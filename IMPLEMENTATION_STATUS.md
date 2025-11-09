@@ -231,8 +231,9 @@ Systematic review and refinement of galleries to keep only highest quality demos
 | D3.js | 40 | 18 | 22 | 45% | Force graphs, trees, Sankey, chord, maps |
 | Scientific Viz | 40 | 15 | 25 | 38% | Orbital mechanics, wave interference, EM fields, fluids |
 | WebAssembly | 40 | 13 | 27 | 33% | High-performance algorithms, graphics, simulations |
-| **Other galleries** | 280 | 280 | 0 | 100% | Kept complete (P5, Biological, etc.) |
-| **Total** | **520** | **366** | **154** | **70%** | **Quality over quantity** |
+| Biological Sims | 40 | 22 | 18 | 55% | Boids, evolution, L-systems, reaction-diffusion |
+| **Other galleries** | 240 | 240 | 0 | 100% | Kept complete (P5, Web Audio, etc.) |
+| **Total** | **520** | **348** | **172** | **67%** | **Quality over quantity** |
 
 **Galleries Curated:**
 1. **Three.js** (40 → 30): Removed redundant shader materials and post-processing effects
@@ -242,6 +243,7 @@ Systematic review and refinement of galleries to keep only highest quality demos
 5. **D3.js** (40 → 18): Kept most impactful force graphs, trees, Sankey, chord, and maps
 6. **Scientific Visualizations** (40 → 15): Removed molecular structures and N-body; kept orbital mechanics, wave interference, EM fields, fluids
 7. **WebAssembly** (40 → 13): Kept essential high-performance algorithms, graphics engines, and swarm simulations
+8. **Biological Simulations** (40 → 22): Removed neural networks section; reduced L-systems and reaction-diffusion to best examples; kept full boids and evolution sections
 
 **Curation Criteria:**
 - Visual impact and uniqueness
@@ -252,7 +254,7 @@ Systematic review and refinement of galleries to keep only highest quality demos
 
 **Results:**
 - **Before curation:** ~560 demos (40 original + 520 from branches)
-- **After curation:** 406 demos (27% reduction)
+- **After curation:** 388 demos (31% reduction)
 - **Quality improvement:** Higher average demo quality
 - **Better user experience:** Less overwhelming, more curated selection
 - **Focus shift:** From comprehensive coverage to best-in-class examples
@@ -264,7 +266,7 @@ Systematic review and refinement of galleries to keep only highest quality demos
 ### Completed Actions ✅
 1. ✅ **Evaluated all successful branches** - Reviewed and tested 13 working implementations
 2. ✅ **Consolidated to main** - All successful branches merged
-3. ✅ **Quality curation** - Refined galleries from 560+ to 406 curated demos (7 galleries curated)
+3. ✅ **Quality curation** - Refined galleries from 560+ to 388 curated demos (8 galleries curated)
 4. ✅ **Repository cleanup** - Removed all worktrees and failed branches
 
 ### Future Enhancements
@@ -295,9 +297,9 @@ Consider manual implementation for failed simulations:
 | Branches merged to main | 13 |
 | Active worktrees | 0 (all consolidated) |
 | Visualizations after merge | ~560 |
-| Visualizations after curation | 406 |
-| Curation reduction | 27% |
-| Galleries curated | 7 of 13 |
+| Visualizations after curation | 388 |
+| Curation reduction | 31% |
+| Galleries curated | 8 of 13 |
 | Frameworks successfully integrated | 7 (D3, P5, Pixi, Three.js, WebGL, WebGPU, WebAssembly) |
 | Simulations from roadmap completed | 1/10 (10%) |
 | Overall roadmap coverage | ~60% |
@@ -315,13 +317,13 @@ Consider manual implementation for failed simulations:
 6. **68% success rate** is actually quite good for automated implementation
 
 ### From Curation Process
-7. **Quality over quantity** - 406 curated demos > 560 uncurated demos
+7. **Quality over quantity** - 388 curated demos > 560 uncurated demos
 8. **Framework-based galleries benefit from selectivity** - showing best examples improves learning
-9. **27% reduction** improved user experience without sacrificing coverage
+9. **31% reduction** improved user experience without sacrificing coverage
 10. **Curation criteria matter** - visual impact, uniqueness, and educational value are key
-11. **Category balance** - kept full collections for some (P5, Biological), heavily curated others (WebGPU 40→12, WebAssembly 40→13)
+11. **Category balance** - kept full collections for some (P5, Web Audio), heavily curated others (WebGPU 40→12, WebAssembly 40→13, Biological 40→22)
 12. **User experience** - Less overwhelming gallery = better exploration and learning
-13. **Performance-focused curation** - Scientific and WebAssembly galleries benefit from focusing on most performant examples
+13. **Performance-focused curation** - Scientific, WebAssembly, and Biological galleries benefit from focusing on most performant examples
 
 ---
 
