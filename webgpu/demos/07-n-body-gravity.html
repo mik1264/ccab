@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU N-Body Gravity Simulation</title>
+    <style>
+        body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; overflow: hidden; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="1024" height="1024"></canvas>
+    <script>
+        const NUM_BODIES = 2000;
+
+        async function init() {
+            if (!navigator.gpu) { alert('WebGPU not supported'); return; }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format });
+
+            const computeShader = `
+                struct Body {
+                    pos: vec2<f32>,
+                    vel: vec2<f32>,
+                    mass: f32,
+                    _pad: f32,
+                }
+
+                @group(0) @binding(0) var<storage, read> bodiesIn: array<Body>;
+                @group(0) @binding(1) var<storage, read_write> bodiesOut: array<Body>;
+                @group(0) @binding(2) var<uniform> params: vec2<f32>; // dt, softening
+
+                @compute @workgroup_size(64)
+                fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                    let index = id.x;
+                    if (index >= ${NUM_BODIES}u) { return; }
+
+                    var body = bodiesIn[index];
+                    var force = vec2<f32>(0.0);
+
+                    for (var i = 0u; i < ${NUM_BODIES}u; i++) {
+                        if (i == index) { continue; }
+                        let other = bodiesIn[i];
+                        let delta = other.pos - body.pos;
+                        let distSq = dot(delta, delta) + params.y;
+                        let dist = sqrt(distSq);
+                        let f = (body.mass * other.mass) / distSq;
+                        force += normalize(delta) * f;
+                    }
+
+                    body.vel += force * params.x / body.mass;
+                    body.pos += body.vel * params.x;
+
+                    // Bounce off walls
+                    if (body.pos.x < 0.0 || body.pos.x > 1024.0) { body.vel.x *= -0.9; }
+                    if (body.pos.y < 0.0 || body.pos.y > 1024.0) { body.vel.y *= -0.9; }
+                    body.pos = clamp(body.pos, vec2<f32>(0.0), vec2<f32>(1024.0));
+
+                    bodiesOut[index] = body;
+                }
+            `;
+
+            const renderShader = `
+                struct Body {
+                    pos: vec2<f32>,
+                    vel: vec2<f32>,
+                    mass: f32,
+                    _pad: f32,
+                }
+
+                @group(0) @binding(0) var<storage, read> bodies: array<Body>;
+
+                struct VertexOutput {
+                    @builtin(position) pos: vec4<f32>,
+                    @location(0) color: vec4<f32>,
+                }
+
+                @vertex
+                fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VertexOutput {
+                    let body = bodies[ii];
+                    var positions = array(vec2(-3.0,-3.0), vec2(3.0,-3.0), vec2(-3.0,3.0), vec2(3.0,-3.0), vec2(3.0,3.0), vec2(-3.0,3.0));
+                    let pos = body.pos + positions[vi];
+
+                    var output: VertexOutput;
+                    output.pos = vec4<f32>((pos.x / 512.0 - 1.0), -(pos.y / 512.0 - 1.0), 0.0, 1.0);
+
+                    let speed = length(body.vel);
+                    output.color = vec4<f32>(
+                        0.5 + 0.5 * sin(body.mass * 10.0),
+                        0.5 + 0.5 * cos(body.mass * 8.0),
+                        0.5 + 0.5 * sin(speed * 0.1),
+                        1.0
+                    );
+                    return output;
+                }
+
+                @fragment
+                fn fs(input: VertexOutput) -> @location(0) vec4<f32> {
+                    return input.color;
+                }
+            `;
+
+            const bodyData = new Float32Array(NUM_BODIES * 8);
+            for (let i = 0; i < NUM_BODIES; i++) {
+                const angle = (i / NUM_BODIES) * Math.PI * 2;
+                const radius = 200 + Math.random() * 200;
+                bodyData[i * 8 + 0] = 512 + Math.cos(angle) * radius;
+                bodyData[i * 8 + 1] = 512 + Math.sin(angle) * radius;
+                bodyData[i * 8 + 2] = -Math.sin(angle) * 20;
+                bodyData[i * 8 + 3] = Math.cos(angle) * 20;
+                bodyData[i * 8 + 4] = 0.5 + Math.random() * 0.5;
+            }
+
+            const bodyBuffers = [
+                device.createBuffer({ size: bodyData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+                device.createBuffer({ size: bodyData.byteLength, usage: GPUBufferUsage.STORAGE }),
+            ];
+
+            device.queue.writeBuffer(bodyBuffers[0], 0, bodyData);
+
+            const paramsBuffer = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            device.queue.writeBuffer(paramsBuffer, 0, new Float32Array([0.016, 100.0]));
+
+            const computePipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' },
+            });
+
+            const renderPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vs' },
+                fragment: {
+                    module: device.createShaderModule({ code: renderShader }),
+                    entryPoint: 'fs',
+                    targets: [{ format, blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } } }],
+                },
+            });
+
+            let step = 0;
+            function frame() {
+                const computeBG = device.createBindGroup({
+                    layout: computePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: bodyBuffers[step % 2] } },
+                        { binding: 1, resource: { buffer: bodyBuffers[(step + 1) % 2] } },
+                        { binding: 2, resource: { buffer: paramsBuffer } },
+                    ],
+                });
+
+                const renderBG = device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: { buffer: bodyBuffers[(step + 1) % 2] } }],
+                });
+
+                const encoder = device.createCommandEncoder();
+
+                const compute = encoder.beginComputePass();
+                compute.setPipeline(computePipeline);
+                compute.setBindGroup(0, computeBG);
+                compute.dispatchWorkgroups(Math.ceil(NUM_BODIES / 64));
+                compute.end();
+
+                const render = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        storeOp: 'store',
+                    }],
+                });
+                render.setPipeline(renderPipeline);
+                render.setBindGroup(0, renderBG);
+                render.draw(6, NUM_BODIES);
+                render.end();
+
+                device.queue.submit([encoder.finish()]);
+                step++;
+                requestAnimationFrame(frame);
+            }
+            frame();
+        }
+        init();
+    </script>
+</body>
+</html>

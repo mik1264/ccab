@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Wave Simulation</title>
+    <style>
+        body { margin: 0; background: #001; display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="512" height="512"></canvas>
+    <script>
+        const SIZE = 256;
+
+        async function init() {
+            if (!navigator.gpu) { alert('WebGPU not supported'); return; }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format });
+
+            const waveShader = `
+                @group(0) @binding(0) var current: texture_2d<f32>;
+                @group(0) @binding(1) var previous: texture_2d<f32>;
+                @group(0) @binding(2) var output: texture_storage_2d<r32float, write>;
+                @group(0) @binding(3) var<uniform> params: vec2<f32>; // damping, speed
+
+                @compute @workgroup_size(8, 8)
+                fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                    let coords = vec2<i32>(id.xy);
+                    if (coords.x >= ${SIZE} || coords.y >= ${SIZE}) { return; }
+
+                    let c = textureLoad(current, coords, 0).r;
+                    let p = textureLoad(previous, coords, 0).r;
+
+                    let l = textureLoad(current, coords + vec2<i32>(-1, 0), 0).r;
+                    let r = textureLoad(current, coords + vec2<i32>(1, 0), 0).r;
+                    let u = textureLoad(current, coords + vec2<i32>(0, -1), 0).r;
+                    let d = textureLoad(current, coords + vec2<i32>(0, 1), 0).r;
+
+                    let laplacian = (l + r + u + d) * 0.25 - c;
+                    var next = c + (c - p) * params.x + laplacian * params.y;
+
+                    // Boundary conditions
+                    if (coords.x == 0 || coords.x == ${SIZE-1} || coords.y == 0 || coords.y == ${SIZE-1}) {
+                        next *= 0.0;
+                    }
+
+                    textureStore(output, coords, vec4<f32>(next, 0.0, 0.0, 0.0));
+                }
+            `;
+
+            const renderShader = `
+                @group(0) @binding(0) var waveTex: texture_2d<f32>;
+
+                @vertex
+                fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                    var pos = array(vec2(-1.0,-1.0), vec2(1.0,-1.0), vec2(-1.0,1.0), vec2(1.0,-1.0), vec2(1.0,1.0), vec2(-1.0,1.0));
+                    return vec4<f32>(pos[i], 0.0, 1.0);
+                }
+
+                @fragment
+                fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                    let coords = vec2<i32>(pos.xy * f32(${SIZE}) / 512.0);
+                    let height = textureLoad(waveTex, coords, 0).r;
+
+                    let color = vec3<f32>(
+                        0.1 + height * 0.5,
+                        0.3 + height * 0.7,
+                        0.6 + height * 0.4
+                    );
+                    return vec4<f32>(color, 1.0);
+                }
+            `;
+
+            const createTexture = () => device.createTexture({
+                size: [SIZE, SIZE],
+                format: 'r32float',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+            });
+
+            const waves = [createTexture(), createTexture(), createTexture()];
+
+            const paramsBuffer = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            device.queue.writeBuffer(paramsBuffer, 0, new Float32Array([0.99, 0.5]));
+
+            const wavePipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ code: waveShader }), entryPoint: 'main' },
+            });
+
+            const renderPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vs' },
+                fragment: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'fs', targets: [{ format }] },
+            });
+
+            canvas.addEventListener('click', (e) => {
+                const x = Math.floor(e.offsetX / canvas.width * SIZE);
+                const y = Math.floor(e.offsetY / canvas.height * SIZE);
+
+                const addShader = `
+                    @group(0) @binding(0) var input: texture_2d<f32>;
+                    @group(0) @binding(1) var output: texture_storage_2d<r32float, write>;
+                    @group(0) @binding(2) var<uniform> click: vec2<f32>;
+
+                    @compute @workgroup_size(8, 8)
+                    fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                        let coords = vec2<i32>(id.xy);
+                        if (coords.x >= ${SIZE} || coords.y >= ${SIZE}) { return; }
+
+                        var value = textureLoad(input, coords, 0).r;
+                        let dist = length(vec2<f32>(coords) - click);
+                        if (dist < 10.0) {
+                            value += 5.0 * (1.0 - dist / 10.0);
+                        }
+                        textureStore(output, coords, vec4<f32>(value, 0.0, 0.0, 0.0));
+                    }
+                `;
+
+                const clickBuffer = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+                device.queue.writeBuffer(clickBuffer, 0, new Float32Array([x, y]));
+
+                const addPipeline = device.createComputePipeline({
+                    layout: 'auto',
+                    compute: { module: device.createShaderModule({ code: addShader }), entryPoint: 'main' },
+                });
+
+                const addBG = device.createBindGroup({
+                    layout: addPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: waves[step % 3].createView() },
+                        { binding: 1, resource: waves[(step + 1) % 3].createView() },
+                        { binding: 2, resource: { buffer: clickBuffer } },
+                    ],
+                });
+
+                const encoder = device.createCommandEncoder();
+                const pass = encoder.beginComputePass();
+                pass.setPipeline(addPipeline);
+                pass.setBindGroup(0, addBG);
+                pass.dispatchWorkgroups(32, 32);
+                pass.end();
+                device.queue.submit([encoder.finish()]);
+                step++;
+            });
+
+            let step = 0;
+            function frame() {
+                const waveBG = device.createBindGroup({
+                    layout: wavePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: waves[(step + 1) % 3].createView() },
+                        { binding: 1, resource: waves[step % 3].createView() },
+                        { binding: 2, resource: waves[(step + 2) % 3].createView() },
+                        { binding: 3, resource: { buffer: paramsBuffer } },
+                    ],
+                });
+
+                const renderBG = device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: waves[(step + 2) % 3].createView() }],
+                });
+
+                const encoder = device.createCommandEncoder();
+
+                const compute = encoder.beginComputePass();
+                compute.setPipeline(wavePipeline);
+                compute.setBindGroup(0, waveBG);
+                compute.dispatchWorkgroups(32, 32);
+                compute.end();
+
+                const render = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        clearValue: { r: 0, g: 0, b: 0.1, a: 1 },
+                        storeOp: 'store',
+                    }],
+                });
+                render.setPipeline(renderPipeline);
+                render.setBindGroup(0, renderBG);
+                render.draw(6);
+                render.end();
+
+                device.queue.submit([encoder.finish()]);
+                step++;
+                requestAnimationFrame(frame);
+            }
+            frame();
+        }
+        init();
+    </script>
+</body>
+</html>

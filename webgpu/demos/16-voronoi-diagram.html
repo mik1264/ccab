@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Voronoi Diagram</title>
+    <style>
+        body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="800" height="800"></canvas>
+    <script>
+        const NUM_POINTS = 32;
+
+        async function init() {
+            if (!navigator.gpu) { alert('WebGPU not supported'); return; }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format });
+
+            const voronoiShader = `
+                struct Point {
+                    pos: vec2<f32>,
+                    color: vec3<f32>,
+                    _pad: f32,
+                }
+
+                @group(0) @binding(0) var<storage, read> points: array<Point>;
+                @group(0) @binding(1) var outputTex: texture_storage_2d<rgba8unorm, write>;
+
+                @compute @workgroup_size(8, 8)
+                fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                    let coords = vec2<i32>(id.xy);
+                    if (coords.x >= 800 || coords.y >= 800) { return; }
+
+                    let uv = vec2<f32>(coords) / 800.0;
+                    var minDist = 999.0;
+                    var nearestIdx = 0u;
+
+                    for (var i = 0u; i < ${NUM_POINTS}u; i++) {
+                        let dist = length(uv - points[i].pos);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            nearestIdx = i;
+                        }
+                    }
+
+                    let color = points[nearestIdx].color;
+                    let edge = step(0.005, minDist);
+                    textureStore(outputTex, coords, vec4<f32>(color * edge, 1.0));
+                }
+            `;
+
+            const renderShader = `
+                @group(0) @binding(0) var tex: texture_2d<f32>;
+                @vertex
+                fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                    var pos = array(vec2(-1.0,-1.0), vec2(1.0,-1.0), vec2(-1.0,1.0), vec2(1.0,-1.0), vec2(1.0,1.0), vec2(-1.0,1.0));
+                    return vec4<f32>(pos[i], 0.0, 1.0);
+                }
+                @fragment
+                fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                    return textureLoad(tex, vec2<i32>(pos.xy), 0);
+                }
+            `;
+
+            const pointData = new Float32Array(NUM_POINTS * 8);
+            for (let i = 0; i < NUM_POINTS; i++) {
+                pointData[i * 8 + 0] = Math.random();
+                pointData[i * 8 + 1] = Math.random();
+                pointData[i * 8 + 2] = Math.random();
+                pointData[i * 8 + 3] = Math.random();
+                pointData[i * 8 + 4] = Math.random();
+            }
+
+            const pointBuffer = device.createBuffer({ size: pointData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+            const texture = device.createTexture({
+                size: [800, 800],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+            });
+
+            const voronoiPipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ code: voronoiShader }), entryPoint: 'main' },
+            });
+
+            const renderPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vs' },
+                fragment: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'fs', targets: [{ format }] },
+            });
+
+            let time = 0;
+            function frame() {
+                time += 0.01;
+                for (let i = 0; i < NUM_POINTS; i++) {
+                    pointData[i * 8 + 0] = 0.5 + 0.4 * Math.sin(time + i * 0.5);
+                    pointData[i * 8 + 1] = 0.5 + 0.4 * Math.cos(time + i * 0.3);
+                }
+                device.queue.writeBuffer(pointBuffer, 0, pointData);
+
+                const voronoiBG = device.createBindGroup({
+                    layout: voronoiPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: pointBuffer } },
+                        { binding: 1, resource: texture.createView() },
+                    ],
+                });
+
+                const renderBG = device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: texture.createView() }],
+                });
+
+                const encoder = device.createCommandEncoder();
+
+                const compute = encoder.beginComputePass();
+                compute.setPipeline(voronoiPipeline);
+                compute.setBindGroup(0, voronoiBG);
+                compute.dispatchWorkgroups(100, 100);
+                compute.end();
+
+                const render = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                });
+                render.setPipeline(renderPipeline);
+                render.setBindGroup(0, renderBG);
+                render.draw(6);
+                render.end();
+
+                device.queue.submit([encoder.finish()]);
+                requestAnimationFrame(frame);
+            }
+            frame();
+        }
+        init();
+    </script>
+</body>
+</html>

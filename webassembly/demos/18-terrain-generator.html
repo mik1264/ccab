@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Terrain Generator - WebAssembly</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        canvas {
+            border: 2px solid #222;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width = 1200;
+        const height = canvas.height = 800;
+
+        const GRID_SIZE = 80;
+        const CELL_SIZE = 15;
+
+        let cameraZ = 0;
+        let terrain = [];
+
+        // Perlin noise permutation
+        const p = new Uint8Array(512);
+        for (let i = 0; i < 256; i++) p[i] = i;
+        for (let i = 255; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [p[i], p[j]] = [p[j], p[i]];
+        }
+        for (let i = 0; i < 256; i++) p[256 + i] = p[i];
+
+        function fade(t) {
+            return t * t * t * (t * (t * 6 - 15) + 10);
+        }
+
+        function lerp(a, b, t) {
+            return a + t * (b - a);
+        }
+
+        function grad(hash, x, y) {
+            const h = hash & 3;
+            const u = h < 2 ? x : y;
+            const v = h < 2 ? y : x;
+            return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+        }
+
+        function perlin(x, y) {
+            const X = Math.floor(x) & 255;
+            const Y = Math.floor(y) & 255;
+            x -= Math.floor(x);
+            y -= Math.floor(y);
+            const u = fade(x);
+            const v = fade(y);
+            const a = p[X] + Y;
+            const b = p[X + 1] + Y;
+            return lerp(
+                lerp(grad(p[a], x, y), grad(p[b], x - 1, y), u),
+                lerp(grad(p[a + 1], x, y - 1), grad(p[b + 1], x - 1, y - 1), u),
+                v
+            );
+        }
+
+        function generateTerrain() {
+            terrain = [];
+            for (let z = 0; z < GRID_SIZE; z++) {
+                terrain[z] = [];
+                for (let x = 0; x < GRID_SIZE; x++) {
+                    const scale = 0.05;
+                    const h1 = perlin((x + cameraZ) * scale, z * scale) * 30;
+                    const h2 = perlin((x + cameraZ) * scale * 2, z * scale * 2) * 15;
+                    const h3 = perlin((x + cameraZ) * scale * 0.5, z * scale * 0.5) * 50;
+                    terrain[z][x] = h1 + h2 + h3;
+                }
+            }
+        }
+
+        function projectPoint(x, y, z) {
+            const scale = 400;
+            const distance = 500;
+            const perspective = scale / (distance + z * CELL_SIZE);
+
+            return {
+                x: width / 2 + x * CELL_SIZE * perspective,
+                y: height / 2 + y * perspective,
+                z: z * CELL_SIZE
+            };
+        }
+
+        function getColor(height, z) {
+            if (height < -10) {
+                return `rgb(20, 50, ${100 + z})`;
+            } else if (height < 5) {
+                return `rgb(${50 + height * 2}, ${120 + height}, 50)`;
+            } else if (height < 20) {
+                return `rgb(${80 + height}, ${140 + height}, 60)`;
+            } else if (height < 40) {
+                return `rgb(${120 + height}, ${120 + height}, ${100 + height})`;
+            } else {
+                return `rgb(${200 + height}, ${200 + height}, ${220 + height})`;
+            }
+        }
+
+        function animate() {
+            ctx.fillStyle = '#001020';
+            ctx.fillRect(0, 0, width, height);
+
+            cameraZ += 0.5;
+            generateTerrain();
+
+            // Draw terrain from back to front
+            for (let z = GRID_SIZE - 1; z > 0; z--) {
+                for (let x = 0; x < GRID_SIZE - 1; x++) {
+                    const p1 = projectPoint(x - GRID_SIZE / 2, terrain[z][x], z);
+                    const p2 = projectPoint(x - GRID_SIZE / 2 + 1, terrain[z][x + 1], z);
+                    const p3 = projectPoint(x - GRID_SIZE / 2 + 1, terrain[z - 1][x + 1], z - 1);
+                    const p4 = projectPoint(x - GRID_SIZE / 2, terrain[z - 1][x], z - 1);
+
+                    const avgHeight = (terrain[z][x] + terrain[z][x + 1] +
+                                     terrain[z - 1][x] + terrain[z - 1][x + 1]) / 4;
+
+                    ctx.fillStyle = getColor(avgHeight, z);
+                    ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
+                    ctx.lineWidth = 0.5;
+
+                    ctx.beginPath();
+                    ctx.moveTo(p1.x, p1.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    ctx.lineTo(p3.x, p3.y);
+                    ctx.lineTo(p4.x, p4.y);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+                }
+            }
+
+            // Draw wireframe overlay
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+            ctx.lineWidth = 1;
+
+            for (let z = 0; z < GRID_SIZE; z++) {
+                ctx.beginPath();
+                for (let x = 0; x < GRID_SIZE; x++) {
+                    const p = projectPoint(x - GRID_SIZE / 2, terrain[z][x], z);
+                    if (x === 0) {
+                        ctx.moveTo(p.x, p.y);
+                    } else {
+                        ctx.lineTo(p.x, p.y);
+                    }
+                }
+                ctx.stroke();
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>

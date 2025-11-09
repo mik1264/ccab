@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Histogram Computation</title>
+    <style>
+        body { margin: 0; background: #1a1a2e; display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <script>
+        const BINS = 256;
+        const DATA_SIZE = 100000;
+
+        async function init() {
+            if (!navigator.gpu) { alert('WebGPU not supported'); return; }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format });
+
+            const histogramShader = `
+                @group(0) @binding(0) var<storage, read> data: array<f32>;
+                @group(0) @binding(1) var<storage, read_write> histogram: array<atomic<u32>>;
+
+                @compute @workgroup_size(256)
+                fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                    let idx = id.x;
+                    if (idx >= ${DATA_SIZE}u) { return; }
+
+                    let value = data[idx];
+                    let bin = u32(clamp(value, 0.0, 0.9999) * f32(${BINS}));
+                    atomicAdd(&histogram[bin], 1u);
+                }
+            `;
+
+            const renderShader = `
+                @group(0) @binding(0) var<storage, read> histogram: array<u32>;
+                @group(0) @binding(1) var<uniform> maxCount: u32;
+
+                @vertex
+                fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> @builtin(position) vec4<f32> {
+                    let x = f32(ii) / f32(${BINS}) * 2.0 - 1.0;
+                    let height = f32(histogram[ii]) / f32(maxCount) * 2.0;
+                    let y = select(-1.0, height - 1.0, vi >= 2u);
+
+                    let positions = array(
+                        vec2<f32>(x, -1.0), vec2<f32>(x + 2.0/f32(${BINS}), -1.0),
+                        vec2<f32>(x, y), vec2<f32>(x + 2.0/f32(${BINS}), y)
+                    );
+                    return vec4<f32>(positions[vi], 0.0, 1.0);
+                }
+
+                @fragment
+                fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                    let t = pos.y / 600.0;
+                    return vec4<f32>(0.9 - t * 0.4, 0.3 + t * 0.5, 0.9, 1.0);
+                }
+            `;
+
+            const dataBuffer = device.createBuffer({ size: DATA_SIZE * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+            const histogramBuffer = device.createBuffer({ size: BINS * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+            const maxCountBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+            const histogramPipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ code: histogramShader }), entryPoint: 'main' },
+            });
+
+            const renderPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vs' },
+                fragment: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'fs', targets: [{ format }] },
+                primitive: { topology: 'triangle-strip' },
+            });
+
+            let time = 0;
+            function frame() {
+                time += 0.02;
+
+                // Generate data with varying distribution
+                const data = new Float32Array(DATA_SIZE);
+                for (let i = 0; i < DATA_SIZE; i++) {
+                    const r1 = Math.random();
+                    const r2 = Math.random();
+                    // Box-Muller transform for normal distribution
+                    const gaussian = Math.sqrt(-2 * Math.log(r1)) * Math.cos(2 * Math.PI * r2);
+                    data[i] = (gaussian * 0.15 + 0.5 + Math.sin(time) * 0.2) % 1.0;
+                }
+
+                device.queue.writeBuffer(dataBuffer, 0, data);
+                device.queue.writeBuffer(histogramBuffer, 0, new Uint32Array(BINS));
+
+                const histogramBG = device.createBindGroup({
+                    layout: histogramPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: dataBuffer } },
+                        { binding: 1, resource: { buffer: histogramBuffer } },
+                    ],
+                });
+
+                device.queue.writeBuffer(maxCountBuffer, 0, new Uint32Array([Math.floor(DATA_SIZE / 50)]));
+
+                const renderBG = device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: histogramBuffer } },
+                        { binding: 1, resource: { buffer: maxCountBuffer } },
+                    ],
+                });
+
+                const encoder = device.createCommandEncoder();
+
+                const compute = encoder.beginComputePass();
+                compute.setPipeline(histogramPipeline);
+                compute.setBindGroup(0, histogramBG);
+                compute.dispatchWorkgroups(Math.ceil(DATA_SIZE / 256));
+                compute.end();
+
+                const render = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        clearValue: { r: 0.1, g: 0.1, b: 0.18, a: 1 },
+                        storeOp: 'store',
+                    }],
+                });
+                render.setPipeline(renderPipeline);
+                render.setBindGroup(0, renderBG);
+                render.draw(4, BINS);
+                render.end();
+
+                device.queue.submit([encoder.finish()]);
+                requestAnimationFrame(frame);
+            }
+            frame();
+        }
+        init();
+    </script>
+</body>
+</html>

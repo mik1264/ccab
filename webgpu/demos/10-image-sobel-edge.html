@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Sobel Edge Detection</title>
+    <style>
+        body { margin: 0; background: #222; display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; border: 2px solid #666; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="512" height="512"></canvas>
+    <script>
+        async function init() {
+            if (!navigator.gpu) { alert('WebGPU not supported'); return; }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format });
+
+            const sobelShader = `
+                @group(0) @binding(0) var input: texture_2d<f32>;
+                @group(0) @binding(1) var output: texture_storage_2d<rgba8unorm, write>;
+
+                @compute @workgroup_size(8, 8)
+                fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                    let coords = vec2<i32>(id.xy);
+                    let dims = textureDimensions(output);
+                    if (coords.x >= dims.x || coords.y >= dims.y) { return; }
+
+                    // Sobel kernels
+                    var gx = 0.0;
+                    var gy = 0.0;
+
+                    for (var dy = -1; dy <= 1; dy++) {
+                        for (var dx = -1; dx <= 1; dx++) {
+                            let pixel = textureLoad(input, coords + vec2<i32>(dx, dy), 0);
+                            let gray = dot(pixel.rgb, vec3<f32>(0.299, 0.587, 0.114));
+
+                            let kx = f32(dx);
+                            let ky = f32(dy);
+                            gx += gray * kx * select(1.0, 2.0, dx == 0);
+                            gy += gray * ky * select(1.0, 2.0, dy == 0);
+                        }
+                    }
+
+                    let magnitude = sqrt(gx * gx + gy * gy);
+                    let color = vec3<f32>(magnitude);
+                    textureStore(output, coords, vec4<f32>(color, 1.0));
+                }
+            `;
+
+            const renderShader = `
+                @group(0) @binding(0) var<uniform> time: f32;
+
+                @vertex
+                fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                    var pos = array(vec2(-1.0,-1.0), vec2(1.0,-1.0), vec2(-1.0,1.0), vec2(1.0,-1.0), vec2(1.0,1.0), vec2(-1.0,1.0));
+                    return vec4<f32>(pos[i], 0.0, 1.0);
+                }
+
+                @fragment
+                fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                    let uv = pos.xy / 512.0;
+                    let center = vec2<f32>(0.5);
+
+                    var color = vec3<f32>(0.0);
+
+                    // Create animated patterns
+                    for (var i = 0; i < 3; i++) {
+                        let angle = time * 0.3 + f32(i) * 2.094;
+                        let r = 0.2 + 0.1 * sin(time * 0.5 + f32(i));
+                        let p = center + vec2<f32>(cos(angle), sin(angle)) * r;
+                        let d = length(uv - p);
+                        color += vec3<f32>(
+                            0.5 + 0.5 * sin(f32(i) * 2.0),
+                            0.5 + 0.5 * cos(f32(i) * 1.5),
+                            0.5 + 0.5 * sin(f32(i) * 3.0)
+                        ) * (1.0 - smoothstep(0.0, 0.1, d));
+                    }
+
+                    // Add grid pattern
+                    let grid = fract(uv * 20.0 + time * 0.5);
+                    color += vec3<f32>(smoothstep(0.48, 0.5, grid.x) + smoothstep(0.48, 0.5, grid.y)) * 0.1;
+
+                    return vec4<f32>(color, 1.0);
+                }
+            `;
+
+            const inputTexture = device.createTexture({
+                size: [512, 512],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+            });
+
+            const outputTexture = device.createTexture({
+                size: [512, 512],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+            });
+
+            const timeBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+            const sobelPipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ code: sobelShader }), entryPoint: 'main' },
+            });
+
+            const renderPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vs' },
+                fragment: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+            });
+
+            const copyPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: device.createShaderModule({ code: `
+                    @vertex
+                    fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                        var pos = array(vec2(-1.0,-1.0), vec2(1.0,-1.0), vec2(-1.0,1.0), vec2(1.0,-1.0), vec2(1.0,1.0), vec2(-1.0,1.0));
+                        return vec4<f32>(pos[i], 0.0, 1.0);
+                    }
+                `}), entryPoint: 'vs' },
+                fragment: { module: device.createShaderModule({ code: `
+                    @group(0) @binding(0) var tex: texture_2d<f32>;
+                    @fragment
+                    fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                        return textureLoad(tex, vec2<i32>(pos.xy), 0);
+                    }
+                `}), entryPoint: 'fs', targets: [{ format }] },
+            });
+
+            let time = 0;
+            function frame() {
+                time += 0.016;
+                device.queue.writeBuffer(timeBuffer, 0, new Float32Array([time]));
+
+                const encoder = device.createCommandEncoder();
+
+                // Render pattern
+                const renderBG = device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: { buffer: timeBuffer } }],
+                });
+
+                const renderPass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: inputTexture.createView(),
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                });
+                renderPass.setPipeline(renderPipeline);
+                renderPass.setBindGroup(0, renderBG);
+                renderPass.draw(6);
+                renderPass.end();
+
+                // Apply Sobel
+                const sobelBG = device.createBindGroup({
+                    layout: sobelPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: inputTexture.createView() },
+                        { binding: 1, resource: outputTexture.createView() },
+                    ],
+                });
+
+                const compute = encoder.beginComputePass();
+                compute.setPipeline(sobelPipeline);
+                compute.setBindGroup(0, sobelBG);
+                compute.dispatchWorkgroups(64, 64);
+                compute.end();
+
+                // Copy to screen
+                const copyBG = device.createBindGroup({
+                    layout: copyPipeline.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: outputTexture.createView() }],
+                });
+
+                const finalPass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                });
+                finalPass.setPipeline(copyPipeline);
+                finalPass.setBindGroup(0, copyBG);
+                finalPass.draw(6);
+                finalPass.end();
+
+                device.queue.submit([encoder.finish()]);
+                requestAnimationFrame(frame);
+            }
+            frame();
+        }
+        init();
+    </script>
+</body>
+</html>

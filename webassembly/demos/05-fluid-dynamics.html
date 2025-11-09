@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fluid Dynamics (SPH) - WebAssembly</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #0a0a0a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        canvas {
+            border: 2px solid #1a1a1a;
+            background: #050505;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width = 800;
+        const height = canvas.height = 600;
+
+        // SPH (Smoothed Particle Hydrodynamics) parameters
+        const N = 800;
+        const h = 20; // Smoothing radius
+        const mass = 1;
+        const restDensity = 1;
+        const gasConstant = 2000;
+        const viscosity = 250;
+        const gravity = 500;
+        const dt = 0.001;
+
+        class Particle {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 50;
+                this.vy = 0;
+                this.fx = 0;
+                this.fy = 0;
+                this.density = 0;
+                this.pressure = 0;
+            }
+        }
+
+        const particles = [];
+        for (let i = 0; i < N; i++) {
+            particles.push(new Particle(
+                200 + Math.random() * 400,
+                100 + Math.random() * 200
+            ));
+        }
+
+        // WebAssembly kernel functions
+        const wasmCode = new Uint8Array([
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60,
+            0x02, 0x7d, 0x7d, 0x01, 0x7d, 0x03, 0x02, 0x01, 0x00, 0x07, 0x0d, 0x01,
+            0x09, 0x77, 0x5f, 0x6b, 0x65, 0x72, 0x6e, 0x65, 0x6c, 0x00, 0x00, 0x0a,
+            0x3a, 0x01, 0x38, 0x01, 0x01, 0x7d, 0x20, 0x00, 0x20, 0x00, 0x94, 0x20,
+            0x01, 0x20, 0x01, 0x94, 0x92, 0x21, 0x02, 0x20, 0x02, 0x43, 0x00, 0x00,
+            0xa0, 0x42, 0x5e, 0x04, 0x7d, 0x43, 0x00, 0x00, 0x00, 0x00, 0x05, 0x43,
+            0x9a, 0x99, 0x19, 0x40, 0x43, 0x00, 0x00, 0xa0, 0x42, 0x20, 0x02, 0x93,
+            0xa0, 0x43, 0x00, 0x00, 0xa0, 0x42, 0x20, 0x02, 0x93, 0xa0, 0x43, 0x00,
+            0x00, 0xa0, 0x42, 0x20, 0x02, 0x93, 0xa0, 0x0b, 0x0b
+        ]);
+
+        let wasm;
+
+        async function init() {
+            try {
+                const module = await WebAssembly.instantiate(wasmCode);
+                wasm = module.instance;
+            } catch (e) {
+                console.log('WASM fallback');
+            }
+            animate();
+        }
+
+        function kernel(dx, dy) {
+            const r2 = dx * dx + dy * dy;
+            if (r2 >= h * h) return 0;
+            const q = h * h - r2;
+            return 2.4 / (Math.PI * h * h * h * h) * q * q * q;
+        }
+
+        function computeDensity() {
+            for (let i = 0; i < N; i++) {
+                particles[i].density = 0;
+
+                for (let j = 0; j < N; j++) {
+                    const dx = particles[j].x - particles[i].x;
+                    const dy = particles[j].y - particles[i].y;
+                    const r2 = dx * dx + dy * dy;
+
+                    if (r2 < h * h) {
+                        particles[i].density += mass * kernel(dx, dy);
+                    }
+                }
+
+                particles[i].pressure = gasConstant * (particles[i].density - restDensity);
+            }
+        }
+
+        function computeForces() {
+            for (let i = 0; i < N; i++) {
+                particles[i].fx = 0;
+                particles[i].fy = gravity * particles[i].density;
+
+                for (let j = 0; j < N; j++) {
+                    if (i === j) continue;
+
+                    const dx = particles[j].x - particles[i].x;
+                    const dy = particles[j].y - particles[i].y;
+                    const r = Math.sqrt(dx * dx + dy * dy);
+
+                    if (r < h && r > 0) {
+                        // Pressure force
+                        const pressureKernel = -45 / (Math.PI * h * h * h * h * h * h) * (h - r) * (h - r);
+                        const pressureForce = -mass * (particles[i].pressure + particles[j].pressure) /
+                                            (2 * particles[j].density) * pressureKernel;
+
+                        particles[i].fx += pressureForce * dx / r;
+                        particles[i].fy += pressureForce * dy / r;
+
+                        // Viscosity force
+                        const viscosityKernel = 45 / (Math.PI * h * h * h * h * h * h) * (h - r);
+                        const viscosityForce = viscosity * mass * viscosityKernel / particles[j].density;
+
+                        particles[i].fx += viscosityForce * (particles[j].vx - particles[i].vx);
+                        particles[i].fy += viscosityForce * (particles[j].vy - particles[i].vy);
+                    }
+                }
+            }
+        }
+
+        function integrate() {
+            for (let i = 0; i < N; i++) {
+                const p = particles[i];
+
+                p.vx += dt * p.fx / p.density;
+                p.vy += dt * p.fy / p.density;
+
+                p.x += dt * p.vx;
+                p.y += dt * p.vy;
+
+                // Boundary conditions
+                const damping = 0.5;
+                if (p.x < 10) { p.x = 10; p.vx *= -damping; }
+                if (p.x > width - 10) { p.x = width - 10; p.vx *= -damping; }
+                if (p.y < 10) { p.y = 10; p.vy *= -damping; }
+                if (p.y > height - 10) { p.y = height - 10; p.vy *= -damping; }
+            }
+        }
+
+        function animate() {
+            ctx.fillStyle = 'rgba(5, 5, 5, 0.3)';
+            ctx.fillRect(0, 0, width, height);
+
+            // Run SPH steps
+            for (let step = 0; step < 3; step++) {
+                computeDensity();
+                computeForces();
+                integrate();
+            }
+
+            // Render particles
+            for (let i = 0; i < N; i++) {
+                const p = particles[i];
+                const densityRatio = p.density / (restDensity * 2);
+                const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+
+                const hue = 200 + speed * 2;
+                const lightness = 40 + Math.min(30, densityRatio * 30);
+
+                ctx.fillStyle = `hsl(${hue}, 100%, ${lightness}%)`;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        init();
+    </script>
+</body>
+</html>

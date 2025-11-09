@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Mandelbrot Set</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            image-rendering: pixelated;
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: monospace;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="info">Click to zoom | Scroll to change iterations</div>
+    <script>
+        async function init() {
+            if (!navigator.gpu) {
+                alert('WebGPU not supported');
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+
+            canvas.width = 800;
+            canvas.height = 800;
+
+            const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format: presentationFormat });
+
+            const shaderCode = `
+                struct Uniforms {
+                    center: vec2<f32>,
+                    zoom: f32,
+                    maxIterations: u32,
+                }
+
+                @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+                @group(0) @binding(1) var outputTex: texture_storage_2d<rgba8unorm, write>;
+
+                @compute @workgroup_size(8, 8)
+                fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                    let dims = textureDimensions(outputTex);
+                    let coords = vec2<i32>(global_id.xy);
+
+                    if (coords.x >= dims.x || coords.y >= dims.y) {
+                        return;
+                    }
+
+                    let uv = vec2<f32>(f32(coords.x) / f32(dims.x), f32(coords.y) / f32(dims.y));
+                    let aspect = f32(dims.x) / f32(dims.y);
+
+                    var c = vec2<f32>(
+                        (uv.x - 0.5) * 4.0 * aspect / uniforms.zoom + uniforms.center.x,
+                        (uv.y - 0.5) * 4.0 / uniforms.zoom + uniforms.center.y
+                    );
+
+                    var z = vec2<f32>(0.0, 0.0);
+                    var iterations = 0u;
+
+                    for (var i = 0u; i < uniforms.maxIterations; i = i + 1u) {
+                        if (length(z) > 2.0) {
+                            break;
+                        }
+                        let temp = vec2<f32>(
+                            z.x * z.x - z.y * z.y + c.x,
+                            2.0 * z.x * z.y + c.y
+                        );
+                        z = temp;
+                        iterations = i;
+                    }
+
+                    var color: vec3<f32>;
+                    if (iterations == uniforms.maxIterations - 1u) {
+                        color = vec3<f32>(0.0, 0.0, 0.0);
+                    } else {
+                        let t = f32(iterations) / f32(uniforms.maxIterations);
+                        color = vec3<f32>(
+                            0.5 + 0.5 * cos(3.0 + t * 10.0 + 0.0),
+                            0.5 + 0.5 * cos(3.0 + t * 10.0 + 2.0),
+                            0.5 + 0.5 * cos(3.0 + t * 10.0 + 4.0)
+                        );
+                    }
+
+                    textureStore(outputTex, coords, vec4<f32>(color, 1.0));
+                }
+            `;
+
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+
+            const texture = device.createTexture({
+                size: [canvas.width, canvas.height],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING,
+            });
+
+            let centerX = -0.5;
+            let centerY = 0.0;
+            let zoom = 1.0;
+            let maxIterations = 100;
+
+            const uniformBuffer = device.createBuffer({
+                size: 16,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+
+            const computePipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: shaderModule, entryPoint: 'main' },
+            });
+
+            const bindGroup = device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: uniformBuffer } },
+                    { binding: 1, resource: texture.createView() },
+                ],
+            });
+
+            // Copy to canvas shader
+            const copyShader = `
+                @group(0) @binding(0) var inputTex: texture_2d<f32>;
+
+                @vertex
+                fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> @builtin(position) vec4<f32> {
+                    var positions = array<vec2<f32>, 6>(
+                        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
+                        vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0)
+                    );
+                    return vec4<f32>(positions[vertexIndex], 0.0, 1.0);
+                }
+
+                @fragment
+                fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                    return textureLoad(inputTex, vec2<i32>(pos.xy), 0);
+                }
+            `;
+
+            const copyModule = device.createShaderModule({ code: copyShader });
+            const copyPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: copyModule, entryPoint: 'vs_main' },
+                fragment: {
+                    module: copyModule,
+                    entryPoint: 'fs_main',
+                    targets: [{ format: presentationFormat }],
+                },
+            });
+
+            const copyBindGroup = device.createBindGroup({
+                layout: copyPipeline.getBindGroupLayout(0),
+                entries: [{ binding: 0, resource: texture.createView() }],
+            });
+
+            function render() {
+                const uniforms = new Float32Array([centerX, centerY, zoom, maxIterations]);
+                device.queue.writeBuffer(uniformBuffer, 0, uniforms);
+
+                const commandEncoder = device.createCommandEncoder();
+
+                const computePass = commandEncoder.beginComputePass();
+                computePass.setPipeline(computePipeline);
+                computePass.setBindGroup(0, bindGroup);
+                computePass.dispatchWorkgroups(Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+                computePass.end();
+
+                const renderPass = commandEncoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                });
+                renderPass.setPipeline(copyPipeline);
+                renderPass.setBindGroup(0, copyBindGroup);
+                renderPass.draw(6);
+                renderPass.end();
+
+                device.queue.submit([commandEncoder.finish()]);
+            }
+
+            canvas.addEventListener('click', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const x = (e.clientX - rect.left) / rect.width;
+                const y = (e.clientY - rect.top) / rect.height;
+                const aspect = canvas.width / canvas.height;
+
+                centerX = (x - 0.5) * 4.0 * aspect / zoom + centerX;
+                centerY = (y - 0.5) * 4.0 / zoom + centerY;
+                zoom *= 2.0;
+                render();
+            });
+
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                maxIterations = Math.max(10, maxIterations + (e.deltaY > 0 ? -10 : 10));
+                document.getElementById('info').textContent = `Iterations: ${maxIterations} | Click to zoom`;
+                render();
+            });
+
+            render();
+        }
+
+        init();
+    </script>
+</body>
+</html>

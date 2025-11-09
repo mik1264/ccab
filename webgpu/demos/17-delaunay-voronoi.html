@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Delaunay-Voronoi</title>
+    <style>
+        body { margin: 0; background: #05050a; display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="800" height="800"></canvas>
+    <script>
+        const NUM_SITES = 50;
+
+        async function init() {
+            if (!navigator.gpu) { alert('WebGPU not supported'); return; }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format });
+
+            const computeShader = `
+                @group(0) @binding(0) var<storage, read> sites: array<vec2<f32>>;
+                @group(0) @binding(1) var outputTex: texture_storage_2d<rgba8unorm, write>;
+                @group(0) @binding(2) var<uniform> time: f32;
+
+                @compute @workgroup_size(8, 8)
+                fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                    let coords = vec2<i32>(id.xy);
+                    if (coords.x >= 800 || coords.y >= 800) { return; }
+
+                    let uv = vec2<f32>(coords) / 800.0;
+                    var minDist = 999.0;
+                    var secondMinDist = 999.0;
+                    var nearestIdx = 0u;
+
+                    for (var i = 0u; i < ${NUM_SITES}u; i++) {
+                        let dist = length(uv - sites[i]);
+                        if (dist < minDist) {
+                            secondMinDist = minDist;
+                            minDist = dist;
+                            nearestIdx = i;
+                        } else if (dist < secondMinDist) {
+                            secondMinDist = dist;
+                        }
+                    }
+
+                    let edgeDist = secondMinDist - minDist;
+                    let edge = smoothstep(0.0, 0.01, edgeDist);
+
+                    let hue = f32(nearestIdx) / f32(${NUM_SITES}) + time * 0.1;
+                    let color = vec3<f32>(
+                        0.5 + 0.5 * sin(hue * 6.28),
+                        0.5 + 0.5 * sin(hue * 6.28 + 2.09),
+                        0.5 + 0.5 * sin(hue * 6.28 + 4.18)
+                    );
+
+                    let finalColor = mix(vec3<f32>(1.0), color * 0.8, edge);
+                    textureStore(outputTex, coords, vec4<f32>(finalColor, 1.0));
+                }
+            `;
+
+            const renderShader = `
+                @group(0) @binding(0) var tex: texture_2d<f32>;
+                @vertex
+                fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                    var pos = array(vec2(-1.0,-1.0), vec2(1.0,-1.0), vec2(-1.0,1.0), vec2(1.0,-1.0), vec2(1.0,1.0), vec2(-1.0,1.0));
+                    return vec4<f32>(pos[i], 0.0, 1.0);
+                }
+                @fragment
+                fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                    return textureLoad(tex, vec2<i32>(pos.xy), 0);
+                }
+            `;
+
+            const sitesBuffer = device.createBuffer({ size: NUM_SITES * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+            const timeBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            const texture = device.createTexture({
+                size: [800, 800],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+            });
+
+            const computePipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' },
+            });
+
+            const renderPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vs' },
+                fragment: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'fs', targets: [{ format }] },
+            });
+
+            let time = 0;
+            function frame() {
+                time += 0.01;
+                const sites = new Float32Array(NUM_SITES * 2);
+                for (let i = 0; i < NUM_SITES; i++) {
+                    sites[i * 2 + 0] = 0.5 + 0.35 * Math.sin(time * 0.3 + i * 0.5);
+                    sites[i * 2 + 1] = 0.5 + 0.35 * Math.cos(time * 0.2 + i * 0.7);
+                }
+                device.queue.writeBuffer(sitesBuffer, 0, sites);
+                device.queue.writeBuffer(timeBuffer, 0, new Float32Array([time]));
+
+                const computeBG = device.createBindGroup({
+                    layout: computePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: sitesBuffer } },
+                        { binding: 1, resource: texture.createView() },
+                        { binding: 2, resource: { buffer: timeBuffer } },
+                    ],
+                });
+
+                const renderBG = device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: texture.createView() }],
+                });
+
+                const encoder = device.createCommandEncoder();
+
+                const compute = encoder.beginComputePass();
+                compute.setPipeline(computePipeline);
+                compute.setBindGroup(0, computeBG);
+                compute.dispatchWorkgroups(100, 100);
+                compute.end();
+
+                const render = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                });
+                render.setPipeline(renderPipeline);
+                render.setBindGroup(0, renderBG);
+                render.draw(6);
+                render.end();
+
+                device.queue.submit([encoder.finish()]);
+                requestAnimationFrame(frame);
+            }
+            frame();
+        }
+        init();
+    </script>
+</body>
+</html>

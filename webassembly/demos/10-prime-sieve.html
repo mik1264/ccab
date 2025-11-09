@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prime Number Sieve Visualization - WebAssembly</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: monospace;
+        }
+        #container {
+            text-align: center;
+        }
+        canvas {
+            border: 2px solid #222;
+            display: block;
+            margin: 20px auto;
+        }
+        #info {
+            color: #0f0;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <canvas id="canvas"></canvas>
+        <div id="info"></div>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width = 1000;
+        const height = canvas.height = 700;
+        const info = document.getElementById('info');
+
+        const MAX = 10000;
+
+        // WebAssembly memory for sieve
+        const memory = new WebAssembly.Memory({ initial: 1 });
+        const sieve = new Uint8Array(memory.buffer, 0, MAX);
+
+        // Initialize all as potential primes
+        for (let i = 0; i < MAX; i++) sieve[i] = 1;
+        sieve[0] = sieve[1] = 0;
+
+        // WebAssembly Sieve of Eratosthenes
+        const wasmCode = `(module
+            (memory (import "env" "memory") 1)
+            (func (export "sieveStep")
+                (param $current i32) (param $max i32) (result i32)
+                (local $i i32) (local $next i32)
+
+                ;; Mark multiples as composite
+                (local.set $i (i32.mul (local.get $current) (i32.const 2)))
+                (loop $markLoop
+                    (i32.store8 (local.get $i) (i32.const 0))
+                    (local.set $i (i32.add (local.get $i) (local.get $current)))
+                    (br_if $markLoop (i32.lt_u (local.get $i) (local.get $max)))
+                )
+
+                ;; Find next prime
+                (local.set $next (i32.add (local.get $current) (i32.const 1)))
+                (loop $findLoop
+                    (if (i32.ge_u (local.get $next) (local.get $max))
+                        (then (return (i32.const -1))))
+                    (if (i32.load8_u (local.get $next))
+                        (then (return (local.get $next))))
+                    (local.set $next (i32.add (local.get $next) (i32.const 1)))
+                    (br $findLoop)
+                )
+                (i32.const -1)
+            )
+        )`;
+
+        let wasm;
+        let currentPrime = 2;
+        let currentStep = 0;
+        let primeCount = 0;
+        let animationSpeed = 2;
+
+        async function init() {
+            try {
+                const module = await WebAssembly.instantiate(
+                    await WebAssembly.compile(
+                        await new Response(wasmCode, {
+                            headers: { 'Content-Type': 'text/plain' }
+                        }).arrayBuffer()
+                    ),
+                    { env: { memory } }
+                );
+                wasm = module.instance;
+            } catch (e) {
+                console.log('WASM failed, using JS');
+            }
+
+            animate();
+        }
+
+        function sieveStepJS(current) {
+            // Mark multiples
+            for (let i = current * 2; i < MAX; i += current) {
+                sieve[i] = 0;
+            }
+
+            // Find next prime
+            for (let i = current + 1; i < MAX; i++) {
+                if (sieve[i]) return i;
+            }
+            return -1;
+        }
+
+        function animate() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, width, height);
+
+            // Perform sieve steps
+            for (let i = 0; i < animationSpeed; i++) {
+                if (currentPrime !== -1 && currentPrime < Math.sqrt(MAX)) {
+                    if (wasm) {
+                        currentPrime = wasm.exports.sieveStep(currentPrime, MAX);
+                    } else {
+                        currentPrime = sieveStepJS(currentPrime);
+                    }
+                    currentStep++;
+                }
+            }
+
+            // Count primes
+            primeCount = 0;
+            for (let i = 0; i < MAX; i++) {
+                if (sieve[i]) primeCount++;
+            }
+
+            // Visualize as grid
+            const cols = 100;
+            const rows = Math.ceil(MAX / cols);
+            const cellW = width / cols;
+            const cellH = height / rows;
+
+            for (let i = 0; i < MAX; i++) {
+                const x = (i % cols) * cellW;
+                const y = Math.floor(i / cols) * cellH;
+
+                if (sieve[i]) {
+                    // Prime number
+                    const brightness = 40 + (i / MAX) * 40;
+                    const hue = (i % 360);
+                    ctx.fillStyle = `hsl(${hue}, 100%, ${brightness}%)`;
+                } else {
+                    // Composite number
+                    ctx.fillStyle = '#111';
+                }
+
+                ctx.fillRect(x, y, Math.ceil(cellW) - 1, Math.ceil(cellH) - 1);
+            }
+
+            // Highlight current prime being processed
+            if (currentPrime !== -1 && currentPrime < MAX) {
+                const x = (currentPrime % cols) * cellW;
+                const y = Math.floor(currentPrime / cols) * cellH;
+
+                ctx.strokeStyle = '#ff0';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(x, y, cellW, cellH);
+
+                // Highlight multiples being eliminated
+                for (let mult = currentPrime * 2; mult < MAX; mult += currentPrime) {
+                    const mx = (mult % cols) * cellW;
+                    const my = Math.floor(mult / cols) * cellH;
+
+                    ctx.strokeStyle = 'rgba(255, 0, 0, 0.3)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(mx, my, cellW, cellH);
+                }
+            }
+
+            info.innerHTML = `
+                Numbers: ${MAX.toLocaleString()}<br>
+                Primes Found: ${primeCount.toLocaleString()}<br>
+                Current Prime: ${currentPrime === -1 ? 'Complete' : currentPrime}<br>
+                Steps: ${currentStep}<br>
+                ${wasm ? 'WebAssembly Accelerated' : 'JavaScript Fallback'}
+            `;
+
+            requestAnimationFrame(animate);
+        }
+
+        init();
+    </script>
+</body>
+</html>

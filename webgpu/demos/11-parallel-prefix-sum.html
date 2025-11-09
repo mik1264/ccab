@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Parallel Prefix Sum Visualization</title>
+    <style>
+        body { margin: 0; background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; border: 3px solid #fff; border-radius: 10px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <script>
+        const SIZE = 1024;
+
+        async function init() {
+            if (!navigator.gpu) { alert('WebGPU not supported'); return; }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format });
+
+            const scanShader = `
+                @group(0) @binding(0) var<storage, read> input: array<f32>;
+                @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+                @group(0) @binding(2) var<uniform> params: vec2<u32>; // offset, size
+
+                @compute @workgroup_size(256)
+                fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                    let idx = id.x;
+                    if (idx >= params.y) { return; }
+
+                    var sum = input[idx];
+                    if (idx >= params.x) {
+                        sum += input[idx - params.x];
+                    }
+                    output[idx] = sum;
+                }
+            `;
+
+            const renderShader = `
+                @group(0) @binding(0) var<storage, read> data: array<f32>;
+                @group(0) @binding(1) var<uniform> maxVal: f32;
+
+                @vertex
+                fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> @builtin(position) vec4<f32> {
+                    let x = f32(ii) / ${SIZE}.0 * 2.0 - 1.0;
+                    let height = data[ii] / maxVal;
+                    let y = select(-1.0, height * 2.0 - 1.0, vi >= 2u);
+
+                    let positions = array(
+                        vec2<f32>(x, -1.0), vec2<f32>(x + 2.0/${SIZE}.0, -1.0),
+                        vec2<f32>(x, y), vec2<f32>(x + 2.0/${SIZE}.0, y)
+                    );
+                    return vec4<f32>(positions[vi], 0.0, 1.0);
+                }
+
+                @fragment
+                fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                    let t = pos.y / 600.0;
+                    return vec4<f32>(0.2 + t * 0.5, 0.5 + t * 0.3, 0.9 - t * 0.3, 1.0);
+                }
+            `;
+
+            const inputData = new Float32Array(SIZE);
+            for (let i = 0; i < SIZE; i++) {
+                inputData[i] = Math.random();
+            }
+
+            const buffers = [
+                device.createBuffer({ size: SIZE * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+                device.createBuffer({ size: SIZE * 4, usage: GPUBufferUsage.STORAGE }),
+            ];
+
+            device.queue.writeBuffer(buffers[0], 0, inputData);
+
+            const paramsBuffer = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            const maxValBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+            const scanPipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ code: scanShader }), entryPoint: 'main' },
+            });
+
+            const renderPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vs' },
+                fragment: {
+                    module: device.createShaderModule({ code: renderShader }),
+                    entryPoint: 'fs',
+                    targets: [{ format }],
+                },
+                primitive: { topology: 'triangle-strip' },
+            });
+
+            let step = 0;
+            function frame() {
+                const encoder = device.createCommandEncoder();
+
+                // Perform parallel prefix sum
+                for (let offset = 1; offset < SIZE; offset *= 2) {
+                    device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([offset, SIZE]));
+
+                    const scanBG = device.createBindGroup({
+                        layout: scanPipeline.getBindGroupLayout(0),
+                        entries: [
+                            { binding: 0, resource: { buffer: buffers[step % 2] } },
+                            { binding: 1, resource: { buffer: buffers[(step + 1) % 2] } },
+                            { binding: 2, resource: { buffer: paramsBuffer } },
+                        ],
+                    });
+
+                    const compute = encoder.beginComputePass();
+                    compute.setPipeline(scanPipeline);
+                    compute.setBindGroup(0, scanBG);
+                    compute.dispatchWorkgroups(Math.ceil(SIZE / 256));
+                    compute.end();
+
+                    step++;
+                }
+
+                device.queue.writeBuffer(maxValBuffer, 0, new Float32Array([SIZE / 2]));
+
+                const renderBG = device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: buffers[step % 2] } },
+                        { binding: 1, resource: { buffer: maxValBuffer } },
+                    ],
+                });
+
+                const render = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        clearValue: { r: 0.1, g: 0.1, b: 0.2, a: 1 },
+                        storeOp: 'store',
+                    }],
+                });
+                render.setPipeline(renderPipeline);
+                render.setBindGroup(0, renderBG);
+                render.draw(4, SIZE);
+                render.end();
+
+                device.queue.submit([encoder.finish()]);
+
+                // Reset for next frame
+                setTimeout(() => {
+                    for (let i = 0; i < SIZE; i++) {
+                        inputData[i] = Math.random();
+                    }
+                    device.queue.writeBuffer(buffers[0], 0, inputData);
+                    step = 0;
+                    requestAnimationFrame(frame);
+                }, 1000);
+            }
+            frame();
+        }
+        init();
+    </script>
+</body>
+</html>

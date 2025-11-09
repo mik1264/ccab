@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Ray-Sphere Intersection</title>
+    <style>
+        body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" width="800" height="800"></canvas>
+    <script>
+        async function init() {
+            if (!navigator.gpu) { alert('WebGPU not supported'); return; }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('webgpu');
+            const format = navigator.gpu.getPreferredCanvasFormat();
+            context.configure({ device, format });
+
+            const rayTraceShader = `
+                @group(0) @binding(0) var outputTex: texture_storage_2d<rgba8unorm, write>;
+                @group(0) @binding(1) var<uniform> time: f32;
+
+                fn raySphere(ro: vec3<f32>, rd: vec3<f32>, center: vec3<f32>, radius: f32) -> f32 {
+                    let oc = ro - center;
+                    let b = dot(oc, rd);
+                    let c = dot(oc, oc) - radius * radius;
+                    let h = b * b - c;
+                    if (h < 0.0) { return -1.0; }
+                    return -b - sqrt(h);
+                }
+
+                @compute @workgroup_size(8, 8)
+                fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                    let coords = vec2<i32>(id.xy);
+                    if (coords.x >= 800 || coords.y >= 800) { return; }
+
+                    let uv = (vec2<f32>(coords) - 400.0) / 400.0;
+                    let ro = vec3<f32>(0.0, 0.0, -5.0);
+                    let rd = normalize(vec3<f32>(uv, 1.0));
+
+                    var color = vec3<f32>(0.0);
+
+                    // Multiple spheres
+                    let spheres = array<vec4<f32>, 5>(
+                        vec4<f32>(sin(time) * 2.0, 0.0, 0.0, 1.0),
+                        vec4<f32>(-1.5, cos(time) * 1.5, 1.0, 0.8),
+                        vec4<f32>(1.5, sin(time * 0.7) * 1.5, 1.0, 0.8),
+                        vec4<f32>(cos(time * 1.3) * 2.0, 0.0, 2.0, 0.6),
+                        vec4<f32>(0.0, -1.0, 0.0, 0.5)
+                    );
+
+                    var minT = 999.0;
+                    var hitIdx = -1;
+
+                    for (var i = 0; i < 5; i++) {
+                        let t = raySphere(ro, rd, spheres[i].xyz, spheres[i].w);
+                        if (t > 0.0 && t < minT) {
+                            minT = t;
+                            hitIdx = i;
+                        }
+                    }
+
+                    if (hitIdx >= 0) {
+                        let hitPos = ro + rd * minT;
+                        let normal = normalize(hitPos - spheres[hitIdx].xyz);
+                        let lightDir = normalize(vec3<f32>(1.0, 1.0, -1.0));
+                        let diff = max(dot(normal, lightDir), 0.0);
+
+                        let baseColor = vec3<f32>(
+                            0.5 + 0.5 * sin(f32(hitIdx) * 2.0 + time),
+                            0.5 + 0.5 * sin(f32(hitIdx) * 2.5 + time),
+                            0.5 + 0.5 * sin(f32(hitIdx) * 3.0 + time)
+                        );
+
+                        color = baseColor * (0.3 + 0.7 * diff);
+                    } else {
+                        // Sky gradient
+                        color = mix(vec3<f32>(0.1, 0.2, 0.4), vec3<f32>(0.6, 0.7, 0.9), rd.y * 0.5 + 0.5);
+                    }
+
+                    textureStore(outputTex, coords, vec4<f32>(color, 1.0));
+                }
+            `;
+
+            const renderShader = `
+                @group(0) @binding(0) var tex: texture_2d<f32>;
+                @vertex
+                fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+                    var pos = array(vec2(-1.0,-1.0), vec2(1.0,-1.0), vec2(-1.0,1.0), vec2(1.0,-1.0), vec2(1.0,1.0), vec2(-1.0,1.0));
+                    return vec4<f32>(pos[i], 0.0, 1.0);
+                }
+                @fragment
+                fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                    return textureLoad(tex, vec2<i32>(pos.xy), 0);
+                }
+            `;
+
+            const texture = device.createTexture({
+                size: [800, 800],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+            });
+
+            const timeBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+            const rayTracePipeline = device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ code: rayTraceShader }), entryPoint: 'main' },
+            });
+
+            const renderPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vs' },
+                fragment: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'fs', targets: [{ format }] },
+            });
+
+            let time = 0;
+            function frame() {
+                time += 0.016;
+                device.queue.writeBuffer(timeBuffer, 0, new Float32Array([time]));
+
+                const rayTraceBG = device.createBindGroup({
+                    layout: rayTracePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: texture.createView() },
+                        { binding: 1, resource: { buffer: timeBuffer } },
+                    ],
+                });
+
+                const renderBG = device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: texture.createView() }],
+                });
+
+                const encoder = device.createCommandEncoder();
+
+                const compute = encoder.beginComputePass();
+                compute.setPipeline(rayTracePipeline);
+                compute.setBindGroup(0, rayTraceBG);
+                compute.dispatchWorkgroups(100, 100);
+                compute.end();
+
+                const render = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                });
+                render.setPipeline(renderPipeline);
+                render.setBindGroup(0, renderBG);
+                render.draw(6);
+                render.end();
+
+                device.queue.submit([encoder.finish()]);
+                requestAnimationFrame(frame);
+            }
+            frame();
+        }
+        init();
+    </script>
+</body>
+</html>

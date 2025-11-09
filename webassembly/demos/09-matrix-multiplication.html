@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Matrix Multiplication Visualization - WebAssembly</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #0a0a0a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: monospace;
+        }
+        #container {
+            text-align: center;
+        }
+        canvas {
+            border: 2px solid #222;
+            display: block;
+            margin: 20px auto;
+        }
+        #stats {
+            color: #0f0;
+            font-size: 14px;
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <canvas id="canvas"></canvas>
+        <div id="stats"></div>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width = 900;
+        const height = canvas.height = 600;
+        const stats = document.getElementById('stats');
+
+        const SIZE = 64;
+
+        // WebAssembly memory for matrices
+        const memory = new WebAssembly.Memory({ initial: 10 });
+        const buffer = new Float32Array(memory.buffer);
+
+        // Matrix A at offset 0
+        // Matrix B at offset SIZE*SIZE
+        // Matrix C at offset SIZE*SIZE*2
+
+        // Initialize matrices
+        for (let i = 0; i < SIZE * SIZE; i++) {
+            buffer[i] = Math.random();
+            buffer[SIZE * SIZE + i] = Math.random();
+        }
+
+        // WebAssembly matrix multiplication
+        const wasmCode = `(module
+            (memory (import "env" "memory") 10)
+            (func (export "matmul")
+                (param $size i32)
+                (local $i i32) (local $j i32) (local $k i32)
+                (local $sum f32) (local $offsetC i32) (local $offsetA i32) (local $offsetB i32)
+
+                (local.set $i (i32.const 0))
+                (loop $loopI
+                    (local.set $j (i32.const 0))
+                    (loop $loopJ
+                        (local.set $sum (f32.const 0))
+                        (local.set $k (i32.const 0))
+                        (loop $loopK
+                            (local.set $offsetA
+                                (i32.add
+                                    (i32.mul (local.get $i) (local.get $size))
+                                    (local.get $k)))
+                            (local.set $offsetB
+                                (i32.add
+                                    (i32.add
+                                        (i32.mul (local.get $size) (local.get $size))
+                                        (i32.mul (local.get $k) (local.get $size)))
+                                    (local.get $j)))
+
+                            (local.set $sum
+                                (f32.add
+                                    (local.get $sum)
+                                    (f32.mul
+                                        (f32.load (i32.shl (local.get $offsetA) (i32.const 2)))
+                                        (f32.load (i32.shl (local.get $offsetB) (i32.const 2))))))
+
+                            (local.set $k (i32.add (local.get $k) (i32.const 1)))
+                            (br_if $loopK (i32.lt_u (local.get $k) (local.get $size)))
+                        )
+
+                        (local.set $offsetC
+                            (i32.add
+                                (i32.mul (local.get $size) (local.get $size))
+                                (i32.add
+                                    (i32.mul (local.get $size) (local.get $size))
+                                    (i32.add
+                                        (i32.mul (local.get $i) (local.get $size))
+                                        (local.get $j)))))
+
+                        (f32.store (i32.shl (local.get $offsetC) (i32.const 2)) (local.get $sum))
+
+                        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+                        (br_if $loopJ (i32.lt_u (local.get $j) (local.get $size)))
+                    )
+
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br_if $loopI (i32.lt_u (local.get $i) (local.get $size)))
+                )
+            )
+        )`;
+
+        let wasm;
+        let computing = false;
+        let frame = 0;
+
+        async function init() {
+            const wasmBytes = new TextEncoder().encode(wasmCode);
+            try {
+                const module = await WebAssembly.instantiate(
+                    await WebAssembly.compile(
+                        await new Response(wasmCode, {
+                            headers: { 'Content-Type': 'text/plain' }
+                        }).arrayBuffer()
+                    ),
+                    { env: { memory } }
+                );
+                wasm = module.instance;
+            } catch (e) {
+                console.log('Using JS fallback');
+            }
+
+            animate();
+        }
+
+        function matmulJS() {
+            const A_offset = 0;
+            const B_offset = SIZE * SIZE;
+            const C_offset = SIZE * SIZE * 2;
+
+            for (let i = 0; i < SIZE; i++) {
+                for (let j = 0; j < SIZE; j++) {
+                    let sum = 0;
+                    for (let k = 0; k < SIZE; k++) {
+                        sum += buffer[A_offset + i * SIZE + k] * buffer[B_offset + k * SIZE + j];
+                    }
+                    buffer[C_offset + i * SIZE + j] = sum;
+                }
+            }
+        }
+
+        function computeMatrix() {
+            const start = performance.now();
+
+            if (wasm) {
+                wasm.exports.matmul(SIZE);
+            } else {
+                matmulJS();
+            }
+
+            const end = performance.now();
+            return end - start;
+        }
+
+        function drawMatrix(offsetIndex, x, y, w, h, label) {
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px monospace';
+            ctx.fillText(label, x, y - 10);
+
+            const cellW = w / SIZE;
+            const cellH = h / SIZE;
+            const offset = offsetIndex * SIZE * SIZE;
+
+            for (let i = 0; i < SIZE; i++) {
+                for (let j = 0; j < SIZE; j++) {
+                    const value = buffer[offset + i * SIZE + j];
+                    const normalized = Math.min(1, Math.max(0, value / 4));
+
+                    const hue = normalized * 240;
+                    const brightness = 30 + normalized * 50;
+
+                    ctx.fillStyle = `hsl(${hue}, 100%, ${brightness}%)`;
+                    ctx.fillRect(
+                        x + j * cellW,
+                        y + i * cellH,
+                        Math.ceil(cellW),
+                        Math.ceil(cellH)
+                    );
+                }
+            }
+        }
+
+        function animate() {
+            frame++;
+
+            ctx.fillStyle = '#0a0a0a';
+            ctx.fillRect(0, 0, width, height);
+
+            // Rotate matrices
+            if (frame % 60 === 0) {
+                for (let i = 0; i < SIZE * SIZE; i++) {
+                    buffer[i] = Math.random();
+                    buffer[SIZE * SIZE + i] = Math.random();
+                }
+            }
+
+            const computeTime = computeMatrix();
+
+            const cellSize = 280;
+            const spacing = 20;
+
+            drawMatrix(0, 20, 150, cellSize, cellSize, 'Matrix A');
+            drawMatrix(1, 320, 150, cellSize, cellSize, 'Matrix B');
+            drawMatrix(2, 620, 150, cellSize, cellSize, 'Result C = A × B');
+
+            // Draw multiplication symbol
+            ctx.fillStyle = '#fff';
+            ctx.font = '48px monospace';
+            ctx.fillText('×', 290, 300);
+            ctx.fillText('=', 590, 300);
+
+            stats.innerHTML = `
+                Matrix Size: ${SIZE}×${SIZE}<br>
+                Operations: ${SIZE * SIZE * SIZE} multiplications<br>
+                Compute Time: ${computeTime.toFixed(2)}ms<br>
+                ${wasm ? 'Using WebAssembly' : 'Using JavaScript'}
+            `;
+
+            requestAnimationFrame(animate);
+        }
+
+        init();
+    </script>
+</body>
+</html>
