@@ -199,9 +199,58 @@ All visualizations target:
 2. **Phase 2**: Automated generation of 19 feature branches
 3. **Phase 3**: Quality filtering (13 successful, 6 failed)
 4. **Phase 4**: Consolidation into main branch
-5. **Current**: 480+ demos across 19 polished categories
+5. **Phase 5**: Quality curation (560 → 406 demos)
+6. **Current**: 406 curated demos across 19 categories
 
 **Success Pattern**: Framework-based visualizations (Three.js, D3.js, P5.js) succeeded at higher rates than complex physics simulations.
+
+## 🎓 Method: A Class of 100+ Claude Code Instances as Students
+
+This project represents an experimental approach to AI-assisted creative coding - essentially running a "class" of 100+ Claude Code instances as students working on visualization assignments.
+
+### The Process
+
+**Initial Exploration (10 Web Instances)**
+1. Launched 10 Claude Code web instances (enabled by $1000 credit for Max plan subscribers)
+2. Each instance tasked with creating 20 unique beautiful visualizations
+3. Result: ~200 initial demos exploring different approaches and techniques
+
+**Consolidation & Evaluation**
+1. Used `git worktree` to pull all work into local Claude Code environment
+2. Merged and evaluated each contribution
+3. Sorted by: functionality, visual appeal, code quality
+4. Identified patterns: what works, what doesn't, what looks attractive
+
+**Strategic Planning**
+1. Developed comprehensive implementation roadmap using Claude Opus
+2. Identified 10 essential technology categories for deep exploration
+3. Planned 40 demonstrations per category for thorough coverage
+
+**Scaled Implementation (10 More Instances)**
+1. Launched 10 additional cloud instances
+2. Each instance assigned a specific section from the roadmap
+3. Each generated 40 iterations/variations on their assigned technology
+4. Result: 400 additional demos across diverse categories
+
+**Final Curation**
+1. Second merge and evaluation cycle
+2. Analysis of successes and failures (documented in IMPLEMENTATION_STATUS.md)
+3. Quality-focused curation: 560 → 406 demos (27% reduction)
+4. Kept only the most visually impressive and educationally valuable examples
+
+### Reflections
+
+**A Memory Lane Moment**: This process reminded me of high school computer science class with teacher Alexander Kremlev, who would assign visualization tasks and visit each student to see their progress and challenges. Here, I experienced a 400+ student work evaluation exercise - though admittedly, I was much lazier than Alexander was with us as students!
+
+**Key Insights**:
+- **Parallel AI Development Works**: Multiple instances exploring the same problem space generate diverse solutions
+- **Curation is Critical**: Quality over quantity - 68% success rate for automated generation, 70% retention after curation
+- **Framework Success**: Graphics libraries (Three.js, D3.js, P5.js) automated better than complex physics simulations
+- **Educational Value**: The final collection serves as a comprehensive learning resource
+
+### Next Steps
+
+**Skill Distillation**: Planning to distill this methodology into a Claude Code skill to see if it generates more persistent, reusable results for future visualization projects.
 
 ## 📜 License
 
