@@ -1,6 +1,6 @@
 # CCAB - Claude Code and AB (aka Algorithmic Beauty) Testing
 
-> **406+ Interactive Web Visualizations** showcasing the creative possibilities of modern web technologies
+> **348+ Interactive Web Visualizations** showcasing the creative possibilities of modern web technologies
 
 A comprehensive collection of creative coding demonstrations spanning vanilla JavaScript, advanced graphics frameworks, scientific simulations, and cutting-edge web APIs. All demos are self-contained HTML files requiring no build process—just open and explore.
 
@@ -16,7 +16,7 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 - ✨ **Interactive Visualizations** - HTML5 Canvas fundamentals
 - 🧪 **Neural Cellular Automata** - Experimental simulations
 
-**Extended Galleries (366+ demos)**
+**Extended Galleries (308+ demos)**
 - 🧬 **Wolfram Cellular Automata** - All 256 elementary CA rules with analysis tools
 - 🎭 **Three.js 3D Gallery** - Rotating models, particles, advanced shader effects (30)
 - 🌈 **WebGL Shader Art** - Fragment shaders, raymarching, GPU particles, fractals (21)
@@ -26,10 +26,10 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 - 📈 **D3.js Data Visualizations** - Force graphs, trees, Sankey, chord diagrams, maps (18)
 - 🎵 **Web Audio API** - FFT visualizers, waveforms, 3D audio, beat detection (40)
 - 🔬 **Scientific Visualizations** - Orbital mechanics, wave interference, electromagnetic fields, fluid dynamics (15)
-- 🦠 **Biological Simulations** - Boids, evolution, neural networks, L-systems (40)
-- 🔺 **Visualization Algorithms** - Voronoi, Delaunay, metaballs, pathfinding, Fourier (40)
+- 🦠 **Biological Simulations** - Boids, evolution, L-systems, reaction-diffusion (22)
+- 🔺 **Visualization Algorithms** - Voronoi, Delaunay, metaballs, pathfinding, Fourier (25)
 - 🚀 **WebAssembly High-Performance** - Near-native speed algorithms and simulations (13)
-- 🌟 **Complex Showcases** - Ray tracers, fluids, terrain, galaxies, fractals (40)
+- 🌟 **Complex Showcases** - Ray tracers, terrain, galaxies, fractals, music (15)
 
 ## 🎯 Features
 
@@ -114,7 +114,7 @@ Explore cutting-edge techniques:
 
 ## 📊 Statistics
 
-- **Total Visualizations**: 406+
+- **Total Visualizations**: 348+
 - **Categories**: 19
 - **Technologies**: 10+ frameworks/APIs
 - **Lines of Code**: 68,000+
@@ -199,8 +199,8 @@ All visualizations target:
 2. **Phase 2**: Automated generation of 19 feature branches
 3. **Phase 3**: Quality filtering (13 successful, 6 failed)
 4. **Phase 4**: Consolidation into main branch
-5. **Phase 5**: Quality curation (560 → 406 demos)
-6. **Current**: 406 curated demos across 19 categories
+5. **Phase 5**: Quality curation (560 → 348 demos)
+6. **Current**: 348 curated demos across 19 categories
 
 **Success Pattern**: Framework-based visualizations (Three.js, D3.js, P5.js) succeeded at higher rates than complex physics simulations.
 
@@ -235,7 +235,7 @@ This project represents an experimental approach to AI-assisted creative coding 
 **Final Curation**
 1. Second merge and evaluation cycle
 2. Analysis of successes and failures (documented in IMPLEMENTATION_STATUS.md)
-3. Quality-focused curation: 560 → 406 demos (27% reduction)
+3. Quality-focused curation: 560 → 348 demos (38% reduction)
 4. Kept only the most visually impressive and educationally valuable examples
 
 ### Reflections
@@ -244,7 +244,7 @@ This project represents an experimental approach to AI-assisted creative coding 
 
 **Key Insights**:
 - **Parallel AI Development Works**: Multiple instances exploring the same problem space generate diverse solutions
-- **Curation is Critical**: Quality over quantity - 68% success rate for automated generation, 70% retention after curation
+- **Curation is Critical**: Quality over quantity - 68% success rate for automated generation, 62% retention after curation
 - **Framework Success**: Graphics libraries (Three.js, D3.js, P5.js) automated better than complex physics simulations
 - **Educational Value**: The final collection serves as a comprehensive learning resource
 

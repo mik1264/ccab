@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CCAB (Creative Code and Algorithmic Beauty)** - A comprehensive showcase of 406+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
+**CCAB (Creative Code and Algorithmic Beauty)** - A comprehensive showcase of 348+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
 
 This is a **static HTML/CSS/JavaScript** project with no build system, no dependencies, and no package manager. All demos are self-contained HTML files that can be opened directly in a browser.
 
@@ -20,7 +20,7 @@ The project follows a two-tier navigation structure:
 
 ```
 ccab/
-├── index.html                      # Main landing page (19 categories, 406+ demos)
+├── index.html                      # Main landing page (19 categories, 348+ demos)
 ├── algorithmic-art/
 │   └── index.html                  # Gallery: 20+ demos in one page
 ├── d3js/
@@ -56,10 +56,10 @@ ccab/
 - `d3js/` - D3.js data visualizations (18 demos)
 - `web-audio-api/` - Web Audio API (40 demos)
 - `scientific-visualizations/` - Physics/chemistry/biology (15 demos)
-- `biological-simulations/` - Boids, evolution, L-systems (40 demos)
-- `visualization-algorithms/` - Voronoi, Delaunay, pathfinding (40 demos)
+- `biological-simulations/` - Boids, evolution, L-systems (22 demos)
+- `visualization-algorithms/` - Voronoi, Delaunay, pathfinding (25 demos)
 - `webassembly/` - High-performance WASM (13 demos)
-- `complex-showcases/` - Ray tracers, fluids, terrain (40 demos)
+- `complex-showcases/` - Ray tracers, terrain, galaxies (15 demos)
 
 ## Key Implementation Patterns
 
@@ -242,7 +242,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 When demos are added/removed, update line 331 in `index.html`:
 ```html
 <div class="stats">
-    <h3>406+ Interactive Demos</h3>  <!-- Update this number -->
+    <h3>348+ Interactive Demos</h3>  <!-- Update this number -->
     <p>From vanilla HTML/CSS/JavaScript to WebGL, WebGPU, Three.js, P5.js, D3.js, Pixi.js, and WebAssembly</p>
 </div>
 ```
@@ -290,7 +290,7 @@ This project evolved through:
 1. **Initial creation**: 40 vanilla HTML/CSS/JS demos across 6 categories
 2. **Automated generation**: 19 feature branches created, 13 successful (520+ new demos)
 3. **Consolidation**: All successful branches merged to main (Nov 2025)
-4. **Quality refinement**: Removed underperforming demos, optimized gallery structure
-5. **Current state**: 406+ demos across 19 categories
+4. **Quality curation**: 560 → 348 demos (38% reduction, retaining highest quality)
+5. **Current state**: 348+ demos across 19 categories
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).
