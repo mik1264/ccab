@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CCAB (Creative Code and Algorithmic Beauty)** - A comprehensive showcase of 348+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
+**CCAB (Creative Code and Algorithmic Beauty)** - A comprehensive showcase of 364+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
 
 This is a **static HTML/CSS/JavaScript** project with no build system, no dependencies, and no package manager. All demos are self-contained HTML files that can be opened directly in a browser.
 
@@ -14,13 +14,13 @@ This is a **static HTML/CSS/JavaScript** project with no build system, no depend
 
 The project follows a two-tier navigation structure:
 
-1. **Main Index** (`index.html`): Landing page with 19 category sections
+1. **Main Index** (`index.html`): Landing page with 20 category sections
 2. **Gallery Indexes**: Each category has its own `index.html` linking to individual demos
 3. **Individual Demos**: Self-contained HTML files with inline CSS/JavaScript
 
 ```
 ccab/
-├── index.html                      # Main landing page (19 categories, 348+ demos)
+├── index.html                      # Main landing page (20 categories, 364+ demos)
 ├── algorithmic-art/
 │   └── index.html                  # Gallery: 20+ demos in one page
 ├── d3js/
@@ -36,7 +36,7 @@ ccab/
 └── [12 more gallery directories]
 ```
 
-### 19 Gallery Categories
+### 20 Gallery Categories
 
 **Original (6):**
 - `algorithmic-art/` - Fractals, patterns, generative art (20+ demos)
@@ -46,7 +46,7 @@ ccab/
 - `visualizations/` - 9 basic HTML5 canvas demos
 - `games/` - Neural Cellular Automata
 
-**Added via Automated Generation (13):**
+**Added via Automated Generation (14):**
 - `wolfram-ca/` - All 256 Wolfram Elementary Cellular Automata rules
 - `threejs/` - Three.js 3D visualizations (30 demos)
 - `webgl-shaders/` - Raw WebGL shader art (21 demos)
@@ -57,6 +57,7 @@ ccab/
 - `web-audio-api/` - Web Audio API (40 demos)
 - `scientific-visualizations/` - Physics/chemistry/biology (15 demos)
 - `biological-simulations/` - Boids, evolution, L-systems (22 demos)
+- `altruism-evolution/` - Altruism & cooperation evolution (16 demos)
 - `visualization-algorithms/` - Voronoi, Delaunay, pathfinding (25 demos)
 - `webassembly/` - High-performance WASM (13 demos)
 - `complex-showcases/` - Ray tracers, terrain, galaxies (15 demos)
@@ -239,10 +240,10 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ### Updating Main Gallery Stats
 
-When demos are added/removed, update line 331 in `index.html`:
+When demos are added/removed, update the stats in `index.html`:
 ```html
 <div class="stats">
-    <h3>348+ Interactive Demos</h3>  <!-- Update this number -->
+    <h3>364+ Interactive Demos</h3>  <!-- Update this number -->
     <p>From vanilla HTML/CSS/JavaScript to WebGL, WebGPU, Three.js, P5.js, D3.js, Pixi.js, and WebAssembly</p>
 </div>
 ```
@@ -291,6 +292,7 @@ This project evolved through:
 2. **Automated generation**: 19 feature branches created, 13 successful (520+ new demos)
 3. **Consolidation**: All successful branches merged to main (Nov 2025)
 4. **Quality curation**: 560 → 348 demos (38% reduction, retaining highest quality)
-5. **Current state**: 348+ demos across 19 categories
+5. **Altruism Evolution**: Added educational evolutionary biology gallery (16 demos)
+6. **Current state**: 364+ demos across 20 categories
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).

@@ -1,12 +1,12 @@
 # CCAB - Claude Code and AB (aka Algorithmic Beauty) Testing
 
-> **348+ Interactive Web Visualizations** showcasing the creative possibilities of modern web technologies
+> **364+ Interactive Web Visualizations** showcasing the creative possibilities of modern web technologies
 
 A comprehensive collection of creative coding demonstrations spanning vanilla JavaScript, advanced graphics frameworks, scientific simulations, and cutting-edge web APIs. All demos are self-contained HTML files requiring no build process—just open and explore.
 
 ## 🎨 What's Inside
 
-### 19 Gallery Categories • 480+ Visualizations
+### 20 Gallery Categories • 364+ Visualizations
 
 **Original Collections (40 demos)**
 - 🔷 **Algorithmic Art** - Fractals, patterns, and generative mathematics (20+ demos)
@@ -16,7 +16,7 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 - ✨ **Interactive Visualizations** - HTML5 Canvas fundamentals
 - 🧪 **Neural Cellular Automata** - Experimental simulations
 
-**Extended Galleries (308+ demos)**
+**Extended Galleries (324+ demos)**
 - 🧬 **Wolfram Cellular Automata** - All 256 elementary CA rules with analysis tools
 - 🎭 **Three.js 3D Gallery** - Rotating models, particles, advanced shader effects (30)
 - 🌈 **WebGL Shader Art** - Fragment shaders, raymarching, GPU particles, fractals (21)
@@ -27,6 +27,7 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 - 🎵 **Web Audio API** - FFT visualizers, waveforms, 3D audio, beat detection (40)
 - 🔬 **Scientific Visualizations** - Orbital mechanics, wave interference, electromagnetic fields, fluid dynamics (15)
 - 🦠 **Biological Simulations** - Boids, evolution, L-systems, reaction-diffusion (22)
+- 🧬 **Altruism Evolution** - Interactive visualizations exploring evolutionary biology and cooperation (16)
 - 🔺 **Visualization Algorithms** - Voronoi, Delaunay, metaballs, pathfinding, Fourier (25)
 - 🚀 **WebAssembly High-Performance** - Near-native speed algorithms and simulations (13)
 - 🌟 **Complex Showcases** - Ray tracers, terrain, galaxies, fractals, music (15)
@@ -57,7 +58,7 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 
 ```
 ccab/
-├── index.html                          # Main gallery (19 categories)
+├── index.html                          # Main gallery (20 categories)
 │
 ├── algorithmic-art/                    # Fractals & patterns
 ├── game-of-life/                       # Conway's Game of Life variations
@@ -79,6 +80,7 @@ ccab/
 ├── web-audio-api/                      # Audio visualizations
 ├── scientific-visualizations/          # Physics/chemistry/biology
 ├── biological-simulations/             # Life simulations
+├── altruism-evolution/                 # Altruism & cooperation
 ├── visualization-algorithms/           # Computational geometry
 ├── webassembly/                        # High-performance WASM
 ├── complex-showcases/                  # Advanced simulations
@@ -114,10 +116,10 @@ Explore cutting-edge techniques:
 
 ## 📊 Statistics
 
-- **Total Visualizations**: 348+
-- **Categories**: 19
+- **Total Visualizations**: 364+
+- **Categories**: 20
 - **Technologies**: 10+ frameworks/APIs
-- **Lines of Code**: 68,000+
+- **Lines of Code**: 75,000+
 - **Implementation Success Rate**: 68% (automated generation)
 - **Browser Compatibility**: Modern evergreen browsers
 - **Performance Target**: 60 FPS
@@ -200,7 +202,8 @@ All visualizations target:
 3. **Phase 3**: Quality filtering (13 successful, 6 failed)
 4. **Phase 4**: Consolidation into main branch
 5. **Phase 5**: Quality curation (560 → 348 demos)
-6. **Current**: 348 curated demos across 19 categories
+6. **Phase 6**: Altruism Evolution gallery (16 demos)
+7. **Current**: 364 curated demos across 20 categories
 
 **Success Pattern**: Framework-based visualizations (Three.js, D3.js, P5.js) succeeded at higher rates than complex physics simulations.
 
@@ -274,4 +277,4 @@ Built with:
 
 **Explore. Learn. Create.** 🚀
 
-*406+ visualizations demonstrating the creative possibilities of web technologies*
+*364+ visualizations demonstrating the creative possibilities of web technologies*
