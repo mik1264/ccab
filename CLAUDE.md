@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CCAB (Creative Code and Algorithmic Beauty)** - A comprehensive showcase of 560+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
+**CCAB (Creative Code and Algorithmic Beauty)** - A comprehensive showcase of 406+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
 
 This is a **static HTML/CSS/JavaScript** project with no build system, no dependencies, and no package manager. All demos are self-contained HTML files that can be opened directly in a browser.
 
@@ -20,16 +20,16 @@ The project follows a two-tier navigation structure:
 
 ```
 ccab/
-├── index.html                      # Main landing page (19 categories, 560+ demos)
+├── index.html                      # Main landing page (19 categories, 406+ demos)
 ├── algorithmic-art/
 │   └── index.html                  # Gallery: 20+ demos in one page
 ├── d3js/
-│   ├── index.html                  # Gallery: 40 demos across 6 subcategories
+│   ├── index.html                  # Gallery: 18 demos across 6 subcategories
 │   ├── force-directed/             # Subcategory
 │   ├── hierarchical-trees/         # Subcategory
 │   └── ...
 ├── threejs/
-│   ├── index.html                  # Gallery: 40 demos
+│   ├── index.html                  # Gallery: 30 demos
 │   ├── 01-rotating-cube.html       # Individual demo
 │   ├── 02-spinning-torus.html
 │   └── ...
@@ -48,17 +48,17 @@ ccab/
 
 **Added via Automated Generation (13):**
 - `wolfram-ca/` - All 256 Wolfram Elementary Cellular Automata rules
-- `threejs/` - Three.js 3D visualizations (40 demos)
-- `webgl-shaders/` - Raw WebGL shader art (40 demos)
-- `webgpu/` - WebGPU compute shaders (40 demos)
+- `threejs/` - Three.js 3D visualizations (30 demos)
+- `webgl-shaders/` - Raw WebGL shader art (21 demos)
+- `webgpu/` - WebGPU compute shaders (12 demos)
 - `p5-generative-art/` - P5.js creative coding (40 demos)
-- `pixi-sprite-animations/` - Pixi.js sprites (40 demos)
-- `d3js/` - D3.js data visualizations (40 demos)
+- `pixi-sprite-animations/` - Pixi.js sprites (17 demos)
+- `d3js/` - D3.js data visualizations (18 demos)
 - `web-audio-api/` - Web Audio API (40 demos)
-- `scientific-visualizations/` - Physics/chemistry/biology (40 demos)
+- `scientific-visualizations/` - Physics/chemistry/biology (15 demos)
 - `biological-simulations/` - Boids, evolution, L-systems (40 demos)
 - `visualization-algorithms/` - Voronoi, Delaunay, pathfinding (40 demos)
-- `webassembly/` - High-performance WASM (40 demos)
+- `webassembly/` - High-performance WASM (13 demos)
 - `complex-showcases/` - Ray tracers, fluids, terrain (40 demos)
 
 ## Key Implementation Patterns
@@ -242,7 +242,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 When demos are added/removed, update line 331 in `index.html`:
 ```html
 <div class="stats">
-    <h3>560+ Interactive Demos</h3>  <!-- Update this number -->
+    <h3>406+ Interactive Demos</h3>  <!-- Update this number -->
     <p>From vanilla HTML/CSS/JavaScript to WebGL, WebGPU, Three.js, P5.js, D3.js, Pixi.js, and WebAssembly</p>
 </div>
 ```
@@ -290,6 +290,7 @@ This project evolved through:
 1. **Initial creation**: 40 vanilla HTML/CSS/JS demos across 6 categories
 2. **Automated generation**: 19 feature branches created, 13 successful (520+ new demos)
 3. **Consolidation**: All successful branches merged to main (Nov 2025)
-4. **Current state**: 560+ demos across 19 categories
+4. **Quality refinement**: Removed underperforming demos, optimized gallery structure
+5. **Current state**: 406+ demos across 19 categories
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).

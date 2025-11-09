@@ -1,12 +1,12 @@
-# CCAB - Creative Code and Algorithmic Beauty
+# CCAB - Claude Code and AB (aka Algorithmic Beauty) Testing
 
-> **560+ Interactive Web Visualizations** showcasing the creative possibilities of modern web technologies
+> **406+ Interactive Web Visualizations** showcasing the creative possibilities of modern web technologies
 
 A comprehensive collection of creative coding demonstrations spanning vanilla JavaScript, advanced graphics frameworks, scientific simulations, and cutting-edge web APIs. All demos are self-contained HTML files requiring no build process—just open and explore.
 
 ## 🎨 What's Inside
 
-### 19 Gallery Categories • 560+ Visualizations
+### 19 Gallery Categories • 480+ Visualizations
 
 **Original Collections (40 demos)**
 - 🔷 **Algorithmic Art** - Fractals, patterns, and generative mathematics (20+ demos)
@@ -16,60 +16,20 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 - ✨ **Interactive Visualizations** - HTML5 Canvas fundamentals
 - 🧪 **Neural Cellular Automata** - Experimental simulations
 
-**Extended Galleries (520+ demos)**
+**Extended Galleries (366+ demos)**
 - 🧬 **Wolfram Cellular Automata** - All 256 elementary CA rules with analysis tools
-- 🎭 **Three.js 3D Gallery** - Rotating models, particles, shaders, post-processing (40)
-- 🌈 **WebGL Shader Art** - Fragment shaders, raymarching, GPU particles, fractals (40)
-- ⚡ **WebGPU Compute Shaders** - Parallel processing, ray tracing, advanced GPU computing (40)
+- 🎭 **Three.js 3D Gallery** - Rotating models, particles, advanced shader effects (30)
+- 🌈 **WebGL Shader Art** - Fragment shaders, raymarching, GPU particles, fractals (21)
+- ⚡ **WebGPU Compute Shaders** - Parallel processing, ray tracing (12)
 - 🎨 **P5.js Generative Art** - Perlin noise, recursion, creative coding systems (40)
-- 🎬 **Pixi.js Sprite Animations** - Particles, filters, displacement maps (40)
-- 📈 **D3.js Data Visualizations** - Force graphs, trees, Sankey, chord diagrams, maps (40)
+- 🎬 **Pixi.js Sprite Animations** - Particles, filters, advanced effects (17)
+- 📈 **D3.js Data Visualizations** - Force graphs, trees, Sankey, chord diagrams, maps (18)
 - 🎵 **Web Audio API** - FFT visualizers, waveforms, 3D audio, beat detection (40)
-- 🔬 **Scientific Visualizations** - Molecular structures, orbital mechanics, wave interference (40)
+- 🔬 **Scientific Visualizations** - Orbital mechanics, wave interference, electromagnetic fields, fluid dynamics (15)
 - 🦠 **Biological Simulations** - Boids, evolution, neural networks, L-systems (40)
 - 🔺 **Visualization Algorithms** - Voronoi, Delaunay, metaballs, pathfinding, Fourier (40)
-- 🚀 **WebAssembly High-Performance** - Near-native speed algorithms and simulations (40)
+- 🚀 **WebAssembly High-Performance** - Near-native speed algorithms and simulations (13)
 - 🌟 **Complex Showcases** - Ray tracers, fluids, terrain, galaxies, fractals (40)
-
-## 🚀 Quick Start
-
-### Option 1: Direct File Access
-```bash
-# Clone the repository
-git clone https://github.com/mik1264/ccab.git
-cd ccab
-
-# Open the main gallery
-open index.html
-
-# Or explore individual galleries
-open threejs/index.html
-open webgl-shaders/index.html
-open d3js/index.html
-```
-
-### Option 2: Local Server
-```bash
-# Python 3
-python3 -m http.server 8000
-
-# Python 2
-python -m SimpleHTTPServer 8000
-
-# Node.js
-npx http-server
-
-# Then visit http://localhost:8000
-```
-
-### Option 3: Live Deployment
-Deploy to any static hosting service:
-- **GitHub Pages**: Enable in repository settings
-- **Netlify**: Drag and drop the folder
-- **Vercel**: Connect the repository
-- **Cloudflare Pages**: Deploy with Git integration
-
-No build process required—all files are ready to serve!
 
 ## 🎯 Features
 
@@ -147,52 +107,14 @@ Progress to framework-based demos:
 
 ### Advanced
 Explore cutting-edge techniques:
-1. `webgl-shaders/demos/15-mandelbulb.html` - Raymarching & SDFs
-2. `webgpu/demos/23-cornell-box.html` - GPU ray tracing
+1. `webgl-shaders/demos/12-cube-fractal.html` - Raymarching & SDFs
+2. `webgpu/demos/22-ray-reflections.html` - GPU ray tracing
 3. `webassembly/demos/05-fluid-dynamics.html` - High-performance computing
 4. `wolfram-ca/index.html` - Computational complexity
 
-## 🛠️ Adding Your Own Visualizations
-
-### Create a New Demo
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>My Visualization</title>
-    <style>
-        /* Your CSS here */
-    </style>
-</head>
-<body>
-    <canvas id="canvas"></canvas>
-    <script>
-        // Your JavaScript here
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
-
-        function animate() {
-            // Your animation logic
-            requestAnimationFrame(animate);
-        }
-        animate();
-    </script>
-</body>
-</html>
-```
-
-### Add to Gallery
-1. Save as `gallery-name/XX-descriptive-name.html`
-2. Update `gallery-name/index.html` with link
-3. Maintain numbering sequence
-4. Test by opening directly in browser
-
-See [CLAUDE.md](CLAUDE.md) for detailed development guide.
-
 ## 📊 Statistics
 
-- **Total Visualizations**: 560+
+- **Total Visualizations**: 406+
 - **Categories**: 19
 - **Technologies**: 10+ frameworks/APIs
 - **Lines of Code**: 68,000+
@@ -215,27 +137,10 @@ See [CLAUDE.md](CLAUDE.md) for detailed development guide.
 - **Particle Systems** - GPU-accelerated thousands of particles
 
 ### Educational Simulations
-- **Scientific Visualizations** - Orbital mechanics, wave interference
+- **Scientific Visualizations** - Orbital mechanics, wave interference, electromagnetic fields, fluid dynamics
 - **Visualization Algorithms** - Voronoi, Delaunay, pathfinding
 - **L-Systems** - Recursive plant growth
 - **Strange Attractors** - Chaos theory demonstrations
-
-## 🤝 Contributing
-
-This project welcomes contributions! Some ideas:
-
-- **New Visualizations**: Add demos to existing galleries
-- **New Galleries**: Create entirely new categories
-- **Improvements**: Enhance existing demos with better visuals/interactivity
-- **Documentation**: Improve comments and explanations
-- **Bug Fixes**: Report or fix issues with existing demos
-
-**Guidelines:**
-- Keep demos self-contained (single HTML file)
-- Use CDN links for external libraries
-- Target 60 FPS performance
-- Include clear comments
-- Follow existing naming conventions
 
 ## 📚 Documentation
 
@@ -249,12 +154,12 @@ This project welcomes contributions! Some ideas:
 
 | Technology | Usage | Demos |
 |------------|-------|-------|
-| **Three.js** | 3D graphics, WebGL wrapper | 40+ |
-| **WebGL** | Raw shader programming | 40+ |
-| **WebGPU** | Next-gen GPU computing | 40+ |
+| **Three.js** | 3D graphics, WebGL wrapper | 30+ |
+| **WebGL** | Raw shader programming | 21+ |
+| **WebGPU** | Next-gen GPU computing | 12+ |
 | **P5.js** | Creative coding framework | 40+ |
-| **Pixi.js** | 2D sprite rendering | 40+ |
-| **D3.js** | Data visualization | 40+ |
+| **Pixi.js** | 2D sprite rendering | 17+ |
+| **D3.js** | Data visualization | 18+ |
 | **Web Audio API** | Audio processing & visualization | 40+ |
 | **WebAssembly** | High-performance computing | 40+ |
 | **Canvas 2D** | Basic graphics | 50+ |
@@ -294,7 +199,7 @@ All visualizations target:
 2. **Phase 2**: Automated generation of 19 feature branches
 3. **Phase 3**: Quality filtering (13 successful, 6 failed)
 4. **Phase 4**: Consolidation into main branch
-5. **Current**: 560+ demos across 19 polished categories
+5. **Current**: 480+ demos across 19 polished categories
 
 **Success Pattern**: Framework-based visualizations (Three.js, D3.js, P5.js) succeeded at higher rates than complex physics simulations.
 
@@ -320,4 +225,4 @@ Built with:
 
 **Explore. Learn. Create.** 🚀
 
-*560+ visualizations demonstrating the creative possibilities of web technologies*
+*406+ visualizations demonstrating the creative possibilities of web technologies*
