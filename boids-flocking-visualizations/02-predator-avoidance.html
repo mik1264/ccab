@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boids with Predator Avoidance</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #2c1810 0%, #4a2618 100%);
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        #canvas {
+            background: #1a0f08;
+            box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
+            border-radius: 8px;
+            cursor: crosshair;
+        }
+
+        .info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            max-width: 350px;
+            backdrop-filter: blur(10px);
+        }
+
+        .info h1 {
+            font-size: 20px;
+            margin-bottom: 10px;
+            color: #ff6b6b;
+        }
+
+        .info .rule {
+            margin: 8px 0;
+            padding-left: 12px;
+            border-left: 3px solid #ff6b6b;
+        }
+
+        .stats {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 14px;
+            backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div class="info">
+        <h1>Predator Avoidance</h1>
+        <p>Boids flee from predators while maintaining flocking behavior.</p>
+        <div class="rule"><strong>Flee:</strong> Escape predator (10°/tick, highest priority)</div>
+        <div class="rule"><strong>Separation:</strong> Avoid crowding (1.5°/tick)</div>
+        <div class="rule"><strong>Alignment:</strong> Match heading (5.0°/tick)</div>
+        <div class="rule"><strong>Cohesion:</strong> Move toward center (3.0°/tick)</div>
+        <p style="margin-top: 12px; font-size: 12px; opacity: 0.8;">
+            Click to move predator • Fear radius: 150px
+        </p>
+    </div>
+
+    <div class="stats">
+        <div>Boids: <span id="boidCount">120</span></div>
+        <div>Predators: <span id="predatorCount">1</span></div>
+        <div>FPS: <span id="fps">60</span></div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        canvas.width = window.innerWidth * 0.9;
+        canvas.height = window.innerHeight * 0.9;
+
+        const PARAMS = {
+            visionRadius: 80,
+            minSeparation: 25,
+            maxSpeed: 2.5,
+            maxSeparateTurn: 1.5,
+            maxAlignTurn: 5.0,
+            maxCohereTurn: 3.0,
+            maxFleeTurn: 10.0,         // Predator avoidance turn rate
+            predatorFearRadius: 150,    // Distance to fear predator
+            boidSize: 6,
+            predatorSize: 12
+        };
+
+        class Boid {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.heading = Math.random() * Math.PI * 2;
+                this.speed = PARAMS.maxSpeed;
+                this.fear = 0; // Fear level for visual feedback
+            }
+
+            findFlockmates(boids) {
+                const flockmates = [];
+                for (const other of boids) {
+                    if (other === this) continue;
+                    const dist = this.wrappedDistance(other);
+                    if (dist < PARAMS.visionRadius) {
+                        flockmates.push(other);
+                    }
+                }
+                return flockmates;
+            }
+
+            wrappedDistance(other) {
+                const dx = Math.abs(this.x - other.x);
+                const dy = Math.abs(this.y - other.y);
+                const wrappedDx = Math.min(dx, canvas.width - dx);
+                const wrappedDy = Math.min(dy, canvas.height - dy);
+                return Math.sqrt(wrappedDx * wrappedDx + wrappedDy * wrappedDy);
+            }
+
+            findNearest(flockmates) {
+                if (flockmates.length === 0) return null;
+                let nearest = flockmates[0];
+                let minDist = this.wrappedDistance(nearest);
+                for (let i = 1; i < flockmates.length; i++) {
+                    const dist = this.wrappedDistance(flockmates[i]);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearest = flockmates[i];
+                    }
+                }
+                return { boid: nearest, distance: minDist };
+            }
+
+            // Check for nearby predators
+            checkPredators(predators) {
+                for (const predator of predators) {
+                    const dist = this.distanceTo(predator.x, predator.y);
+                    if (dist < PARAMS.predatorFearRadius) {
+                        return { predator, distance: dist };
+                    }
+                }
+                return null;
+            }
+
+            distanceTo(x, y) {
+                const dx = this.x - x;
+                const dy = this.y - y;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+
+            // Flee from predator
+            flee(predator) {
+                const dx = this.x - predator.x;
+                const dy = this.y - predator.y;
+                const fleeHeading = Math.atan2(dy, dx);
+                this.turnToward(fleeHeading, PARAMS.maxFleeTurn);
+            }
+
+            separate(nearest) {
+                let dx = this.x - nearest.x;
+                let dy = this.y - nearest.y;
+                if (Math.abs(dx) > canvas.width / 2) {
+                    dx = dx > 0 ? dx - canvas.width : dx + canvas.width;
+                }
+                if (Math.abs(dy) > canvas.height / 2) {
+                    dy = dy > 0 ? dy - canvas.height : dy + canvas.height;
+                }
+                const targetHeading = Math.atan2(dy, dx);
+                this.turnToward(targetHeading, PARAMS.maxSeparateTurn);
+            }
+
+            align(flockmates) {
+                if (flockmates.length === 0) return;
+                let sumSin = 0;
+                let sumCos = 0;
+                for (const other of flockmates) {
+                    sumSin += Math.sin(other.heading);
+                    sumCos += Math.cos(other.heading);
+                }
+                const avgHeading = Math.atan2(sumSin / flockmates.length, sumCos / flockmates.length);
+                this.turnToward(avgHeading, PARAMS.maxAlignTurn);
+            }
+
+            cohere(flockmates) {
+                if (flockmates.length === 0) return;
+                let sumX = 0;
+                let sumY = 0;
+                for (const other of flockmates) {
+                    let dx = other.x - this.x;
+                    let dy = other.y - this.y;
+                    if (Math.abs(dx) > canvas.width / 2) {
+                        dx = dx > 0 ? dx - canvas.width : dx + canvas.width;
+                    }
+                    if (Math.abs(dy) > canvas.height / 2) {
+                        dy = dy > 0 ? dy - canvas.height : dy + canvas.height;
+                    }
+                    sumX += dx;
+                    sumY += dy;
+                }
+                const avgX = sumX / flockmates.length;
+                const avgY = sumY / flockmates.length;
+                const targetHeading = Math.atan2(avgY, avgX);
+                this.turnToward(targetHeading, PARAMS.maxCohereTurn);
+            }
+
+            turnToward(targetHeading, maxTurn) {
+                const maxTurnRad = (maxTurn * Math.PI) / 180;
+                let diff = targetHeading - this.heading;
+                while (diff > Math.PI) diff -= 2 * Math.PI;
+                while (diff < -Math.PI) diff += 2 * Math.PI;
+                if (Math.abs(diff) < maxTurnRad) {
+                    this.heading = targetHeading;
+                } else {
+                    this.heading += Math.sign(diff) * maxTurnRad;
+                }
+                this.heading = (this.heading + 2 * Math.PI) % (2 * Math.PI);
+            }
+
+            update(boids, predators) {
+                // Check for predators first (highest priority)
+                const predatorThreat = this.checkPredators(predators);
+
+                if (predatorThreat) {
+                    this.flee(predatorThreat.predator);
+                    this.fear = 1.0 - (predatorThreat.distance / PARAMS.predatorFearRadius);
+                } else {
+                    this.fear *= 0.95; // Decay fear
+                    const flockmates = this.findFlockmates(boids);
+                    const nearest = this.findNearest(flockmates);
+
+                    if (nearest && nearest.distance < PARAMS.minSeparation) {
+                        this.separate(nearest.boid);
+                    } else {
+                        this.align(flockmates);
+                        this.cohere(flockmates);
+                    }
+                }
+
+                // Move forward
+                this.x += Math.cos(this.heading) * this.speed;
+                this.y += Math.sin(this.heading) * this.speed;
+
+                // Toroidal wrapping
+                if (this.x < 0) this.x += canvas.width;
+                if (this.x > canvas.width) this.x -= canvas.width;
+                if (this.y < 0) this.y += canvas.height;
+                if (this.y > canvas.height) this.y -= canvas.height;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.heading);
+
+                ctx.beginPath();
+                ctx.moveTo(PARAMS.boidSize, 0);
+                ctx.lineTo(-PARAMS.boidSize, PARAMS.boidSize / 2);
+                ctx.lineTo(-PARAMS.boidSize, -PARAMS.boidSize / 2);
+                ctx.closePath();
+
+                // Color changes based on fear level
+                const r = Math.floor(100 + this.fear * 155);
+                const g = Math.floor(181 - this.fear * 100);
+                const b = Math.floor(246 - this.fear * 100);
+                ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+                ctx.fill();
+
+                ctx.strokeStyle = this.fear > 0.5 ? '#ff6b6b' : '#1976d2';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                ctx.restore();
+            }
+        }
+
+        class Predator {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.heading = 0;
+                this.targetX = x;
+                this.targetY = y;
+                this.speed = 1.5;
+            }
+
+            setTarget(x, y) {
+                this.targetX = x;
+                this.targetY = y;
+            }
+
+            update() {
+                // Move toward target
+                const dx = this.targetX - this.x;
+                const dy = this.targetY - this.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist > 5) {
+                    this.heading = Math.atan2(dy, dx);
+                    this.x += Math.cos(this.heading) * this.speed;
+                    this.y += Math.sin(this.heading) * this.speed;
+                }
+            }
+
+            draw() {
+                // Draw predator as red triangle with aura
+                ctx.save();
+
+                // Fear aura
+                const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, PARAMS.predatorFearRadius);
+                gradient.addColorStop(0, 'rgba(255, 107, 107, 0.2)');
+                gradient.addColorStop(1, 'rgba(255, 107, 107, 0)');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(this.x - PARAMS.predatorFearRadius, this.y - PARAMS.predatorFearRadius,
+                            PARAMS.predatorFearRadius * 2, PARAMS.predatorFearRadius * 2);
+
+                // Predator body
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.heading);
+
+                ctx.beginPath();
+                ctx.moveTo(PARAMS.predatorSize, 0);
+                ctx.lineTo(-PARAMS.predatorSize, PARAMS.predatorSize / 2);
+                ctx.lineTo(-PARAMS.predatorSize, -PARAMS.predatorSize / 2);
+                ctx.closePath();
+
+                ctx.fillStyle = '#ff6b6b';
+                ctx.fill();
+                ctx.strokeStyle = '#d63031';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                ctx.restore();
+            }
+        }
+
+        // Initialize
+        const boids = [];
+        const NUM_BOIDS = 120;
+
+        for (let i = 0; i < NUM_BOIDS; i++) {
+            const x = Math.random() * canvas.width;
+            const y = Math.random() * canvas.height;
+            boids.push(new Boid(x, y));
+        }
+
+        const predators = [new Predator(canvas.width / 2, canvas.height / 2)];
+
+        // Mouse interaction
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            predators[0].setTarget(x, y);
+        });
+
+        // FPS counter
+        let lastTime = performance.now();
+        let frameCount = 0;
+        let fps = 60;
+
+        function updateFPS() {
+            frameCount++;
+            const currentTime = performance.now();
+            if (currentTime >= lastTime + 1000) {
+                fps = Math.round((frameCount * 1000) / (currentTime - lastTime));
+                document.getElementById('fps').textContent = fps;
+                frameCount = 0;
+                lastTime = currentTime;
+            }
+        }
+
+        // Animation loop
+        function animate() {
+            ctx.fillStyle = '#1a0f08';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Update predators
+            for (const predator of predators) {
+                predator.update();
+            }
+
+            // Update boids
+            for (const boid of boids) {
+                boid.update(boids, predators);
+            }
+
+            // Draw predators
+            for (const predator of predators) {
+                predator.draw();
+            }
+
+            // Draw boids
+            for (const boid of boids) {
+                boid.draw();
+            }
+
+            updateFPS();
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth * 0.9;
+            canvas.height = window.innerHeight * 0.9;
+        });
+
+        animate();
+    </script>
+</body>
+</html>
