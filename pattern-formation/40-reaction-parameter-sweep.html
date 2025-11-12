@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reaction Parameter Sweep</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; display: flex; flex-direction: column; align-items: center; font-family: Arial, sans-serif; }
+        canvas { display: block; image-rendering: pixelated; }
+        .info { position: absolute; top: 20px; left: 20px; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px; color: white; max-width: 300px; }
+        .info h3 { margin: 0 0 10px 0; }
+        .info p { margin: 5px 0; font-size: 13px; }
+        button { margin: 10px 5px 0 0; padding: 8px 15px; background: #667eea; border: none; border-radius: 4px; color: white; cursor: pointer; }
+        button:hover { background: #764ba2; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h3>Parameter Sweep</h3>
+        <p>Automatically cycling through reaction-diffusion parameter space</p>
+        <p id="params"></p>
+        <button onclick="toggleSweep()">Pause/Resume</button>
+        <button onclick="reset()">Reset</button>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const gl = canvas.getContext('webgl2');
+        if (!gl) alert('WebGL 2 not supported');
+
+        const width = 512, height = 512;
+        canvas.width = width; canvas.height = height;
+
+        let sweepParams = { F: 0.055, k: 0.062 };
+        let sweeping = true;
+        let sweepTime = 0;
+
+        const vertexShaderSource = `#version 300 es
+            in vec2 position;
+            out vec2 uv;
+            void main() {
+                uv = position * 0.5 + 0.5;
+                gl_Position = vec4(position, 0.0, 1.0);
+            }
+        `;
+
+        const computeShaderSource = `#version 300 es
+            precision highp float;
+            uniform sampler2D state;
+            uniform vec2 resolution;
+            uniform float F;
+            uniform float k;
+            in vec2 uv;
+            out vec4 fragColor;
+
+            void main() {
+                vec2 pixel = 1.0 / resolution;
+                vec2 state_c = texture(state, uv).xy;
+                float a = state_c.x;
+                float b = state_c.y;
+
+                vec2 lap = vec2(0.0);
+                lap += texture(state, uv + vec2(-pixel.x, 0.0)).xy * 0.2;
+                lap += texture(state, uv + vec2(pixel.x, 0.0)).xy * 0.2;
+                lap += texture(state, uv + vec2(0.0, -pixel.y)).xy * 0.2;
+                lap += texture(state, uv + vec2(0.0, pixel.y)).xy * 0.2;
+                lap += texture(state, uv + vec2(-pixel.x, -pixel.y)).xy * 0.05;
+                lap += texture(state, uv + vec2(pixel.x, -pixel.y)).xy * 0.05;
+                lap += texture(state, uv + vec2(-pixel.x, pixel.y)).xy * 0.05;
+                lap += texture(state, uv + vec2(pixel.x, pixel.y)).xy * 0.05;
+                lap -= state_c;
+
+                float abb = a * b * b;
+                float da = 1.0 * lap.x - abb + F * (1.0 - a);
+                float db = 0.5 * lap.y + abb - (k + F) * b;
+
+                a += da * 1.0;
+                b += db * 1.0;
+
+                fragColor = vec4(a, b, 0.0, 1.0);
+            }
+        `;
+
+        const displayShaderSource = `#version 300 es
+            precision highp float;
+            uniform sampler2D state;
+            in vec2 uv;
+            out vec4 fragColor;
+
+            void main() {
+                float b = texture(state, uv).y;
+                vec3 color = vec3(0.5 + 0.5 * cos(b * 6.28 + vec3(0.0, 2.0, 4.0)));
+                fragColor = vec4(color, 1.0);
+            }
+        `;
+
+        function compileShader(type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            return shader;
+        }
+
+        function createProgram(vertSource, fragSource) {
+            const program = gl.createProgram();
+            gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vertSource));
+            gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fragSource));
+            gl.linkProgram(program);
+            return program;
+        }
+
+        const computeProgram = createProgram(vertexShaderSource, computeShaderSource);
+        const displayProgram = createProgram(vertexShaderSource, displayShaderSource);
+
+        const positions = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+        function createTexture() {
+            const texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, width, height, 0, gl.RG, gl.FLOAT, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+            return texture;
+        }
+
+        const textures = [createTexture(), createTexture()];
+        const framebuffers = [gl.createFramebuffer(), gl.createFramebuffer()];
+
+        for (let i = 0; i < 2; i++) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[i]);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures[i], 0);
+        }
+
+        function initializeState() {
+            const data = new Float32Array(width * height * 2);
+            for (let i = 0; i < width * height; i++) {
+                data[i * 2] = 1.0;
+                data[i * 2 + 1] = Math.random() < 0.05 ? 1.0 : 0.0;
+            }
+            gl.bindTexture(gl.TEXTURE_2D, textures[0]);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, width, height, 0, gl.RG, gl.FLOAT, data);
+        }
+
+        function toggleSweep() { sweeping = !sweeping; }
+
+        function reset() {
+            initializeState();
+            sweepTime = 0;
+        }
+
+        initializeState();
+
+        let currentBuffer = 0;
+        let frameCount = 0;
+
+        function render() {
+            // Update parameters periodically
+            if (sweeping && frameCount % 300 === 0) {
+                sweepTime += 0.1;
+                sweepParams.F = 0.02 + 0.04 * Math.sin(sweepTime * 0.7);
+                sweepParams.k = 0.05 + 0.02 * Math.cos(sweepTime * 0.5);
+                if (frameCount % 900 === 0) initializeState();
+            }
+
+            document.getElementById('params').textContent =
+                `F: ${sweepParams.F.toFixed(4)}, k: ${sweepParams.k.toFixed(4)}`;
+
+            gl.useProgram(computeProgram);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[1 - currentBuffer]);
+            gl.viewport(0, 0, width, height);
+
+            const posLoc = gl.getAttribLocation(computeProgram, 'position');
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, textures[currentBuffer]);
+            gl.uniform1i(gl.getUniformLocation(computeProgram, 'state'), 0);
+            gl.uniform2f(gl.getUniformLocation(computeProgram, 'resolution'), width, height);
+            gl.uniform1f(gl.getUniformLocation(computeProgram, 'F'), sweepParams.F);
+            gl.uniform1f(gl.getUniformLocation(computeProgram, 'k'), sweepParams.k);
+
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            currentBuffer = 1 - currentBuffer;
+
+            gl.useProgram(displayProgram);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+            const displayPosLoc = gl.getAttribLocation(displayProgram, 'position');
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(displayPosLoc);
+            gl.vertexAttribPointer(displayPosLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, textures[currentBuffer]);
+            gl.uniform1i(gl.getUniformLocation(displayProgram, 'state'), 0);
+
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            frameCount++;
+            requestAnimationFrame(render);
+        }
+
+        render();
+    </script>
+</body>
+</html>

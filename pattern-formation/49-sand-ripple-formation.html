@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sand Ripple Formation</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #1a1510; display: flex; flex-direction: column; align-items: center; font-family: Arial, sans-serif; }
+        canvas { display: block; image-rendering: pixelated; }
+        .info { position: absolute; top: 20px; left: 20px; background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px; color: white; max-width: 300px; }
+        .info h3 { margin: 0 0 10px 0; }
+        button { margin: 10px 5px 0 0; padding: 8px 15px; background: #667eea; border: none; border-radius: 4px; color: white; cursor: pointer; }
+        button:hover { background: #764ba2; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h3>Sand Ripple Formation</h3>
+        <p>Wind-driven sand transport creating rhythmic dune ripples</p>
+        <button onclick="reset()">Reset</button>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const gl = canvas.getContext('webgl2');
+        if (!gl) alert('WebGL 2 not supported');
+
+        const width = 600, height = 400;
+        canvas.width = width; canvas.height = height;
+
+        const vertexShaderSource = `#version 300 es
+            in vec2 position;
+            out vec2 uv;
+            void main() {
+                uv = position * 0.5 + 0.5;
+                gl_Position = vec4(position, 0.0, 1.0);
+            }
+        `;
+
+        const computeShaderSource = `#version 300 es
+            precision highp float;
+            uniform sampler2D state;
+            uniform vec2 resolution;
+            in vec2 uv;
+            out vec4 fragColor;
+
+            void main() {
+                vec2 pixel = 1.0 / resolution;
+                float h = texture(state, uv).x; // height
+
+                // Wind direction: left to right
+                vec2 windDir = vec2(1.0, 0.0);
+
+                // Upwind and downwind heights
+                float h_up = texture(state, uv - windDir * pixel).x;
+                float h_down = texture(state, uv + windDir * pixel).x;
+
+                // Slope
+                float slope = h_down - h;
+
+                // Sand transport: erosion on windward, deposition on leeward
+                float transport = 0.0;
+                if (slope > 0.02) {
+                    transport = -0.01; // erosion
+                } else if (slope < -0.02) {
+                    transport = 0.01; // deposition
+                }
+
+                // Diffusion for smoothing
+                float lap = 0.0;
+                lap += texture(state, uv + vec2(-pixel.x, 0.0)).x * 0.2;
+                lap += texture(state, uv + vec2(pixel.x, 0.0)).x * 0.2;
+                lap += texture(state, uv + vec2(0.0, -pixel.y)).x * 0.2;
+                lap += texture(state, uv + vec2(0.0, pixel.y)).x * 0.2;
+                lap -= h * 0.8;
+
+                h += transport + lap * 0.05;
+
+                fragColor = vec4(clamp(h, 0.0, 1.0), 0.0, 0.0, 1.0);
+            }
+        `;
+
+        const displayShaderSource = `#version 300 es
+            precision highp float;
+            uniform sampler2D state;
+            in vec2 uv;
+            out vec4 fragColor;
+
+            void main() {
+                float h = texture(state, uv).x;
+
+                // Sand dune colors with shading
+                vec3 sand1 = vec3(0.76, 0.70, 0.50);
+                vec3 sand2 = vec3(0.55, 0.47, 0.37);
+
+                vec3 color = mix(sand2, sand1, h);
+
+                // Add shadow based on height gradient
+                float dx = dFdx(h);
+                float shade = 1.0 - dx * 5.0;
+                color *= shade;
+
+                fragColor = vec4(color, 1.0);
+            }
+        `;
+
+        function compileShader(type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            return shader;
+        }
+
+        function createProgram(vertSource, fragSource) {
+            const program = gl.createProgram();
+            gl.attachShader(program, compileShader(gl.VERTEX_SHADER, vertSource));
+            gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, fragSource));
+            gl.linkProgram(program);
+            return program;
+        }
+
+        const computeProgram = createProgram(vertexShaderSource, computeShaderSource);
+        const displayProgram = createProgram(vertexShaderSource, displayShaderSource);
+
+        const positions = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+        function createTexture() {
+            const texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+            return texture;
+        }
+
+        const textures = [createTexture(), createTexture()];
+        const framebuffers = [gl.createFramebuffer(), gl.createFramebuffer()];
+
+        for (let i = 0; i < 2; i++) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[i]);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, textures[i], 0);
+        }
+
+        function initializeState() {
+            const data = new Float32Array(width * height);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const i = y * width + x;
+                    data[i] = 0.5 + Math.sin(x * 0.1) * 0.1 + (Math.random() - 0.5) * 0.1;
+                }
+            }
+            gl.bindTexture(gl.TEXTURE_2D, textures[0]);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, data);
+        }
+
+        function reset() { initializeState(); }
+        initializeState();
+
+        let currentBuffer = 0;
+
+        function render() {
+            gl.useProgram(computeProgram);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[1 - currentBuffer]);
+            gl.viewport(0, 0, width, height);
+
+            const posLoc = gl.getAttribLocation(computeProgram, 'position');
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, textures[currentBuffer]);
+            gl.uniform1i(gl.getUniformLocation(computeProgram, 'state'), 0);
+            gl.uniform2f(gl.getUniformLocation(computeProgram, 'resolution'), width, height);
+
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            currentBuffer = 1 - currentBuffer;
+
+            gl.useProgram(displayProgram);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+            const displayPosLoc = gl.getAttribLocation(displayProgram, 'position');
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(displayPosLoc);
+            gl.vertexAttribPointer(displayPosLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, textures[currentBuffer]);
+            gl.uniform1i(gl.getUniformLocation(displayProgram, 'state'), 0);
+
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            requestAnimationFrame(render);
+        }
+
+        render();
+    </script>
+</body>
+</html>
