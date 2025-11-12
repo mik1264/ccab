@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Metrics Dashboard - Petri Arena</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+        }
+        h1 {
+            text-align: center;
+            margin: 0 0 10px 0;
+            font-size: 24px;
+        }
+        .description {
+            max-width: 900px;
+            text-align: center;
+            margin: 0 auto 20px;
+            color: #aaa;
+        }
+        .dashboard {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        canvas {
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+        .metrics {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .metric-card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 15px;
+        }
+        .metric-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #667eea;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .metric-chart {
+            height: 60px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            padding: 10px 20px;
+            background: #667eea;
+            border: none;
+            border-radius: 5px;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #764ba2;
+        }
+        .quality-indicator {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .indicator {
+            flex: 1;
+            padding: 5px;
+            border-radius: 3px;
+            text-align: center;
+            font-size: 11px;
+        }
+        .good { background: rgba(100, 255, 100, 0.3); }
+        .medium { background: rgba(255, 215, 0, 0.3); }
+        .poor { background: rgba(255, 100, 100, 0.3); }
+    </style>
+</head>
+<body>
+    <h1>Comprehensive Metrics Dashboard</h1>
+    <p class="description">
+        Track all key PD-NCA metrics: entropy (complexity), compressibility (predictability),
+        aliveness distribution, and open-endedness. The paper uses these to identify interesting runs.
+    </p>
+
+    <div class="dashboard">
+        <canvas id="mainCanvas"></canvas>
+
+        <div class="metrics">
+            <div class="metric-card">
+                <div class="metric-title">Spatial Entropy</div>
+                <div class="metric-value"><span id="entropy">0.000</span></div>
+                <div style="font-size: 11px; color: #aaa;">Diversity of states (0=uniform, 1=diverse)</div>
+                <canvas id="entropyChart" class="metric-chart"></canvas>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-title">Compressibility</div>
+                <div class="metric-value"><span id="compress">0.00</span></div>
+                <div style="font-size: 11px; color: #aaa;">Lower = more complex patterns</div>
+                <canvas id="compressChart" class="metric-chart"></canvas>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-title">Total Aliveness</div>
+                <div class="metric-value"><span id="aliveness">0.000</span></div>
+                <div style="font-size: 11px; color: #aaa;">Sum of all agent activities</div>
+                <canvas id="alivenessChart" class="metric-chart"></canvas>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-title">Open-Endedness Score</div>
+                <div class="metric-value"><span id="openness">0.00</span></div>
+                <div style="font-size: 11px; color: #aaa;">Novelty over time (ASAL-inspired)</div>
+                <div class="quality-indicator">
+                    <div id="qualityEntropy" class="indicator">Entropy</div>
+                    <div id="qualityDiversity" class="indicator">Diversity</div>
+                    <div id="qualityNovelty" class="indicator">Novelty</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="resetBtn">Reset</button>
+        <button id="pauseBtn">Pause</button>
+        <button id="perturbBtn">Add Perturbation</button>
+    </div>
+
+    <script>
+        const mainCanvas = document.getElementById('mainCanvas');
+        const mainCtx = mainCanvas.getContext('2d');
+        const entropyChart = document.getElementById('entropyChart');
+        const compressChart = document.getElementById('compressChart');
+        const alivenessChart = document.getElementById('alivenessChart');
+
+        const gridSize = 128;
+        const cellSize = 4;
+        mainCanvas.width = gridSize * cellSize;
+        mainCanvas.height = gridSize * cellSize;
+
+        [entropyChart, compressChart, alivenessChart].forEach(c => {
+            c.width = c.offsetWidth;
+            c.height = 60;
+        });
+
+        const numAgents = 3;
+        let grid = new Float32Array(gridSize * gridSize * numAgents);
+
+        let stepCount = 0;
+        let paused = false;
+
+        let entropyHistory = [];
+        let compressHistory = [];
+        let alivenessHistory = [];
+        let stateHistory = [];
+        const maxHistory = 100;
+
+        function idx(x, y, agent) {
+            const gx = ((x + gridSize) % gridSize);
+            const gy = ((y + gridSize) % gridSize);
+            return (gy * gridSize + gx) * numAgents + agent;
+        }
+
+        function reset() {
+            grid.fill(0);
+            stepCount = 0;
+            entropyHistory = [];
+            compressHistory = [];
+            alivenessHistory = [];
+            stateHistory = [];
+
+            // Random initialization
+            for (let s = 0; s < 12; s++) {
+                const x = Math.floor(Math.random() * gridSize);
+                const y = Math.floor(Math.random() * gridSize);
+                const agent = s % numAgents;
+                const r = 5 + Math.floor(Math.random() * 5);
+
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        if (dx*dx + dy*dy <= r*r) {
+                            grid[idx(x + dx, y + dy, agent)] = 0.5 + Math.random() * 0.5;
+                        }
+                    }
+                }
+            }
+        }
+
+        function perturbSystem() {
+            for (let i = 0; i < 100; i++) {
+                const x = Math.floor(Math.random() * gridSize);
+                const y = Math.floor(Math.random() * gridSize);
+                const agent = Math.floor(Math.random() * numAgents);
+                grid[idx(x, y, agent)] = Math.random();
+            }
+        }
+
+        function step() {
+            const next = new Float32Array(grid.length);
+
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    for (let a = 0; a < numAgents; a++) {
+                        let sum = 0;
+                        for (let dy = -1; dy <= 1; dy++) {
+                            for (let dx = -1; dx <= 1; dx++) {
+                                sum += grid[idx(x + dx, y + dy, a)];
+                            }
+                        }
+
+                        const current = grid[idx(x, y, a)];
+                        const predator = (a + 1) % numAgents;
+                        let predatorSum = 0;
+
+                        for (let dy = -1; dy <= 1; dy++) {
+                            for (let dx = -1; dx <= 1; dx++) {
+                                predatorSum += grid[idx(x + dx, y + dy, predator)];
+                            }
+                        }
+
+                        let nextVal = current;
+
+                        if (predatorSum > 4) {
+                            nextVal = Math.max(0, current - 0.08);
+                        } else if (sum > 3) {
+                            nextVal = Math.min(1.0, current + 0.06);
+                        } else {
+                            nextVal = Math.max(0, current - 0.02);
+                        }
+
+                        nextVal += (Math.random() - 0.5) * 0.005;
+                        nextVal = Math.max(0, Math.min(1, nextVal));
+
+                        next[idx(x, y, a)] = nextVal;
+                    }
+                }
+            }
+
+            grid = next;
+            stepCount++;
+        }
+
+        function calculateEntropy() {
+            const bins = 20;
+            const histogram = new Array(bins).fill(0);
+
+            for (let i = 0; i < grid.length; i++) {
+                const bin = Math.min(bins - 1, Math.floor(grid[i] * bins));
+                histogram[bin]++;
+            }
+
+            let entropy = 0;
+            for (let count of histogram) {
+                if (count > 0) {
+                    const p = count / grid.length;
+                    entropy -= p * Math.log2(p);
+                }
+            }
+
+            return entropy / Math.log2(bins);
+        }
+
+        function calculateCompressibility() {
+            // Simplified: downsample and measure variance
+            const downsampled = [];
+            const step = 4;
+
+            for (let y = 0; y < gridSize; y += step) {
+                for (let x = 0; x < gridSize; x += step) {
+                    let sum = 0;
+                    for (let dy = 0; dy < step; dy++) {
+                        for (let dx = 0; dx < step; dx++) {
+                            for (let a = 0; a < numAgents; a++) {
+                                sum += grid[idx(x + dx, y + dy, a)];
+                            }
+                        }
+                    }
+                    downsampled.push(sum / (step * step * numAgents));
+                }
+            }
+
+            const mean = downsampled.reduce((a, b) => a + b, 0) / downsampled.length;
+            const variance = downsampled.reduce((sum, v) => sum + (v - mean) ** 2, 0) / downsampled.length;
+
+            return Math.sqrt(variance);
+        }
+
+        function calculateTotalAliveness() {
+            let sum = 0;
+            for (let i = 0; i < grid.length; i++) {
+                sum += grid[i];
+            }
+            return sum / grid.length;
+        }
+
+        function calculateOpennessScore() {
+            if (stateHistory.length < 10) return 0;
+
+            // Measure novelty: distance from recent states
+            const current = Array.from(grid);
+            let noveltySum = 0;
+
+            const checkLen = Math.min(20, stateHistory.length);
+            for (let i = stateHistory.length - checkLen; i < stateHistory.length; i++) {
+                const past = stateHistory[i];
+                let distance = 0;
+                for (let j = 0; j < current.length; j += 100) { // Sample for speed
+                    distance += Math.abs(current[j] - past[j]);
+                }
+                noveltySum += distance;
+            }
+
+            return noveltySum / (checkLen * grid.length / 100);
+        }
+
+        function draw() {
+            const imageData = mainCtx.createImageData(mainCanvas.width, mainCanvas.height);
+            const data = imageData.data;
+
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    const r = grid[idx(x, y, 0)] * 255;
+                    const g = grid[idx(x, y, 1)] * 255;
+                    const b = grid[idx(x, y, 2)] * 255;
+
+                    for (let dy = 0; dy < cellSize; dy++) {
+                        for (let dx = 0; dx < cellSize; dx++) {
+                            const px = x * cellSize + dx;
+                            const py = y * cellSize + dy;
+                            const pi = (py * mainCanvas.width + px) * 4;
+
+                            data[pi] = r;
+                            data[pi + 1] = g;
+                            data[pi + 2] = b;
+                            data[pi + 3] = 255;
+                        }
+                    }
+                }
+            }
+
+            mainCtx.putImageData(imageData, 0, 0);
+        }
+
+        function drawMiniChart(canvas, history, color) {
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(0, 0, w, h);
+
+            if (history.length < 2) return;
+
+            const max = Math.max(...history, 0.01);
+            const min = Math.min(...history);
+            const range = max - min;
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            history.forEach((val, i) => {
+                const x = (i / maxHistory) * w;
+                const y = h - ((val - min) / (range + 0.001)) * h;
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+
+            ctx.stroke();
+        }
+
+        function updateMetrics() {
+            const entropy = calculateEntropy();
+            const compress = calculateCompressibility();
+            const aliveness = calculateTotalAliveness();
+            const openness = calculateOpennessScore();
+
+            entropyHistory.push(entropy);
+            compressHistory.push(compress);
+            alivenessHistory.push(aliveness);
+
+            if (entropyHistory.length > maxHistory) entropyHistory.shift();
+            if (compressHistory.length > maxHistory) compressHistory.shift();
+            if (alivenessHistory.length > maxHistory) alivenessHistory.shift();
+
+            stateHistory.push(Array.from(grid));
+            if (stateHistory.length > 50) stateHistory.shift();
+
+            document.getElementById('entropy').textContent = entropy.toFixed(3);
+            document.getElementById('compress').textContent = compress.toFixed(3);
+            document.getElementById('aliveness').textContent = aliveness.toFixed(3);
+            document.getElementById('openness').textContent = openness.toFixed(2);
+
+            drawMiniChart(entropyChart, entropyHistory, 'rgb(100, 200, 255)');
+            drawMiniChart(compressChart, compressHistory, 'rgb(255, 150, 100)');
+            drawMiniChart(alivenessChart, alivenessHistory, 'rgb(150, 255, 150)');
+
+            // Quality indicators
+            const entropyQuality = entropy > 0.5 ? 'good' : entropy > 0.3 ? 'medium' : 'poor';
+            const diversityQuality = compress > 0.3 ? 'good' : compress > 0.15 ? 'medium' : 'poor';
+            const noveltyQuality = openness > 5 ? 'good' : openness > 2 ? 'medium' : 'poor';
+
+            document.getElementById('qualityEntropy').className = 'indicator ' + entropyQuality;
+            document.getElementById('qualityDiversity').className = 'indicator ' + diversityQuality;
+            document.getElementById('qualityNovelty').className = 'indicator ' + noveltyQuality;
+
+            document.getElementById('qualityEntropy').textContent = entropy > 0.5 ? '✓ Good' : entropy > 0.3 ? '~ OK' : '✗ Low';
+            document.getElementById('qualityDiversity').textContent = compress > 0.3 ? '✓ High' : compress > 0.15 ? '~ OK' : '✗ Low';
+            document.getElementById('qualityNovelty').textContent = openness > 5 ? '✓ Novel' : openness > 2 ? '~ OK' : '✗ Static';
+        }
+
+        function animate() {
+            if (!paused) {
+                step();
+                updateMetrics();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('resetBtn').addEventListener('click', reset);
+        document.getElementById('pauseBtn').addEventListener('click', () => {
+            paused = !paused;
+            document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
+        });
+        document.getElementById('perturbBtn').addEventListener('click', perturbSystem);
+
+        reset();
+        animate();
+    </script>
+</body>
+</html>

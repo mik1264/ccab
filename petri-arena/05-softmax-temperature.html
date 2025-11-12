@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Softmax Temperature τ - Petri Arena</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 24px;
+        }
+        .description {
+            max-width: 800px;
+            text-align: center;
+            margin-bottom: 20px;
+            color: #aaa;
+        }
+        .comparison {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .arena {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        canvas {
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+        .arena-label {
+            margin-top: 10px;
+            font-weight: bold;
+            font-size: 16px;
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+        }
+        button {
+            padding: 10px 20px;
+            background: #667eea;
+            border: none;
+            border-radius: 5px;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #764ba2;
+        }
+        label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        input[type="range"] {
+            width: 200px;
+        }
+        .stats {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            font-family: monospace;
+            max-width: 800px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Softmax Temperature (τ) Comparison</h1>
+    <p class="description">
+        Temperature controls competition sharpness. Low τ = winner-takes-all (brittle). High τ = soft competition (coexistence).
+        Watch how the same agents behave differently under different temperature regimes.
+    </p>
+
+    <div class="comparison">
+        <div class="arena">
+            <canvas id="canvasLow"></canvas>
+            <div class="arena-label">Low τ = <span id="tauLow">0.1</span> (Sharp)</div>
+        </div>
+        <div class="arena">
+            <canvas id="canvasHigh"></canvas>
+            <div class="arena-label">High τ = <span id="tauHigh">2.0</span> (Soft)</div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="resetBtn">Reset Both</button>
+        <button id="pauseBtn">Pause</button>
+        <label>
+            Low τ:
+            <input type="range" id="tauLowSlider" min="1" max="50" value="10">
+        </label>
+        <label>
+            High τ:
+            <input type="range" id="tauHighSlider" min="50" max="200" value="200">
+        </label>
+    </div>
+
+    <div class="stats">
+        <div><strong>Step:</strong> <span id="step">0</span></div>
+        <div style="margin-top: 10px;">
+            <strong>Low τ Arena:</strong>
+            R: <span id="lowR">0%</span> |
+            G: <span id="lowG">0%</span> |
+            B: <span id="lowB">0%</span>
+        </div>
+        <div style="margin-top: 5px;">
+            <strong>High τ Arena:</strong>
+            R: <span id="highR">0%</span> |
+            G: <span id="highG">0%</span> |
+            B: <span id="highB">0%</span>
+        </div>
+        <div style="margin-top: 10px; font-size: 12px; color: #aaa;">
+            Low τ favors dominant agent (less diversity). High τ allows coexistence (more diversity).
+        </div>
+    </div>
+
+    <script>
+        const canvasLow = document.getElementById('canvasLow');
+        const canvasHigh = document.getElementById('canvasHigh');
+        const ctxLow = canvasLow.getContext('2d');
+        const ctxHigh = canvasHigh.getContext('2d');
+
+        const gridSize = 96;
+        const cellSize = 4;
+        canvasLow.width = canvasHigh.width = gridSize * cellSize;
+        canvasLow.height = canvasHigh.height = gridSize * cellSize;
+
+        // Three agents: 0=Red, 1=Green, 2=Blue
+        let gridLow = new Float32Array(gridSize * gridSize * 3);
+        let gridHigh = new Float32Array(gridSize * gridSize * 3);
+        let nextLow = new Float32Array(gridSize * gridSize * 3);
+        let nextHigh = new Float32Array(gridSize * gridSize * 3);
+
+        let stepCount = 0;
+        let paused = false;
+        let tauLow = 0.1;
+        let tauHigh = 2.0;
+
+        function idx(x, y, c) {
+            const gx = ((x + gridSize) % gridSize);
+            const gy = ((y + gridSize) % gridSize);
+            return (gy * gridSize + gx) * 3 + c;
+        }
+
+        function reset() {
+            gridLow.fill(0);
+            gridHigh.fill(0);
+            stepCount = 0;
+
+            // Same initial conditions for both
+            const initPattern = () => {
+                const seeds = [
+                    {x: 30, y: 48, agent: 0, r: 10},
+                    {x: 66, y: 48, agent: 1, r: 10},
+                    {x: 48, y: 70, agent: 2, r: 10}
+                ];
+
+                return seeds;
+            };
+
+            const seeds = initPattern();
+
+            // Initialize both grids identically
+            [gridLow, gridHigh].forEach(grid => {
+                seeds.forEach(seed => {
+                    for (let dy = -seed.r; dy <= seed.r; dy++) {
+                        for (let dx = -seed.r; dx <= seed.r; dx++) {
+                            if (dx*dx + dy*dy <= seed.r * seed.r) {
+                                const i = idx(seed.x + dx, seed.y + dy, seed.agent);
+                                grid[i] = 0.7 + Math.random() * 0.3;
+                            }
+                        }
+                    }
+                });
+            });
+        }
+
+        function softmax(values, tau) {
+            const max = Math.max(...values);
+            const expVals = values.map(v => Math.exp((v - max) / tau));
+            const sum = expVals.reduce((a, b) => a + b, 0);
+            return expVals.map(v => v / (sum + 1e-8));
+        }
+
+        function stepGrid(grid, nextGrid, tau) {
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    let sums = [0, 0, 0];
+
+                    // Get neighbor sums for each agent
+                    for (let dy = -1; dy <= 1; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            for (let a = 0; a < 3; a++) {
+                                sums[a] += grid[idx(x + dx, y + dy, a)];
+                            }
+                        }
+                    }
+
+                    const current = [
+                        grid[idx(x, y, 0)],
+                        grid[idx(x, y, 1)],
+                        grid[idx(x, y, 2)]
+                    ];
+
+                    // Compute strengths (simplified: based on current aliveness + noise)
+                    const strengths = current.map((a, i) =>
+                        a + sums[i] / 9 + Math.random() * 0.1
+                    );
+
+                    // Apply softmax with temperature
+                    const weights = softmax(strengths, tau);
+
+                    // Update each agent based on weighted competition
+                    for (let a = 0; a < 3; a++) {
+                        let next = current[a];
+
+                        if (sums[a] > 3) {
+                            next = Math.min(1.0, current[a] + 0.1 * weights[a]);
+                        } else {
+                            next = Math.max(0.0, current[a] - 0.03);
+                        }
+
+                        // Apply weight-based suppression from competitors
+                        const competitorWeight = 1 - weights[a];
+                        next *= (0.8 + 0.2 * weights[a]);
+
+                        nextGrid[idx(x, y, a)] = Math.max(0, Math.min(1, next));
+                    }
+                }
+            }
+        }
+
+        function step() {
+            stepGrid(gridLow, nextLow, tauLow);
+            stepGrid(gridHigh, nextHigh, tauHigh);
+
+            [gridLow, nextLow] = [nextLow, gridLow];
+            [gridHigh, nextHigh] = [nextHigh, gridHigh];
+            stepCount++;
+        }
+
+        function drawGrid(grid, ctx) {
+            const imageData = ctx.createImageData(gridSize * cellSize, gridSize * cellSize);
+            const data = imageData.data;
+
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    const r = grid[idx(x, y, 0)];
+                    const g = grid[idx(x, y, 1)];
+                    const b = grid[idx(x, y, 2)];
+
+                    for (let dy = 0; dy < cellSize; dy++) {
+                        for (let dx = 0; dx < cellSize; dx++) {
+                            const px = x * cellSize + dx;
+                            const py = y * cellSize + dy;
+                            const pi = (py * gridSize * cellSize + px) * 4;
+
+                            data[pi] = Math.floor(r * 255);
+                            data[pi + 1] = Math.floor(g * 255);
+                            data[pi + 2] = Math.floor(b * 255);
+                            data[pi + 3] = 255;
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+        function updateStats() {
+            const countGrid = (grid) => {
+                let counts = [0, 0, 0];
+                for (let i = 0; i < gridSize * gridSize; i++) {
+                    const maxIdx = grid[i*3] > grid[i*3+1]
+                        ? (grid[i*3] > grid[i*3+2] ? 0 : 2)
+                        : (grid[i*3+1] > grid[i*3+2] ? 1 : 2);
+                    if (grid[i*3 + maxIdx] > 0.3) counts[maxIdx]++;
+                }
+                return counts;
+            };
+
+            const lowCounts = countGrid(gridLow);
+            const highCounts = countGrid(gridHigh);
+            const total = gridSize * gridSize;
+
+            document.getElementById('step').textContent = stepCount;
+            document.getElementById('lowR').textContent = ((lowCounts[0]/total)*100).toFixed(1)+'%';
+            document.getElementById('lowG').textContent = ((lowCounts[1]/total)*100).toFixed(1)+'%';
+            document.getElementById('lowB').textContent = ((lowCounts[2]/total)*100).toFixed(1)+'%';
+            document.getElementById('highR').textContent = ((highCounts[0]/total)*100).toFixed(1)+'%';
+            document.getElementById('highG').textContent = ((highCounts[1]/total)*100).toFixed(1)+'%';
+            document.getElementById('highB').textContent = ((highCounts[2]/total)*100).toFixed(1)+'%';
+        }
+
+        function animate() {
+            if (!paused) {
+                step();
+                updateStats();
+            }
+            drawGrid(gridLow, ctxLow);
+            drawGrid(gridHigh, ctxHigh);
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('resetBtn').addEventListener('click', reset);
+        document.getElementById('pauseBtn').addEventListener('click', () => {
+            paused = !paused;
+            document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
+        });
+
+        document.getElementById('tauLowSlider').addEventListener('input', (e) => {
+            tauLow = parseInt(e.target.value) / 100;
+            document.getElementById('tauLow').textContent = tauLow.toFixed(2);
+        });
+
+        document.getElementById('tauHighSlider').addEventListener('input', (e) => {
+            tauHigh = parseInt(e.target.value) / 100;
+            document.getElementById('tauHigh').textContent = tauHigh.toFixed(2);
+        });
+
+        reset();
+        animate();
+    </script>
+</body>
+</html>
