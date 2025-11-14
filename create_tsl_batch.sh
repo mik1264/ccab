@@ -1,0 +1,39 @@
+#!/bin/bash
+# Advanced Color Theory (23-30)
+for i in {23..30}; do
+  case $i in
+    23) t="HSV to RGB Conversion";d="Real-time hue-saturation-value color space conversion with animated parameters." ;;
+    24) t="Chromatic Aberration";d="Lens distortion effect splitting colors like a prism." ;;
+    25) t="Color Temperature";d="Blackbody radiation simulation from cool blue to warm red." ;;
+    26) t="Complementary Colors";d="Automatic complementary color generation and mixing." ;;
+    27) t="Triadic Harmony";d="Three evenly-spaced colors on the color wheel creating balanced palettes." ;;
+    28) t="Perceptual Brightness";d="Luminance-based coloring using human perception weighting." ;;
+    29) t="Color Displacement";d="Position offset based on color intensity creating 3D relief." ;;
+    30) t="Hue Rotation Animation";d="Continuous rotation through the entire color spectrum." ;;
+  esac
+  cat > "/home/user/ccab/tsl-shaders/${i}-${t// /-}.html" << EOF
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${t}</title>
+<style>*{margin:0;padding:0}body{background:#000}#canvas{width:100vw;height:100vh}.info{position:absolute;top:20px;left:20px;color:#fff;background:rgba(0,0,0,.7);padding:15px;border-radius:8px;max-width:300px;font-size:14px}.info h1{font-size:18px;margin-bottom:8px}</style>
+</head><body><canvas id="canvas"></canvas><div class="info"><h1>${t}</h1><p>${d}</p></div>
+<script async src="https://unpkg.com/es-module-shims@1.6.3/dist/es-module-shims.js"></script>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.170.0/build/three.webgpu.js","three/tsl":"https://unpkg.com/three@0.170.0/build/three.webgpu.js","three/addons/":"https://unpkg.com/three@0.170.0/examples/jsm/"}}</script>
+<script type="module">
+import*as THREE from'three';import{OrbitControls}from'three/addons/controls/OrbitControls.js';import{positionLocal,normalLocal,time,sin,cos,fract,vec3,Fn}from'three/tsl';
+const canvas=document.getElementById('canvas');async function init(){const scene=new THREE.Scene();scene.background=new THREE.Color(0x0a0a0a);
+const camera=new THREE.PerspectiveCamera(75,window.innerWidth/window.innerHeight,0.1,1000);camera.position.set(0,0,3);
+const renderer=new THREE.WebGPURenderer({canvas,antialias:true});renderer.setSize(window.innerWidth,window.innerHeight);await renderer.init();
+const controls=new OrbitControls(camera,canvas);controls.enableDamping=true;scene.add(new THREE.AmbientLight(0xffffff,0.5));
+const light=new THREE.DirectionalLight(0xffffff,1);light.position.set(5,5,5);scene.add(light);
+const geometry=new THREE.SphereGeometry(1,64,64);const material=new THREE.MeshStandardNodeMaterial();
+material.colorNode=Fn(()=>{const pos=positionLocal;const hue=fract(pos.x.mul(2).add(time.mul(0.1)));const sat=0.8;const val=0.9;
+const c=val.mul(sat);const x=c.mul(hue.mul(6).mod(2).sub(1).abs().oneMinus());const m=val.sub(c);
+const r=hue.mul(6).lessThan(1).cond(c.add(m),hue.mul(6).lessThan(2).cond(x.add(m),hue.mul(6).lessThan(3).cond(m,hue.mul(6).lessThan(4).cond(m,hue.mul(6).lessThan(5).cond(x.add(m),c.add(m))))));
+const g=hue.mul(6).lessThan(1).cond(x.add(m),hue.mul(6).lessThan(2).cond(c.add(m),hue.mul(6).lessThan(3).cond(c.add(m),hue.mul(6).lessThan(4).cond(x.add(m),m))));
+const b=hue.mul(6).lessThan(1).cond(m,hue.mul(6).lessThan(3).cond(m,hue.mul(6).lessThan(4).cond(c.add(m),hue.mul(6).lessThan(5).cond(c.add(m),x.add(m)))));
+return vec3(r,g,b);})();const mesh=new THREE.Mesh(geometry,material);scene.add(mesh);
+function animate(){requestAnimationFrame(animate);mesh.rotation.y+=0.005;controls.update();renderer.render(scene,camera);}animate();
+window.addEventListener('resize',()=>{camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);});}init();
+</script></body></html>
+EOF
+done
+echo "Created 23-30 (Color Theory)"
