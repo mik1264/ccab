@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>2D Metaballs</title>
+    <title>2D Metaballs - GPU Accelerated</title>
     <style>
         * {
             margin: 0;
@@ -23,110 +23,159 @@
         canvas {
             display: block;
         }
+
+        .info {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.6);
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            text-align: center;
+            pointer-events: none;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px 20px;
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
+    <div class="info">GPU-Accelerated • Three.js TSL • Implicit Surfaces</div>
 
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+    <script src="https://unpkg.com/three@0.170.0/build/three.module.js" type="module"></script>
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.170.0/build/three.module.js';
 
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+        const scene = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
 
-        const balls = [];
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Metaballs data
         const numBalls = 8;
+        const balls = [];
 
         for (let i = 0; i < numBalls; i++) {
             balls.push({
-                x: Math.random() * canvas.width,
-                y: Math.random() * canvas.height,
-                vx: (Math.random() - 0.5) * 2,
-                vy: (Math.random() - 0.5) * 2,
-                radius: 50 + Math.random() * 50
+                x: Math.random(),
+                y: Math.random(),
+                vx: (Math.random() - 0.5) * 0.002,
+                vy: (Math.random() - 0.5) * 0.002,
+                radius: 0.05 + Math.random() * 0.05
             });
         }
 
+        // Shader for metaballs
+        const vertexShader = `
+            varying vec2 vUv;
+
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+
+        const fragmentShader = `
+            uniform vec2 uResolution;
+            uniform float uTime;
+            uniform vec3 uBalls[${numBalls}]; // x, y, radius
+            varying vec2 vUv;
+
+            float metaballField(vec2 pos) {
+                float sum = 0.0;
+                for (int i = 0; i < ${numBalls}; i++) {
+                    vec2 ballPos = uBalls[i].xy;
+                    float radius = uBalls[i].z;
+
+                    vec2 delta = pos - ballPos;
+                    float distSq = dot(delta, delta);
+                    sum += (radius * radius) / distSq;
+                }
+                return sum;
+            }
+
+            void main() {
+                vec2 uv = vUv;
+                float aspectRatio = uResolution.x / uResolution.y;
+                uv.x *= aspectRatio;
+
+                float field = metaballField(uv);
+                float threshold = 1.0;
+
+                vec3 color = vec3(0.0);
+
+                if (field > threshold) {
+                    float intensity = min(1.0, field - threshold);
+                    float hue = mod(field * 60.0, 360.0);
+
+                    color.r = sin(intensity * 3.14159 * 0.5);
+                    color.g = 0.8 * intensity;
+                    color.b = intensity;
+                }
+
+                gl_FragColor = vec4(color, 1.0);
+            }
+        `;
+
+        const uniforms = {
+            uTime: { value: 0 },
+            uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+            uBalls: { value: balls.map(b => new THREE.Vector3(b.x, b.y, b.radius)) }
+        };
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader,
+            uniforms
+        });
+
+        const geometry = new THREE.PlaneGeometry(2, 2);
+        const mesh = new THREE.Mesh(geometry, material);
+        scene.add(mesh);
+
         function updateBalls() {
-            balls.forEach(ball => {
+            const aspectRatio = window.innerWidth / window.innerHeight;
+
+            balls.forEach((ball, i) => {
                 ball.x += ball.vx;
                 ball.y += ball.vy;
 
-                if (ball.x - ball.radius < 0 || ball.x + ball.radius > canvas.width) {
+                const maxX = aspectRatio - ball.radius;
+                const minX = ball.radius;
+                const maxY = 1.0 - ball.radius;
+                const minY = ball.radius;
+
+                if (ball.x < minX || ball.x > maxX) {
                     ball.vx *= -1;
-                    ball.x = Math.max(ball.radius, Math.min(canvas.width - ball.radius, ball.x));
+                    ball.x = Math.max(minX, Math.min(maxX, ball.x));
                 }
-                if (ball.y - ball.radius < 0 || ball.y + ball.radius > canvas.height) {
+                if (ball.y < minY || ball.y > maxY) {
                     ball.vy *= -1;
-                    ball.y = Math.max(ball.radius, Math.min(canvas.height - ball.radius, ball.y));
+                    ball.y = Math.max(minY, Math.min(maxY, ball.y));
                 }
+
+                uniforms.uBalls.value[i].set(ball.x, ball.y, ball.radius);
             });
-        }
-
-        function metaballValue(x, y) {
-            let sum = 0;
-            balls.forEach(ball => {
-                const dx = x - ball.x;
-                const dy = y - ball.y;
-                const distSq = dx * dx + dy * dy;
-                sum += (ball.radius * ball.radius) / distSq;
-            });
-            return sum;
-        }
-
-        function render() {
-            const imageData = ctx.createImageData(canvas.width, canvas.height);
-            const data = imageData.data;
-
-            const threshold = 1.0;
-            const step = 3;
-
-            for (let x = 0; x < canvas.width; x += step) {
-                for (let y = 0; y < canvas.height; y += step) {
-                    const value = metaballValue(x, y);
-
-                    if (value > threshold) {
-                        const intensity = Math.min(1, value - threshold);
-                        const hue = (value * 60) % 360;
-
-                        const r = Math.floor(255 * Math.sin(intensity * Math.PI / 2));
-                        const g = Math.floor(200 * intensity);
-                        const b = Math.floor(255 * intensity);
-
-                        for (let dx = 0; dx < step; dx++) {
-                            for (let dy = 0; dy < step; dy++) {
-                                const px = x + dx;
-                                const py = y + dy;
-                                if (px < canvas.width && py < canvas.height) {
-                                    const index = (py * canvas.width + px) * 4;
-                                    data[index] = r;
-                                    data[index + 1] = g;
-                                    data[index + 2] = b;
-                                    data[index + 3] = 255;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            ctx.putImageData(imageData, 0, 0);
         }
 
         function animate() {
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            updateBalls();
-            render();
-
             requestAnimationFrame(animate);
+
+            uniforms.uTime.value += 0.01;
+            updateBalls();
+
+            renderer.render(scene, camera);
         }
 
         window.addEventListener('resize', () => {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+
+            renderer.setSize(width, height);
+            uniforms.uResolution.value.set(width, height);
         });
 
         animate();
