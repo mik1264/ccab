@@ -1,0 +1,171 @@
+#!/bin/bash
+cd /home/user/ccab/tsl-shaders
+
+# 69: Lagrange Points
+cat > 69-lagrange-points.html << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Lagrange Points L4/L5</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        canvas { display: block; }
+        #info {
+            position: absolute; top: 10px; left: 10px; color: white;
+            font-family: monospace; background: rgba(0,0,0,0.7);
+            padding: 10px; border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">Lagrange Points L4/L5<br>Trojan asteroids at stable equilibrium points</div>
+    <script type="importmap">
+    {"imports": {
+        "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+        "three/tsl": "https://unpkg.com/three@0.170.0/build/three.webgpu.js",
+        "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+    }}
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { color } from 'three/tsl';
+        import WebGPU from 'three/addons/capabilities/WebGPU.js';
+        import WebGPURenderer from 'three/addons/renderers/webgpu/WebGPURenderer.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        if (!WebGPU.isAvailable()) {
+            document.body.innerHTML = '<div style="color:white;padding:50px;">WebGPU not supported</div>';
+            throw new Error('WebGPU not supported');
+        }
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 15, 0.1);
+
+        const renderer = new WebGPURenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        await renderer.init();
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+
+        // Sun
+        const sun = new THREE.Mesh(
+            new THREE.SphereGeometry(0.8, 32, 32),
+            new THREE.MeshBasicNodeMaterial({ colorNode: color(1.0, 0.9, 0.2) })
+        );
+        scene.add(sun);
+
+        // Planet
+        const planet = new THREE.Mesh(
+            new THREE.SphereGeometry(0.4, 32, 32),
+            new THREE.MeshBasicNodeMaterial({ colorNode: color(0.3, 0.5, 1.0) })
+        );
+        scene.add(planet);
+
+        // Trojan asteroids at L4 and L5 (60° ahead and behind)
+        const trojans = [];
+        for (let i = 0; i < 20; i++) {
+            const trojan = new THREE.Mesh(
+                new THREE.SphereGeometry(0.08, 16, 16),
+                new THREE.MeshBasicMaterial({ color: i < 10 ? 0xff6666 : 0x66ff66 })
+            );
+            trojans.push(trojan);
+            scene.add(trojan);
+        }
+
+        const G = 1.0;
+        const mSun = 100.0, mPlanet = 1.0, mTrojan = 0.001;
+        const orbitalRadius = 10.0;
+        const omega = Math.sqrt(G * mSun / (orbitalRadius * orbitalRadius * orbitalRadius));
+
+        // L4 is 60° ahead, L5 is 60° behind
+        const l4Angle = Math.PI / 3;
+        const l5Angle = -Math.PI / 3;
+
+        let state = {
+            planet: {
+                x: orbitalRadius, y: 0, z: 0,
+                vx: 0, vy: 0, vz: omega * orbitalRadius
+            },
+            trojans: []
+        };
+
+        // Initialize trojans near L4 and L5 with small random perturbations
+        for (let i = 0; i < 20; i++) {
+            const isL4 = i < 10;
+            const angle = isL4 ? l4Angle : l5Angle;
+            const offsetR = (Math.random() - 0.5) * 0.5;
+            const offsetAngle = (Math.random() - 0.5) * 0.3;
+
+            const r = orbitalRadius + offsetR;
+            const a = angle + offsetAngle;
+
+            state.trojans.push({
+                x: r * Math.cos(a), y: 0, z: r * Math.sin(a),
+                vx: -omega * r * Math.sin(a), vy: 0, vz: omega * r * Math.cos(a)
+            });
+        }
+
+        function updatePhysics(dt) {
+            // Update planet
+            const rPlanet = Math.sqrt(state.planet.x**2 + state.planet.z**2);
+            const fPlanet = G * mSun / (rPlanet**2);
+            state.planet.vx -= fPlanet * state.planet.x / rPlanet * dt;
+            state.planet.vz -= fPlanet * state.planet.z / rPlanet * dt;
+            state.planet.x += state.planet.vx * dt;
+            state.planet.z += state.planet.vz * dt;
+
+            // Update trojans (influenced by both sun and planet)
+            state.trojans.forEach(trojan => {
+                // Force from sun
+                const rSun = Math.sqrt(trojan.x**2 + trojan.z**2);
+                const fSun = G * mSun / (rSun**2);
+                const axSun = -fSun * trojan.x / rSun;
+                const azSun = -fSun * trojan.z / rSun;
+
+                // Force from planet
+                const dx = state.planet.x - trojan.x;
+                const dz = state.planet.z - trojan.z;
+                const rPlanet = Math.sqrt(dx**2 + dz**2);
+                const fPlanet = G * mPlanet / (rPlanet**2);
+                const axPlanet = fPlanet * dx / rPlanet;
+                const azPlanet = fPlanet * dz / rPlanet;
+
+                trojan.vx += (axSun + axPlanet) * dt;
+                trojan.vz += (azSun + azPlanet) * dt;
+                trojan.x += trojan.vx * dt;
+                trojan.z += trojan.vz * dt;
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const dt = 0.016 / 3;
+            for (let i = 0; i < 3; i++) updatePhysics(dt);
+
+            planet.position.set(state.planet.x, state.planet.y, state.planet.z);
+            trojans.forEach((mesh, i) => {
+                mesh.position.set(state.trojans[i].x, state.trojans[i].y, state.trojans[i].z);
+            });
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
+EOF
+
+echo "Created 69-lagrange-points.html"
