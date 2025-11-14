@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Game of Life - Rainbow Cycling</title>
+    <title>Game of Life - Rainbow Cycling (TSL)</title>
     <style>
         body {
             margin: 0;
@@ -21,95 +21,206 @@
         }
         h1 {
             font-size: 24px;
-            margin: 0 0 20px 0;
+            margin: 0 0 10px 0;
+        }
+        .tech-badge {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            margin-bottom: 15px;
+            font-weight: bold;
         }
     </style>
 </head>
 <body>
     <h1>Rainbow Cycling Game of Life</h1>
+    <div class="tech-badge">GPU-Accelerated • Three.js TSL • Fragment Shaders</div>
     <canvas id="canvas"></canvas>
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/",
+            "three/nodes": "https://unpkg.com/three@0.170.0/examples/jsm/nodes/Nodes.js"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import * as Nodes from 'three/nodes';
+
+        const {
+            texture, uniform, uv, vec2, vec3, vec4, float,
+            Fn, If, Loop, mod, floor, fract, mix, step, smoothstep
+        } = Nodes;
+
         const cellSize = 8;
         const cols = 100;
         const rows = 80;
+        const canvas = document.getElementById('canvas');
         canvas.width = cols * cellSize;
         canvas.height = rows * cellSize;
 
-        let grid = createGrid();
-        let hueOffset = 0;
+        // Setup Three.js with WebGL + Node Material system
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+        renderer.setSize(cols * cellSize, rows * cellSize);
 
-        function createGrid() {
-            const arr = new Array(cols);
-            for (let i = 0; i < cols; i++) {
-                arr[i] = new Array(rows);
-                for (let j = 0; j < rows; j++) {
-                    arr[i][j] = Math.random() > 0.7 ? 1 : 0;
-                }
-            }
-            return arr;
+        const scene = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+        // Create grid textures for ping-pong buffering
+        const gridData = new Uint8Array(cols * rows * 4);
+        for (let i = 0; i < cols * rows; i++) {
+            const alive = Math.random() > 0.7 ? 255 : 0;
+            gridData[i * 4] = alive;
+            gridData[i * 4 + 1] = alive;
+            gridData[i * 4 + 2] = alive;
+            gridData[i * 4 + 3] = 255;
         }
 
-        function countNeighbors(grid, x, y) {
-            let count = 0;
-            for (let i = -1; i <= 1; i++) {
-                for (let j = -1; j <= 1; j++) {
-                    if (i === 0 && j === 0) continue;
-                    const col = (x + i + cols) % cols;
-                    const row = (y + j + rows) % rows;
-                    count += grid[col][row];
+        const gridTexture1 = new THREE.DataTexture(gridData, cols, rows, THREE.RGBAFormat);
+        gridTexture1.needsUpdate = true;
+        gridTexture1.magFilter = THREE.NearestFilter;
+        gridTexture1.minFilter = THREE.NearestFilter;
+
+        const gridTexture2 = gridTexture1.clone();
+        gridTexture2.needsUpdate = true;
+
+        let currentTexture = gridTexture1;
+        let nextTexture = gridTexture2;
+
+        // TSL function: Count neighbors in Game of Life grid
+        const countNeighbors = Fn(([gridTex, coord, gridSize]) => {
+            let count = float(0);
+            const pixelSize = vec2(1.0).div(gridSize);
+
+            // Iterate through 8 neighbors
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    if (dx === 0 && dy === 0) continue;
+
+                    const offset = vec2(dx, dy).mul(pixelSize);
+                    const neighborCoord = fract(coord.add(offset));
+                    const neighborValue = texture(gridTex, neighborCoord).r;
+                    count = count.add(step(0.5, neighborValue));
                 }
             }
+
             return count;
-        }
+        });
 
-        function nextGeneration() {
-            const next = createGrid();
-            for (let i = 0; i < cols; i++) {
-                for (let j = 0; j < rows; j++) {
-                    next[i][j] = 0;
-                }
+        // TSL function: Game of Life rules
+        const gameOfLifeCompute = Fn(([currentTex, gridSize]) => {
+            const coord = uv();
+            const currentState = texture(currentTex, coord).r;
+            const isAlive = step(0.5, currentState);
+            const neighbors = countNeighbors(currentTex, coord, gridSize);
+
+            // Rules: survive with 2-3 neighbors, born with 3 neighbors
+            const survives = isAlive.mul(step(1.5, neighbors)).mul(step(neighbors, 3.5));
+            const born = isAlive.oneMinus().mul(step(2.9, neighbors)).mul(step(neighbors, 3.1));
+            const newState = survives.add(born);
+
+            return vec4(newState, newState, newState, 1);
+        });
+
+        // TSL function: HSV to RGB conversion
+        const hsvToRgb = Fn(([h, s, v]) => {
+            const c = v.mul(s);
+            const x = c.mul(mod(h.mul(6), 2).sub(1).abs().oneMinus());
+            const m = v.sub(c);
+
+            const hue6 = h.mul(6);
+            const r = mix(mix(mix(c, x, step(1, hue6)), float(0), step(2, hue6)),
+                         mix(float(0), x, step(4, hue6)), step(3, hue6));
+            const g = mix(mix(x, c, step(1, hue6)), x, step(4, hue6));
+            const b = mix(mix(float(0), x, step(3, hue6)), c, step(5, hue6));
+
+            return vec3(r.add(m), g.add(m), b.add(m));
+        });
+
+        // TSL function: Rainbow display shader
+        const timeUniform = uniform(0);
+        const rainbowDisplay = Fn(([gridTex, gridSize, time]) => {
+            const coord = uv();
+            const cellState = texture(gridTex, coord).r;
+            const isAlive = step(0.5, cellState);
+
+            const pixelCoord = floor(coord.mul(gridSize));
+            const hue = fract(pixelCoord.x.mul(0.01).add(pixelCoord.y.mul(0.01)).add(time.div(180)));
+
+            const color = hsvToRgb(hue, 1.0, 1.0);
+
+            return vec4(color.mul(isAlive), 1);
+        });
+
+        // Create compute pass material (calculates next generation)
+        const computeMaterial = new THREE.MeshBasicMaterial();
+        const gridSizeNode = vec2(cols, rows);
+        computeMaterial.colorNode = gameOfLifeCompute(texture(currentTexture), gridSizeNode);
+
+        const computeGeometry = new THREE.PlaneGeometry(2, 2);
+        const computeScene = new THREE.Scene();
+        const computeMesh = new THREE.Mesh(computeGeometry, computeMaterial);
+        computeScene.add(computeMesh);
+
+        const renderTarget = new THREE.WebGLRenderTarget(cols, rows, {
+            format: THREE.RGBAFormat,
+            type: THREE.UnsignedByteType,
+            magFilter: THREE.NearestFilter,
+            minFilter: THREE.NearestFilter
+        });
+
+        // Create display material (renders with rainbow colors)
+        const displayMaterial = new THREE.MeshBasicMaterial();
+        displayMaterial.colorNode = rainbowDisplay(texture(currentTexture), gridSizeNode, timeUniform);
+
+        const displayGeometry = new THREE.PlaneGeometry(2, 2);
+        const displayMesh = new THREE.Mesh(displayGeometry, displayMaterial);
+        scene.add(displayMesh);
+
+        let frameCount = 0;
+
+        function animate() {
+            frameCount++;
+
+            // Update simulation every 3 frames (20 FPS logic)
+            if (frameCount % 3 === 0) {
+                // Update compute material to use current texture
+                computeMaterial.colorNode = gameOfLifeCompute(texture(currentTexture), gridSizeNode);
+                computeMaterial.needsUpdate = true;
+
+                // Render next generation to render target
+                renderer.setRenderTarget(renderTarget);
+                renderer.render(computeScene, camera);
+                renderer.setRenderTarget(null);
+
+                // Read pixels back from GPU
+                const pixels = new Uint8Array(cols * rows * 4);
+                renderer.readRenderTargetPixels(renderTarget, 0, 0, cols, rows, pixels);
+                nextTexture.image.data = pixels;
+                nextTexture.needsUpdate = true;
+
+                // Ping-pong swap
+                [currentTexture, nextTexture] = [nextTexture, currentTexture];
             }
 
-            for (let i = 0; i < cols; i++) {
-                for (let j = 0; j < rows; j++) {
-                    const state = grid[i][j];
-                    const neighbors = countNeighbors(grid, i, j);
+            // Update rainbow animation time
+            timeUniform.value = (timeUniform.value + 2) % 360;
 
-                    if (state === 0 && neighbors === 3) {
-                        next[i][j] = 1;
-                    } else if (state === 1 && (neighbors === 2 || neighbors === 3)) {
-                        next[i][j] = 1;
-                    }
-                }
-            }
-            return next;
+            // Update display material
+            displayMaterial.colorNode = rainbowDisplay(texture(currentTexture), gridSizeNode, timeUniform);
+            displayMaterial.needsUpdate = true;
+
+            // Render final display
+            renderer.render(scene, camera);
+
+            requestAnimationFrame(animate);
         }
 
-        function draw() {
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            for (let i = 0; i < cols; i++) {
-                for (let j = 0; j < rows; j++) {
-                    if (grid[i][j] === 1) {
-                        const hue = (i * 3 + j * 3 + hueOffset) % 360;
-                        ctx.fillStyle = `hsl(${hue}, 100%, 50%)`;
-                        ctx.fillRect(i * cellSize, j * cellSize, cellSize - 1, cellSize - 1);
-                    }
-                }
-            }
-        }
-
-        function update() {
-            grid = nextGeneration();
-            hueOffset += 2;
-            draw();
-            requestAnimationFrame(update);
-        }
-
-        update();
+        animate();
     </script>
 </body>
 </html>

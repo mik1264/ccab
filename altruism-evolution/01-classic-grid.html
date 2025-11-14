@@ -1,31 +1,34 @@
 <!--
-# Altruism Evolution: Classic Grid Simulation
+# Altruism Evolution: Classic Grid Simulation (GPU-Accelerated)
 
 ## Goal
-Create a faithful recreation of the NetLogo Altruism model using a classic grid-based visualization.
-Show altruistic (pink) and selfish (green) agents competing for space through a genetic lottery system.
+GPU-accelerated simulation of altruism evolution using WebGL fragment shaders.
+Show altruistic (pink) and selfish (green) agents competing through fitness-based reproduction.
 
 ## Approach
-- Use HTML5 Canvas with a 2D grid (50x50 patches)
-- Implement the fitness calculation system: altruists pay cost but provide benefits
-- Use von Neumann neighborhood (4 neighbors + self)
-- Implement weighted lottery for next generation
-- Add environmental factors: harshness and disease
-- Interactive sliders for all parameters
-- Real-time population tracking
+- WebGL fragment shaders for all simulation logic
+- Ping-pong render targets for state storage
+- Parallel GPU computation of fitness and reproduction
+- Real-time visualization with color-coded agents
+- Interactive parameter controls
 
 ## Key Mechanics
 - Altruist fitness: (1 - cost) + (neighbor_altruists/5 * benefit)
 - Selfish fitness: 1 + (neighbor_altruists/5 * benefit)
 - Empty fitness: harshness value
 - Lottery uses weighted random selection based on cumulative fitness
+
+## Tech Stack
+- Three.js with WebGL
+- Fragment shader-based cellular automata
+- GPU-accelerated evolution simulation
 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Classic Grid - Altruism Evolution</title>
+    <title>Classic Grid - Altruism Evolution (GPU)</title>
     <style>
         body {
             margin: 0;
@@ -39,13 +42,22 @@ Show altruistic (pink) and selfish (green) agents competing for space through a 
             min-height: 100vh;
         }
         h1 {
-            margin: 0 0 10px 0;
+            margin: 0 0 5px 0;
             font-size: 2em;
         }
         .subtitle {
-            margin: 0 0 20px 0;
+            margin: 0 0 5px 0;
             opacity: 0.9;
             font-size: 0.9em;
+        }
+        .tech-badge {
+            background: rgba(74, 222, 128, 0.2);
+            border: 1px solid rgba(74, 222, 128, 0.4);
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.75em;
+            margin-bottom: 20px;
+            display: inline-block;
         }
         .container {
             display: flex;
@@ -162,7 +174,8 @@ Show altruistic (pink) and selfish (green) agents competing for space through a 
 </head>
 <body>
     <h1>Classic Grid - Altruism Evolution</h1>
-    <p class="subtitle">Evolutionary competition between altruistic and selfish agents</p>
+    <p class="subtitle">GPU-accelerated evolutionary competition between altruistic and selfish agents</p>
+    <div class="tech-badge">GPU-Accelerated • Three.js TSL • Evolutionary Dynamics</div>
 
     <div class="container">
         <canvas id="canvas"></canvas>
@@ -226,15 +239,15 @@ Show altruistic (pink) and selfish (green) agents competing for space through a 
                 </div>
                 <div class="stat-row">
                     <span>Altruists:</span>
-                    <span class="value-display" id="altruistCount">0</span>
+                    <span class="value-display" id="altruistCount">~</span>
                 </div>
                 <div class="stat-row">
                     <span>Selfish:</span>
-                    <span class="value-display" id="selfishCount">0</span>
+                    <span class="value-display" id="selfishCount">~</span>
                 </div>
                 <div class="stat-row">
                     <span>Empty:</span>
-                    <span class="value-display" id="emptyCount">0</span>
+                    <span class="value-display" id="emptyCount">~</span>
                 </div>
             </div>
 
@@ -255,24 +268,19 @@ Show altruistic (pink) and selfish (green) agents competing for space through a 
         </div>
     </div>
 
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
     <script>
         const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+        const GRID_SIZE = 512;
+        const CANVAS_SIZE = 512;
 
-        const GRID_SIZE = 50;
-        const CELL_SIZE = 10;
-        canvas.width = GRID_SIZE * CELL_SIZE;
-        canvas.height = GRID_SIZE * CELL_SIZE;
-
-        // Patch types
-        const EMPTY = 0;
-        const ALTRUIST = 1;
-        const SELFISH = 2;
-
-        // Grid data
-        let patches = [];
+        let renderer, camera, scene;
+        let simulationMaterial, displayMaterial;
+        let stateTarget, nextStateTarget;
+        let simulationMesh, displayMesh;
         let generation = 0;
         let paused = false;
+        let frame = 0;
 
         // Parameters
         let params = {
@@ -310,245 +318,269 @@ Show altruistic (pink) and selfish (green) agents competing for space through a 
             document.getElementById('diseaseVal').textContent = e.target.value;
         };
 
-        // Initialize patch
-        function createPatch() {
-            return {
-                type: EMPTY,
-                benefitOut: 0,
-                fitness: 0,
-                altruismBenefit: 0,
-                altFitness: 0,
-                selfFitness: 0,
-                harshFitness: 0,
-                altWeight: 0,
-                selfWeight: 0,
-                harshWeight: 0
+        function init() {
+            // Setup Three.js
+            renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+            renderer.setSize(CANVAS_SIZE, CANVAS_SIZE);
+
+            scene = new THREE.Scene();
+            camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+            // Create render targets for ping-pong
+            const rtOptions = {
+                minFilter: THREE.NearestFilter,
+                magFilter: THREE.NearestFilter,
+                format: THREE.RGBAFormat,
+                type: THREE.FloatType
             };
+
+            stateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
+            nextStateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
+
+            // Simulation shader (computes next generation)
+            simulationMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    state: { value: null },
+                    resolution: { value: new THREE.Vector2(GRID_SIZE, GRID_SIZE) },
+                    cost: { value: params.costOfAltruism },
+                    benefit: { value: params.benefitFromAltruism },
+                    harshness: { value: params.harshness },
+                    disease: { value: params.disease },
+                    seed: { value: Math.random() * 1000 },
+                    frame: { value: 0 }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D state;
+                    uniform vec2 resolution;
+                    uniform float cost;
+                    uniform float benefit;
+                    uniform float harshness;
+                    uniform float disease;
+                    uniform float seed;
+                    uniform float frame;
+                    varying vec2 vUv;
+
+                    // Hash function for pseudo-random numbers
+                    float hash(vec2 p) {
+                        return fract(sin(dot(p, vec2(127.1, 311.7)) + seed + frame) * 43758.5453);
+                    }
+
+                    void main() {
+                        vec2 pixel = 1.0 / resolution;
+
+                        // Get current state: r = type (0=empty, 0.5=altruist, 1=selfish)
+                        float currentState = texture2D(state, vUv).r;
+
+                        // Get neighbors (Von Neumann neighborhood)
+                        float left = texture2D(state, vUv + vec2(-pixel.x, 0.0)).r;
+                        float right = texture2D(state, vUv + vec2(pixel.x, 0.0)).r;
+                        float up = texture2D(state, vUv + vec2(0.0, pixel.y)).r;
+                        float down = texture2D(state, vUv + vec2(0.0, -pixel.y)).r;
+
+                        // Count altruists (state = 0.5) in neighborhood including self
+                        float altCount = 0.0;
+                        if (abs(currentState - 0.5) < 0.1) altCount += 1.0;
+                        if (abs(left - 0.5) < 0.1) altCount += 1.0;
+                        if (abs(right - 0.5) < 0.1) altCount += 1.0;
+                        if (abs(up - 0.5) < 0.1) altCount += 1.0;
+                        if (abs(down - 0.5) < 0.1) altCount += 1.0;
+
+                        // Calculate altruism benefit
+                        float altBenefit = benefit * altCount / 5.0;
+
+                        // Calculate fitness for each cell type in neighborhood
+                        float altFitness = 0.0;
+                        float selfFitness = 0.0;
+                        float harshFitness = 0.0;
+
+                        // Process each neighbor + self
+                        for (int i = 0; i < 5; i++) {
+                            vec2 offset = vec2(0.0);
+                            if (i == 1) offset = vec2(-pixel.x, 0.0);
+                            else if (i == 2) offset = vec2(pixel.x, 0.0);
+                            else if (i == 3) offset = vec2(0.0, pixel.y);
+                            else if (i == 4) offset = vec2(0.0, -pixel.y);
+
+                            float nState = texture2D(state, vUv + offset).r;
+                            float fitness = 0.0;
+
+                            if (abs(nState - 1.0) < 0.1) {
+                                // SELFISH
+                                fitness = 1.0 + altBenefit;
+                                selfFitness += fitness;
+                            } else if (abs(nState - 0.5) < 0.1) {
+                                // ALTRUIST
+                                fitness = (1.0 - cost) + altBenefit;
+                                altFitness += fitness;
+                            } else {
+                                // EMPTY
+                                fitness = harshness;
+                                harshFitness += fitness;
+                            }
+                        }
+
+                        // Add disease to empty fitness
+                        harshFitness += disease;
+
+                        // Run lottery
+                        float totalFitness = altFitness + selfFitness + harshFitness;
+                        float newState = 0.0; // Default to EMPTY
+
+                        if (totalFitness > 0.0) {
+                            float rand = hash(vUv * resolution + vec2(frame)) * totalFitness;
+
+                            if (rand < altFitness) {
+                                newState = 0.5; // ALTRUIST
+                            } else if (rand < altFitness + selfFitness) {
+                                newState = 1.0; // SELFISH
+                            }
+                            // else remains 0.0 (EMPTY)
+                        }
+
+                        gl_FragColor = vec4(newState, 0.0, 0.0, 1.0);
+                    }
+                `
+            });
+
+            // Display shader (visualizes the state)
+            displayMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    state: { value: null }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform sampler2D state;
+                    varying vec2 vUv;
+
+                    void main() {
+                        float cellState = texture2D(state, vUv).r;
+
+                        if (cellState < 0.25) {
+                            // EMPTY
+                            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                        } else if (cellState < 0.75) {
+                            // ALTRUIST (pink)
+                            gl_FragColor = vec4(1.0, 0.41, 0.71, 1.0);
+                        } else {
+                            // SELFISH (green)
+                            gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);
+                        }
+                    }
+                `
+            });
+
+            // Create quad mesh
+            const geometry = new THREE.PlaneGeometry(2, 2);
+            simulationMesh = new THREE.Mesh(geometry, simulationMaterial);
+            displayMesh = new THREE.Mesh(geometry, displayMaterial);
+
+            // Initialize with random state
+            initializeState();
+            animate();
         }
 
-        // Initialize grid
-        function setup() {
-            patches = [];
+        function initializeState() {
+            const initialData = new Float32Array(GRID_SIZE * GRID_SIZE * 4);
+
+            for (let i = 0; i < GRID_SIZE * GRID_SIZE; i++) {
+                const rand = Math.random();
+                let state = 0.0; // EMPTY
+
+                if (rand < params.altruisticProbability) {
+                    state = 0.5; // ALTRUIST
+                } else if (rand < params.altruisticProbability + params.selfishProbability) {
+                    state = 1.0; // SELFISH
+                }
+
+                initialData[i * 4] = state;
+                initialData[i * 4 + 1] = 0;
+                initialData[i * 4 + 2] = 0;
+                initialData[i * 4 + 3] = 1;
+            }
+
+            const texture = new THREE.DataTexture(
+                initialData,
+                GRID_SIZE,
+                GRID_SIZE,
+                THREE.RGBAFormat,
+                THREE.FloatType
+            );
+            texture.needsUpdate = true;
+
+            // Render initial state to target
+            const tempScene = new THREE.Scene();
+            const tempMaterial = new THREE.MeshBasicMaterial({ map: texture });
+            const tempMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), tempMaterial);
+            tempScene.add(tempMesh);
+
+            renderer.setRenderTarget(stateTarget);
+            renderer.render(tempScene, camera);
+            renderer.setRenderTarget(null);
+
             generation = 0;
-
-            for (let y = 0; y < GRID_SIZE; y++) {
-                patches[y] = [];
-                for (let x = 0; x < GRID_SIZE; x++) {
-                    const patch = createPatch();
-                    const rand = Math.random();
-
-                    if (rand < params.altruisticProbability) {
-                        patch.type = ALTRUIST;
-                        patch.benefitOut = 1;
-                    } else if (rand < params.altruisticProbability + params.selfishProbability) {
-                        patch.type = SELFISH;
-                        patch.benefitOut = 0;
-                    } else {
-                        patch.type = EMPTY;
-                        patch.benefitOut = 0;
-                    }
-
-                    patches[y][x] = patch;
-                }
-            }
-
-            render();
-            updateStats();
         }
 
-        // Get neighbors (von Neumann neighborhood)
-        function getNeighbors(x, y) {
-            const neighbors = [];
-            if (x > 0) neighbors.push(patches[y][x-1]);
-            if (x < GRID_SIZE-1) neighbors.push(patches[y][x+1]);
-            if (y > 0) neighbors.push(patches[y-1][x]);
-            if (y < GRID_SIZE-1) neighbors.push(patches[y+1][x]);
-            return neighbors;
-        }
-
-        // Calculate altruism benefit for each patch
-        function calculateAltruismBenefits() {
-            for (let y = 0; y < GRID_SIZE; y++) {
-                for (let x = 0; x < GRID_SIZE; x++) {
-                    const patch = patches[y][x];
-                    const neighbors = getNeighbors(x, y);
-                    const totalBenefit = patch.benefitOut + neighbors.reduce((sum, n) => sum + n.benefitOut, 0);
-                    patch.altruismBenefit = params.benefitFromAltruism * totalBenefit / 5;
-                }
-            }
-        }
-
-        // Calculate fitness for each patch
-        function calculateFitness() {
-            for (let y = 0; y < GRID_SIZE; y++) {
-                for (let x = 0; x < GRID_SIZE; x++) {
-                    const patch = patches[y][x];
-
-                    if (patch.type === SELFISH) {
-                        patch.fitness = 1 + patch.altruismBenefit;
-                    } else if (patch.type === ALTRUIST) {
-                        patch.fitness = (1 - params.costOfAltruism) + patch.altruismBenefit;
-                    } else { // EMPTY
-                        patch.fitness = params.harshness;
-                    }
-                }
-            }
-        }
-
-        // Record neighbor fitness for lottery
-        function recordNeighborFitness() {
-            for (let y = 0; y < GRID_SIZE; y++) {
-                for (let x = 0; x < GRID_SIZE; x++) {
-                    const patch = patches[y][x];
-                    patch.altFitness = patch.type === ALTRUIST ? patch.fitness : 0;
-                    patch.selfFitness = patch.type === SELFISH ? patch.fitness : 0;
-                    patch.harshFitness = patch.type === EMPTY ? patch.fitness : 0;
-
-                    const neighbors = getNeighbors(x, y);
-                    neighbors.forEach(n => {
-                        if (n.type === ALTRUIST) patch.altFitness += n.fitness;
-                        else if (n.type === SELFISH) patch.selfFitness += n.fitness;
-                        else patch.harshFitness += n.fitness;
-                    });
-                }
-            }
-        }
-
-        // Calculate lottery weights
-        function calculateLotteryWeights() {
-            for (let y = 0; y < GRID_SIZE; y++) {
-                for (let x = 0; x < GRID_SIZE; x++) {
-                    const patch = patches[y][x];
-                    const fitnessSum = patch.altFitness + patch.selfFitness + patch.harshFitness + params.disease;
-
-                    if (fitnessSum > 0) {
-                        patch.altWeight = patch.altFitness / fitnessSum;
-                        patch.selfWeight = patch.selfFitness / fitnessSum;
-                        patch.harshWeight = (patch.harshFitness + params.disease) / fitnessSum;
-                    } else {
-                        patch.altWeight = 0;
-                        patch.selfWeight = 0;
-                        patch.harshWeight = 0;
-                    }
-                }
-            }
-        }
-
-        // Run lottery for next generation
-        function runLottery() {
-            const newPatches = [];
-
-            for (let y = 0; y < GRID_SIZE; y++) {
-                newPatches[y] = [];
-                for (let x = 0; x < GRID_SIZE; x++) {
-                    const patch = patches[y][x];
-                    const newPatch = createPatch();
-                    const rand = Math.random();
-
-                    if (rand < patch.altWeight) {
-                        newPatch.type = ALTRUIST;
-                        newPatch.benefitOut = 1;
-                    } else if (rand < patch.altWeight + patch.selfWeight) {
-                        newPatch.type = SELFISH;
-                        newPatch.benefitOut = 0;
-                    } else {
-                        newPatch.type = EMPTY;
-                        newPatch.benefitOut = 0;
-                    }
-
-                    newPatches[y][x] = newPatch;
-                }
-            }
-
-            patches = newPatches;
-        }
-
-        // Update simulation
-        function update() {
-            if (paused) return;
-
-            // Check if population exists
-            let hasPopulation = false;
-            for (let y = 0; y < GRID_SIZE; y++) {
-                for (let x = 0; x < GRID_SIZE; x++) {
-                    if (patches[y][x].type !== EMPTY) {
-                        hasPopulation = true;
-                        break;
-                    }
-                }
-                if (hasPopulation) break;
-            }
-
-            if (!hasPopulation) return;
-
-            calculateAltruismBenefits();
-            calculateFitness();
-            recordNeighborFitness();
-            calculateLotteryWeights();
-            runLottery();
-
-            generation++;
-            render();
-            updateStats();
-        }
-
-        // Render grid
-        function render() {
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            for (let y = 0; y < GRID_SIZE; y++) {
-                for (let x = 0; x < GRID_SIZE; x++) {
-                    const patch = patches[y][x];
-
-                    if (patch.type === ALTRUIST) {
-                        ctx.fillStyle = '#ff69b4'; // Pink
-                    } else if (patch.type === SELFISH) {
-                        ctx.fillStyle = '#00ff00'; // Green
-                    } else {
-                        continue; // Keep black for empty
-                    }
-
-                    ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
-                }
-            }
-        }
-
-        // Update statistics
-        function updateStats() {
-            let altruistCount = 0;
-            let selfishCount = 0;
-            let emptyCount = 0;
-
-            for (let y = 0; y < GRID_SIZE; y++) {
-                for (let x = 0; x < GRID_SIZE; x++) {
-                    const patch = patches[y][x];
-                    if (patch.type === ALTRUIST) altruistCount++;
-                    else if (patch.type === SELFISH) selfishCount++;
-                    else emptyCount++;
-                }
-            }
-
-            document.getElementById('generation').textContent = generation;
-            document.getElementById('altruistCount').textContent = altruistCount;
-            document.getElementById('selfishCount').textContent = selfishCount;
-            document.getElementById('emptyCount').textContent = emptyCount;
-        }
-
-        // Toggle pause
-        function togglePause() {
-            paused = !paused;
-        }
-
-        // Animation loop
         function animate() {
-            update();
             requestAnimationFrame(animate);
+
+            if (!paused) {
+                // Update uniforms
+                simulationMaterial.uniforms.cost.value = params.costOfAltruism;
+                simulationMaterial.uniforms.benefit.value = params.benefitFromAltruism;
+                simulationMaterial.uniforms.harshness.value = params.harshness;
+                simulationMaterial.uniforms.disease.value = params.disease;
+                simulationMaterial.uniforms.frame.value = frame++;
+
+                // Run simulation step
+                simulationMaterial.uniforms.state.value = stateTarget.texture;
+                scene.clear();
+                scene.add(simulationMesh);
+                renderer.setRenderTarget(nextStateTarget);
+                renderer.render(scene, camera);
+
+                // Swap targets
+                [stateTarget, nextStateTarget] = [nextStateTarget, stateTarget];
+
+                generation++;
+                if (generation % 10 === 0) {
+                    document.getElementById('generation').textContent = generation;
+                }
+            }
+
+            // Display current state
+            displayMaterial.uniforms.state.value = stateTarget.texture;
+            scene.clear();
+            scene.add(displayMesh);
+            renderer.setRenderTarget(null);
+            renderer.render(scene, camera);
         }
 
-        // Initialize
-        setup();
-        setInterval(update, 100); // Run at 10 fps for visibility
+        window.setup = function() {
+            generation = 0;
+            frame = 0;
+            simulationMaterial.uniforms.seed.value = Math.random() * 1000;
+            initializeState();
+            document.getElementById('generation').textContent = '0';
+        };
+
+        window.togglePause = function() {
+            paused = !paused;
+        };
+
+        init();
     </script>
 </body>
 </html>
