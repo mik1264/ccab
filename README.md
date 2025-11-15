@@ -162,25 +162,37 @@ Explore cutting-edge techniques:
 ## 🎯 Highlights
 
 ### Computational Showcases
-- **256 Wolfram Rules** - Complete elementary cellular automata explorer
-- **Ray Tracing** - Real-time WebGPU path tracing
-- **Fluid Dynamics** - SPH and grid-based simulations
-- **Fractal Explorers** - Deep zoom Mandelbrot and Julia sets
+- **Physics Simulations** - 80+ demos across 14 subcategories (largest gallery!)
+- **Neural Cellular Automata** - 50 Petri Arena competitions with evolving strategies
+- **Gravity & Orbits** - 50 orbital mechanics simulations including N-body problems
+- **Emergent Behaviors** - 50 demos of swarms, flocking, and self-organization
+- **Fractal Explorers** - Deep zoom Mandelbrot, Julia sets, and 10+ fractal types
 
 ### Interactive Experiences
-- **Web Audio Visualizers** - 40 real-time audio-reactive demos
-- **Biological Simulations** - Flocking, evolution, neural networks
-- **D3.js Data Viz** - Force graphs, geographic maps, streaming data
-- **Particle Systems** - GPU-accelerated thousands of particles
+- **Agent-Based Models** - 200+ demos across 12 economic and social simulations
+- **Web Audio Visualizers** - 40 real-time audio-reactive demos with beat detection
+- **Three.js Collection** - 122+ demos across three different shader systems
+- **D3.js Data Viz** - Force graphs, geographic maps, Sankey diagrams
+- **Particle Systems** - GPU-accelerated with thousands of particles
 
 ### Educational Simulations
-- **Scientific Visualizations** - Orbital mechanics, wave interference, electromagnetic fields, fluid dynamics
-- **Visualization Algorithms** - Voronoi, Delaunay, pathfinding
-- **L-Systems** - Recursive plant growth
-- **Strange Attractors** - Chaos theory demonstrations
+- **Scientific Visualizations** - EM fields, fluid dynamics, wave interference
+- **Evolutionary Models** - Altruism, cooperation, predator-prey dynamics
+- **Epidemic Models** - SIR/SEIR network disease spread simulations
+- **Economic Models** - Wealth distribution, Sugarscape, trade systems
+- **Chaos Theory** - Strange attractors, Lorenz systems, butterfly effect
 
 ## 📚 Documentation
 
+### Gallery Documentation
+- **[MASTER_CATALOG.md](documentation/MASTER_CATALOG.md)** - Complete catalog of all 1,000+ demos
+- **[threejs.md](documentation/galleries/threejs.md)** - Three.js 3D visualizations (36 demos)
+- **[webgl-shaders.md](documentation/galleries/webgl-shaders.md)** - WebGL shader programming (29 demos)
+- **[d3js.md](documentation/galleries/d3js.md)** - D3.js data visualizations (18 demos)
+- **[web-audio-api.md](documentation/galleries/web-audio-api.md)** - Audio visualizations (40 demos)
+- **[game-of-life.md](documentation/galleries/game-of-life.md)** - Game of Life variations (23 demos)
+
+### Project Documentation
 - **[CLAUDE.md](CLAUDE.md)** - Developer guide for contributors
 - **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)** - Project history and implementation results
 - **[NEXT_STEPS.md](NEXT_STEPS.md)** - Future enhancement roadmap
@@ -191,16 +203,16 @@ Explore cutting-edge techniques:
 
 | Technology | Usage | Demos |
 |------------|-------|-------|
-| **Three.js** | 3D graphics, WebGL wrapper | 30+ |
-| **WebGL** | Raw shader programming | 21+ |
-| **WebGPU** | Next-gen GPU computing | 12+ |
-| **P5.js** | Creative coding framework | 40+ |
-| **Pixi.js** | 2D sprite rendering | 17+ |
-| **D3.js** | Data visualization | 18+ |
-| **Web Audio API** | Audio processing & visualization | 40+ |
-| **WebAssembly** | High-performance computing | 40+ |
-| **Canvas 2D** | Basic graphics | 50+ |
-| **Vanilla JS** | No framework demos | 60+ |
+| **Canvas 2D** | Basic graphics, simulations | 600+ |
+| **Three.js** | 3D graphics, WebGL wrapper | 122+ |
+| **WebGL** | Raw shader programming | 29 |
+| **WebGPU** | Next-gen GPU computing | 12 |
+| **Three.js TSL** | Modern shader language | 86 |
+| **D3.js** | Data visualization | 18 |
+| **Pixi.js** | 2D sprite rendering | 17 |
+| **Web Audio API** | Audio processing & visualization | 40 |
+| **WebAssembly** | High-performance computing | 5 |
+| **CSS3/SVG** | Pure CSS art, SVG animations | 11 |
 
 ## 🎨 Visual Gallery Preview
 
@@ -233,14 +245,18 @@ All visualizations target:
 ## 🏆 Project Evolution
 
 1. **Phase 1**: Manual creation of 40 foundational demos
-2. **Phase 2**: Automated generation of 19 feature branches
-3. **Phase 3**: Quality filtering (13 successful, 6 failed)
-4. **Phase 4**: Consolidation into main branch
-5. **Phase 5**: Quality curation (560 → 348 demos)
-6. **Phase 6**: Altruism Evolution gallery (16 demos)
-7. **Current**: 364 curated demos across 20 categories
+2. **Phase 2**: Automated generation using 20+ Claude Code instances
+3. **Phase 3**: Created 47 galleries (up from initial 6)
+4. **Phase 4**: Quality filtering and consolidation
+5. **Phase 5**: Expansion with agent-based models and physics simulations
+6. **Phase 6**: Documentation and cataloging of 1,000+ demos
+7. **Current**: 1,000+ demos across 47 galleries (44 active)
 
-**Success Pattern**: Framework-based visualizations (Three.js, D3.js, P5.js) succeeded at higher rates than complex physics simulations.
+**Key Discoveries**:
+- Framework-based visualizations (Three.js, D3.js) have higher success rates
+- Agent-based models scale well with parameter variations
+- Physics simulations benefit from GPU acceleration
+- Largest galleries: Physics (80+), Petri Arena (50), Gravity (50), Emergent Behaviors (50)
 
 ## 🎓 Method: A Class of 100+ Claude Code Instances as Students
 
@@ -248,10 +264,10 @@ This project represents an experimental approach to AI-assisted creative coding 
 
 ### The Process
 
-**Initial Exploration (10 Web Instances)**
-1. Launched 10 Claude Code web instances (enabled by $1000 credit for Max plan subscribers)
-2. Each instance tasked with creating 20 unique beautiful visualizations
-3. Result: ~200 initial demos exploring different approaches and techniques
+**Initial Exploration (Multiple Instances)**
+1. Launched 20+ Claude Code instances over multiple phases
+2. Each instance tasked with creating specific gallery categories
+3. Result: 1,000+ demos across 47 distinct galleries
 
 **Consolidation & Evaluation**
 1. Used `git worktree` to pull all work into local Claude Code environment
@@ -264,27 +280,28 @@ This project represents an experimental approach to AI-assisted creative coding 
 2. Identified 10 essential technology categories for deep exploration
 3. Planned 40 demonstrations per category for thorough coverage
 
-**Scaled Implementation (10 More Instances)**
-1. Launched 10 additional cloud instances
-2. Each instance assigned a specific section from the roadmap
-3. Each generated 40 iterations/variations on their assigned technology
-4. Result: 400 additional demos across diverse categories
+**Scaled Implementation**
+1. Systematic expansion across technology categories
+2. Each instance focused on specific simulation types or frameworks
+3. Emphasis on agent-based models, physics simulations, and shader programming
+4. Result: 47 galleries covering broad spectrum of web technologies
 
-**Final Curation**
-1. Second merge and evaluation cycle
-2. Analysis of successes and failures (documented in IMPLEMENTATION_STATUS.md)
-3. Quality-focused curation: 560 → 348 demos (38% reduction)
-4. Kept only the most visually impressive and educationally valuable examples
+**Final Curation & Documentation**
+1. Comprehensive evaluation of all galleries
+2. Documentation of 1,000+ individual demos
+3. Creation of master catalog and detailed gallery documentation
+4. 44 active galleries with demos, 3 placeholder galleries for future expansion
 
 ### Reflections
 
 **A Memory Lane Moment**: This process reminded me of high school computer science class with teacher Alexander Kremlev, who would assign visualization tasks and visit each student to see their progress and challenges. Here, I experienced a 400+ student work evaluation exercise - though admittedly, I was much lazier than Alexander was with us as students!
 
 **Key Insights**:
-- **Parallel AI Development Works**: Multiple instances exploring the same problem space generate diverse solutions
-- **Curation is Critical**: Quality over quantity - 68% success rate for automated generation, 62% retention after curation
-- **Framework Success**: Graphics libraries (Three.js, D3.js, P5.js) automated better than complex physics simulations
-- **Educational Value**: The final collection serves as a comprehensive learning resource
+- **Scale Achieved**: 1,000+ demos across 47 galleries from ~20 Claude instances
+- **Agent-Based Models Excel**: Economic and social simulations scale exceptionally well
+- **Physics Wins Big**: Physics simulations became the largest gallery (80+ demos)
+- **Framework Success**: Three.js ecosystem generated 122+ demos across multiple galleries
+- **Educational Value**: Comprehensive collection covering entire spectrum of web technologies
 
 ### Next Steps
 
@@ -312,4 +329,4 @@ Built with:
 
 **Explore. Learn. Create.** 🚀
 
-*364+ visualizations demonstrating the creative possibilities of web technologies*
+*1,000+ interactive visualizations across 47 galleries demonstrating the creative possibilities of web technologies*
