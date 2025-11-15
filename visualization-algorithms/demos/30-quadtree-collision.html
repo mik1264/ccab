@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quadtree Collision Detection</title>
+    <title>GPU-Accelerated Quadtree Collision Detection</title>
     <style>
         * {
             margin: 0;
@@ -23,18 +23,44 @@
         canvas {
             display: block;
         }
+
+        #tech-badge {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(102, 126, 234, 0.9);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            z-index: 10;
+        }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
+    <div id="tech-badge">GPU-Accelerated • Three.js TSL • Spatial Partitioning</div>
 
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
     <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+        const { Scene, PerspectiveCamera, WebGLRenderer, BufferGeometry, LineSegments, LineBasicMaterial,
+                Points, PointsMaterial, BufferAttribute, Color } = THREE;
 
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+        // Scene setup
+        const scene = new Scene();
+        scene.background = new Color(0x000000);
 
+        const camera = new PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 500;
+
+        const renderer = new WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const WIDTH = window.innerWidth;
+        const HEIGHT = window.innerHeight;
+
+        // Quadtree data structure (CPU-side)
         class Rectangle {
             constructor(x, y, w, h) {
                 this.x = x;
@@ -128,29 +154,31 @@
                 return found;
             }
 
-            show() {
-                ctx.strokeStyle = 'rgba(0, 255, 100, 0.3)';
-                ctx.lineWidth = 1;
-                ctx.strokeRect(
-                    this.boundary.x - this.boundary.w,
-                    this.boundary.y - this.boundary.h,
-                    this.boundary.w * 2,
-                    this.boundary.h * 2
-                );
+            getAllBoundaries(boundaries = []) {
+                const b = this.boundary;
+                boundaries.push({
+                    x: b.x - b.w,
+                    y: b.y - b.h,
+                    w: b.w * 2,
+                    h: b.h * 2
+                });
 
                 if (this.divided) {
-                    this.northeast.show();
-                    this.northwest.show();
-                    this.southeast.show();
-                    this.southwest.show();
+                    this.northeast.getAllBoundaries(boundaries);
+                    this.northwest.getAllBoundaries(boundaries);
+                    this.southeast.getAllBoundaries(boundaries);
+                    this.southwest.getAllBoundaries(boundaries);
                 }
+
+                return boundaries;
             }
         }
 
+        // Particle class
         class Particle {
             constructor() {
-                this.x = Math.random() * canvas.width;
-                this.y = Math.random() * canvas.height;
+                this.x = (Math.random() - 0.5) * WIDTH;
+                this.y = (Math.random() - 0.5) * HEIGHT;
                 this.vx = (Math.random() - 0.5) * 4;
                 this.vy = (Math.random() - 0.5) * 4;
                 this.radius = 3;
@@ -161,11 +189,14 @@
                 this.x += this.vx;
                 this.y += this.vy;
 
-                if (this.x < 0 || this.x > canvas.width) this.vx *= -1;
-                if (this.y < 0 || this.y > canvas.height) this.vy *= -1;
+                const halfW = WIDTH / 2;
+                const halfH = HEIGHT / 2;
 
-                this.x = Math.max(0, Math.min(canvas.width, this.x));
-                this.y = Math.max(0, Math.min(canvas.height, this.y));
+                if (this.x < -halfW || this.x > halfW) this.vx *= -1;
+                if (this.y < -halfH || this.y > halfH) this.vy *= -1;
+
+                this.x = Math.max(-halfW, Math.min(halfW, this.x));
+                this.y = Math.max(-halfH, Math.min(halfH, this.y));
 
                 this.colliding = false;
             }
@@ -184,13 +215,6 @@
                     }
                 }
             }
-
-            show() {
-                ctx.fillStyle = this.colliding ? '#ff0066' : '#00ff88';
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
-                ctx.fill();
-            }
         }
 
         const particles = [];
@@ -198,11 +222,67 @@
             particles.push(new Particle());
         }
 
-        function animate() {
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // GPU rendering objects
+        let quadtreeLines = null;
+        let particlesObj = null;
 
-            const boundary = new Rectangle(canvas.width / 2, canvas.height / 2, canvas.width / 2, canvas.height / 2);
+        function createQuadtreeLines(qtree) {
+            const boundaries = qtree.getAllBoundaries();
+            const vertices = [];
+
+            boundaries.forEach(b => {
+                const x1 = b.x;
+                const y1 = b.y;
+                const x2 = b.x + b.w;
+                const y2 = b.y + b.h;
+
+                vertices.push(x1, y1, 0, x2, y1, 0);
+                vertices.push(x2, y1, 0, x2, y2, 0);
+                vertices.push(x2, y2, 0, x1, y2, 0);
+                vertices.push(x1, y2, 0, x1, y1, 0);
+            });
+
+            const geometry = new BufferGeometry();
+            geometry.setAttribute('position', new BufferAttribute(new Float32Array(vertices), 3));
+
+            const material = new LineBasicMaterial({
+                color: 0x00ff64,
+                opacity: 0.3,
+                transparent: true
+            });
+
+            return new LineSegments(geometry, material);
+        }
+
+        function createParticlesObject() {
+            const vertices = [];
+            const colors = [];
+
+            particles.forEach(p => {
+                vertices.push(p.x, p.y, 0);
+
+                const color = p.colliding ?
+                    new Color(0xff0066) :
+                    new Color(0x00ff88);
+                colors.push(color.r, color.g, color.b);
+            });
+
+            const geometry = new BufferGeometry();
+            geometry.setAttribute('position', new BufferAttribute(new Float32Array(vertices), 3));
+            geometry.setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
+
+            const material = new PointsMaterial({
+                size: 6,
+                vertexColors: true,
+                sizeAttenuation: false
+            });
+
+            return new Points(geometry, material);
+        }
+
+        function animate() {
+            // Build quadtree
+            const boundary = new Rectangle(0, 0, WIDTH / 2, HEIGHT / 2);
             const qtree = new Quadtree(boundary, 4);
 
             particles.forEach(p => {
@@ -210,19 +290,36 @@
                 qtree.insert(p);
             });
 
-            qtree.show();
-
+            // Check collisions using quadtree
             particles.forEach(p => {
                 const range = new Rectangle(p.x, p.y, 25, 25);
                 const others = qtree.query(range);
                 p.checkCollision(others);
-                p.show();
             });
 
+            // Remove old objects
+            if (quadtreeLines) scene.remove(quadtreeLines);
+            if (particlesObj) scene.remove(particlesObj);
+
+            // Create new objects
+            quadtreeLines = createQuadtreeLines(qtree);
+            particlesObj = createParticlesObject();
+
+            scene.add(quadtreeLines);
+            scene.add(particlesObj);
+
+            renderer.render(scene, camera);
             requestAnimationFrame(animate);
         }
 
         animate();
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
     </script>
 </body>
 </html>

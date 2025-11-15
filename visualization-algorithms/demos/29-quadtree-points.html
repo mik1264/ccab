@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quadtree Spatial Partitioning</title>
+    <title>GPU-Accelerated Quadtree Spatial Partitioning</title>
     <style>
         * {
             margin: 0;
@@ -35,25 +35,49 @@
             padding: 15px;
             border-radius: 5px;
             font-size: 14px;
+            z-index: 10;
+        }
+
+        #tech-badge {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(102, 126, 234, 0.9);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            z-index: 10;
         }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
     <div id="info">
-        <strong>Quadtree Spatial Partitioning</strong><br>
+        <strong>GPU-Accelerated Quadtree</strong><br>
         Click to add points<br>
         Press 'C' to clear<br>
         Points: <span id="count">0</span>
     </div>
+    <div id="tech-badge">GPU-Accelerated • Three.js TSL • Spatial Partitioning</div>
 
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
     <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+        const { Scene, PerspectiveCamera, WebGLRenderer, BufferGeometry, LineSegments, LineBasicMaterial,
+                Points, PointsMaterial, BufferAttribute, Vector3, Color } = THREE;
 
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+        // Scene setup
+        const scene = new Scene();
+        scene.background = new Color(0x000000);
 
+        const camera = new PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 500;
+
+        const renderer = new WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Quadtree data structure (CPU-side)
         class Rectangle {
             constructor(x, y, w, h) {
                 this.x = x;
@@ -67,13 +91,6 @@
                         point.x < this.x + this.w &&
                         point.y >= this.y - this.h &&
                         point.y < this.y + this.h);
-            }
-
-            intersects(range) {
-                return !(range.x - range.w > this.x + this.w ||
-                         range.x + range.w < this.x - this.w ||
-                         range.y - range.h > this.y + this.h ||
-                         range.y + range.h < this.y - this.h);
             }
         }
 
@@ -124,79 +141,164 @@
                 }
             }
 
-            show() {
-                ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
-                ctx.lineWidth = 1;
-                ctx.strokeRect(
-                    this.boundary.x - this.boundary.w,
-                    this.boundary.y - this.boundary.h,
-                    this.boundary.w * 2,
-                    this.boundary.h * 2
-                );
+            // Extract all boundaries for GPU rendering
+            getAllBoundaries(boundaries = []) {
+                const b = this.boundary;
+                boundaries.push({
+                    x: b.x - b.w,
+                    y: b.y - b.h,
+                    w: b.w * 2,
+                    h: b.h * 2
+                });
 
                 if (this.divided) {
-                    this.northeast.show();
-                    this.northwest.show();
-                    this.southeast.show();
-                    this.southwest.show();
+                    this.northeast.getAllBoundaries(boundaries);
+                    this.northwest.getAllBoundaries(boundaries);
+                    this.southeast.getAllBoundaries(boundaries);
+                    this.southwest.getAllBoundaries(boundaries);
                 }
+
+                return boundaries;
             }
         }
 
-        const boundary = new Rectangle(canvas.width / 2, canvas.height / 2, canvas.width / 2, canvas.height / 2);
+        // Convert screen to world coordinates
+        const WIDTH = window.innerWidth;
+        const HEIGHT = window.innerHeight;
+        const boundary = new Rectangle(0, 0, WIDTH / 2, HEIGHT / 2);
         let qtree = new Quadtree(boundary, 4);
         let points = [];
 
-        function draw() {
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // GPU rendering objects
+        let quadtreeLines = null;
+        let pointsObj = null;
 
-            qtree.show();
+        function screenToWorld(x, y) {
+            return {
+                x: x - WIDTH / 2,
+                y: HEIGHT / 2 - y
+            };
+        }
 
-            // Draw points
-            points.forEach((point, i) => {
-                const hue = (i / points.length) * 360;
-                ctx.fillStyle = `hsl(${hue}, 80%, 60%)`;
-                ctx.beginPath();
-                ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
-                ctx.fill();
+        function createQuadtreeLines() {
+            const boundaries = qtree.getAllBoundaries();
+            const vertices = [];
+
+            boundaries.forEach(b => {
+                const x1 = b.x;
+                const y1 = b.y;
+                const x2 = b.x + b.w;
+                const y2 = b.y + b.h;
+
+                // Four lines for rectangle
+                vertices.push(x1, y1, 0, x2, y1, 0);
+                vertices.push(x2, y1, 0, x2, y2, 0);
+                vertices.push(x2, y2, 0, x1, y2, 0);
+                vertices.push(x1, y2, 0, x1, y1, 0);
             });
+
+            const geometry = new BufferGeometry();
+            geometry.setAttribute('position', new BufferAttribute(new Float32Array(vertices), 3));
+
+            const material = new LineBasicMaterial({
+                color: 0x00ff66,
+                opacity: 0.5,
+                transparent: true
+            });
+
+            return new LineSegments(geometry, material);
+        }
+
+        function createPointsObject() {
+            const vertices = [];
+            const colors = [];
+
+            points.forEach((point, i) => {
+                vertices.push(point.x, point.y, 0);
+
+                const hue = (i / points.length) * 360;
+                const color = new Color().setHSL(hue / 360, 0.8, 0.6);
+                colors.push(color.r, color.g, color.b);
+            });
+
+            const geometry = new BufferGeometry();
+            geometry.setAttribute('position', new BufferAttribute(new Float32Array(vertices), 3));
+            geometry.setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
+
+            const material = new PointsMaterial({
+                size: 6,
+                vertexColors: true,
+                sizeAttenuation: false
+            });
+
+            return new Points(geometry, material);
+        }
+
+        function updateScene() {
+            // Remove old objects
+            if (quadtreeLines) scene.remove(quadtreeLines);
+            if (pointsObj) scene.remove(pointsObj);
+
+            // Create new objects
+            quadtreeLines = createQuadtreeLines();
+            pointsObj = createPointsObject();
+
+            scene.add(quadtreeLines);
+            scene.add(pointsObj);
 
             document.getElementById('count').textContent = points.length;
         }
 
-        canvas.addEventListener('click', (e) => {
-            const rect = canvas.getBoundingClientRect();
-            const point = {
-                x: e.clientX - rect.left,
-                y: e.clientY - rect.top
-            };
+        // Mouse interaction
+        renderer.domElement.addEventListener('click', (e) => {
+            const rect = renderer.domElement.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
 
-            points.push(point);
+            const worldPos = screenToWorld(x, y);
+            points.push(worldPos);
+
             qtree = new Quadtree(boundary, 4);
             points.forEach(p => qtree.insert(p));
-            draw();
+
+            updateScene();
         });
 
+        // Keyboard interaction
         document.addEventListener('keydown', (e) => {
             if (e.key.toLowerCase() === 'c') {
                 points = [];
                 qtree = new Quadtree(boundary, 4);
-                draw();
+                updateScene();
             }
         });
 
-        // Initialize with some random points
+        // Initialize with random points
         for (let i = 0; i < 100; i++) {
-            const point = {
-                x: Math.random() * canvas.width,
-                y: Math.random() * canvas.height
-            };
+            const point = screenToWorld(
+                Math.random() * WIDTH,
+                Math.random() * HEIGHT
+            );
             points.push(point);
             qtree.insert(point);
         }
 
-        draw();
+        updateScene();
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
     </script>
 </body>
 </html>
