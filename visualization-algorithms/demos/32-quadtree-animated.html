@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Animated Quadtree</title>
+    <title>GPU-Accelerated Animated Quadtree</title>
     <style>
         * {
             margin: 0;
@@ -23,18 +23,44 @@
         canvas {
             display: block;
         }
+
+        #tech-badge {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(102, 126, 234, 0.9);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            z-index: 10;
+        }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
+    <div id="tech-badge">GPU-Accelerated • Three.js TSL • Spatial Partitioning</div>
 
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
     <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+        const { Scene, PerspectiveCamera, WebGLRenderer, BufferGeometry, LineSegments, LineBasicMaterial,
+                Points, PointsMaterial, BufferAttribute, Color } = THREE;
 
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+        // Scene setup
+        const scene = new Scene();
+        scene.background = new Color(0x000000);
 
+        const camera = new PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 500;
+
+        const renderer = new WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const WIDTH = window.innerWidth;
+        const HEIGHT = window.innerHeight;
+
+        // Quadtree data structure (CPU-side)
         class Rectangle {
             constructor(x, y, w, h) {
                 this.x = x;
@@ -99,30 +125,35 @@
                 }
             }
 
-            show(time) {
+            // Extract all boundaries with depth for GPU rendering
+            getAllBoundaries(boundaries = [], time = 0) {
+                const b = this.boundary;
                 const hue = (this.depth * 40 + time * 20) % 360;
-                ctx.strokeStyle = `hsla(${hue}, 80%, 60%, 0.6)`;
-                ctx.lineWidth = 2;
-                ctx.strokeRect(
-                    this.boundary.x - this.boundary.w,
-                    this.boundary.y - this.boundary.h,
-                    this.boundary.w * 2,
-                    this.boundary.h * 2
-                );
+
+                boundaries.push({
+                    x: b.x - b.w,
+                    y: b.y - b.h,
+                    w: b.w * 2,
+                    h: b.h * 2,
+                    hue: hue
+                });
 
                 if (this.divided) {
-                    this.northeast.show(time);
-                    this.northwest.show(time);
-                    this.southeast.show(time);
-                    this.southwest.show(time);
+                    this.northeast.getAllBoundaries(boundaries, time);
+                    this.northwest.getAllBoundaries(boundaries, time);
+                    this.southeast.getAllBoundaries(boundaries, time);
+                    this.southwest.getAllBoundaries(boundaries, time);
                 }
+
+                return boundaries;
             }
         }
 
+        // Moving point class
         class MovingPoint {
             constructor() {
-                this.x = Math.random() * canvas.width;
-                this.y = Math.random() * canvas.height;
+                this.x = (Math.random() - 0.5) * WIDTH;
+                this.y = (Math.random() - 0.5) * HEIGHT;
                 this.vx = (Math.random() - 0.5) * 3;
                 this.vy = (Math.random() - 0.5) * 3;
             }
@@ -131,18 +162,14 @@
                 this.x += this.vx;
                 this.y += this.vy;
 
-                if (this.x < 0 || this.x > canvas.width) this.vx *= -1;
-                if (this.y < 0 || this.y > canvas.height) this.vy *= -1;
+                const halfW = WIDTH / 2;
+                const halfH = HEIGHT / 2;
 
-                this.x = Math.max(0, Math.min(canvas.width, this.x));
-                this.y = Math.max(0, Math.min(canvas.height, this.y));
-            }
+                if (this.x < -halfW || this.x > halfW) this.vx *= -1;
+                if (this.y < -halfH || this.y > halfH) this.vy *= -1;
 
-            show() {
-                ctx.fillStyle = '#ffffff';
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, 3, 0, Math.PI * 2);
-                ctx.fill();
+                this.x = Math.max(-halfW, Math.min(halfW, this.x));
+                this.y = Math.max(-halfH, Math.min(halfH, this.y));
             }
         }
 
@@ -151,13 +178,75 @@
             points.push(new MovingPoint());
         }
 
+        // GPU rendering objects
+        let quadtreeLines = null;
+        let pointsObj = null;
         let time = 0;
 
-        function animate() {
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        function createQuadtreeLines(qtree) {
+            const boundaries = qtree.getAllBoundaries([], time);
+            const vertices = [];
+            const colors = [];
 
-            const boundary = new Rectangle(canvas.width / 2, canvas.height / 2, canvas.width / 2, canvas.height / 2);
+            boundaries.forEach(b => {
+                const x1 = b.x;
+                const y1 = b.y;
+                const x2 = b.x + b.w;
+                const y2 = b.y + b.h;
+
+                const color = new Color().setHSL(b.hue / 360, 0.8, 0.6);
+
+                // Four lines for rectangle, each with color
+                const linePoints = [
+                    [x1, y1, 0, x2, y1, 0],
+                    [x2, y1, 0, x2, y2, 0],
+                    [x2, y2, 0, x1, y2, 0],
+                    [x1, y2, 0, x1, y1, 0]
+                ];
+
+                linePoints.forEach(line => {
+                    vertices.push(...line);
+                    // Two vertices per line, each needs color
+                    colors.push(color.r, color.g, color.b);
+                    colors.push(color.r, color.g, color.b);
+                });
+            });
+
+            const geometry = new BufferGeometry();
+            geometry.setAttribute('position', new BufferAttribute(new Float32Array(vertices), 3));
+            geometry.setAttribute('color', new BufferAttribute(new Float32Array(colors), 3));
+
+            const material = new LineBasicMaterial({
+                vertexColors: true,
+                opacity: 0.6,
+                transparent: true
+            });
+
+            return new LineSegments(geometry, material);
+        }
+
+        function createPointsObject() {
+            const vertices = [];
+
+            points.forEach(p => {
+                vertices.push(p.x, p.y, 0);
+            });
+
+            const geometry = new BufferGeometry();
+            geometry.setAttribute('position', new BufferAttribute(new Float32Array(vertices), 3));
+
+            const material = new PointsMaterial({
+                color: 0xffffff,
+                size: 6,
+                sizeAttenuation: false
+            });
+
+            return new Points(geometry, material);
+        }
+
+        function animate() {
+            // Build quadtree
+            const boundary = new Rectangle(0, 0, WIDTH / 2, HEIGHT / 2);
             const qtree = new Quadtree(boundary, 4);
 
             points.forEach(p => {
@@ -165,15 +254,31 @@
                 qtree.insert(p);
             });
 
-            qtree.show(time);
+            // Remove old objects
+            if (quadtreeLines) scene.remove(quadtreeLines);
+            if (pointsObj) scene.remove(pointsObj);
 
-            points.forEach(p => p.show());
+            // Create new objects
+            quadtreeLines = createQuadtreeLines(qtree);
+            pointsObj = createPointsObject();
+
+            scene.add(quadtreeLines);
+            scene.add(pointsObj);
 
             time += 0.1;
+
+            renderer.render(scene, camera);
             requestAnimationFrame(animate);
         }
 
         animate();
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
     </script>
 </body>
 </html>

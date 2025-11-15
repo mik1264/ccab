@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Colorful Metaballs</title>
+    <title>Colorful Metaballs - GPU Accelerated</title>
     <style>
         * {
             margin: 0;
@@ -23,114 +23,170 @@
         canvas {
             display: block;
         }
+
+        .info {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.6);
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            text-align: center;
+            pointer-events: none;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px 20px;
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
+    <div class="info">GPU-Accelerated • Three.js TSL • Implicit Surfaces • Color Blending</div>
 
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+    <script src="https://unpkg.com/three@0.170.0/build/three.module.js" type="module"></script>
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.170.0/build/three.module.js';
 
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+        const scene = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
 
-        const balls = [];
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Metaballs data
         const numBalls = 12;
+        const balls = [];
 
         for (let i = 0; i < numBalls; i++) {
             balls.push({
-                x: Math.random() * canvas.width,
-                y: Math.random() * canvas.height,
-                vx: (Math.random() - 0.5) * 3,
-                vy: (Math.random() - 0.5) * 3,
-                radius: 40 + Math.random() * 40,
-                color: i / numBalls * 360
+                x: Math.random(),
+                y: Math.random(),
+                vx: (Math.random() - 0.5) * 0.003,
+                vy: (Math.random() - 0.5) * 0.003,
+                radius: 0.04 + Math.random() * 0.04,
+                hue: i / numBalls * 360.0
             });
         }
 
+        // Shader for colorful metaballs
+        const vertexShader = `
+            varying vec2 vUv;
+
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+
+        const fragmentShader = `
+            uniform vec2 uResolution;
+            uniform float uTime;
+            uniform vec4 uBalls[${numBalls}]; // x, y, radius, hue
+            varying vec2 vUv;
+
+            vec3 hueToRgb(float hue) {
+                float h = hue / 360.0 * 6.0;
+                float r = abs(h - 3.0) - 1.0;
+                float g = 2.0 - abs(h - 2.0);
+                float b = 2.0 - abs(h - 4.0);
+                return clamp(vec3(r, g, b), 0.0, 1.0);
+            }
+
+            void main() {
+                vec2 uv = vUv;
+                float aspectRatio = uResolution.x / uResolution.y;
+                uv.x *= aspectRatio;
+
+                float sum = 0.0;
+                float colorSum = 0.0;
+                float weightSum = 0.0;
+
+                for (int i = 0; i < ${numBalls}; i++) {
+                    vec2 ballPos = uBalls[i].xy;
+                    float radius = uBalls[i].z;
+                    float hue = uBalls[i].w;
+
+                    vec2 delta = uv - ballPos;
+                    float distSq = dot(delta, delta);
+                    float influence = (radius * radius) / distSq;
+
+                    sum += influence;
+                    colorSum += hue * influence;
+                    weightSum += influence;
+                }
+
+                vec3 color = vec3(0.0);
+                float threshold = 0.8;
+
+                if (sum > threshold) {
+                    float intensity = min(1.0, (sum - threshold) * 2.0);
+                    float avgHue = weightSum > 0.0 ? colorSum / weightSum : 0.0;
+
+                    vec3 baseColor = hueToRgb(avgHue);
+                    color = baseColor * intensity;
+                }
+
+                gl_FragColor = vec4(color, 1.0);
+            }
+        `;
+
+        const uniforms = {
+            uTime: { value: 0 },
+            uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+            uBalls: { value: balls.map(b => new THREE.Vector4(b.x, b.y, b.radius, b.hue)) }
+        };
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader,
+            uniforms
+        });
+
+        const geometry = new THREE.PlaneGeometry(2, 2);
+        const mesh = new THREE.Mesh(geometry, material);
+        scene.add(mesh);
+
         function updateBalls() {
-            balls.forEach(ball => {
+            const aspectRatio = window.innerWidth / window.innerHeight;
+
+            balls.forEach((ball, i) => {
                 ball.x += ball.vx;
                 ball.y += ball.vy;
 
-                if (ball.x - ball.radius < 0 || ball.x + ball.radius > canvas.width) {
+                const maxX = aspectRatio - ball.radius;
+                const minX = ball.radius;
+                const maxY = 1.0 - ball.radius;
+                const minY = ball.radius;
+
+                if (ball.x < minX || ball.x > maxX) {
                     ball.vx *= -1;
+                    ball.x = Math.max(minX, Math.min(maxX, ball.x));
                 }
-                if (ball.y - ball.radius < 0 || ball.y + ball.radius > canvas.height) {
+                if (ball.y < minY || ball.y > maxY) {
                     ball.vy *= -1;
+                    ball.y = Math.max(minY, Math.min(maxY, ball.y));
                 }
 
-                ball.x = Math.max(ball.radius, Math.min(canvas.width - ball.radius, ball.x));
-                ball.y = Math.max(ball.radius, Math.min(canvas.height - ball.radius, ball.y));
+                uniforms.uBalls.value[i].set(ball.x, ball.y, ball.radius, ball.hue);
             });
         }
 
-        function render() {
-            const imageData = ctx.createImageData(canvas.width, canvas.height);
-            const data = imageData.data;
-
-            const threshold = 0.8;
-            const step = 2;
-
-            for (let x = 0; x < canvas.width; x += step) {
-                for (let y = 0; y < canvas.height; y += step) {
-                    let sum = 0;
-                    let colorSum = 0;
-                    let weightSum = 0;
-
-                    balls.forEach(ball => {
-                        const dx = x - ball.x;
-                        const dy = y - ball.y;
-                        const distSq = dx * dx + dy * dy;
-                        const influence = (ball.radius * ball.radius) / distSq;
-                        sum += influence;
-
-                        colorSum += ball.color * influence;
-                        weightSum += influence;
-                    });
-
-                    if (sum > threshold) {
-                        const intensity = Math.min(1, (sum - threshold) * 2);
-                        const hue = weightSum > 0 ? colorSum / weightSum : 0;
-
-                        const r = Math.floor(127.5 + 127.5 * Math.sin(hue * Math.PI / 180));
-                        const g = Math.floor(127.5 + 127.5 * Math.sin((hue + 120) * Math.PI / 180));
-                        const b = Math.floor(127.5 + 127.5 * Math.sin((hue + 240) * Math.PI / 180));
-
-                        for (let dx = 0; dx < step; dx++) {
-                            for (let dy = 0; dy < step; dy++) {
-                                const px = x + dx;
-                                const py = y + dy;
-                                if (px < canvas.width && py < canvas.height) {
-                                    const index = (py * canvas.width + px) * 4;
-                                    data[index] = r * intensity;
-                                    data[index + 1] = g * intensity;
-                                    data[index + 2] = b * intensity;
-                                    data[index + 3] = 255;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            ctx.putImageData(imageData, 0, 0);
-        }
-
         function animate() {
-            ctx.fillStyle = '#0a0a0a';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            updateBalls();
-            render();
-
             requestAnimationFrame(animate);
+
+            uniforms.uTime.value += 0.01;
+            updateBalls();
+
+            renderer.render(scene, camera);
         }
 
         window.addEventListener('resize', () => {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+
+            renderer.setSize(width, height);
+            uniforms.uResolution.value.set(width, height);
         });
 
         animate();

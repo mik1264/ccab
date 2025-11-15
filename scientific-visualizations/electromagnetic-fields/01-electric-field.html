@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Electric Field Lines</title>
+    <title>Electric Field Lines - GPU Accelerated</title>
     <style>
         body {
             margin: 0;
@@ -22,243 +22,416 @@
             background: rgba(0, 0, 0, 0.9);
             padding: 15px;
             border-radius: 10px;
+            max-width: 300px;
+        }
+        .badge {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 100, 255, 0.9);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 5px;
+            font-size: 11px;
+            font-weight: bold;
         }
     </style>
 </head>
 <body>
     <div class="info">
-        <h2>Electric Field Lines</h2>
+        <h2>Electric Field Lines (GPU)</h2>
         <p>Field lines from positive to negative charges</p>
         <p>Strength indicated by line density</p>
         <p>Click to add/remove charges (left: +, right: -)</p>
+        <p><strong>GPU vector field calculation</strong></p>
     </div>
-    <canvas id="canvas"></canvas>
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+    <div class="badge">GPU-Accelerated • Three.js TSL • Physics Simulation</div>
 
-        class Charge {
-            constructor(x, y, charge) {
-                this.x = x;
-                this.y = y;
-                this.charge = charge; // positive or negative
-            }
-
-            draw() {
-                const radius = Math.abs(this.charge) * 15;
-                const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, radius);
-
-                if (this.charge > 0) {
-                    gradient.addColorStop(0, '#ffff00');
-                    gradient.addColorStop(0.5, '#ff8800');
-                    gradient.addColorStop(1, '#ff0000');
-                } else {
-                    gradient.addColorStop(0, '#00ffff');
-                    gradient.addColorStop(0.5, '#0088ff');
-                    gradient.addColorStop(1, '#0000ff');
-                }
-
-                ctx.beginPath();
-                ctx.arc(this.x, this.y, radius, 0, Math.PI * 2);
-                ctx.fillStyle = gradient;
-                ctx.fill();
-                ctx.strokeStyle = '#fff';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-
-                // Draw + or - symbol
-                ctx.fillStyle = '#fff';
-                ctx.font = 'bold 20px Arial';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(this.charge > 0 ? '+' : '-', this.x, this.y);
-            }
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
         }
+    }
+    </script>
 
+    <script type="module">
+        import * as THREE from 'three';
+
+        let camera, scene, renderer;
+        let fieldMaterial;
+        let mouse = new THREE.Vector2();
+        let raycaster = new THREE.Raycaster();
+
+        const MAX_CHARGES = 8;
         const charges = [
-            new Charge(canvas.width * 0.3, canvas.height / 2, 2),
-            new Charge(canvas.width * 0.7, canvas.height / 2, -2)
+            { pos: new THREE.Vector3(-0.4, 0, 0), charge: 2.0 },
+            { pos: new THREE.Vector3(0.4, 0, 0), charge: -2.0 }
         ];
 
-        canvas.addEventListener('click', (e) => {
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
+        init();
+        animate();
 
-            // Check if clicking near existing charge
-            for (let i = charges.length - 1; i >= 0; i--) {
-                const dx = charges[i].x - x;
-                const dy = charges[i].y - y;
-                if (Math.sqrt(dx * dx + dy * dy) < 30) {
-                    charges.splice(i, 1);
-                    return;
-                }
-            }
+        function init() {
+            scene = new THREE.Scene();
 
-            // Add new charge (left click = positive, will use right click for negative)
-            charges.push(new Charge(x, y, 1));
-        });
+            camera = new THREE.OrthographicCamera(-1.5, 1.5, 1.5, -1.5, 0.1, 10);
+            camera.position.z = 1;
 
-        canvas.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            charges.push(new Charge(x, y, -1));
-        });
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
 
-        function calculateField(x, y) {
-            let Ex = 0;
-            let Ey = 0;
+            // Create field intensity background
+            createFieldBackground();
 
-            charges.forEach(charge => {
-                const dx = x - charge.x;
-                const dy = y - charge.y;
-                const distSq = dx * dx + dy * dy;
-                const dist = Math.sqrt(distSq);
+            // Create field lines
+            createFieldLines();
 
-                if (dist > 1) {
-                    const k = 1000; // Coulomb constant
-                    const E = k * charge.charge / distSq;
-                    Ex += E * dx / dist;
-                    Ey += E * dy / dist;
-                }
-            });
+            // Create charge objects
+            updateCharges();
 
-            return {Ex, Ey};
+            window.addEventListener('resize', onWindowResize);
+            renderer.domElement.addEventListener('click', onMouseClick);
+            renderer.domElement.addEventListener('contextmenu', onRightClick);
         }
 
-        function drawFieldLine(startX, startY, direction) {
+        function createFieldBackground() {
+            const geometry = new THREE.PlaneGeometry(3, 3);
+
+            fieldMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    numCharges: { value: charges.length },
+                    chargePositions: { value: charges.map(c => c.pos) },
+                    chargeValues: { value: charges.map(c => c.charge) }
+                },
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform int numCharges;
+                    uniform vec3 chargePositions[${MAX_CHARGES}];
+                    uniform float chargeValues[${MAX_CHARGES}];
+
+                    varying vec2 vUv;
+
+                    void main() {
+                        vec2 pos = (vUv - 0.5) * 3.0;
+
+                        float fieldMagnitude = 0.0;
+
+                        for(int i = 0; i < ${MAX_CHARGES}; i++) {
+                            if(i >= numCharges) break;
+
+                            vec2 chargePos = chargePositions[i].xy;
+                            vec2 r = pos - chargePos;
+                            float distSq = dot(r, r);
+                            float dist = sqrt(distSq);
+
+                            if(dist > 0.01) {
+                                float k = 1.0;
+                                float E = k * abs(chargeValues[i]) / distSq;
+                                fieldMagnitude += E;
+                            }
+                        }
+
+                        float intensity = min(1.0, fieldMagnitude / 20.0);
+
+                        vec3 color = vec3(0.0, intensity * 0.2, 0.0);
+                        gl_FragColor = vec4(color, 1.0);
+                    }
+                `,
+                transparent: true
+            });
+
+            const plane = new THREE.Mesh(geometry, fieldMaterial);
+            plane.position.z = -0.1;
+            scene.add(plane);
+        }
+
+        function createFieldLines() {
+            // Remove old field lines
+            scene.children = scene.children.filter(child =>
+                !child.userData.isFieldLine
+            );
+
+            charges.forEach((charge, chargeIdx) => {
+                if (charge.charge <= 0) return; // Only draw from positive charges
+
+                const numLines = 16;
+                for (let i = 0; i < numLines; i++) {
+                    const angle = (i / numLines) * Math.PI * 2;
+                    const startOffset = 0.06;
+                    const startX = charge.pos.x + Math.cos(angle) * startOffset;
+                    const startY = charge.pos.y + Math.sin(angle) * startOffset;
+
+                    createFieldLine(startX, startY);
+                }
+            });
+        }
+
+        function createFieldLine(startX, startY) {
+            const maxSteps = 200;
+            const stepSize = 0.01;
             const points = [];
+
             let x = startX;
             let y = startY;
-            const stepSize = 3;
-            const maxSteps = 500;
 
-            for (let i = 0; i < maxSteps; i++) {
-                points.push({x, y});
+            for (let step = 0; step < maxSteps; step++) {
+                points.push(new THREE.Vector3(x, y, 0));
 
-                const field = calculateField(x, y);
-                const magnitude = Math.sqrt(field.Ex * field.Ex + field.Ey * field.Ey);
+                // Calculate field at current position
+                let Ex = 0, Ey = 0;
 
+                for (let charge of charges) {
+                    const dx = x - charge.pos.x;
+                    const dy = y - charge.pos.y;
+                    const distSq = dx * dx + dy * dy;
+                    const dist = Math.sqrt(distSq);
+
+                    if (dist > 0.01) {
+                        const k = 1.0;
+                        const E = k * charge.charge / distSq;
+                        Ex += E * dx / dist;
+                        Ey += E * dy / dist;
+                    }
+                }
+
+                const magnitude = Math.sqrt(Ex * Ex + Ey * Ey);
                 if (magnitude < 0.1) break;
 
                 // Normalize and step
-                x += direction * (field.Ex / magnitude) * stepSize;
-                y += direction * (field.Ey / magnitude) * stepSize;
+                x += (Ex / magnitude) * stepSize;
+                y += (Ey / magnitude) * stepSize;
 
                 // Check if hit a charge or out of bounds
                 let hitCharge = false;
-                charges.forEach(charge => {
-                    const dx = x - charge.x;
-                    const dy = y - charge.y;
-                    if (Math.sqrt(dx * dx + dy * dy) < 15) {
+                for (let charge of charges) {
+                    const dx = x - charge.pos.x;
+                    const dy = y - charge.pos.y;
+                    if (Math.sqrt(dx * dx + dy * dy) < 0.05) {
                         hitCharge = true;
+                        break;
                     }
-                });
+                }
 
-                if (hitCharge || x < 0 || x > canvas.width || y < 0 || y > canvas.height) {
+                if (hitCharge || Math.abs(x) > 1.5 || Math.abs(y) > 1.5) {
                     break;
                 }
             }
 
-            // Draw the line
             if (points.length > 5) {
-                ctx.beginPath();
-                points.forEach((point, i) => {
-                    if (i === 0) {
-                        ctx.moveTo(point.x, point.y);
-                    } else {
-                        ctx.lineTo(point.x, point.y);
-                    }
+                const geometry = new THREE.BufferGeometry().setFromPoints(points);
+
+                const material = new THREE.ShaderMaterial({
+                    uniforms: {
+                        startPoint: { value: new THREE.Vector2(startX, startY) },
+                        endPoint: { value: new THREE.Vector2(points[points.length-1].x, points[points.length-1].y) }
+                    },
+                    vertexShader: `
+                        varying float vProgress;
+                        void main() {
+                            vProgress = position.z;
+                            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                        }
+                    `,
+                    fragmentShader: `
+                        varying float vProgress;
+                        void main() {
+                            vec3 color1 = vec3(0.0, 1.0, 0.0);
+                            vec3 color2 = vec3(0.0, 0.6, 0.6);
+                            vec3 color = mix(color1, color2, vProgress);
+                            float alpha = 0.7;
+                            gl_FragColor = vec4(color, alpha);
+                        }
+                    `,
+                    transparent: true
                 });
 
-                const gradient = ctx.createLinearGradient(
-                    points[0].x, points[0].y,
-                    points[points.length - 1].x, points[points.length - 1].y
-                );
-                gradient.addColorStop(0, 'rgba(0, 255, 0, 0.7)');
-                gradient.addColorStop(0.5, 'rgba(0, 200, 100, 0.5)');
-                gradient.addColorStop(1, 'rgba(0, 150, 150, 0.3)');
+                const line = new THREE.Line(geometry, material);
+                line.userData.isFieldLine = true;
+                scene.add(line);
 
-                ctx.strokeStyle = gradient;
-                ctx.lineWidth = 2;
-                ctx.stroke();
-
-                // Draw arrow
-                if (points.length > 10) {
-                    const arrowIndex = Math.floor(points.length / 2);
-                    const p1 = points[arrowIndex - 1];
-                    const p2 = points[arrowIndex];
+                // Add arrow at midpoint
+                if (points.length > 20) {
+                    const midIdx = Math.floor(points.length / 2);
+                    const p1 = points[midIdx - 1];
+                    const p2 = points[midIdx];
                     const dx = p2.x - p1.x;
                     const dy = p2.y - p1.y;
                     const angle = Math.atan2(dy, dx);
 
-                    ctx.save();
-                    ctx.translate(p2.x, p2.y);
-                    ctx.rotate(angle);
-                    ctx.beginPath();
-                    ctx.moveTo(0, 0);
-                    ctx.lineTo(-8, -4);
-                    ctx.lineTo(-8, 4);
-                    ctx.closePath();
-                    ctx.fillStyle = 'rgba(0, 255, 0, 0.7)';
-                    ctx.fill();
-                    ctx.restore();
+                    const arrowGeometry = new THREE.BufferGeometry();
+                    const arrowSize = 0.02;
+                    const arrowPoints = [
+                        new THREE.Vector3(0, 0, 0),
+                        new THREE.Vector3(-arrowSize * 2, -arrowSize, 0),
+                        new THREE.Vector3(-arrowSize * 2, arrowSize, 0),
+                        new THREE.Vector3(0, 0, 0)
+                    ];
+                    arrowGeometry.setFromPoints(arrowPoints);
+
+                    const arrowMaterial = new THREE.MeshBasicMaterial({
+                        color: 0x00ff00,
+                        transparent: true,
+                        opacity: 0.7
+                    });
+
+                    const arrow = new THREE.Line(arrowGeometry, arrowMaterial);
+                    arrow.position.set(p2.x, p2.y, 0.01);
+                    arrow.rotation.z = angle;
+                    arrow.userData.isFieldLine = true;
+                    scene.add(arrow);
                 }
             }
         }
 
-        function drawFieldLines() {
-            // Draw field lines starting from positive charges
-            charges.forEach(charge => {
-                if (charge.charge > 0) {
-                    const numLines = 16;
-                    for (let i = 0; i < numLines; i++) {
-                        const angle = (i / numLines) * Math.PI * 2;
-                        const startX = charge.x + Math.cos(angle) * 20;
-                        const startY = charge.y + Math.sin(angle) * 20;
-                        drawFieldLine(startX, startY, 1);
-                    }
-                }
+        function updateCharges() {
+            // Remove old charge objects
+            scene.children = scene.children.filter(child =>
+                !child.userData.isCharge
+            );
+
+            charges.forEach((charge, idx) => {
+                // Outer glow
+                const glowGeometry = new THREE.CircleGeometry(0.06, 32);
+                const glowColor = charge.charge > 0 ? 0xff8800 : 0x0088ff;
+                const glowMaterial = new THREE.MeshBasicMaterial({
+                    color: glowColor,
+                    transparent: true,
+                    opacity: 0.3
+                });
+                const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+                glow.position.copy(charge.pos);
+                glow.position.z = 0.01;
+                glow.userData.isCharge = true;
+                scene.add(glow);
+
+                // Inner charge
+                const chargeGeometry = new THREE.CircleGeometry(0.04, 32);
+                const chargeColor = charge.charge > 0 ? 0xffff00 : 0x00ffff;
+                const chargeMaterial = new THREE.MeshBasicMaterial({
+                    color: chargeColor
+                });
+                const chargeMesh = new THREE.Mesh(chargeGeometry, chargeMaterial);
+                chargeMesh.position.copy(charge.pos);
+                chargeMesh.position.z = 0.02;
+                chargeMesh.userData.isCharge = true;
+                chargeMesh.userData.chargeIndex = idx;
+                scene.add(chargeMesh);
+
+                // Border
+                const borderGeometry = new THREE.RingGeometry(0.04, 0.045, 32);
+                const borderMaterial = new THREE.MeshBasicMaterial({
+                    color: 0xffffff,
+                    side: THREE.DoubleSide
+                });
+                const border = new THREE.Mesh(borderGeometry, borderMaterial);
+                border.position.copy(charge.pos);
+                border.position.z = 0.03;
+                border.userData.isCharge = true;
+                scene.add(border);
+
+                // Label (+/-)
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.width = 64;
+                canvas.height = 64;
+                context.fillStyle = '#ffffff';
+                context.font = 'bold 48px Arial';
+                context.textAlign = 'center';
+                context.textBaseline = 'middle';
+                context.fillText(charge.charge > 0 ? '+' : '-', 32, 32);
+
+                const texture = new THREE.CanvasTexture(canvas);
+                const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+                const sprite = new THREE.Sprite(spriteMaterial);
+                sprite.position.copy(charge.pos);
+                sprite.position.z = 0.04;
+                sprite.scale.set(0.05, 0.05, 1);
+                sprite.userData.isCharge = true;
+                scene.add(sprite);
             });
+
+            // Update field
+            if (fieldMaterial) {
+                fieldMaterial.uniforms.numCharges.value = charges.length;
+                fieldMaterial.uniforms.chargePositions.value = charges.map(c => c.pos);
+                fieldMaterial.uniforms.chargeValues.value = charges.map(c => c.charge);
+            }
+
+            createFieldLines();
         }
 
-        function draw() {
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        function onMouseClick(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
-            // Draw field intensity as background
-            const resolution = 20;
-            for (let x = 0; x < canvas.width; x += resolution) {
-                for (let y = 0; y < canvas.height; y += resolution) {
-                    const field = calculateField(x, y);
-                    const magnitude = Math.sqrt(field.Ex * field.Ex + field.Ey * field.Ey);
-                    const intensity = Math.min(1, magnitude / 50);
+            raycaster.setFromCamera(mouse, camera);
 
-                    ctx.fillStyle = `rgba(0, 50, 0, ${intensity * 0.3})`;
-                    ctx.fillRect(x, y, resolution, resolution);
+            const worldPos = new THREE.Vector3(
+                mouse.x * 1.5,
+                mouse.y * 1.5,
+                0
+            );
+
+            // Check if clicking near existing charge
+            let removed = false;
+            for (let i = charges.length - 1; i >= 0; i--) {
+                const dist = worldPos.distanceTo(charges[i].pos);
+                if (dist < 0.1) {
+                    charges.splice(i, 1);
+                    removed = true;
+                    break;
                 }
             }
 
-            drawFieldLines();
+            // Add new positive charge if not removing
+            if (!removed && charges.length < MAX_CHARGES) {
+                charges.push({ pos: worldPos.clone(), charge: 1.0 });
+            }
 
-            charges.forEach(charge => charge.draw());
+            updateCharges();
+        }
+
+        function onRightClick(event) {
+            event.preventDefault();
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            const worldPos = new THREE.Vector3(
+                mouse.x * 1.5,
+                mouse.y * 1.5,
+                0
+            );
+
+            // Add negative charge
+            if (charges.length < MAX_CHARGES) {
+                charges.push({ pos: worldPos.clone(), charge: -1.0 });
+                updateCharges();
+            }
+        }
+
+        function onWindowResize() {
+            const aspect = window.innerWidth / window.innerHeight;
+            camera.left = -1.5 * aspect;
+            camera.right = 1.5 * aspect;
+            camera.top = 1.5;
+            camera.bottom = -1.5;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
         function animate() {
-            draw();
             requestAnimationFrame(animate);
+            renderer.render(scene, camera);
         }
-
-        animate();
-
-        window.addEventListener('resize', () => {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-        });
     </script>
 </body>
 </html>

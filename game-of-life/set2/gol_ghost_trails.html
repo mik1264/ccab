@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Game of Life - Ghost Trails</title>
+    <title>Game of Life - Ghost Trails (TSL)</title>
     <style>
         body {
             margin: 0;
@@ -18,211 +18,253 @@
         canvas {
             border: 2px solid #333;
             margin: 20px 0;
+            box-shadow: 0 0 30px rgba(0,255,255,0.4);
         }
-        .controls {
-            display: flex;
-            gap: 10px;
-            margin: 10px 0;
+        h1 {
+            font-size: 24px;
+            margin: 0 0 10px 0;
         }
-        button {
-            padding: 10px 20px;
-            font-size: 16px;
-            cursor: pointer;
-            background: #444;
-            color: #fff;
-            border: none;
-            border-radius: 5px;
-        }
-        button:hover {
-            background: #666;
+        .tech-badge {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            margin-bottom: 15px;
+            font-weight: bold;
         }
     </style>
 </head>
 <body>
     <h1>👻 Game of Life - Ghost Trails</h1>
+    <div class="tech-badge">GPU-Accelerated • Three.js TSL • Fading Trails</div>
     <p>Cells leave fading ghost trails showing their history</p>
-    <div class="controls">
-        <button onclick="togglePause()">Pause/Play</button>
-        <button onclick="randomize()">Randomize</button>
-        <button onclick="clear()">Clear</button>
-    </div>
     <canvas id="canvas"></canvas>
+    <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/",
+            "three/nodes": "https://unpkg.com/three@0.170.0/examples/jsm/nodes/Nodes.js"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import * as Nodes from 'three/nodes';
 
-    <script>
+        const {
+            texture, uv, vec2, vec3, vec4, float,
+            Fn, fract, mix, step, max
+        } = Nodes;
+
+        const cellSize = 10;
+        const cols = 80;
+        const rows = 60;
         const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+        canvas.width = cols * cellSize;
+        canvas.height = rows * cellSize;
 
-        const CELL_SIZE = 10;
-        const COLS = 80;
-        const ROWS = 60;
-        canvas.width = COLS * CELL_SIZE;
-        canvas.height = ROWS * CELL_SIZE;
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+        renderer.setSize(cols * cellSize, rows * cellSize);
 
-        let grid = createGrid();
-        let trailGrid = createTrailGrid();
-        let paused = false;
+        const scene = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-        function createGrid() {
-            return Array(ROWS).fill(null).map(() => Array(COLS).fill(0));
+        // Initialize textures
+        const gridData = new Uint8Array(cols * rows * 4);
+        const trailData = new Uint8Array(cols * rows * 4);
+        for (let i = 0; i < cols * rows; i++) {
+            const alive = Math.random() > 0.7 ? 255 : 0;
+            gridData[i * 4] = alive;
+            gridData[i * 4 + 1] = alive;
+            gridData[i * 4 + 2] = alive;
+            gridData[i * 4 + 3] = 255;
+            trailData[i * 4] = 0;
+            trailData[i * 4 + 1] = 0;
+            trailData[i * 4 + 2] = 0;
+            trailData[i * 4 + 3] = 255;
         }
 
-        function createTrailGrid() {
-            return Array(ROWS).fill(null).map(() => Array(COLS).fill(0));
-        }
+        const gridTexture1 = new THREE.DataTexture(gridData, cols, rows, THREE.RGBAFormat);
+        gridTexture1.needsUpdate = true;
+        gridTexture1.magFilter = THREE.NearestFilter;
+        gridTexture1.minFilter = THREE.NearestFilter;
 
-        function randomize() {
-            for (let i = 0; i < ROWS; i++) {
-                for (let j = 0; j < COLS; j++) {
-                    grid[i][j] = Math.random() > 0.7 ? 1 : 0;
-                }
-            }
-            trailGrid = createTrailGrid();
-        }
+        const gridTexture2 = gridTexture1.clone();
+        gridTexture2.needsUpdate = true;
 
-        function clear() {
-            grid = createGrid();
-            trailGrid = createTrailGrid();
-        }
+        const trailTexture = new THREE.DataTexture(trailData, cols, rows, THREE.RGBAFormat);
+        trailTexture.needsUpdate = true;
+        trailTexture.magFilter = THREE.LinearFilter;
+        trailTexture.minFilter = THREE.LinearFilter;
 
-        function togglePause() {
-            paused = !paused;
-        }
+        let currentTexture = gridTexture1;
+        let nextTexture = gridTexture2;
 
-        function countNeighbors(row, col) {
-            let count = 0;
-            for (let i = -1; i <= 1; i++) {
-                for (let j = -1; j <= 1; j++) {
-                    if (i === 0 && j === 0) continue;
-                    const newRow = (row + i + ROWS) % ROWS;
-                    const newCol = (col + j + COLS) % COLS;
-                    count += grid[newRow][newCol];
+        // TSL: Count neighbors
+        const countNeighbors = Fn(([gridTex, coord, gridSize]) => {
+            let count = float(0);
+            const pixelSize = vec2(1.0).div(gridSize);
+
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    if (dx === 0 && dy === 0) continue;
+                    const offset = vec2(dx, dy).mul(pixelSize);
+                    const neighborCoord = fract(coord.add(offset));
+                    const neighborValue = texture(gridTex, neighborCoord).r;
+                    count = count.add(step(0.5, neighborValue));
                 }
             }
             return count;
-        }
+        });
 
-        function update() {
-            const newGrid = createGrid();
+        // TSL: Game of Life compute
+        const gameOfLifeCompute = Fn(([currentTex, gridSize]) => {
+            const coord = uv();
+            const currentState = texture(currentTex, coord).r;
+            const isAlive = step(0.5, currentState);
+            const neighbors = countNeighbors(currentTex, coord, gridSize);
 
-            // Fade trails
-            for (let i = 0; i < ROWS; i++) {
-                for (let j = 0; j < COLS; j++) {
-                    trailGrid[i][j] *= 0.92; // Slow fade
-                    if (trailGrid[i][j] < 0.01) trailGrid[i][j] = 0;
-                }
-            }
+            const survives = isAlive.mul(step(1.5, neighbors)).mul(step(neighbors, 3.5));
+            const born = isAlive.oneMinus().mul(step(2.9, neighbors)).mul(step(neighbors, 3.1));
+            const newState = survives.add(born);
 
-            for (let i = 0; i < ROWS; i++) {
-                for (let j = 0; j < COLS; j++) {
-                    const neighbors = countNeighbors(i, j);
-                    const cell = grid[i][j];
+            return vec4(newState, newState, newState, 1);
+        });
 
-                    if (cell === 1 && (neighbors === 2 || neighbors === 3)) {
-                        newGrid[i][j] = 1;
-                        trailGrid[i][j] = 1; // Mark trail
-                    } else if (cell === 0 && neighbors === 3) {
-                        newGrid[i][j] = 1;
-                        trailGrid[i][j] = 1; // Mark trail
-                    } else if (cell === 1) {
-                        // Cell died, leave strong trail
-                        trailGrid[i][j] = 1;
-                    }
-                }
-            }
+        // TSL: Trail update with fade
+        const updateTrails = Fn(([gridTex, trailTex]) => {
+            const coord = uv();
+            const currentState = texture(gridTex, coord).r;
+            const oldTrail = texture(trailTex, coord).r;
 
-            grid = newGrid;
-        }
+            // Fade old trail by 92% and add current state
+            const newTrail = max(currentState, oldTrail.mul(0.92));
 
-        function draw() {
-            // Clear to black
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            return vec4(newTrail, newTrail, newTrail, 1);
+        });
 
-            // Draw trails first (older/dimmer)
-            for (let i = 0; i < ROWS; i++) {
-                for (let j = 0; j < COLS; j++) {
-                    if (trailGrid[i][j] > 0) {
-                        const intensity = trailGrid[i][j];
+        // TSL: Ghost trails display
+        const ghostTrailsDisplay = Fn(([gridTex, trailTex]) => {
+            const coord = uv();
+            const cellState = texture(gridTex, coord).r;
+            const trailValue = texture(trailTex, coord).r;
+            const isAlive = step(0.5, cellState);
 
-                        // Create ghostly trail effect with multiple colors
-                        const hue1 = 180;
-                        const hue2 = 280;
-                        const hue = hue1 + (1 - intensity) * (hue2 - hue1);
+            // Ghostly trail colors (cyan to purple gradient)
+            const hue1 = 180.0 / 360.0;
+            const hue2 = 280.0 / 360.0;
+            const trailIntensity = trailValue.oneMinus();
+            const hue = hue1.add(trailIntensity.mul(hue2.sub(hue1)));
 
-                        ctx.fillStyle = `hsla(${hue}, 80%, 50%, ${intensity * 0.6})`;
+            // Trail color with varying hue
+            const trailColor = vec3(
+                hue.mul(2).mul(trailValue),
+                hue.mul(1.5).mul(trailValue),
+                trailValue
+            );
 
-                        // Glow effect
-                        ctx.shadowBlur = 15 * intensity;
-                        ctx.shadowColor = ctx.fillStyle;
+            // Active cells: bright cyan/white
+            const activeColor = vec3(1, 1, 1);
+            const cyanGlow = vec3(0, 1, 1);
 
-                        ctx.fillRect(
-                            j * CELL_SIZE + 1,
-                            i * CELL_SIZE + 1,
-                            CELL_SIZE - 2,
-                            CELL_SIZE - 2
-                        );
+            // Mix between trail and active
+            const finalColor = mix(
+                trailColor.mul(0.6),
+                mix(cyanGlow, activeColor, 0.5),
+                isAlive
+            );
 
-                        ctx.shadowBlur = 0;
-                    }
-                }
-            }
+            const finalAlpha = max(isAlive, trailValue.mul(0.6));
 
-            // Draw alive cells on top (brightest)
-            for (let i = 0; i < ROWS; i++) {
-                for (let j = 0; j < COLS; j++) {
-                    if (grid[i][j] === 1) {
-                        // Bright white core
-                        ctx.fillStyle = '#ffffff';
-                        ctx.shadowBlur = 20;
-                        ctx.shadowColor = '#00ffff';
+            return vec4(finalColor, finalAlpha);
+        });
 
-                        ctx.fillRect(
-                            j * CELL_SIZE + 2,
-                            i * CELL_SIZE + 2,
-                            CELL_SIZE - 4,
-                            CELL_SIZE - 4
-                        );
+        // Compute scene
+        const gridSizeNode = vec2(cols, rows);
+        const computeMaterial = new THREE.MeshBasicMaterial();
+        computeMaterial.colorNode = gameOfLifeCompute(texture(currentTexture), gridSizeNode);
 
-                        // Cyan glow
-                        ctx.fillStyle = '#00ffff';
-                        ctx.shadowBlur = 15;
-                        ctx.shadowColor = '#00ffff';
+        const computeGeometry = new THREE.PlaneGeometry(2, 2);
+        const computeScene = new THREE.Scene();
+        const computeMesh = new THREE.Mesh(computeGeometry, computeMaterial);
+        computeScene.add(computeMesh);
 
-                        ctx.fillRect(
-                            j * CELL_SIZE + 1,
-                            i * CELL_SIZE + 1,
-                            CELL_SIZE - 2,
-                            CELL_SIZE - 2
-                        );
+        const renderTarget = new THREE.WebGLRenderTarget(cols, rows, {
+            format: THREE.RGBAFormat,
+            type: THREE.UnsignedByteType,
+            magFilter: THREE.NearestFilter,
+            minFilter: THREE.NearestFilter
+        });
 
-                        ctx.shadowBlur = 0;
-                    }
-                }
-            }
-        }
+        // Trail update scene
+        const trailMaterial = new THREE.MeshBasicMaterial();
+        trailMaterial.colorNode = updateTrails(texture(currentTexture), texture(trailTexture));
+
+        const trailScene = new THREE.Scene();
+        const trailMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), trailMaterial);
+        trailScene.add(trailMesh);
+
+        const trailTarget = new THREE.WebGLRenderTarget(cols, rows, {
+            format: THREE.RGBAFormat,
+            type: THREE.UnsignedByteType,
+            magFilter: THREE.LinearFilter,
+            minFilter: THREE.LinearFilter
+        });
+
+        // Display scene
+        const displayMaterial = new THREE.MeshBasicMaterial();
+        displayMaterial.transparent = true;
+        displayMaterial.colorNode = ghostTrailsDisplay(texture(currentTexture), texture(trailTexture));
+
+        const displayGeometry = new THREE.PlaneGeometry(2, 2);
+        const displayMesh = new THREE.Mesh(displayGeometry, displayMaterial);
+        scene.add(displayMesh);
 
         let frameCount = 0;
 
-        function gameLoop() {
-            if (!paused && frameCount % 6 === 0) {
-                update();
+        function animate() {
+            frameCount++;
+
+            // Update every 2 frames
+            if (frameCount % 2 === 0) {
+                // Compute next generation
+                computeMaterial.colorNode = gameOfLifeCompute(texture(currentTexture), gridSizeNode);
+                computeMaterial.needsUpdate = true;
+                renderer.setRenderTarget(renderTarget);
+                renderer.render(computeScene, camera);
+
+                const pixels = new Uint8Array(cols * rows * 4);
+                renderer.readRenderTargetPixels(renderTarget, 0, 0, cols, rows, pixels);
+                nextTexture.image.data = pixels;
+                nextTexture.needsUpdate = true;
+
+                [currentTexture, nextTexture] = [nextTexture, currentTexture];
+
+                // Update trail texture
+                trailMaterial.colorNode = updateTrails(texture(currentTexture), texture(trailTexture));
+                trailMaterial.needsUpdate = true;
+                renderer.setRenderTarget(trailTarget);
+                renderer.render(trailScene, camera);
+
+                const trailPixels = new Uint8Array(cols * rows * 4);
+                renderer.readRenderTargetPixels(trailTarget, 0, 0, cols, rows, trailPixels);
+                trailTexture.image.data = trailPixels;
+                trailTexture.needsUpdate = true;
+
+                renderer.setRenderTarget(null);
             }
 
-            draw();
-            frameCount++;
-            requestAnimationFrame(gameLoop);
+            // Render display
+            displayMaterial.colorNode = ghostTrailsDisplay(texture(currentTexture), texture(trailTexture));
+            displayMaterial.needsUpdate = true;
+            renderer.render(scene, camera);
+
+            requestAnimationFrame(animate);
         }
 
-        randomize();
-        gameLoop();
-
-        // Click to toggle cells
-        canvas.addEventListener('click', (e) => {
-            const rect = canvas.getBoundingClientRect();
-            const x = Math.floor((e.clientX - rect.left) / CELL_SIZE);
-            const y = Math.floor((e.clientY - rect.top) / CELL_SIZE);
-            grid[y][x] = 1 - grid[y][x];
-        });
+        animate();
     </script>
 </body>
 </html>

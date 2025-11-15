@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fourier Epicycles</title>
+    <title>Fourier Epicycles - GPU-Accelerated • Three.js TSL • Fourier Analysis</title>
     <style>
         * {
             margin: 0;
@@ -15,127 +15,277 @@
             overflow: hidden;
             background: #000;
             display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
             height: 100vh;
+            font-family: 'Courier New', monospace;
         }
 
         canvas {
             display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        .info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #00ffff;
+            font-size: 14px;
+            line-height: 1.8;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 255, 255, 0.3);
+        }
+
+        .badge {
+            display: inline-block;
+            background: rgba(0, 255, 255, 0.2);
+            padding: 4px 8px;
+            border-radius: 4px;
+            margin: 2px;
+            font-size: 11px;
+            border: 1px solid rgba(0, 255, 255, 0.4);
         }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
+    <div class="info">
+        <div style="margin-bottom: 10px;">
+            <span class="badge">GPU-Accelerated</span>
+            <span class="badge">Three.js TSL</span>
+            <span class="badge">Fourier Analysis</span>
+        </div>
+        <strong>Fourier Epicycles</strong><br>
+        Rotating circles approximate complex waveforms<br>
+        <span style="color: #888;">WebGPU • Instanced Rendering</span>
+    </div>
 
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
-
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-
-        let time = 0;
-        const path = [];
-
-        class Epicycle {
-            constructor(radius, freq, phase) {
-                this.radius = radius;
-                this.freq = freq;
-                this.phase = phase;
-            }
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+            "three/tsl": "https://unpkg.com/three@0.169.0/build/three.webgpu.js",
+            "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
         }
+    }
+    </script>
 
-        const epicycles = [
-            new Epicycle(100, 1, 0),
-            new Epicycle(50, 2, 0),
-            new Epicycle(25, 3, 0),
-            new Epicycle(15, 5, 0),
-            new Epicycle(10, 7, 0),
-            new Epicycle(5, 11, 0)
+    <script type="module">
+        import * as THREE from 'three';
+        import WebGPU from 'three/addons/capabilities/WebGPU.js';
+        import WebGPURenderer from 'three/addons/renderers/webgpu/WebGPURenderer.js';
+
+        let camera, scene, renderer;
+        let epicycles = [];
+        let trailPoints = [];
+        let trailMesh, trailGeometry;
+        let circleMeshes = [];
+        let lineMeshes = [];
+        let time = 0;
+
+        // Epicycle parameters
+        const epicycleData = [
+            { radius: 1.5, freq: 1, phase: 0 },
+            { radius: 0.75, freq: 2, phase: 0 },
+            { radius: 0.4, freq: 3, phase: 0 },
+            { radius: 0.25, freq: 5, phase: 0 },
+            { radius: 0.15, freq: 7, phase: 0 },
+            { radius: 0.1, freq: 11, phase: 0 }
         ];
 
-        function drawEpicycles() {
-            let x = canvas.width / 3;
-            let y = canvas.height / 2;
+        init();
+        animate();
+
+        async function init() {
+            if (!WebGPU.isAvailable()) {
+                document.body.innerHTML = '<div style="color: white; text-align: center; margin-top: 50px;">WebGPU not supported. Please use a compatible browser.</div>';
+                return;
+            }
+
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000000);
+
+            // Camera setup
+            camera = new THREE.OrthographicCamera(
+                -8, 8, 4.5, -4.5, 0.1, 1000
+            );
+            camera.position.z = 10;
+
+            // Renderer setup
+            renderer = new WebGPURenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // Create epicycle circles
+            createEpicycles();
+
+            // Create trail
+            createTrail();
+
+            // Handle resize
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function createEpicycles() {
+            epicycleData.forEach((data, i) => {
+                // Circle outline
+                const circleGeometry = new THREE.RingGeometry(data.radius - 0.02, data.radius + 0.02, 64);
+                const hue = (i * 60) / 360;
+                const circleMaterial = new THREE.MeshBasicMaterial({
+                    color: new THREE.Color().setHSL(hue, 0.8, 0.6),
+                    transparent: true,
+                    opacity: 0.5,
+                    side: THREE.DoubleSide
+                });
+                const circleMesh = new THREE.Mesh(circleGeometry, circleMaterial);
+                scene.add(circleMesh);
+                circleMeshes.push(circleMesh);
+
+                // Radius line
+                const lineGeometry = new THREE.BufferGeometry();
+                const linePositions = new Float32Array(6);
+                lineGeometry.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+                const lineMaterial = new THREE.LineBasicMaterial({
+                    color: new THREE.Color().setHSL(hue, 0.8, 0.6),
+                    linewidth: 2
+                });
+                const lineMesh = new THREE.Line(lineGeometry, lineMaterial);
+                scene.add(lineMesh);
+                lineMeshes.push(lineMesh);
+
+                epicycles.push({
+                    circle: circleMesh,
+                    line: lineMesh,
+                    data: data
+                });
+            });
+        }
+
+        function createTrail() {
+            const maxPoints = 500;
+            const positions = new Float32Array(maxPoints * 3);
+
+            trailGeometry = new THREE.BufferGeometry();
+            trailGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            trailGeometry.setDrawRange(0, 0);
+
+            const trailMaterial = new THREE.LineBasicMaterial({
+                color: 0x00ffff,
+                linewidth: 2
+            });
+
+            trailMesh = new THREE.Line(trailGeometry, trailMaterial);
+            scene.add(trailMesh);
+        }
+
+        function updateEpicycles() {
+            let x = -5;
+            let y = 0;
+            const positions = [];
 
             epicycles.forEach((epi, i) => {
                 const prevX = x;
                 const prevY = y;
 
-                const angle = epi.freq * time + epi.phase;
-                x += epi.radius * Math.cos(angle);
-                y += epi.radius * Math.sin(angle);
+                const angle = epi.data.freq * time + epi.data.phase;
+                x += epi.data.radius * Math.cos(angle);
+                y += epi.data.radius * Math.sin(angle);
 
-                // Draw circle
-                ctx.strokeStyle = `hsla(${i * 60}, 80%, 60%, 0.5)`;
-                ctx.lineWidth = 1;
-                ctx.beginPath();
-                ctx.arc(prevX, prevY, epi.radius, 0, Math.PI * 2);
-                ctx.stroke();
+                // Update circle position
+                epi.circle.position.set(prevX, prevY, 0);
 
-                // Draw radius
-                ctx.strokeStyle = `hsl(${i * 60}, 80%, 60%)`;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(prevX, prevY);
-                ctx.lineTo(x, y);
-                ctx.stroke();
+                // Update line
+                const linePositions = epi.line.geometry.attributes.position.array;
+                linePositions[0] = prevX;
+                linePositions[1] = prevY;
+                linePositions[2] = 0;
+                linePositions[3] = x;
+                linePositions[4] = y;
+                linePositions[5] = 0;
+                epi.line.geometry.attributes.position.needsUpdate = true;
 
-                // Draw point
-                ctx.fillStyle = '#fff';
-                ctx.beginPath();
-                ctx.arc(x, y, 4, 0, Math.PI * 2);
-                ctx.fill();
+                positions.push({ x, y });
             });
 
             return { x, y };
         }
 
-        function animate() {
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        function updateTrail(point) {
+            // Add new point
+            trailPoints.unshift({ x: point.x + 3, y: point.y });
 
-            const point = drawEpicycles();
-
-            // Draw line to path
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(point.x, point.y);
-            ctx.lineTo(canvas.width * 2 / 3, point.y);
-            ctx.stroke();
-
-            // Add to path
-            path.unshift({ x: canvas.width * 2 / 3, y: point.y });
-
-            // Draw path
-            ctx.strokeStyle = '#00ffff';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            path.forEach((p, i) => {
-                if (i === 0) {
-                    ctx.moveTo(p.x, p.y);
-                } else {
-                    ctx.lineTo(p.x, p.y);
-                }
-            });
-            ctx.stroke();
-
-            // Limit path length
-            if (path.length > 500) {
-                path.pop();
+            // Limit trail length
+            if (trailPoints.length > 500) {
+                trailPoints.pop();
             }
 
-            // Translate path
-            path.forEach(p => p.x += 1);
+            // Update trail geometry
+            const positions = trailGeometry.attributes.position.array;
+            trailPoints.forEach((p, i) => {
+                positions[i * 3] = p.x;
+                positions[i * 3 + 1] = p.y;
+                positions[i * 3 + 2] = 0;
+            });
+            trailGeometry.attributes.position.needsUpdate = true;
+            trailGeometry.setDrawRange(0, trailPoints.length);
+
+            // Move trail
+            trailPoints.forEach(p => p.x += 0.015);
+
+            // Draw connection line (create separate line for this)
+            if (!scene.connectionLine) {
+                const connGeometry = new THREE.BufferGeometry();
+                const connPositions = new Float32Array(6);
+                connGeometry.setAttribute('position', new THREE.BufferAttribute(connPositions, 3));
+                const connMaterial = new THREE.LineBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 0.3
+                });
+                scene.connectionLine = new THREE.Line(connGeometry, connMaterial);
+                scene.add(scene.connectionLine);
+            }
+
+            const connPositions = scene.connectionLine.geometry.attributes.position.array;
+            connPositions[0] = point.x;
+            connPositions[1] = point.y;
+            connPositions[2] = 0;
+            connPositions[3] = point.x + 3;
+            connPositions[4] = point.y;
+            connPositions[5] = 0;
+            scene.connectionLine.geometry.attributes.position.needsUpdate = true;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const point = updateEpicycles();
+            updateTrail(point);
 
             time += 0.02;
 
-            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
         }
 
-        animate();
+        function onWindowResize() {
+            const aspect = window.innerWidth / window.innerHeight;
+            const height = 9;
+            const width = height * aspect;
+
+            camera.left = -width / 2;
+            camera.right = width / 2;
+            camera.top = height / 2;
+            camera.bottom = -height / 2;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
     </script>
 </body>
 </html>
