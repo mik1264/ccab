@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CCAB (Claude Code and Algorithmic Beauty)** - A comprehensive showcase of 1,072+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
+**CCAB (Creative Code and Algorithmic Beauty)** - A comprehensive showcase of 1,072+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
 
 This is a **static HTML/CSS/JavaScript** project with no build system, no dependencies, and no package manager. All demos are self-contained HTML files that can be opened directly in a browser.
 
@@ -14,13 +14,13 @@ This is a **static HTML/CSS/JavaScript** project with no build system, no depend
 
 The project follows a two-tier navigation structure:
 
-1. **Main Index** (`index.html`): Landing page with 20 category sections
+1. **Main Index** (`index.html`): Landing page with 46 category sections
 2. **Gallery Indexes**: Each category has its own `index.html` linking to individual demos
 3. **Individual Demos**: Self-contained HTML files with inline CSS/JavaScript
 
 ```
 ccab/
-├── index.html                      # Main landing page (20 categories, 364+ demos)
+├── index.html                      # Main landing page (46 categories, 1,072+ demos)
 ├── algorithmic-art/
 │   └── index.html                  # Gallery: 20+ demos in one page
 ├── d3js/
@@ -29,14 +29,16 @@ ccab/
 │   ├── hierarchical-trees/         # Subcategory
 │   └── ...
 ├── threejs/
-│   ├── index.html                  # Gallery: 30 demos
+│   ├── index.html                  # Gallery: 36 demos
 │   ├── 01-rotating-cube.html       # Individual demo
 │   ├── 02-spinning-torus.html
 │   └── ...
-└── [12 more gallery directories]
+├── physics-simulations/            # Largest gallery (80 demos)
+├── petri-arena/                    # 74 neural cellular automata demos
+└── [42 more gallery directories]
 ```
 
-### 20 Gallery Categories
+### 46 Gallery Categories
 
 **Original (6):**
 - `algorithmic-art/` - Fractals, patterns, generative art (20+ demos)
@@ -46,21 +48,33 @@ ccab/
 - `visualizations/` - 9 basic HTML5 canvas demos
 - `games/` - Neural Cellular Automata
 
-**Added via Automated Generation (14):**
-- `wolfram-ca/` - All 256 Wolfram Elementary Cellular Automata rules
-- `threejs/` - Three.js 3D visualizations (30 demos)
-- `webgl-shaders/` - Raw WebGL shader art (21 demos)
-- `webgpu/` - WebGPU compute shaders (12 demos)
-- `p5-generative-art/` - P5.js creative coding (40 demos)
-- `pixi-sprite-animations/` - Pixi.js sprites (17 demos)
-- `d3js/` - D3.js data visualizations (18 demos)
-- `web-audio-api/` - Web Audio API (40 demos)
-- `scientific-visualizations/` - Physics/chemistry/biology (15 demos)
-- `biological-simulations/` - Boids, evolution, L-systems (22 demos)
-- `altruism-evolution/` - Altruism & cooperation evolution (16 demos)
-- `visualization-algorithms/` - Voronoi, Delaunay, pathfinding (25 demos)
-- `webassembly/` - High-performance WASM (13 demos)
-- `complex-showcases/` - Ray tracers, terrain, galaxies (15 demos)
+**Added via Automated Generation (40+):**
+Major galleries include:
+- `physics-simulations/` - 80 comprehensive physics simulations (largest gallery)
+- `petri-arena/` - 74 neural cellular automata (PD-NCA) visualizations
+- `gravity-orbits/` - 50 gravitational simulations and orbital mechanics
+- `emergent-behaviors/` - 50 simulations of emergent phenomena
+- `tsl-shaders/` - 46 Three.js Shading Language (TSL) demos
+- `threejs-tsl-shaders/` - 40 additional TSL advanced shaders
+- `p5-generative-art/` - 40 creative coding visualizations
+- `web-audio-api/` - 40 audio visualizations
+- `solar-flare-visualizations/` - 40 solar phenomena visualizations
+- `complex-showcases/` - 40 advanced simulations
+- `visualization-algorithms/` - 40 advanced algorithms
+- `follower-visualizations/` - 30 pursuit behaviors
+- `threejs/` - 36 Three.js 3D visualizations
+- `webgl-shaders/` - 29 raw WebGL shader art
+- `particle-systems/` - 20 particle effects
+- `boids-flocking-visualizations/` - 20 flocking algorithms
+- `wolf-sheep-predation/` - 20 predator-prey models
+- Plus 23 more galleries covering ABM economics, cellular automata, evolutionary biology, segregation models, epidemiology, and more
+
+**Key Technology Categories:**
+- **Graphics Frameworks:** Three.js, WebGL, WebGPU, P5.js, Pixi.js, TSL
+- **Data Viz:** D3.js, dynamic infographics
+- **Agent-Based Models:** Altruism, ethnocentrism, Schelling, sugarscape, virus models
+- **Scientific:** Physics simulations, biological simulations, chaos attractors
+- **Advanced:** WebAssembly, Web Audio API
 
 ## Key Implementation Patterns
 
@@ -173,10 +187,19 @@ Based on `IMPLEMENTATION_STATUS.md`, these implementations failed:
 
 ## Documentation Files
 
+**Analysis & Planning:**
+- `DUPLICATE_ANALYSIS.md` - Analysis of 189 orphaned/duplicate demos across 1,114 files
+- `ORPHANED_FILES.md` - Comprehensive orphaned files report (17% of content)
+- `NAVIGATION_RESTRUCTURING_PLAN.md` - Navigation improvement plan for 46 galleries
 - `IMPLEMENTATION_STATUS.md` - Tracks 19 automated branch implementations (13 successful, 6 failed)
 - `NEXT_STEPS.md` - Comprehensive 12-week roadmap for platform enhancement
 - `SIMULATIONS_ROADMAP.md` - Deep dive into 10 essential simulations beyond Game of Life
 - `SIMULATIONS_QUICK_GUIDE.md` - Quick reference for simulation priorities
+
+**Key Findings:**
+- 189 orphaned items identified (4 empty dirs, 2 orphaned galleries, 183 orphaned demos)
+- Galleries missing index.html: game-of-life, infographics, visualizations
+- Highest orphan rates: petri-arena (73%), physics-simulations (50%)
 
 ## Development Workflow
 
@@ -195,16 +218,30 @@ python3 -m http.server 8000
 
 ### Git Workflow
 
-This project uses a unique git worktree pattern for parallel development:
+This project uses git worktrees for parallel development:
 
 ```bash
-# List all worktrees (if any remain)
+# List all worktrees
 git worktree list
 
-# Current setup: Single main branch
-# Previous: 13 successful feature branches were merged
-# 6 failed branches were deleted
+# Check for new branches
+git fetch --all
+
+# Create worktree for a branch
+git worktree add ../ccab-branch-name origin/branch-name
+
+# Remove worktree
+git worktree remove ../ccab-branch-name --force
+
+# Archive merged branches
+git branch -r --merged main  # List merged branches
+git push origin --delete branch-name  # Delete from remote
 ```
+
+**Current Status:**
+- Main working directory: `/Users/mik1264/experiments/ccab/ccab`
+- 35 merged branches archived (deleted from origin Nov 2025)
+- Active worktrees for unmerged branches as needed
 
 **Standard workflow:**
 1. Work directly on main branch (no build to break)
@@ -243,7 +280,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 When demos are added/removed, update the stats in `index.html`:
 ```html
 <div class="stats">
-    <h3>364+ Interactive Demos</h3>  <!-- Update this number -->
+    <h3>1,072+ Interactive Demos</h3>  <!-- Update this number -->
     <p>From vanilla HTML/CSS/JavaScript to WebGL, WebGPU, Three.js, P5.js, D3.js, Pixi.js, and WebAssembly</p>
 </div>
 ```
@@ -288,11 +325,29 @@ Individual gallery indexes may have their own styling but should maintain profes
 ## Historical Context
 
 This project evolved through:
-1. **Initial creation**: 40 vanilla HTML/CSS/JS demos across 6 categories
+1. **Initial creation**: 40 vanilla HTML/CSS/JS demos across 6 categories (Nov 2024)
 2. **Automated generation**: 19 feature branches created, 13 successful (520+ new demos)
 3. **Consolidation**: All successful branches merged to main (Nov 2025)
 4. **Quality curation**: 560 → 348 demos (38% reduction, retaining highest quality)
-5. **Altruism Evolution**: Added educational evolutionary biology gallery (16 demos)
-6. **Current state**: 364+ demos across 20 categories
+5. **Expansion phase**: Added 30+ new galleries (ABM models, physics, TSL shaders)
+6. **Current state**: 1,072+ demos across 46 categories
+7. **Analysis phase**: Identified 189 orphaned items, documented duplicates (Nov 2025)
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).
+
+## Deployment
+
+**GitHub Pages**: Automatically deployed via GitHub Actions
+- Live site: `https://mik1264.github.io/ccab/`
+- Workflow: `.github/workflows/deploy.yml`
+- Trigger: Every push to `main` branch
+- Manual trigger available via Actions tab
+
+**Setup:**
+```bash
+# Deployment happens automatically on push
+git push origin main
+
+# Monitor deployment
+# Visit: https://github.com/mik1264/ccab/actions
+```
