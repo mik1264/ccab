@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CCAB (Claude Code and Algorithmic Beauty)** - A comprehensive showcase of 1,072+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
+**CCAB (Claude Code and Algorithmic Beauty)** - A carefully curated collection of 701 high-quality interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
 
 This is a **static HTML/CSS/JavaScript** project with no build system, no dependencies, and no package manager. All demos are self-contained HTML files that can be opened directly in a browser.
 
@@ -20,7 +20,7 @@ The project follows a two-tier navigation structure:
 
 ```
 ccab/
-├── index.html                      # Main landing page (20 categories, 364+ demos)
+├── index.html                      # Main landing page (46 categories, 701 demos)
 ├── algorithmic-art/
 │   └── index.html                  # Gallery: 20+ demos in one page
 ├── d3js/
