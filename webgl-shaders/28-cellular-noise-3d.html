@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cellular Noise 3D - WebGL Shader</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        #info {
+            position: absolute; top: 10px; left: 10px; color: white;
+            background: rgba(0,0,0,0.7); padding: 15px; border-radius: 5px;
+            font-family: monospace; font-size: 14px; pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="info">3D Worley/Cellular Noise<br>Volumetric cell patterns</div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const gl = canvas.getContext('webgl2');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        const vs = `#version 300 es
+            in vec2 a_position;
+            void main() { gl_Position = vec4(a_position, 0.0, 1.0); }
+        `;
+
+        const fs = `#version 300 es
+            precision highp float;
+            uniform vec2 u_resolution;
+            uniform float u_time;
+            out vec4 fragColor;
+
+            vec3 hash33(vec3 p3) {
+                p3 = fract(p3 * vec3(443.897, 441.423, 437.195));
+                p3 += dot(p3, p3.yzx + 19.19);
+                return fract((p3.xxy + p3.yxx) * p3.zyx);
+            }
+
+            float cellular3D(vec3 p) {
+                vec3 i = floor(p);
+                vec3 f = fract(p);
+
+                float minDist = 1.0;
+
+                for(int x = -1; x <= 1; x++) {
+                    for(int y = -1; y <= 1; y++) {
+                        for(int z = -1; z <= 1; z++) {
+                            vec3 neighbor = vec3(float(x), float(y), float(z));
+                            vec3 point = hash33(i + neighbor);
+
+                            // Animate cell points
+                            point = 0.5 + 0.5 * sin(u_time * 0.5 + 6.2831 * point);
+
+                            vec3 diff = neighbor + point - f;
+                            float dist = length(diff);
+                            minDist = min(minDist, dist);
+                        }
+                    }
+                }
+
+                return minDist;
+            }
+
+            float cellular3DSecondClosest(vec3 p) {
+                vec3 i = floor(p);
+                vec3 f = fract(p);
+
+                float minDist1 = 10.0;
+                float minDist2 = 10.0;
+
+                for(int x = -1; x <= 1; x++) {
+                    for(int y = -1; y <= 1; y++) {
+                        for(int z = -1; z <= 1; z++) {
+                            vec3 neighbor = vec3(float(x), float(y), float(z));
+                            vec3 point = hash33(i + neighbor);
+                            point = 0.5 + 0.5 * sin(u_time * 0.5 + 6.2831 * point);
+
+                            vec3 diff = neighbor + point - f;
+                            float dist = length(diff);
+
+                            if(dist < minDist1) {
+                                minDist2 = minDist1;
+                                minDist1 = dist;
+                            } else if(dist < minDist2) {
+                                minDist2 = dist;
+                            }
+                        }
+                    }
+                }
+
+                return minDist2 - minDist1;
+            }
+
+            mat2 rot2D(float angle) {
+                float s = sin(angle);
+                float c = cos(angle);
+                return mat2(c, -s, s, c);
+            }
+
+            vec3 palette(float t) {
+                vec3 a = vec3(0.5, 0.5, 0.5);
+                vec3 b = vec3(0.5, 0.5, 0.5);
+                vec3 c = vec3(1.0, 1.0, 1.0);
+                vec3 d = vec3(0.0, 0.1, 0.2);
+                return a + b * cos(6.28318 * (c * t + d));
+            }
+
+            void main() {
+                vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / min(u_resolution.x, u_resolution.y);
+
+                // Create 3D coordinate
+                vec3 p = vec3(uv * 3.0, u_time * 0.2);
+
+                // Rotate for more interesting view
+                p.xy *= rot2D(u_time * 0.1);
+                p.yz *= rot2D(u_time * 0.15);
+
+                // Sample cellular noise
+                float cells = cellular3D(p * 2.0);
+                float cells2 = cellular3D(p * 4.0);
+                float cellEdges = cellular3DSecondClosest(p * 2.0);
+
+                // Combine patterns
+                float pattern = cells + cells2 * 0.5;
+                pattern += cellEdges * 2.0;
+
+                // Color mapping
+                vec3 col = palette(pattern + u_time * 0.1);
+
+                // Add edge highlights
+                col += vec3(1.0) * smoothstep(0.8, 1.0, cellEdges * 10.0);
+
+                // Add depth fade
+                float depth = 1.0 - length(uv) * 0.5;
+                col *= depth;
+
+                fragColor = vec4(col, 1.0);
+            }
+        `;
+
+        function createShader(type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            return shader;
+        }
+
+        const program = gl.createProgram();
+        gl.attachShader(program, createShader(gl.VERTEX_SHADER, vs));
+        gl.attachShader(program, createShader(gl.FRAGMENT_SHADER, fs));
+        gl.linkProgram(program);
+
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+
+        const posLoc = gl.getAttribLocation(program, 'a_position');
+        const resLoc = gl.getUniformLocation(program, 'u_resolution');
+        const timeLoc = gl.getUniformLocation(program, 'u_time');
+
+        function render(time) {
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.useProgram(program);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+            gl.uniform2f(resLoc, canvas.width, canvas.height);
+            gl.uniform1f(timeLoc, time * 0.001);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+            requestAnimationFrame(render);
+        }
+
+        render(0);
+    </script>
+</body>
+</html>
