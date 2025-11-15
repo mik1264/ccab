@@ -1,36 +1,60 @@
 # CCAB - Claude Code and AB (aka Algorithmic Beauty) Testing
 
-> **364+ Interactive Web Visualizations** showcasing the creative possibilities of modern web technologies
+> **1,000+ Interactive Web Visualizations** across 47 galleries showcasing the creative possibilities of modern web technologies
 
 A comprehensive collection of creative coding demonstrations spanning vanilla JavaScript, advanced graphics frameworks, scientific simulations, and cutting-edge web APIs. All demos are self-contained HTML files requiring no build process—just open and explore.
 
+## 📖 Complete Documentation
+
+**[→ View the Master Catalog](documentation/MASTER_CATALOG.md)** - Comprehensive listing of all 1,000+ demos with descriptions
+
 ## 🎨 What's Inside
 
-### 20 Gallery Categories • 364+ Visualizations
+### 47 Gallery Categories • 1,000+ Visualizations
 
-**Original Collections (40 demos)**
-- 🔷 **Algorithmic Art** - Fractals, patterns, and generative mathematics (20+ demos)
+**Core Graphics & 3D (11 galleries, 200+ demos)**
+- 🎭 **Three.js** - 3D models, particles, advanced shader effects (36 demos)
+- 🌈 **WebGL Shaders** - Fragment shaders, raymarching, fractals (29 demos)
+- ⚡ **WebGPU** - Next-gen GPU computing, ray tracing (12 demos)
+- 🎨 **Three.js TSL Shaders** - Modern shader language effects (40 demos)
+- 🌊 **TSL Shaders** - Advanced TSL with orbital mechanics (46 demos)
+- 🎬 **Pixi.js** - 2D sprites, particles, filters (17 demos)
+- 🎪 **CSS Art** - Pure CSS3 3D transforms and animations (6 demos)
+- 🔷 **SVG Animations** - Path morphing, line drawing effects (5 demos)
+
+**Agent-Based Models (12 galleries, 200+ demos)**
+- 🤝 **Altruism Evolution** - Evolutionary cooperation dynamics (16 demos)
+- 🌍 **Ethnocentrism** - Cultural evolution and cooperation (20 demos)
+- 🏘️ **Schelling Segregation** - Residential segregation models (20 demos)
+- 🍬 **Sugarscape** - Classic resource-based ABM (20 demos)
+- 💰 **Wealth Distribution** - Economic inequality patterns (20 demos)
+- 🐺 **Wolf-Sheep Predation** - Predator-prey ecosystems (20 demos)
+- 🦠 **Virus Epidemic Models** - SIR/SEIR epidemiology (20 demos)
+- 🔥 **Fire Percolation** - Forest fire spread models (20 demos)
+
+**Physics & Simulations (10 galleries, 350+ demos)**
+- ⚛️ **Physics Simulations** - 80+ demos across 14 subcategories (largest gallery!)
+- 🪐 **Gravity Orbits** - Orbital mechanics, N-body problems (50 demos)
+- 🦋 **Emergent Behaviors** - Langton's Ant, boids, swarms (50 demos)
+- 🧫 **Petri Arena** - Neural cellular automata competitions (50 demos)
+- 🌞 **Solar Flare Visualizations** - Space weather phenomena (40 demos)
+- 🦜 **Boids Flocking** - Swarm behavior and flocking (20 demos)
+- ✨ **Particle Systems** - Fireworks, gravity, fluid (20 demos)
+- 🔬 **Scientific Visualizations** - EM fields, waves, orbits (15 demos)
+
+**Data Visualization & Audio (3 galleries, 60+ demos)**
+- 📊 **D3.js** - Force graphs, trees, maps, Sankey diagrams (18 demos)
+- 🎵 **Web Audio API** - FFT visualizers, beat detection, synthesizers (40 demos)
+- 📈 **Visualization Algorithms** - Sorting, searching, pathfinding (40 demos)
+
+**Creative & Artistic (8 galleries, 80+ demos)**
 - 🎮 **Game of Life** - 23 creative variations of Conway's cellular automaton
-- 📊 **Dynamic Infographics** - Interactive data visualizations and animated charts
-- 〰️ **Lissajous Curves** - Parametric curve beauty
-- ✨ **Interactive Visualizations** - HTML5 Canvas fundamentals
-- 🧪 **Neural Cellular Automata** - Experimental simulations
-
-**Extended Galleries (324+ demos)**
-- 🧬 **Wolfram Cellular Automata** - All 256 elementary CA rules with analysis tools
-- 🎭 **Three.js 3D Gallery** - Rotating models, particles, advanced shader effects (30)
-- 🌈 **WebGL Shader Art** - Fragment shaders, raymarching, GPU particles, fractals (21)
-- ⚡ **WebGPU Compute Shaders** - Parallel processing, ray tracing (12)
-- 🎨 **P5.js Generative Art** - Perlin noise, recursion, creative coding systems (40)
-- 🎬 **Pixi.js Sprite Animations** - Particles, filters, advanced effects (17)
-- 📈 **D3.js Data Visualizations** - Force graphs, trees, Sankey, chord diagrams, maps (18)
-- 🎵 **Web Audio API** - FFT visualizers, waveforms, 3D audio, beat detection (40)
-- 🔬 **Scientific Visualizations** - Orbital mechanics, wave interference, electromagnetic fields, fluid dynamics (15)
-- 🦠 **Biological Simulations** - Boids, evolution, L-systems, reaction-diffusion (22)
-- 🧬 **Altruism Evolution** - Interactive visualizations exploring evolutionary biology and cooperation (16)
-- 🔺 **Visualization Algorithms** - Voronoi, Delaunay, metaballs, pathfinding, Fourier (25)
-- 🚀 **WebAssembly High-Performance** - Near-native speed algorithms and simulations (13)
-- 🌟 **Complex Showcases** - Ray tracers, terrain, galaxies, fractals, music (15)
+- 🎨 **Mathematical Art** - Spirographs, harmonographs, fractals (10 demos)
+- 🔺 **Geometric Patterns** - Islamic patterns, Penrose tiling (6 demos)
+- 🌀 **Chaos Attractors** - Strange attractors, Lorenz systems (8 demos)
+- 👁️ **Optical Illusions** - Motion illusions, moire patterns (13 demos)
+- 〰️ **Lissajous** - Interactive parametric curve generator (1 demo)
+- 🍂 **Autumn Leaf Visualizations** - Seasonal physics (20 demos)
 
 ## 🎯 Features
 
@@ -58,35 +82,45 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 
 ```
 ccab/
-├── index.html                          # Main gallery (20 categories)
+├── index.html                          # Main gallery (47 categories)
 │
-├── algorithmic-art/                    # Fractals & patterns
-├── game-of-life/                       # Conway's Game of Life variations
-├── visualizations/                     # Basic HTML5 Canvas demos
+├── documentation/                      # Comprehensive documentation
+│   ├── MASTER_CATALOG.md              # Complete catalog of all 1,000+ demos
+│   └── galleries/                     # Detailed gallery documentation
+│       ├── threejs.md                 # Three.js demos documentation
+│       ├── webgl-shaders.md           # WebGL demos documentation
+│       ├── d3js.md                    # D3.js demos documentation
+│       ├── web-audio-api.md           # Audio demos documentation
+│       └── game-of-life.md            # Game of Life documentation
 │
-├── threejs/                            # Three.js 3D visualizations
-│   ├── index.html                      # Gallery page
-│   └── 01-rotating-cube.html...40      # Individual demos
-│
-├── webgl-shaders/                      # Raw WebGL shader art
-├── webgpu/                             # WebGPU compute shaders
-├── p5-generative-art/                  # P5.js creative coding
-├── pixi-sprite-animations/             # Pixi.js sprite demos
-├── d3js/                               # D3.js data visualizations
-│   ├── force-directed/                 # Subcategory
-│   ├── hierarchical-trees/             # Subcategory
+├── [Core Graphics & 3D - 11 galleries]
+│   ├── threejs/                       # Three.js 3D (36 demos)
+│   ├── webgl-shaders/                 # Raw WebGL (29 demos)
+│   ├── webgpu/                        # WebGPU compute (12 demos)
+│   ├── threejs-tsl-shaders/           # TSL shaders (40 demos)
+│   ├── tsl-shaders/                   # Advanced TSL (46 demos)
 │   └── ...
 │
-├── web-audio-api/                      # Audio visualizations
-├── scientific-visualizations/          # Physics/chemistry/biology
-├── biological-simulations/             # Life simulations
-├── altruism-evolution/                 # Altruism & cooperation
-├── visualization-algorithms/           # Computational geometry
-├── webassembly/                        # High-performance WASM
-├── complex-showcases/                  # Advanced simulations
-├── wolfram-ca/                         # Cellular automata explorer
+├── [Agent-Based Models - 12 galleries]
+│   ├── altruism-evolution/            # Cooperation dynamics (16 demos)
+│   ├── ethnocentrism/                 # Cultural evolution (20 demos)
+│   ├── schelling-segregation/         # Segregation models (20 demos)
+│   ├── sugarscape/                    # Resource ABM (20 demos)
+│   └── ...
 │
-└── [Documentation files]
+├── [Physics & Simulations - 10 galleries]
+│   ├── physics-simulations/           # Largest gallery (80+ demos)
+│   ├── gravity-orbits/                # Orbital mechanics (50 demos)
+│   ├── emergent-behaviors/            # Swarm behaviors (50 demos)
+│   ├── petri-arena/                   # Neural CA (50 demos)
+│   └── ...
+│
+├── [Data Visualization - 3 galleries]
+│   ├── d3js/                          # D3.js visualizations (18 demos)
+│   ├── web-audio-api/                 # Audio visualizers (40 demos)
+│   └── visualization-algorithms/      # Algorithm viz (40 demos)
+│
+└── [Project Documentation]
     ├── CLAUDE.md                       # Developer guide
     ├── IMPLEMENTATION_STATUS.md        # Project history
     ├── NEXT_STEPS.md                   # Future roadmap
@@ -116,11 +150,12 @@ Explore cutting-edge techniques:
 
 ## 📊 Statistics
 
-- **Total Visualizations**: 364+
-- **Categories**: 20
+- **Total Visualizations**: 1,000+
+- **Gallery Categories**: 47
+- **Active Galleries**: 44 (with demos)
 - **Technologies**: 10+ frameworks/APIs
-- **Lines of Code**: 75,000+
-- **Implementation Success Rate**: 68% (automated generation)
+- **Largest Gallery**: Physics Simulations (80+ demos)
+- **Lines of Code**: 150,000+
 - **Browser Compatibility**: Modern evergreen browsers
 - **Performance Target**: 60 FPS
 
