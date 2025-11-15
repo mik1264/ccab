@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Four-Phase Step Breakdown - Petri Arena</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 24px;
+        }
+        .description {
+            max-width: 900px;
+            text-align: center;
+            margin-bottom: 20px;
+            color: #aaa;
+        }
+        .phases {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .phase {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .phase-label {
+            margin-bottom: 10px;
+            font-weight: bold;
+            font-size: 14px;
+            text-align: center;
+            min-height: 40px;
+            display: flex;
+            align-items: center;
+        }
+        .phase-1 { color: #ff6b6b; }
+        .phase-2 { color: #4ecdc4; }
+        .phase-3 { color: #45b7d1; }
+        .phase-4 { color: #96ceb4; }
+        canvas {
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            padding: 10px 20px;
+            background: #667eea;
+            border: none;
+            border-radius: 5px;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #764ba2;
+        }
+        button.active {
+            background: #764ba2;
+            box-shadow: 0 0 10px rgba(118, 75, 162, 0.6);
+        }
+        .stats {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            font-family: monospace;
+            max-width: 900px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Four-Phase Step Breakdown</h1>
+    <p class="description">
+        PD-NCA operates in 4 phases: (1) Processing - agents propose Δs via CNN,
+        (2) Competition - pairwise strengths from attack·defense,
+        (3) Normalization - softmax(τ) produces weights,
+        (4) State Update - weighted Δs applied and clipped.
+    </p>
+
+    <div class="phases">
+        <div class="phase">
+            <div class="phase-label phase-1">Phase 1: Processing<br>(Agent Proposals)</div>
+            <canvas id="canvas1"></canvas>
+        </div>
+        <div class="phase">
+            <div class="phase-label phase-2">Phase 2: Competition<br>(Strength Calculation)</div>
+            <canvas id="canvas2"></canvas>
+        </div>
+        <div class="phase">
+            <div class="phase-label phase-3">Phase 3: Normalization<br>(Softmax Weights)</div>
+            <canvas id="canvas3"></canvas>
+        </div>
+        <div class="phase">
+            <div class="phase-label phase-4">Phase 4: Update<br>(Final State)</div>
+            <canvas id="canvas4"></canvas>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="stepBtn">Single Step</button>
+        <button id="playBtn">Play</button>
+        <button id="resetBtn">Reset</button>
+        <span style="color: #aaa;">Current Phase: <strong><span id="phaseDisplay">Ready</span></strong></span>
+    </div>
+
+    <div class="stats">
+        <div>Full Steps: <span id="stepCount">0</span></div>
+        <div>Current Phase: <span id="phaseNum">-</span></div>
+        <div style="margin-top: 10px; font-size: 12px; color: #aaa;">
+            Click "Single Step" to advance one phase at a time, or "Play" for continuous simulation.
+        </div>
+    </div>
+
+    <script>
+        const canvases = [
+            document.getElementById('canvas1'),
+            document.getElementById('canvas2'),
+            document.getElementById('canvas3'),
+            document.getElementById('canvas4')
+        ];
+        const contexts = canvases.map(c => c.getContext('2d'));
+
+        const gridSize = 64;
+        const cellSize = 6;
+        canvases.forEach(c => {
+            c.width = gridSize * cellSize;
+            c.height = gridSize * cellSize;
+        });
+
+        const numAgents = 2;
+        let state = new Float32Array(gridSize * gridSize * numAgents * 3); // [aliveness, attack, defense] per agent
+        let proposals = new Float32Array(gridSize * gridSize * numAgents * 3);
+        let strengths = new Float32Array(gridSize * gridSize * numAgents);
+        let weights = new Float32Array(gridSize * gridSize * numAgents);
+
+        let stepCount = 0;
+        let currentPhase = 0;
+        let playing = false;
+        const tau = 0.5;
+
+        function idx(x, y, agent, channel) {
+            const gx = ((x + gridSize) % gridSize);
+            const gy = ((y + gridSize) % gridSize);
+            return ((gy * gridSize + gx) * numAgents + agent) * 3 + channel;
+        }
+
+        function cellIdx(x, y, agent) {
+            const gx = ((x + gridSize) % gridSize);
+            const gy = ((y + gridSize) % gridSize);
+            return (gy * gridSize + gx) * numAgents + agent;
+        }
+
+        function reset() {
+            state.fill(0);
+            stepCount = 0;
+            currentPhase = 0;
+
+            // Initialize two agents
+            const regions = [
+                {x: 20, y: 32, agent: 0, r: 12},
+                {x: 44, y: 32, agent: 1, r: 12}
+            ];
+
+            regions.forEach(region => {
+                for (let dy = -region.r; dy <= region.r; dy++) {
+                    for (let dx = -region.r; dx <= region.r; dx++) {
+                        if (dx*dx + dy*dy <= region.r * region.r) {
+                            state[idx(region.x + dx, region.y + dy, region.agent, 0)] = 0.8; // aliveness
+                            state[idx(region.x + dx, region.y + dy, region.agent, 1)] = Math.random() - 0.5; // attack
+                            state[idx(region.x + dx, region.y + dy, region.agent, 2)] = Math.random() - 0.5; // defense
+                        }
+                    }
+                }
+            });
+
+            updateDisplay();
+        }
+
+        function phase1_processing() {
+            // Agents propose changes based on local neighborhood
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    for (let a = 0; a < numAgents; a++) {
+                        // Simple CNN-like: average of neighbors
+                        let sums = [0, 0, 0];
+                        for (let dy = -1; dy <= 1; dy++) {
+                            for (let dx = -1; dx <= 1; dx++) {
+                                for (let c = 0; c < 3; c++) {
+                                    sums[c] += state[idx(x + dx, y + dy, a, c)];
+                                }
+                            }
+                        }
+
+                        // Propose delta
+                        const currentAlive = state[idx(x, y, a, 0)];
+                        proposals[idx(x, y, a, 0)] = (sums[0] / 9 - currentAlive) * 0.1;
+                        proposals[idx(x, y, a, 1)] = (Math.random() - 0.5) * 0.05;
+                        proposals[idx(x, y, a, 2)] = (Math.random() - 0.5) * 0.05;
+                    }
+                }
+            }
+        }
+
+        function phase2_competition() {
+            // Calculate pairwise strengths using cosine similarity (attack·defense)
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    for (let a = 0; a < numAgents; a++) {
+                        let strength = 0;
+
+                        // Simplified: self attack · self defense + neighbor influence
+                        const attack = state[idx(x, y, a, 1)];
+                        const defense = state[idx(x, y, a, 2)];
+                        const aliveness = state[idx(x, y, a, 0)];
+
+                        strength = Math.abs(attack * defense) + aliveness * 0.5;
+
+                        strengths[cellIdx(x, y, a)] = Math.max(0, strength);
+                    }
+                }
+            }
+        }
+
+        function phase3_normalization() {
+            // Apply softmax with temperature τ
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    let expSum = 0;
+                    let expVals = [];
+
+                    for (let a = 0; a < numAgents; a++) {
+                        const s = strengths[cellIdx(x, y, a)];
+                        const exp = Math.exp(s / tau);
+                        expVals.push(exp);
+                        expSum += exp;
+                    }
+
+                    for (let a = 0; a < numAgents; a++) {
+                        weights[cellIdx(x, y, a)] = expVals[a] / (expSum + 1e-8);
+                    }
+                }
+            }
+        }
+
+        function phase4_update() {
+            // Apply weighted proposals and clip
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    for (let a = 0; a < numAgents; a++) {
+                        const w = weights[cellIdx(x, y, a)];
+
+                        for (let c = 0; c < 3; c++) {
+                            const current = state[idx(x, y, a, c)];
+                            const delta = proposals[idx(x, y, a, c)] * w;
+                            let next = current + delta;
+
+                            // Clip to [-1, 1] (aliveness to [0,1])
+                            if (c === 0) {
+                                next = Math.max(0, Math.min(1, next));
+                            } else {
+                                next = Math.max(-1, Math.min(1, next));
+                            }
+
+                            state[idx(x, y, a, c)] = next;
+                        }
+                    }
+                }
+            }
+            stepCount++;
+        }
+
+        function stepPhase() {
+            const phaseNames = ['Processing', 'Competition', 'Normalization', 'Update'];
+
+            switch(currentPhase) {
+                case 0: phase1_processing(); break;
+                case 1: phase2_competition(); break;
+                case 2: phase3_normalization(); break;
+                case 3: phase4_update(); break;
+            }
+
+            document.getElementById('phaseDisplay').textContent = phaseNames[currentPhase];
+            document.getElementById('phaseNum').textContent = (currentPhase + 1) + '/4 - ' + phaseNames[currentPhase];
+
+            currentPhase = (currentPhase + 1) % 4;
+            updateDisplay();
+        }
+
+        function updateDisplay() {
+            // Canvas 1: Proposals (phase 1)
+            drawGrid(contexts[0], (x, y) => {
+                const p0 = proposals[idx(x, y, 0, 0)];
+                const p1 = proposals[idx(x, y, 1, 0)];
+                return [
+                    Math.floor(Math.abs(p0) * 500),
+                    Math.floor(Math.abs(p1) * 500),
+                    100
+                ];
+            });
+
+            // Canvas 2: Strengths (phase 2)
+            drawGrid(contexts[1], (x, y) => {
+                const s0 = strengths[cellIdx(x, y, 0)];
+                const s1 = strengths[cellIdx(x, y, 1)];
+                const max = Math.max(s0, s1, 0.01);
+                return [
+                    Math.floor((s0/max) * 255),
+                    100,
+                    Math.floor((s1/max) * 255)
+                ];
+            });
+
+            // Canvas 3: Weights (phase 3)
+            drawGrid(contexts[2], (x, y) => {
+                const w0 = weights[cellIdx(x, y, 0)];
+                const w1 = weights[cellIdx(x, y, 1)];
+                return [
+                    Math.floor(w0 * 255),
+                    150,
+                    Math.floor(w1 * 255)
+                ];
+            });
+
+            // Canvas 4: Final state (phase 4)
+            drawGrid(contexts[3], (x, y) => {
+                const a0 = state[idx(x, y, 0, 0)];
+                const a1 = state[idx(x, y, 1, 0)];
+                return [
+                    Math.floor(a0 * 255),
+                    100,
+                    Math.floor(a1 * 255)
+                ];
+            });
+
+            document.getElementById('stepCount').textContent = stepCount;
+        }
+
+        function drawGrid(ctx, colorFn) {
+            const imageData = ctx.createImageData(gridSize * cellSize, gridSize * cellSize);
+            const data = imageData.data;
+
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    const color = colorFn(x, y);
+
+                    for (let dy = 0; dy < cellSize; dy++) {
+                        for (let dx = 0; dx < cellSize; dx++) {
+                            const px = x * cellSize + dx;
+                            const py = y * cellSize + dy;
+                            const pi = (py * gridSize * cellSize + px) * 4;
+
+                            data[pi] = color[0];
+                            data[pi + 1] = color[1];
+                            data[pi + 2] = color[2];
+                            data[pi + 3] = 255;
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+        let animationId = null;
+        function animate() {
+            if (playing) {
+                stepPhase();
+                animationId = setTimeout(() => requestAnimationFrame(animate), 200);
+            }
+        }
+
+        document.getElementById('stepBtn').addEventListener('click', () => {
+            playing = false;
+            stepPhase();
+        });
+
+        document.getElementById('playBtn').addEventListener('click', () => {
+            playing = !playing;
+            document.getElementById('playBtn').textContent = playing ? 'Pause' : 'Play';
+            if (playing) animate();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            playing = false;
+            document.getElementById('playBtn').textContent = 'Play';
+            reset();
+        });
+
+        reset();
+    </script>
+</body>
+</html>

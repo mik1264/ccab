@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Attack/Defense Channel Inspector - Petri Arena</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 24px;
+        }
+        .description {
+            max-width: 900px;
+            text-align: center;
+            margin-bottom: 20px;
+            color: #aaa;
+        }
+        .channels {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .channel {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .channel-label {
+            margin-bottom: 8px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        canvas {
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.5);
+        }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            padding: 10px 20px;
+            background: #667eea;
+            border: none;
+            border-radius: 5px;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #764ba2;
+        }
+        .stats {
+            margin-top: 20px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            font-family: monospace;
+            max-width: 900px;
+        }
+        .click-info {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Attack/Defense Channel Inspector</h1>
+    <p class="description">
+        PD-NCA agents have separate attack (a) and defense (d) channels. Competition is determined by cosine similarity
+        between agent i's attack and agent j's defense. View each channel separately to understand spatial strategies.
+    </p>
+
+    <div class="channels">
+        <div class="channel">
+            <div class="channel-label">Aliveness (Combined)</div>
+            <canvas id="alivenessCanvas"></canvas>
+        </div>
+        <div class="channel">
+            <div class="channel-label">Attack Channels</div>
+            <canvas id="attackCanvas"></canvas>
+        </div>
+        <div class="channel">
+            <div class="channel-label">Defense Channels</div>
+            <canvas id="defenseCanvas"></canvas>
+        </div>
+    </div>
+
+    <div class="controls">
+        <button id="resetBtn">Reset</button>
+        <button id="pauseBtn">Pause</button>
+        <button id="agentBtn">Focus: All Agents</button>
+    </div>
+
+    <div class="stats">
+        <div>Step: <span id="step">0</span></div>
+        <div>Viewing: <span id="focus">All Agents</span></div>
+        <div class="click-info">
+            <strong>Channel Interpretation:</strong><br>
+            <span style="color: #ff6b6b;">Red</span> = Agent 1,
+            <span style="color: #6bff6b;">Green</span> = Agent 2,
+            <span style="color: #6b6bff;">Blue</span> = Agent 3<br>
+            Brightness = channel magnitude. Attack/Defense values range [-1, +1].
+        </div>
+    </div>
+
+    <script>
+        const alivenessCanvas = document.getElementById('alivenessCanvas');
+        const attackCanvas = document.getElementById('attackCanvas');
+        const defenseCanvas = document.getElementById('defenseCanvas');
+
+        const alivenessCtx = alivenessCanvas.getContext('2d');
+        const attackCtx = attackCanvas.getContext('2d');
+        const defenseCtx = defenseCanvas.getContext('2d');
+
+        const gridSize = 96;
+        const cellSize = 4;
+        [alivenessCanvas, attackCanvas, defenseCanvas].forEach(c => {
+            c.width = gridSize * cellSize;
+            c.height = gridSize * cellSize;
+        });
+
+        const numAgents = 3;
+        // Channels per agent: aliveness, attack, defense
+        let grid = new Float32Array(gridSize * gridSize * numAgents * 3);
+
+        let stepCount = 0;
+        let paused = false;
+        let focusAgent = -1; // -1 = all, 0/1/2 = specific agent
+
+        function idx(x, y, agent, channel) {
+            const gx = ((x + gridSize) % gridSize);
+            const gy = ((y + gridSize) % gridSize);
+            return ((gy * gridSize + gx) * numAgents + agent) * 3 + channel;
+        }
+
+        function reset() {
+            grid.fill(0);
+            stepCount = 0;
+
+            // Initialize three agents
+            const regions = [
+                {x: 30, y: 48, agent: 0, r: 12},
+                {x: 66, y: 48, agent: 1, r: 12},
+                {x: 48, y: 70, agent: 2, r: 12}
+            ];
+
+            regions.forEach(region => {
+                for (let dy = -region.r; dy <= region.r; dy++) {
+                    for (let dx = -region.r; dx <= region.r; dx++) {
+                        if (dx*dx + dy*dy <= region.r * region.r) {
+                            grid[idx(region.x + dx, region.y + dy, region.agent, 0)] = 0.8; // aliveness
+                            grid[idx(region.x + dx, region.y + dy, region.agent, 1)] = Math.random() * 2 - 1; // attack
+                            grid[idx(region.x + dx, region.y + dy, region.agent, 2)] = Math.random() * 2 - 1; // defense
+                        }
+                    }
+                }
+            });
+        }
+
+        function step() {
+            const next = new Float32Array(grid.length);
+
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    for (let a = 0; a < numAgents; a++) {
+                        // Get neighbor sums for aliveness
+                        let aliveSum = 0;
+                        for (let dy = -1; dy <= 1; dy++) {
+                            for (let dx = -1; dx <= 1; dx++) {
+                                aliveSum += grid[idx(x + dx, y + dy, a, 0)];
+                            }
+                        }
+
+                        const currentAlive = grid[idx(x, y, a, 0)];
+                        const currentAttack = grid[idx(x, y, a, 1)];
+                        const currentDefense = grid[idx(x, y, a, 2)];
+
+                        // Update aliveness
+                        let nextAlive = currentAlive;
+                        if (aliveSum > 3) {
+                            nextAlive = Math.min(1.0, currentAlive + 0.08);
+                        } else {
+                            nextAlive = Math.max(0.0, currentAlive - 0.03);
+                        }
+
+                        // Evolve attack/defense channels
+                        let nextAttack = currentAttack + (Math.random() - 0.5) * 0.05;
+                        let nextDefense = currentDefense + (Math.random() - 0.5) * 0.05;
+
+                        // Influence from neighbors (learn patterns)
+                        let attackSum = 0, defenseSum = 0, count = 0;
+                        for (let dy = -1; dy <= 1; dy++) {
+                            for (let dx = -1; dx <= 1; dx++) {
+                                if (grid[idx(x + dx, y + dy, a, 0)] > 0.3) {
+                                    attackSum += grid[idx(x + dx, y + dy, a, 1)];
+                                    defenseSum += grid[idx(x + dx, y + dy, a, 2)];
+                                    count++;
+                                }
+                            }
+                        }
+
+                        if (count > 0) {
+                            const avgAttack = attackSum / count;
+                            const avgDefense = defenseSum / count;
+                            nextAttack = nextAttack * 0.9 + avgAttack * 0.1;
+                            nextDefense = nextDefense * 0.9 + avgDefense * 0.1;
+                        }
+
+                        // Clip to [-1, 1]
+                        nextAttack = Math.max(-1, Math.min(1, nextAttack));
+                        nextDefense = Math.max(-1, Math.min(1, nextDefense));
+
+                        next[idx(x, y, a, 0)] = nextAlive;
+                        next[idx(x, y, a, 1)] = nextAttack;
+                        next[idx(x, y, a, 2)] = nextDefense;
+                    }
+                }
+            }
+
+            grid = next;
+            stepCount++;
+        }
+
+        function drawChannel(ctx, channel) {
+            const imageData = ctx.createImageData(ctx.canvas.width, ctx.canvas.height);
+            const data = imageData.data;
+
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    let r = 0, g = 0, b = 0;
+
+                    if (focusAgent === -1) {
+                        // Show all agents
+                        for (let a = 0; a < numAgents; a++) {
+                            const val = grid[idx(x, y, a, channel)];
+                            const intensity = channel === 0 ? val : (val + 1) / 2; // Normalize attack/defense to [0,1]
+
+                            if (a === 0) r = intensity * 255;
+                            else if (a === 1) g = intensity * 255;
+                            else if (a === 2) b = intensity * 255;
+                        }
+                    } else {
+                        // Show single agent
+                        const val = grid[idx(x, y, focusAgent, channel)];
+                        const intensity = channel === 0 ? val : (val + 1) / 2;
+                        r = g = b = intensity * 255;
+                    }
+
+                    for (let dy = 0; dy < cellSize; dy++) {
+                        for (let dx = 0; dx < cellSize; dx++) {
+                            const px = x * cellSize + dx;
+                            const py = y * cellSize + dy;
+                            const pi = (py * ctx.canvas.width + px) * 4;
+
+                            data[pi] = r;
+                            data[pi + 1] = g;
+                            data[pi + 2] = b;
+                            data[pi + 3] = 255;
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+        function draw() {
+            drawChannel(alivenessCtx, 0);
+            drawChannel(attackCtx, 1);
+            drawChannel(defenseCtx, 2);
+        }
+
+        function updateStats() {
+            document.getElementById('step').textContent = stepCount;
+
+            const focusNames = ['All Agents', 'Red Agent Only', 'Green Agent Only', 'Blue Agent Only'];
+            document.getElementById('focus').textContent = focusNames[focusAgent + 1];
+        }
+
+        function animate() {
+            if (!paused) {
+                step();
+                updateStats();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('resetBtn').addEventListener('click', reset);
+        document.getElementById('pauseBtn').addEventListener('click', () => {
+            paused = !paused;
+            document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
+        });
+        document.getElementById('agentBtn').addEventListener('click', () => {
+            focusAgent = (focusAgent + 1) % 4 - 1;
+            const labels = ['Focus: All Agents', 'Focus: Red', 'Focus: Green', 'Focus: Blue'];
+            document.getElementById('agentBtn').textContent = labels[focusAgent + 1];
+        });
+
+        reset();
+        animate();
+    </script>
+</body>
+</html>
