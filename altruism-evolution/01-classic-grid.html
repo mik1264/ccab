@@ -268,8 +268,18 @@ Show altruistic (pink) and selfish (green) agents competing through fitness-base
         </div>
     </div>
 
-    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-    <script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/nodes": "https://unpkg.com/three@0.160.0/examples/jsm/nodes/Nodes.js"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { texture, uv, uniform, vec2, vec3, vec4, float, Fn, mix, clamp, abs, fract, sin, dot, If } from 'three/nodes';
+
         const canvas = document.getElementById('canvas');
         const GRID_SIZE = 512;
         const CANVAS_SIZE = 512;
@@ -337,150 +347,141 @@ Show altruistic (pink) and selfish (green) agents competing through fitness-base
             stateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
             nextStateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
 
-            // Simulation shader (computes next generation)
-            simulationMaterial = new THREE.ShaderMaterial({
-                uniforms: {
-                    state: { value: null },
-                    resolution: { value: new THREE.Vector2(GRID_SIZE, GRID_SIZE) },
-                    cost: { value: params.costOfAltruism },
-                    benefit: { value: params.benefitFromAltruism },
-                    harshness: { value: params.harshness },
-                    disease: { value: params.disease },
-                    seed: { value: Math.random() * 1000 },
-                    frame: { value: 0 }
-                },
-                vertexShader: `
-                    varying vec2 vUv;
-                    void main() {
-                        vUv = uv;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                    }
-                `,
-                fragmentShader: `
-                    uniform sampler2D state;
-                    uniform vec2 resolution;
-                    uniform float cost;
-                    uniform float benefit;
-                    uniform float harshness;
-                    uniform float disease;
-                    uniform float seed;
-                    uniform float frame;
-                    varying vec2 vUv;
+            // Simulation shader (computes next generation) - TSL version
+            const stateTexture = uniform(null);
+            const resolutionUniform = uniform(vec2(GRID_SIZE, GRID_SIZE));
+            const costUniform = uniform(params.costOfAltruism);
+            const benefitUniform = uniform(params.benefitFromAltruism);
+            const harshnessUniform = uniform(params.harshness);
+            const diseaseUniform = uniform(params.disease);
+            const seedUniform = uniform(Math.random() * 1000);
+            const frameUniform = uniform(0);
 
-                    // Hash function for pseudo-random numbers
-                    float hash(vec2 p) {
-                        return fract(sin(dot(p, vec2(127.1, 311.7)) + seed + frame) * 43758.5453);
-                    }
+            const simulationShader = Fn(() => {
+                const uvCoord = uv();
+                const pixel = vec2(1.0).div(resolutionUniform);
 
-                    void main() {
-                        vec2 pixel = 1.0 / resolution;
+                // Hash function
+                const hash = Fn(([p]) => {
+                    const dotVal = dot(p, vec2(127.1, 311.7)).add(seedUniform).add(frameUniform);
+                    return fract(sin(dotVal).mul(43758.5453));
+                });
 
-                        // Get current state: r = type (0=empty, 0.5=altruist, 1=selfish)
-                        float currentState = texture2D(state, vUv).r;
+                // Get current state
+                const currentState = texture(stateTexture, uvCoord).r;
 
-                        // Get neighbors (Von Neumann neighborhood)
-                        float left = texture2D(state, vUv + vec2(-pixel.x, 0.0)).r;
-                        float right = texture2D(state, vUv + vec2(pixel.x, 0.0)).r;
-                        float up = texture2D(state, vUv + vec2(0.0, pixel.y)).r;
-                        float down = texture2D(state, vUv + vec2(0.0, -pixel.y)).r;
+                // Get neighbors
+                const left = texture(stateTexture, uvCoord.add(vec2(pixel.x.negate(), 0.0))).r;
+                const right = texture(stateTexture, uvCoord.add(vec2(pixel.x, 0.0))).r;
+                const up = texture(stateTexture, uvCoord.add(vec2(0.0, pixel.y))).r;
+                const down = texture(stateTexture, uvCoord.add(vec2(0.0, pixel.y.negate()))).r;
 
-                        // Count altruists (state = 0.5) in neighborhood including self
-                        float altCount = 0.0;
-                        if (abs(currentState - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(left - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(right - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(up - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(down - 0.5) < 0.1) altCount += 1.0;
+                // Count altruists
+                let altCount = float(0.0);
+                altCount = altCount.add(abs(currentState.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(left.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(right.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(up.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(down.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
 
-                        // Calculate altruism benefit
-                        float altBenefit = benefit * altCount / 5.0;
+                const altBenefit = benefitUniform.mul(altCount).div(5.0);
 
-                        // Calculate fitness for each cell type in neighborhood
-                        float altFitness = 0.0;
-                        float selfFitness = 0.0;
-                        float harshFitness = 0.0;
+                // Calculate fitness for each neighbor
+                let altFitness = float(0.0);
+                let selfFitness = float(0.0);
+                let harshFitness = float(0.0);
 
-                        // Process each neighbor + self
-                        for (int i = 0; i < 5; i++) {
-                            vec2 offset = vec2(0.0);
-                            if (i == 1) offset = vec2(-pixel.x, 0.0);
-                            else if (i == 2) offset = vec2(pixel.x, 0.0);
-                            else if (i == 3) offset = vec2(0.0, pixel.y);
-                            else if (i == 4) offset = vec2(0.0, -pixel.y);
+                // Process center
+                const centerFitSelf = abs(currentState.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0);
+                const centerFitAlt = abs(currentState.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0);
+                const centerFitEmpty = abs(currentState).lessThan(0.1).select(harshnessUniform, 0.0);
 
-                            float nState = texture2D(state, vUv + offset).r;
-                            float fitness = 0.0;
+                selfFitness = selfFitness.add(centerFitSelf);
+                altFitness = altFitness.add(centerFitAlt);
+                harshFitness = harshFitness.add(centerFitEmpty);
 
-                            if (abs(nState - 1.0) < 0.1) {
-                                // SELFISH
-                                fitness = 1.0 + altBenefit;
-                                selfFitness += fitness;
-                            } else if (abs(nState - 0.5) < 0.1) {
-                                // ALTRUIST
-                                fitness = (1.0 - cost) + altBenefit;
-                                altFitness += fitness;
-                            } else {
-                                // EMPTY
-                                fitness = harshness;
-                                harshFitness += fitness;
-                            }
-                        }
+                // Process left
+                const leftFitSelf = abs(left.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0);
+                const leftFitAlt = abs(left.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0);
+                const leftFitEmpty = abs(left).lessThan(0.1).select(harshnessUniform, 0.0);
 
-                        // Add disease to empty fitness
-                        harshFitness += disease;
+                selfFitness = selfFitness.add(leftFitSelf);
+                altFitness = altFitness.add(leftFitAlt);
+                harshFitness = harshFitness.add(leftFitEmpty);
 
-                        // Run lottery
-                        float totalFitness = altFitness + selfFitness + harshFitness;
-                        float newState = 0.0; // Default to EMPTY
+                // Process right
+                const rightFitSelf = abs(right.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0);
+                const rightFitAlt = abs(right.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0);
+                const rightFitEmpty = abs(right).lessThan(0.1).select(harshnessUniform, 0.0);
 
-                        if (totalFitness > 0.0) {
-                            float rand = hash(vUv * resolution + vec2(frame)) * totalFitness;
+                selfFitness = selfFitness.add(rightFitSelf);
+                altFitness = altFitness.add(rightFitAlt);
+                harshFitness = harshFitness.add(rightFitEmpty);
 
-                            if (rand < altFitness) {
-                                newState = 0.5; // ALTRUIST
-                            } else if (rand < altFitness + selfFitness) {
-                                newState = 1.0; // SELFISH
-                            }
-                            // else remains 0.0 (EMPTY)
-                        }
+                // Process up
+                const upFitSelf = abs(up.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0);
+                const upFitAlt = abs(up.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0);
+                const upFitEmpty = abs(up).lessThan(0.1).select(harshnessUniform, 0.0);
 
-                        gl_FragColor = vec4(newState, 0.0, 0.0, 1.0);
-                    }
-                `
-            });
+                selfFitness = selfFitness.add(upFitSelf);
+                altFitness = altFitness.add(upFitAlt);
+                harshFitness = harshFitness.add(upFitEmpty);
 
-            // Display shader (visualizes the state)
-            displayMaterial = new THREE.ShaderMaterial({
-                uniforms: {
-                    state: { value: null }
-                },
-                vertexShader: `
-                    varying vec2 vUv;
-                    void main() {
-                        vUv = uv;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                    }
-                `,
-                fragmentShader: `
-                    uniform sampler2D state;
-                    varying vec2 vUv;
+                // Process down
+                const downFitSelf = abs(down.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0);
+                const downFitAlt = abs(down.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0);
+                const downFitEmpty = abs(down).lessThan(0.1).select(harshnessUniform, 0.0);
 
-                    void main() {
-                        float cellState = texture2D(state, vUv).r;
+                selfFitness = selfFitness.add(downFitSelf);
+                altFitness = altFitness.add(downFitAlt);
+                harshFitness = harshFitness.add(downFitEmpty);
 
-                        if (cellState < 0.25) {
-                            // EMPTY
-                            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                        } else if (cellState < 0.75) {
-                            // ALTRUIST (pink)
-                            gl_FragColor = vec4(1.0, 0.41, 0.71, 1.0);
-                        } else {
-                            // SELFISH (green)
-                            gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);
-                        }
-                    }
-                `
-            });
+                // Add disease
+                harshFitness = harshFitness.add(diseaseUniform);
+
+                // Lottery
+                const totalFitness = altFitness.add(selfFitness).add(harshFitness);
+                const rand = hash(uvCoord.mul(resolutionUniform).add(vec2(frameUniform))).mul(totalFitness);
+
+                let newState = float(0.0);
+                newState = rand.lessThan(altFitness).select(0.5, newState);
+                newState = rand.greaterThanEqual(altFitness).and(rand.lessThan(altFitness.add(selfFitness))).select(1.0, newState);
+
+                return vec4(newState, 0.0, 0.0, 1.0);
+            })();
+
+            simulationMaterial = new THREE.MeshBasicNodeMaterial();
+            simulationMaterial.colorNode = simulationShader;
+            simulationMaterial.side = THREE.DoubleSide;
+
+            // Display shader (visualizes the state) - TSL version
+            const displayStateTexture = uniform(null);
+
+            const displayShader = Fn(() => {
+                const uvCoord = uv();
+                const cellState = texture(displayStateTexture, uvCoord).r;
+
+                // EMPTY (black)
+                let color = vec3(0.0, 0.0, 0.0);
+
+                // ALTRUIST (pink)
+                color = cellState.greaterThanEqual(0.25).and(cellState.lessThan(0.75)).select(
+                    vec3(1.0, 0.41, 0.71),
+                    color
+                );
+
+                // SELFISH (green)
+                color = cellState.greaterThanEqual(0.75).select(
+                    vec3(0.0, 1.0, 0.0),
+                    color
+                );
+
+                return vec4(color, 1.0);
+            })();
+
+            displayMaterial = new THREE.MeshBasicNodeMaterial();
+            displayMaterial.colorNode = displayShader;
+            displayMaterial.side = THREE.DoubleSide;
 
             // Create quad mesh
             const geometry = new THREE.PlaneGeometry(2, 2);
@@ -538,14 +539,14 @@ Show altruistic (pink) and selfish (green) agents competing through fitness-base
 
             if (!paused) {
                 // Update uniforms
-                simulationMaterial.uniforms.cost.value = params.costOfAltruism;
-                simulationMaterial.uniforms.benefit.value = params.benefitFromAltruism;
-                simulationMaterial.uniforms.harshness.value = params.harshness;
-                simulationMaterial.uniforms.disease.value = params.disease;
-                simulationMaterial.uniforms.frame.value = frame++;
+                costUniform.value = params.costOfAltruism;
+                benefitUniform.value = params.benefitFromAltruism;
+                harshnessUniform.value = params.harshness;
+                diseaseUniform.value = params.disease;
+                frameUniform.value = frame++;
 
                 // Run simulation step
-                simulationMaterial.uniforms.state.value = stateTarget.texture;
+                stateTexture.value = stateTarget.texture;
                 scene.clear();
                 scene.add(simulationMesh);
                 renderer.setRenderTarget(nextStateTarget);
@@ -561,7 +562,7 @@ Show altruistic (pink) and selfish (green) agents competing through fitness-base
             }
 
             // Display current state
-            displayMaterial.uniforms.state.value = stateTarget.texture;
+            displayStateTexture.value = stateTarget.texture;
             scene.clear();
             scene.add(displayMesh);
             renderer.setRenderTarget(null);
@@ -571,7 +572,7 @@ Show altruistic (pink) and selfish (green) agents competing through fitness-base
         window.setup = function() {
             generation = 0;
             frame = 0;
-            simulationMaterial.uniforms.seed.value = Math.random() * 1000;
+            seedUniform.value = Math.random() * 1000;
             initializeState();
             document.getElementById('generation').textContent = '0';
         };

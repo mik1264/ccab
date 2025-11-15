@@ -198,8 +198,18 @@ Show front propagation, invasion dynamics, and spatial waves.
         </div>
     </div>
 
-    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-    <script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/nodes": "https://unpkg.com/three@0.160.0/examples/jsm/nodes/Nodes.js"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { texture, uv, uniform, vec2, vec3, vec4, float, Fn, mix, clamp, abs, fract, sin, dot, max } from 'three/nodes';
+
         const canvas = document.getElementById('canvas');
         const GRID_SIZE = 512;
         const CANVAS_SIZE = 512;
@@ -247,158 +257,123 @@ Show front propagation, invasion dynamics, and spatial waves.
             stateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
             nextStateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
 
-            // Simulation shader
-            simulationMaterial = new THREE.ShaderMaterial({
-                uniforms: {
-                    state: { value: null },
-                    resolution: { value: new THREE.Vector2(GRID_SIZE, GRID_SIZE) },
-                    cost: { value: params.costOfAltruism },
-                    benefit: { value: params.benefitFromAltruism },
-                    seed: { value: Math.random() * 1000 },
-                    frame: { value: 0 },
-                    generation: { value: 0 }
-                },
-                vertexShader: `
-                    varying vec2 vUv;
-                    void main() {
-                        vUv = uv;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                    }
-                `,
-                fragmentShader: `
-                    uniform sampler2D state;
-                    uniform vec2 resolution;
-                    uniform float cost;
-                    uniform float benefit;
-                    uniform float seed;
-                    uniform float frame;
-                    uniform float generation;
-                    varying vec2 vUv;
+            // Simulation shader - TSL version
+            const stateTexture = uniform(null);
+            const resolutionUniform = uniform(vec2(GRID_SIZE, GRID_SIZE));
+            const costUniform = uniform(params.costOfAltruism);
+            const benefitUniform = uniform(params.benefitFromAltruism);
+            const seedUniform = uniform(Math.random() * 1000);
+            const frameUniform = uniform(0);
+            const generationUniform = uniform(0);
 
-                    float hash(vec2 p) {
-                        return fract(sin(dot(p, vec2(127.1, 311.7)) + seed + frame) * 43758.5453);
-                    }
+            const simulationShader = Fn(() => {
+                const uvCoord = uv();
+                const pixel = vec2(1.0).div(resolutionUniform);
 
-                    void main() {
-                        vec2 pixel = 1.0 / resolution;
-                        vec4 current = texture2D(state, vUv);
+                const hash = Fn(([p]) => {
+                    const dotVal = dot(p, vec2(127.1, 311.7)).add(seedUniform).add(frameUniform);
+                    return fract(sin(dotVal).mul(43758.5453));
+                });
 
-                        // r = type (0=empty, 0.5=altruist, 1=selfish)
-                        // g = conversion generation (normalized to 0-1)
-                        float currentState = current.r;
-                        float conversionGen = current.g;
+                const current = texture(stateTexture, uvCoord);
+                const currentState = current.r;
+                const conversionGen = current.g;
 
-                        // Get neighbors
-                        float left = texture2D(state, vUv + vec2(-pixel.x, 0.0)).r;
-                        float right = texture2D(state, vUv + vec2(pixel.x, 0.0)).r;
-                        float up = texture2D(state, vUv + vec2(0.0, pixel.y)).r;
-                        float down = texture2D(state, vUv + vec2(0.0, -pixel.y)).r;
+                const left = texture(stateTexture, uvCoord.add(vec2(pixel.x.negate(), 0.0))).r;
+                const right = texture(stateTexture, uvCoord.add(vec2(pixel.x, 0.0))).r;
+                const up = texture(stateTexture, uvCoord.add(vec2(0.0, pixel.y))).r;
+                const down = texture(stateTexture, uvCoord.add(vec2(0.0, pixel.y.negate()))).r;
 
-                        // Count altruists
-                        float altCount = 0.0;
-                        if (abs(currentState - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(left - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(right - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(up - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(down - 0.5) < 0.1) altCount += 1.0;
+                let altCount = float(0.0);
+                altCount = altCount.add(abs(currentState.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(left.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(right.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(up.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(down.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
 
-                        float altBenefit = benefit * altCount / 5.0;
+                const altBenefit = benefitUniform.mul(altCount).div(5.0);
 
-                        // Calculate fitness
-                        float altFitness = 0.0;
-                        float selfFitness = 0.0;
+                let altFitness = float(0.0);
+                let selfFitness = float(0.0);
 
-                        for (int i = 0; i < 5; i++) {
-                            vec2 offset = vec2(0.0);
-                            if (i == 1) offset = vec2(-pixel.x, 0.0);
-                            else if (i == 2) offset = vec2(pixel.x, 0.0);
-                            else if (i == 3) offset = vec2(0.0, pixel.y);
-                            else if (i == 4) offset = vec2(0.0, -pixel.y);
+                // Process all 5 cells
+                selfFitness = selfFitness.add(abs(currentState.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(currentState.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                            float nState = texture2D(state, vUv + offset).r;
+                selfFitness = selfFitness.add(abs(left.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(left.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                            if (abs(nState - 1.0) < 0.1) {
-                                selfFitness += 1.0 + altBenefit;
-                            } else if (abs(nState - 0.5) < 0.1) {
-                                altFitness += (1.0 - cost) + altBenefit;
-                            }
-                        }
+                selfFitness = selfFitness.add(abs(right.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(right.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                        // Run lottery
-                        float totalFitness = altFitness + selfFitness;
-                        float newState = 0.0;
-                        float newConversionGen = conversionGen;
+                selfFitness = selfFitness.add(abs(up.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(up.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                        if (totalFitness > 0.0) {
-                            float rand = hash(vUv * resolution + vec2(frame)) * totalFitness;
+                selfFitness = selfFitness.add(abs(down.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(down.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                            if (rand < altFitness) {
-                                newState = 0.5; // ALTRUIST
-                                // Track conversion: if was selfish and now altruist, record generation
-                                if (abs(currentState - 1.0) < 0.1) {
-                                    newConversionGen = generation / 1000.0; // Normalize
-                                } else if (abs(currentState - 0.5) < 0.1) {
-                                    // Stay altruist, keep conversion gen
-                                    newConversionGen = conversionGen;
-                                } else {
-                                    // Was empty, record generation
-                                    newConversionGen = generation / 1000.0;
-                                }
-                            } else {
-                                newState = 1.0; // SELFISH
-                                newConversionGen = 0.0;
-                            }
-                        }
+                // Lottery
+                const totalFitness = altFitness.add(selfFitness);
+                const rand = hash(uvCoord.mul(resolutionUniform).add(vec2(frameUniform))).mul(totalFitness);
 
-                        gl_FragColor = vec4(newState, newConversionGen, 0.0, 1.0);
-                    }
-                `
-            });
+                let newState = float(0.0);
+                let newConversionGen = conversionGen;
 
-            // Display shader with wave visualization
-            displayMaterial = new THREE.ShaderMaterial({
-                uniforms: {
-                    state: { value: null },
-                    generation: { value: 0 }
-                },
-                vertexShader: `
-                    varying vec2 vUv;
-                    void main() {
-                        vUv = uv;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                    }
-                `,
-                fragmentShader: `
-                    uniform sampler2D state;
-                    uniform float generation;
-                    varying vec2 vUv;
+                // If becomes altruist
+                const becomesAltruist = rand.lessThan(altFitness);
+                newState = becomesAltruist.and(totalFitness.greaterThan(0.0)).select(0.5, newState);
 
-                    void main() {
-                        vec4 cell = texture2D(state, vUv);
-                        float cellState = cell.r;
-                        float conversionGen = cell.g * 1000.0; // Denormalize
+                // Track conversion
+                const wasSelfish = abs(currentState.sub(1.0)).lessThan(0.1);
+                const wasAltruist = abs(currentState.sub(0.5)).lessThan(0.1);
+                const wasEmpty = abs(currentState).lessThan(0.1);
 
-                        if (cellState < 0.25) {
-                            // EMPTY
-                            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                        } else if (cellState < 0.75) {
-                            // ALTRUIST - color based on age
-                            float age = generation - conversionGen;
-                            float fadeSteps = 100.0;
-                            float intensity = max(0.3, 1.0 - (age / fadeSteps));
+                newConversionGen = becomesAltruist.and(wasSelfish.or(wasEmpty)).select(generationUniform.div(1000.0), newConversionGen);
 
-                            float r = intensity;
-                            float g = 0.41 * intensity;
-                            float b = 0.71 * intensity;
+                // If becomes selfish
+                const becomesSelfish = rand.greaterThanEqual(altFitness).and(totalFitness.greaterThan(0.0));
+                newState = becomesSelfish.select(1.0, newState);
+                newConversionGen = becomesSelfish.select(0.0, newConversionGen);
 
-                            gl_FragColor = vec4(r, g, b, 1.0);
-                        } else {
-                            // SELFISH (dim green)
-                            gl_FragColor = vec4(0.0, 0.3, 0.0, 1.0);
-                        }
-                    }
-                `
-            });
+                return vec4(newState, newConversionGen, 0.0, 1.0);
+            })();
+
+            simulationMaterial = new THREE.MeshBasicNodeMaterial();
+            simulationMaterial.colorNode = simulationShader;
+            simulationMaterial.side = THREE.DoubleSide;
+
+            // Display shader with wave visualization - TSL version
+            const displayStateTexture = uniform(null);
+            const displayGenerationUniform = uniform(0);
+
+            const displayShader = Fn(() => {
+                const uvCoord = uv();
+                const cell = texture(displayStateTexture, uvCoord);
+                const cellState = cell.r;
+                const conversionGen = cell.g.mul(1000.0); // Denormalize
+
+                let color = vec3(0.0, 0.0, 0.0); // Empty
+
+                // Altruist with wave fade
+                const isAltruist = cellState.greaterThanEqual(0.25).and(cellState.lessThan(0.75));
+                const age = displayGenerationUniform.sub(conversionGen);
+                const fadeSteps = float(100.0);
+                const intensity = max(0.3, float(1.0).sub(age.div(fadeSteps)));
+
+                color = isAltruist.select(
+                    vec3(intensity, intensity.mul(0.41), intensity.mul(0.71)),
+                    color
+                );
+
+                // Selfish (dim green)
+                color = cellState.greaterThanEqual(0.75).select(vec3(0.0, 0.3, 0.0), color);
+
+                return vec4(color, 1.0);
+            })();
+
+            displayMaterial = new THREE.MeshBasicNodeMaterial();
+            displayMaterial.colorNode = displayShader;
+            displayMaterial.side = THREE.DoubleSide;
 
             // Create quad mesh
             const geometry = new THREE.PlaneGeometry(2, 2);
@@ -452,13 +427,13 @@ Show front propagation, invasion dynamics, and spatial waves.
 
             if (!paused) {
                 // Update uniforms
-                simulationMaterial.uniforms.cost.value = params.costOfAltruism;
-                simulationMaterial.uniforms.benefit.value = params.benefitFromAltruism;
-                simulationMaterial.uniforms.frame.value = frame++;
-                simulationMaterial.uniforms.generation.value = generation;
+                costUniform.value = params.costOfAltruism;
+                benefitUniform.value = params.benefitFromAltruism;
+                frameUniform.value = frame++;
+                generationUniform.value = generation;
 
                 // Run simulation
-                simulationMaterial.uniforms.state.value = stateTarget.texture;
+                stateTexture.value = stateTarget.texture;
                 scene.clear();
                 scene.add(simulationMesh);
                 renderer.setRenderTarget(nextStateTarget);
@@ -473,8 +448,8 @@ Show front propagation, invasion dynamics, and spatial waves.
             }
 
             // Display
-            displayMaterial.uniforms.state.value = stateTarget.texture;
-            displayMaterial.uniforms.generation.value = generation;
+            displayStateTexture.value = stateTarget.texture;
+            displayGenerationUniform.value = generation;
             scene.clear();
             scene.add(displayMesh);
             renderer.setRenderTarget(null);

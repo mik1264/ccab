@@ -212,8 +212,18 @@ Show how evolutionary pressure varies across the spatial grid.
         </div>
     </div>
 
-    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-    <script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/nodes": "https://unpkg.com/three@0.160.0/examples/jsm/nodes/Nodes.js"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { texture, uv, uniform, vec2, vec3, vec4, float, Fn, mix, clamp, abs, fract, sin, dot } from 'three/nodes';
+
         const canvas = document.getElementById('canvas');
         const GRID_SIZE = 512;
         const CANVAS_SIZE = 512;
@@ -262,160 +272,127 @@ Show how evolutionary pressure varies across the spatial grid.
             stateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
             nextStateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
 
-            // Simulation shader - stores type in r, fitness in g
-            simulationMaterial = new THREE.ShaderMaterial({
-                uniforms: {
-                    state: { value: null },
-                    resolution: { value: new THREE.Vector2(GRID_SIZE, GRID_SIZE) },
-                    cost: { value: params.costOfAltruism },
-                    benefit: { value: params.benefitFromAltruism },
-                    seed: { value: Math.random() * 1000 },
-                    frame: { value: 0 }
-                },
-                vertexShader: `
-                    varying vec2 vUv;
-                    void main() {
-                        vUv = uv;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                    }
-                `,
-                fragmentShader: `
-                    uniform sampler2D state;
-                    uniform vec2 resolution;
-                    uniform float cost;
-                    uniform float benefit;
-                    uniform float seed;
-                    uniform float frame;
-                    varying vec2 vUv;
+            // Simulation shader - stores type in r, fitness in g - TSL version
+            const stateTexture = uniform(null);
+            const resolutionUniform = uniform(vec2(GRID_SIZE, GRID_SIZE));
+            const costUniform = uniform(params.costOfAltruism);
+            const benefitUniform = uniform(params.benefitFromAltruism);
+            const seedUniform = uniform(Math.random() * 1000);
+            const frameUniform = uniform(0);
 
-                    float hash(vec2 p) {
-                        return fract(sin(dot(p, vec2(127.1, 311.7)) + seed + frame) * 43758.5453);
-                    }
+            const simulationShader = Fn(() => {
+                const uvCoord = uv();
+                const pixel = vec2(1.0).div(resolutionUniform);
 
-                    void main() {
-                        vec2 pixel = 1.0 / resolution;
-                        vec4 current = texture2D(state, vUv);
-                        float currentState = current.r;
+                const hash = Fn(([p]) => {
+                    const dotVal = dot(p, vec2(127.1, 311.7)).add(seedUniform).add(frameUniform);
+                    return fract(sin(dotVal).mul(43758.5453));
+                });
 
-                        // Get neighbors
-                        float left = texture2D(state, vUv + vec2(-pixel.x, 0.0)).r;
-                        float right = texture2D(state, vUv + vec2(pixel.x, 0.0)).r;
-                        float up = texture2D(state, vUv + vec2(0.0, pixel.y)).r;
-                        float down = texture2D(state, vUv + vec2(0.0, -pixel.y)).r;
+                const currentState = texture(stateTexture, uvCoord).r;
+                const left = texture(stateTexture, uvCoord.add(vec2(pixel.x.negate(), 0.0))).r;
+                const right = texture(stateTexture, uvCoord.add(vec2(pixel.x, 0.0))).r;
+                const up = texture(stateTexture, uvCoord.add(vec2(0.0, pixel.y))).r;
+                const down = texture(stateTexture, uvCoord.add(vec2(0.0, pixel.y.negate()))).r;
 
-                        // Count altruists
-                        float altCount = 0.0;
-                        if (abs(currentState - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(left - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(right - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(up - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(down - 0.5) < 0.1) altCount += 1.0;
+                let altCount = float(0.0);
+                altCount = altCount.add(abs(currentState.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(left.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(right.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(up.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(down.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
 
-                        float altBenefit = benefit * altCount / 5.0;
+                const altBenefit = benefitUniform.mul(altCount).div(5.0);
 
-                        // Calculate fitness
-                        float altFitness = 0.0;
-                        float selfFitness = 0.0;
-                        float myFitness = 0.0;
+                let altFitness = float(0.0);
+                let selfFitness = float(0.0);
 
-                        for (int i = 0; i < 5; i++) {
-                            vec2 offset = vec2(0.0);
-                            if (i == 1) offset = vec2(-pixel.x, 0.0);
-                            else if (i == 2) offset = vec2(pixel.x, 0.0);
-                            else if (i == 3) offset = vec2(0.0, pixel.y);
-                            else if (i == 4) offset = vec2(0.0, -pixel.y);
+                // Process all 5 cells
+                selfFitness = selfFitness.add(abs(currentState.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(currentState.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                            float nState = texture2D(state, vUv + offset).r;
+                selfFitness = selfFitness.add(abs(left.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(left.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                            if (abs(nState - 1.0) < 0.1) {
-                                selfFitness += 1.0 + altBenefit;
-                            } else if (abs(nState - 0.5) < 0.1) {
-                                altFitness += (1.0 - cost) + altBenefit;
-                            }
-                        }
+                selfFitness = selfFitness.add(abs(right.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(right.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                        // Calculate this cell's fitness
-                        if (abs(currentState - 1.0) < 0.1) {
-                            myFitness = 1.0 + altBenefit;
-                        } else if (abs(currentState - 0.5) < 0.1) {
-                            myFitness = (1.0 - cost) + altBenefit;
-                        }
+                selfFitness = selfFitness.add(abs(up.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(up.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                        // Run lottery
-                        float totalFitness = altFitness + selfFitness;
-                        float newState = 0.0;
+                selfFitness = selfFitness.add(abs(down.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(down.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
 
-                        if (totalFitness > 0.0) {
-                            float rand = hash(vUv * resolution + vec2(frame)) * totalFitness;
-                            newState = rand < altFitness ? 0.5 : 1.0;
-                        }
+                // My fitness
+                let myFitness = float(0.0);
+                myFitness = abs(currentState.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), myFitness);
+                myFitness = abs(currentState.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), myFitness);
 
-                        // Store type in r, fitness in g (normalized)
-                        gl_FragColor = vec4(newState, myFitness / 2.0, 0.0, 1.0);
-                    }
-                `
-            });
+                // Lottery
+                const totalFitness = altFitness.add(selfFitness);
+                const rand = hash(uvCoord.mul(resolutionUniform).add(vec2(frameUniform))).mul(totalFitness);
+                let newState = rand.lessThan(altFitness).select(0.5, 1.0);
+                newState = totalFitness.greaterThan(0.0).select(newState, 0.0);
 
-            // Display shader - switches between agent and fitness view
-            displayMaterial = new THREE.ShaderMaterial({
-                uniforms: {
-                    state: { value: null },
-                    mode: { value: 0.0 } // 0=agents, 1=fitness
-                },
-                vertexShader: `
-                    varying vec2 vUv;
-                    void main() {
-                        vUv = uv;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                    }
-                `,
-                fragmentShader: `
-                    uniform sampler2D state;
-                    uniform float mode;
-                    varying vec2 vUv;
+                return vec4(newState, myFitness.div(2.0), 0.0, 1.0);
+            })();
 
-                    vec3 fitnessToColor(float fitness) {
-                        // Dark blue -> cyan -> yellow -> white
-                        float t = clamp(fitness, 0.0, 1.0);
+            simulationMaterial = new THREE.MeshBasicNodeMaterial();
+            simulationMaterial.colorNode = simulationShader;
+            simulationMaterial.side = THREE.DoubleSide;
 
-                        if (t < 0.33) {
-                            float s = t / 0.33;
-                            return mix(vec3(0.0, 0.0, 0.2), vec3(0.0, 0.5, 1.0), s);
-                        } else if (t < 0.66) {
-                            float s = (t - 0.33) / 0.33;
-                            return mix(vec3(0.0, 0.5, 1.0), vec3(1.0, 1.0, 0.0), s);
-                        } else {
-                            float s = (t - 0.66) / 0.34;
-                            return mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), s);
-                        }
-                    }
+            // Display shader - switches between agent and fitness view - TSL version
+            const displayStateTexture = uniform(null);
+            const modeUniform = uniform(0.0);
 
-                    void main() {
-                        vec4 cell = texture2D(state, vUv);
-                        float cellState = cell.r;
-                        float fitness = cell.g; // Already normalized
+            const displayShader = Fn(() => {
+                const uvCoord = uv();
+                const cell = texture(displayStateTexture, uvCoord);
+                const cellState = cell.r;
+                const fitness = cell.g;
 
-                        if (mode < 0.5) {
-                            // Agent mode
-                            if (cellState < 0.25) {
-                                gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                            } else if (cellState < 0.75) {
-                                gl_FragColor = vec4(1.0, 0.41, 0.71, 1.0); // Altruist
-                            } else {
-                                gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); // Selfish
-                            }
-                        } else {
-                            // Fitness heatmap mode
-                            if (cellState < 0.25) {
-                                gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                            } else {
-                                vec3 color = fitnessToColor(fitness);
-                                gl_FragColor = vec4(color, 1.0);
-                            }
-                        }
-                    }
-                `
-            });
+                const fitnessToColor = Fn(([fit]) => {
+                    const t = clamp(fit, 0.0, 1.0);
+
+                    let result = mix(vec3(0.0, 0.0, 0.2), vec3(0.0, 0.5, 1.0), t.div(0.33));
+                    result = t.greaterThanEqual(0.33).and(t.lessThan(0.66)).select(
+                        mix(vec3(0.0, 0.5, 1.0), vec3(1.0, 1.0, 0.0), t.sub(0.33).div(0.33)),
+                        result
+                    );
+                    result = t.greaterThanEqual(0.66).select(
+                        mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 1.0, 1.0), t.sub(0.66).div(0.34)),
+                        result
+                    );
+
+                    return result;
+                });
+
+                let color = vec3(0.0, 0.0, 0.0);
+
+                // Agent mode
+                const agentMode = modeUniform.lessThan(0.5);
+                color = agentMode.and(cellState.greaterThanEqual(0.25)).and(cellState.lessThan(0.75)).select(
+                    vec3(1.0, 0.41, 0.71),
+                    color
+                );
+                color = agentMode.and(cellState.greaterThanEqual(0.75)).select(
+                    vec3(0.0, 1.0, 0.0),
+                    color
+                );
+
+                // Fitness mode
+                const fitnessMode = modeUniform.greaterThanEqual(0.5);
+                color = fitnessMode.and(cellState.greaterThanEqual(0.25)).select(
+                    fitnessToColor(fitness),
+                    color
+                );
+
+                return vec4(color, 1.0);
+            })();
+
+            displayMaterial = new THREE.MeshBasicNodeMaterial();
+            displayMaterial.colorNode = displayShader;
+            displayMaterial.side = THREE.DoubleSide;
 
             // Create quad mesh
             const geometry = new THREE.PlaneGeometry(2, 2);
@@ -465,11 +442,11 @@ Show how evolutionary pressure varies across the spatial grid.
             requestAnimationFrame(animate);
 
             if (!paused) {
-                simulationMaterial.uniforms.cost.value = params.costOfAltruism;
-                simulationMaterial.uniforms.benefit.value = params.benefitFromAltruism;
-                simulationMaterial.uniforms.frame.value = frame++;
+                costUniform.value = params.costOfAltruism;
+                benefitUniform.value = params.benefitFromAltruism;
+                frameUniform.value = frame++;
 
-                simulationMaterial.uniforms.state.value = stateTarget.texture;
+                stateTexture.value = stateTarget.texture;
                 scene.clear();
                 scene.add(simulationMesh);
                 renderer.setRenderTarget(nextStateTarget);
@@ -484,8 +461,8 @@ Show how evolutionary pressure varies across the spatial grid.
             }
 
             // Display
-            displayMaterial.uniforms.state.value = stateTarget.texture;
-            displayMaterial.uniforms.mode.value = displayMode === 'fitness' ? 1.0 : 0.0;
+            displayStateTexture.value = stateTarget.texture;
+            modeUniform.value = displayMode === 'fitness' ? 1.0 : 0.0;
             scene.clear();
             scene.add(displayMesh);
             renderer.setRenderTarget(null);

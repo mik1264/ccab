@@ -52,13 +52,15 @@
         "imports": {
             "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
             "three/tsl": "https://unpkg.com/three@0.170.0/build/three.webgpu.js",
-            "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+            "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/",
+            "three/nodes": "https://unpkg.com/three@0.170.0/examples/jsm/nodes/Nodes.js"
         }
     }
     </script>
 
     <script type="module">
         import * as THREE from 'three';
+        import { texture, uv, uniform, vec2, vec3, vec4, add, sub, mul, clamp, Fn } from 'three/nodes';
 
         const canvas = document.getElementById('canvas');
         const width = 512;
@@ -136,113 +138,81 @@
         renderer.render(initScene, initCamera);
         renderer.setRenderTarget(null);
 
-        // Compute shader for reaction-diffusion
-        const computeShader = `
-            uniform sampler2D uTexture;
-            uniform vec2 uResolution;
-            uniform float uDa;
-            uniform float uDb;
-            uniform float uFeed;
-            uniform float uKill;
-            varying vec2 vUv;
+        // TSL-based compute material for reaction-diffusion
+        const uTexture = uniform(rt1.texture);
+        const uResolution = uniform(vec2(size, size));
+        const uDa = uniform(params.dA);
+        const uDb = uniform(params.dB);
+        const uFeed = uniform(params.feed);
+        const uKill = uniform(params.kill);
 
-            void main() {
-                vec2 texel = 1.0 / uResolution;
+        // Gray-Scott reaction-diffusion computation using TSL
+        const grayScottCompute = Fn(() => {
+            const uvCoord = uv();
+            const texel = vec2(1.0).div(uResolution);
 
-                // Sample current values
-                vec4 center = texture2D(uTexture, vUv);
-                float a = center.r;
-                float b = center.g;
+            // Sample current values
+            const center = texture(uTexture, uvCoord);
+            const a = center.r;
+            const b = center.g;
 
-                // Compute Laplacian using 9-point stencil
-                float laplacianA = 0.0;
-                float laplacianB = 0.0;
+            // Compute Laplacian using 9-point stencil
+            let laplacianA = a.mul(-1.0);
+            let laplacianB = b.mul(-1.0);
 
-                // Center
-                laplacianA += a * -1.0;
-                laplacianB += b * -1.0;
+            // Cardinals
+            const n = texture(uTexture, uvCoord.add(vec2(0.0, texel.y)));
+            const s = texture(uTexture, uvCoord.add(vec2(0.0, texel.y.negate())));
+            const e = texture(uTexture, uvCoord.add(vec2(texel.x, 0.0)));
+            const w = texture(uTexture, uvCoord.add(vec2(texel.x.negate(), 0.0)));
 
-                // Cardinals
-                vec4 n = texture2D(uTexture, vUv + vec2(0.0, texel.y));
-                vec4 s = texture2D(uTexture, vUv + vec2(0.0, -texel.y));
-                vec4 e = texture2D(uTexture, vUv + vec2(texel.x, 0.0));
-                vec4 w = texture2D(uTexture, vUv + vec2(-texel.x, 0.0));
+            laplacianA = laplacianA.add(n.r.add(s.r).add(e.r).add(w.r).mul(0.2));
+            laplacianB = laplacianB.add(n.g.add(s.g).add(e.g).add(w.g).mul(0.2));
 
-                laplacianA += (n.r + s.r + e.r + w.r) * 0.2;
-                laplacianB += (n.g + s.g + e.g + w.g) * 0.2;
+            // Diagonals
+            const ne = texture(uTexture, uvCoord.add(vec2(texel.x, texel.y)));
+            const nw = texture(uTexture, uvCoord.add(vec2(texel.x.negate(), texel.y)));
+            const se = texture(uTexture, uvCoord.add(vec2(texel.x, texel.y.negate())));
+            const sw = texture(uTexture, uvCoord.add(vec2(texel.x.negate(), texel.y.negate())));
 
-                // Diagonals
-                vec4 ne = texture2D(uTexture, vUv + vec2(texel.x, texel.y));
-                vec4 nw = texture2D(uTexture, vUv + vec2(-texel.x, texel.y));
-                vec4 se = texture2D(uTexture, vUv + vec2(texel.x, -texel.y));
-                vec4 sw = texture2D(uTexture, vUv + vec2(-texel.x, -texel.y));
+            laplacianA = laplacianA.add(ne.r.add(nw.r).add(se.r).add(sw.r).mul(0.05));
+            laplacianB = laplacianB.add(ne.g.add(nw.g).add(se.g).add(sw.g).mul(0.05));
 
-                laplacianA += (ne.r + nw.r + se.r + sw.r) * 0.05;
-                laplacianB += (ne.g + nw.g + se.g + sw.g) * 0.05;
+            // Gray-Scott reaction-diffusion equations
+            const reaction = a.mul(b).mul(b);
+            const deltaA = uDa.mul(laplacianA).sub(reaction).add(uFeed.mul(sub(1.0, a)));
+            const deltaB = uDb.mul(laplacianB).add(reaction).sub(uKill.add(uFeed).mul(b));
 
-                // Gray-Scott reaction-diffusion equations
-                float reaction = a * b * b;
-                float deltaA = uDa * laplacianA - reaction + uFeed * (1.0 - a);
-                float deltaB = uDb * laplacianB + reaction - (uKill + uFeed) * b;
+            const newA = clamp(a.add(deltaA), 0.0, 1.0);
+            const newB = clamp(b.add(deltaB), 0.0, 1.0);
 
-                float newA = clamp(a + deltaA, 0.0, 1.0);
-                float newB = clamp(b + deltaB, 0.0, 1.0);
+            return vec4(newA, newB, 0.0, 1.0);
+        })();
 
-                gl_FragColor = vec4(newA, newB, 0.0, 1.0);
-            }
-        `;
-
-        const computeMaterial = new THREE.ShaderMaterial({
-            uniforms: {
-                uTexture: { value: rt1.texture },
-                uResolution: { value: new THREE.Vector2(size, size) },
-                uDa: { value: params.dA },
-                uDb: { value: params.dB },
-                uFeed: { value: params.feed },
-                uKill: { value: params.kill }
-            },
-            vertexShader: `
-                varying vec2 vUv;
-                void main() {
-                    vUv = uv;
-                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                }
-            `,
-            fragmentShader: computeShader
-        });
+        const computeMaterial = new THREE.MeshBasicNodeMaterial();
+        computeMaterial.colorNode = grayScottCompute;
 
         const computeScene = new THREE.Scene();
         const computeMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), computeMaterial);
         computeScene.add(computeMesh);
         const computeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-        // Display shader for visualization
-        const displayMaterial = new THREE.ShaderMaterial({
-            uniforms: {
-                uTexture: { value: rt1.texture }
-            },
-            vertexShader: `
-                varying vec2 vUv;
-                void main() {
-                    vUv = uv;
-                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                }
-            `,
-            fragmentShader: `
-                uniform sampler2D uTexture;
-                varying vec2 vUv;
+        // TSL-based display material for visualization
+        const uDisplayTexture = uniform(rt1.texture);
 
-                void main() {
-                    vec4 texel = texture2D(uTexture, vUv);
-                    float a = texel.r;
-                    float b = texel.g;
-                    float value = a - b;
+        const displayShader = Fn(() => {
+            const uvCoord = uv();
+            const texel = texture(uDisplayTexture, uvCoord);
+            const a = texel.r;
+            const b = texel.g;
+            const value = a.sub(b);
 
-                    vec3 color = vec3(value, value * 0.8, value * 1.2);
-                    gl_FragColor = vec4(color, 1.0);
-                }
-            `
-        });
+            const color = vec3(value, value.mul(0.8), value.mul(1.2));
+            return vec4(color, 1.0);
+        })();
+
+        const displayMaterial = new THREE.MeshBasicNodeMaterial();
+        displayMaterial.colorNode = displayShader;
 
         const displayScene = new THREE.Scene();
         const displayMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), displayMaterial);
@@ -256,7 +226,7 @@
         function animate() {
             // Run multiple compute iterations per frame
             for (let i = 0; i < 10; i++) {
-                computeMaterial.uniforms.uTexture.value = currentTarget.texture;
+                uTexture.value = currentTarget.texture;
                 renderer.setRenderTarget(nextTarget);
                 renderer.render(computeScene, computeCamera);
 
@@ -265,7 +235,7 @@
             }
 
             // Display result
-            displayMaterial.uniforms.uTexture.value = currentTarget.texture;
+            uDisplayTexture.value = currentTarget.texture;
             renderer.setRenderTarget(null);
             renderer.render(displayScene, displayCamera);
 

@@ -259,8 +259,18 @@ Demonstrate how altruism thrives in harsh environments but fails in benign ones.
         </div>
     </div>
 
-    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-    <script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/nodes": "https://unpkg.com/three@0.160.0/examples/jsm/nodes/Nodes.js"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { texture, uv, uniform, vec2, vec3, vec4, float, Fn, mix, clamp, abs, fract, sin, dot } from 'three/nodes';
+
         const canvas = document.getElementById('canvas');
         const GRID_SIZE = 512;
         const CANVAS_SIZE = 512;
@@ -318,151 +328,100 @@ Demonstrate how altruism thrives in harsh environments but fails in benign ones.
             stateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
             nextStateTarget = new THREE.WebGLRenderTarget(GRID_SIZE, GRID_SIZE, rtOptions);
 
-            // Simulation shader (computes next generation)
-            simulationMaterial = new THREE.ShaderMaterial({
-                uniforms: {
-                    state: { value: null },
-                    resolution: { value: new THREE.Vector2(GRID_SIZE, GRID_SIZE) },
-                    cost: { value: params.costOfAltruism },
-                    benefit: { value: params.benefitFromAltruism },
-                    minHarshness: { value: params.minHarshness },
-                    maxHarshness: { value: params.maxHarshness },
-                    seed: { value: Math.random() * 1000 },
-                    frame: { value: 0 }
-                },
-                vertexShader: `
-                    varying vec2 vUv;
-                    void main() {
-                        vUv = uv;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                    }
-                `,
-                fragmentShader: `
-                    uniform sampler2D state;
-                    uniform vec2 resolution;
-                    uniform float cost;
-                    uniform float benefit;
-                    uniform float minHarshness;
-                    uniform float maxHarshness;
-                    uniform float seed;
-                    uniform float frame;
-                    varying vec2 vUv;
+            // Simulation shader (computes next generation) - TSL version
+            const stateTexture = uniform(null);
+            const resolutionUniform = uniform(vec2(GRID_SIZE, GRID_SIZE));
+            const costUniform = uniform(params.costOfAltruism);
+            const benefitUniform = uniform(params.benefitFromAltruism);
+            const minHarshnessUniform = uniform(params.minHarshness);
+            const maxHarshnessUniform = uniform(params.maxHarshness);
+            const seedUniform = uniform(Math.random() * 1000);
+            const frameUniform = uniform(0);
 
-                    // Hash function for pseudo-random numbers
-                    float hash(vec2 p) {
-                        return fract(sin(dot(p, vec2(127.1, 311.7)) + seed + frame) * 43758.5453);
-                    }
+            const simulationShader = Fn(() => {
+                const uvCoord = uv();
+                const pixel = vec2(1.0).div(resolutionUniform);
 
-                    void main() {
-                        vec2 pixel = 1.0 / resolution;
+                const hash = Fn(([p]) => {
+                    const dotVal = dot(p, vec2(127.1, 311.7)).add(seedUniform).add(frameUniform);
+                    return fract(sin(dotVal).mul(43758.5453));
+                });
 
-                        // Calculate spatial harshness based on X position
-                        float harshness = minHarshness + (maxHarshness - minHarshness) * vUv.x;
+                // Calculate spatial harshness
+                const harshness = minHarshnessUniform.add(maxHarshnessUniform.sub(minHarshnessUniform).mul(uvCoord.x));
 
-                        // Get current state: r = type (0=empty, 0.5=altruist, 1=selfish)
-                        float currentState = texture2D(state, vUv).r;
+                const currentState = texture(stateTexture, uvCoord).r;
+                const left = texture(stateTexture, uvCoord.add(vec2(pixel.x.negate(), 0.0))).r;
+                const right = texture(stateTexture, uvCoord.add(vec2(pixel.x, 0.0))).r;
+                const up = texture(stateTexture, uvCoord.add(vec2(0.0, pixel.y))).r;
+                const down = texture(stateTexture, uvCoord.add(vec2(0.0, pixel.y.negate()))).r;
 
-                        // Get neighbors (Von Neumann neighborhood)
-                        float left = texture2D(state, vUv + vec2(-pixel.x, 0.0)).r;
-                        float right = texture2D(state, vUv + vec2(pixel.x, 0.0)).r;
-                        float up = texture2D(state, vUv + vec2(0.0, pixel.y)).r;
-                        float down = texture2D(state, vUv + vec2(0.0, -pixel.y)).r;
+                let altCount = float(0.0);
+                altCount = altCount.add(abs(currentState.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(left.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(right.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(up.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
+                altCount = altCount.add(abs(down.sub(0.5)).lessThan(0.1).select(1.0, 0.0));
 
-                        // Count altruists (state = 0.5) in neighborhood including self
-                        float altCount = 0.0;
-                        if (abs(currentState - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(left - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(right - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(up - 0.5) < 0.1) altCount += 1.0;
-                        if (abs(down - 0.5) < 0.1) altCount += 1.0;
+                const altBenefit = benefitUniform.mul(altCount).div(5.0);
 
-                        // Calculate altruism benefit
-                        float altBenefit = benefit * altCount / 5.0;
+                let altFitness = float(0.0);
+                let selfFitness = float(0.0);
+                let harshFitness = float(0.0);
 
-                        // Calculate fitness for each cell type in neighborhood
-                        float altFitness = 0.0;
-                        float selfFitness = 0.0;
-                        float harshFitness = 0.0;
+                // Process all 5 cells (center + 4 neighbors)
+                selfFitness = selfFitness.add(abs(currentState.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(currentState.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
+                harshFitness = harshFitness.add(abs(currentState).lessThan(0.1).select(harshness, 0.0));
 
-                        // Process each neighbor + self
-                        for (int i = 0; i < 5; i++) {
-                            vec2 offset = vec2(0.0);
-                            if (i == 1) offset = vec2(-pixel.x, 0.0);
-                            else if (i == 2) offset = vec2(pixel.x, 0.0);
-                            else if (i == 3) offset = vec2(0.0, pixel.y);
-                            else if (i == 4) offset = vec2(0.0, -pixel.y);
+                selfFitness = selfFitness.add(abs(left.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(left.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
+                harshFitness = harshFitness.add(abs(left).lessThan(0.1).select(harshness, 0.0));
 
-                            float nState = texture2D(state, vUv + offset).r;
-                            float fitness = 0.0;
+                selfFitness = selfFitness.add(abs(right.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(right.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
+                harshFitness = harshFitness.add(abs(right).lessThan(0.1).select(harshness, 0.0));
 
-                            if (abs(nState - 1.0) < 0.1) {
-                                // SELFISH
-                                fitness = 1.0 + altBenefit;
-                                selfFitness += fitness;
-                            } else if (abs(nState - 0.5) < 0.1) {
-                                // ALTRUIST
-                                fitness = (1.0 - cost) + altBenefit;
-                                altFitness += fitness;
-                            } else {
-                                // EMPTY - use spatial harshness
-                                fitness = harshness;
-                                harshFitness += fitness;
-                            }
-                        }
+                selfFitness = selfFitness.add(abs(up.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(up.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
+                harshFitness = harshFitness.add(abs(up).lessThan(0.1).select(harshness, 0.0));
 
-                        // Run lottery
-                        float totalFitness = altFitness + selfFitness + harshFitness;
-                        float newState = 0.0; // Default to EMPTY
+                selfFitness = selfFitness.add(abs(down.sub(1.0)).lessThan(0.1).select(float(1.0).add(altBenefit), 0.0));
+                altFitness = altFitness.add(abs(down.sub(0.5)).lessThan(0.1).select(float(1.0).sub(costUniform).add(altBenefit), 0.0));
+                harshFitness = harshFitness.add(abs(down).lessThan(0.1).select(harshness, 0.0));
 
-                        if (totalFitness > 0.0) {
-                            float rand = hash(vUv * resolution + vec2(frame)) * totalFitness;
+                // Lottery
+                const totalFitness = altFitness.add(selfFitness).add(harshFitness);
+                const rand = hash(uvCoord.mul(resolutionUniform).add(vec2(frameUniform))).mul(totalFitness);
 
-                            if (rand < altFitness) {
-                                newState = 0.5; // ALTRUIST
-                            } else if (rand < altFitness + selfFitness) {
-                                newState = 1.0; // SELFISH
-                            }
-                            // else remains 0.0 (EMPTY)
-                        }
+                let newState = float(0.0);
+                newState = rand.lessThan(altFitness).select(0.5, newState);
+                newState = rand.greaterThanEqual(altFitness).and(rand.lessThan(altFitness.add(selfFitness))).select(1.0, newState);
 
-                        gl_FragColor = vec4(newState, 0.0, 0.0, 1.0);
-                    }
-                `
-            });
+                return vec4(newState, 0.0, 0.0, 1.0);
+            })();
 
-            // Display shader (visualizes the state)
-            displayMaterial = new THREE.ShaderMaterial({
-                uniforms: {
-                    state: { value: null }
-                },
-                vertexShader: `
-                    varying vec2 vUv;
-                    void main() {
-                        vUv = uv;
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                    }
-                `,
-                fragmentShader: `
-                    uniform sampler2D state;
-                    varying vec2 vUv;
+            simulationMaterial = new THREE.MeshBasicNodeMaterial();
+            simulationMaterial.colorNode = simulationShader;
+            simulationMaterial.side = THREE.DoubleSide;
 
-                    void main() {
-                        float cellState = texture2D(state, vUv).r;
+            // Display shader (visualizes the state) - TSL version
+            const displayStateTexture = uniform(null);
 
-                        if (cellState < 0.25) {
-                            // EMPTY - show subtle gradient background
-                            float gradient = vUv.x; // Left to right
-                            gl_FragColor = vec4(gradient * 0.1, gradient * 0.05, 0.0, 1.0);
-                        } else if (cellState < 0.75) {
-                            // ALTRUIST (pink)
-                            gl_FragColor = vec4(1.0, 0.41, 0.71, 1.0);
-                        } else {
-                            // SELFISH (green)
-                            gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);
-                        }
-                    }
-                `
-            });
+            const displayShader = Fn(() => {
+                const uvCoord = uv();
+                const cellState = texture(displayStateTexture, uvCoord).r;
+
+                let color = vec3(uvCoord.x.mul(0.1), uvCoord.x.mul(0.05), 0.0); // Empty gradient
+                color = cellState.greaterThanEqual(0.25).and(cellState.lessThan(0.75)).select(vec3(1.0, 0.41, 0.71), color);
+                color = cellState.greaterThanEqual(0.75).select(vec3(0.0, 1.0, 0.0), color);
+
+                return vec4(color, 1.0);
+            })();
+
+            displayMaterial = new THREE.MeshBasicNodeMaterial();
+            displayMaterial.colorNode = displayShader;
+            displayMaterial.side = THREE.DoubleSide;
 
             // Create quad mesh
             const geometry = new THREE.PlaneGeometry(2, 2);
@@ -520,14 +479,14 @@ Demonstrate how altruism thrives in harsh environments but fails in benign ones.
 
             if (!paused) {
                 // Update uniforms
-                simulationMaterial.uniforms.cost.value = params.costOfAltruism;
-                simulationMaterial.uniforms.benefit.value = params.benefitFromAltruism;
-                simulationMaterial.uniforms.minHarshness.value = params.minHarshness;
-                simulationMaterial.uniforms.maxHarshness.value = params.maxHarshness;
-                simulationMaterial.uniforms.frame.value = frame++;
+                costUniform.value = params.costOfAltruism;
+                benefitUniform.value = params.benefitFromAltruism;
+                minHarshnessUniform.value = params.minHarshness;
+                maxHarshnessUniform.value = params.maxHarshness;
+                frameUniform.value = frame++;
 
                 // Run simulation step
-                simulationMaterial.uniforms.state.value = stateTarget.texture;
+                stateTexture.value = stateTarget.texture;
                 scene.clear();
                 scene.add(simulationMesh);
                 renderer.setRenderTarget(nextStateTarget);
@@ -543,7 +502,7 @@ Demonstrate how altruism thrives in harsh environments but fails in benign ones.
             }
 
             // Display current state
-            displayMaterial.uniforms.state.value = stateTarget.texture;
+            displayStateTexture.value = stateTarget.texture;
             scene.clear();
             scene.add(displayMesh);
             renderer.setRenderTarget(null);
@@ -553,7 +512,7 @@ Demonstrate how altruism thrives in harsh environments but fails in benign ones.
         window.setup = function() {
             generation = 0;
             frame = 0;
-            simulationMaterial.uniforms.seed.value = Math.random() * 1000;
+            seedUniform.value = Math.random() * 1000;
             initializeState();
             document.getElementById('generation').textContent = '0';
         };
