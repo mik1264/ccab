@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Performance Stress Test - 500+ Boids</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #000;
+            overflow: hidden;
+        }
+        #canvas { display: block; background: #0a0a0a; }
+        .info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.9);
+            padding: 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            max-width: 350px;
+        }
+        .info h1 { font-size: 20px; margin-bottom: 10px; color: #ff00ff; }
+        .stats {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+        }
+        .stat-value {
+            color: #00ff00;
+            font-weight: bold;
+        }
+        button {
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: #ff00ff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        button:hover {
+            background: #cc00cc;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h1>Performance Stress Test</h1>
+        <p>Testing boids algorithm performance with large flock sizes. Optimized neighbor search using spatial partitioning.</p>
+        <div class="stats">
+            <div class="stat-row">
+                <span>Boids:</span>
+                <span class="stat-value" id="boidCount">500</span>
+            </div>
+            <div class="stat-row">
+                <span>FPS:</span>
+                <span class="stat-value" id="fps">60</span>
+            </div>
+            <div class="stat-row">
+                <span>Frame Time:</span>
+                <span class="stat-value" id="frameTime">0ms</span>
+            </div>
+        </div>
+        <button onclick="addBoids(100)">+ 100 Boids</button>
+        <button onclick="removeBoids(100)">- 100 Boids</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // Spatial hash for optimization
+        class SpatialHash {
+            constructor(cellSize) {
+                this.cellSize = cellSize;
+                this.cells = new Map();
+            }
+
+            clear() {
+                this.cells.clear();
+            }
+
+            getKey(x, y) {
+                const cellX = Math.floor(x / this.cellSize);
+                const cellY = Math.floor(y / this.cellSize);
+                return `${cellX},${cellY}`;
+            }
+
+            insert(boid) {
+                const key = this.getKey(boid.x, boid.y);
+                if (!this.cells.has(key)) {
+                    this.cells.set(key, []);
+                }
+                this.cells.get(key).push(boid);
+            }
+
+            getNearby(boid, radius) {
+                const nearby = [];
+                const cellRadius = Math.ceil(radius / this.cellSize);
+                const centerX = Math.floor(boid.x / this.cellSize);
+                const centerY = Math.floor(boid.y / this.cellSize);
+
+                for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+                    for (let dy = -cellRadius; dy <= cellRadius; dy++) {
+                        const key = `${centerX + dx},${centerY + dy}`;
+                        if (this.cells.has(key)) {
+                            nearby.push(...this.cells.get(key));
+                        }
+                    }
+                }
+                return nearby;
+            }
+        }
+
+        const spatialHash = new SpatialHash(80);
+
+        class Boid {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.heading = Math.random() * Math.PI * 2;
+                this.speed = 2;
+            }
+
+            update(spatialHash) {
+                const nearby = spatialHash.getNearby(this, 80);
+                const flockmates = nearby.filter(other => {
+                    if (other === this) return false;
+                    const dist = Math.hypot(this.x - other.x, this.y - other.y);
+                    return dist < 80;
+                });
+
+                let nearest = null;
+                let minDist = Infinity;
+                for (const other of flockmates) {
+                    const dist = Math.hypot(this.x - other.x, this.y - other.y);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearest = other;
+                    }
+                }
+
+                if (nearest && minDist < 25) {
+                    const angle = Math.atan2(this.y - nearest.y, this.x - nearest.x);
+                    this.turnToward(angle, 1.5);
+                } else if (flockmates.length > 0) {
+                    let sumSin = 0, sumCos = 0;
+                    flockmates.forEach(b => {
+                        sumSin += Math.sin(b.heading);
+                        sumCos += Math.cos(b.heading);
+                    });
+                    const avgHeading = Math.atan2(sumSin / flockmates.length, sumCos / flockmates.length);
+                    this.turnToward(avgHeading, 5.0);
+
+                    let sumX = 0, sumY = 0;
+                    flockmates.forEach(b => {
+                        sumX += b.x - this.x;
+                        sumY += b.y - this.y;
+                    });
+                    const cohAngle = Math.atan2(sumY / flockmates.length, sumX / flockmates.length);
+                    this.turnToward(cohAngle, 3.0);
+                }
+
+                this.x += Math.cos(this.heading) * this.speed;
+                this.y += Math.sin(this.heading) * this.speed;
+
+                if (this.x < 0) this.x = canvas.width;
+                if (this.x > canvas.width) this.x = 0;
+                if (this.y < 0) this.y = canvas.height;
+                if (this.y > canvas.height) this.y = 0;
+            }
+
+            turnToward(targetHeading, maxTurn) {
+                const maxTurnRad = (maxTurn * Math.PI) / 180;
+                let diff = targetHeading - this.heading;
+                while (diff > Math.PI) diff -= 2 * Math.PI;
+                while (diff < -Math.PI) diff += 2 * Math.PI;
+                if (Math.abs(diff) < maxTurnRad) {
+                    this.heading = targetHeading;
+                } else {
+                    this.heading += Math.sign(diff) * maxTurnRad;
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.heading);
+                ctx.fillStyle = '#ff00ff';
+                ctx.fillRect(-3, -1.5, 6, 3);
+                ctx.restore();
+            }
+        }
+
+        const boids = [];
+
+        function addBoids(count) {
+            for (let i = 0; i < count; i++) {
+                boids.push(new Boid(Math.random() * canvas.width, Math.random() * canvas.height));
+            }
+            document.getElementById('boidCount').textContent = boids.length;
+        }
+
+        function removeBoids(count) {
+            boids.splice(0, Math.min(count, boids.length));
+            document.getElementById('boidCount').textContent = boids.length;
+        }
+
+        // Initialize
+        addBoids(500);
+
+        // Performance tracking
+        let lastTime = performance.now();
+        let frameCount = 0;
+        let fps = 60;
+        let lastFrameTime = 0;
+
+        function updateStats() {
+            frameCount++;
+            const currentTime = performance.now();
+
+            if (currentTime >= lastTime + 1000) {
+                fps = Math.round((frameCount * 1000) / (currentTime - lastTime));
+                document.getElementById('fps').textContent = fps;
+                frameCount = 0;
+                lastTime = currentTime;
+            }
+
+            document.getElementById('frameTime').textContent = lastFrameTime.toFixed(1) + 'ms';
+        }
+
+        function animate() {
+            const frameStart = performance.now();
+
+            ctx.fillStyle = '#0a0a0a';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Rebuild spatial hash
+            spatialHash.clear();
+            boids.forEach(b => spatialHash.insert(b));
+
+            // Update and draw
+            boids.forEach(b => b.update(spatialHash));
+            boids.forEach(b => b.draw());
+
+            lastFrameTime = performance.now() - frameStart;
+            updateStats();
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
