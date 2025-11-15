@@ -214,15 +214,6 @@ Explore cutting-edge techniques:
 | **WebAssembly** | High-performance computing | 5 |
 | **CSS3/SVG** | Pure CSS art, SVG animations | 11 |
 
-## 🎨 Visual Gallery Preview
-
-Each gallery features:
-- **Consistent styling** - Professional purple-gradient design
-- **Responsive layout** - Works on desktop and mobile
-- **Hover effects** - Interactive card animations
-- **Category organization** - Logical grouping by technology
-- **Direct linking** - No complex routing needed
-
 ## 🔬 Scientific & Educational Use Cases
 
 This collection is valuable for:
@@ -232,31 +223,6 @@ This collection is valuable for:
 - **Web Technology Demos** - Showcasing browser capabilities
 - **Physics/Math Education** - Interactive scientific simulations
 - **Portfolio Projects** - Reference implementations
-
-## ⚡ Performance
-
-All visualizations target:
-- **60 FPS** for smooth animations
-- **< 3s load time** per demo
-- **Efficient GPU usage** for complex rendering
-- **Responsive controls** for interactive demos
-- **Browser optimization** using requestAnimationFrame
-
-## 🏆 Project Evolution
-
-1. **Phase 1**: Manual creation of 40 foundational demos
-2. **Phase 2**: Automated generation using 20+ Claude Code instances
-3. **Phase 3**: Created 47 galleries (up from initial 6)
-4. **Phase 4**: Quality filtering and consolidation
-5. **Phase 5**: Expansion with agent-based models and physics simulations
-6. **Phase 6**: Documentation and cataloging of 1,000+ demos
-7. **Current**: 1,000+ demos across 47 galleries (44 active)
-
-**Key Discoveries**:
-- Framework-based visualizations (Three.js, D3.js) have higher success rates
-- Agent-based models scale well with parameter variations
-- Physics simulations benefit from GPU acceleration
-- Largest galleries: Physics (80+), Petri Arena (50), Gravity (50), Emergent Behaviors (50)
 
 ## 🎓 Method: A Class of 100+ Claude Code Instances as Students
 
