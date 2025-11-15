@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spatial Clustering and Hotspots</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            overflow: hidden;
+        }
+        #canvas {
+            display: block;
+            background: #000;
+        }
+        .info-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            max-width: 350px;
+        }
+        h1 {
+            font-size: 18px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        .description {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 15px;
+            line-height: 1.5;
+        }
+        .param {
+            margin-bottom: 12px;
+        }
+        label {
+            display: block;
+            font-size: 12px;
+            margin-bottom: 4px;
+            color: #666;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+        .value {
+            font-weight: bold;
+            color: #333;
+        }
+        .stats {
+            font-size: 12px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #ddd;
+        }
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            padding: 4px;
+            background: #f5f5f5;
+            border-radius: 3px;
+        }
+        .susceptible { color: #4ade80; font-weight: bold; }
+        .infected { color: #ef4444; font-weight: bold; }
+        .recovered { color: #94a3b8; font-weight: bold; }
+        .highlight {
+            background: #fecaca;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 11px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="info-panel">
+        <h1>Spatial Clustering & Hotspots</h1>
+        <p class="description">
+            Agents cluster into communities (colored zones). Disease creates hotspots in densely populated areas.
+            Heatmap shows infection density.
+        </p>
+
+        <div class="param">
+            <label>Community Strength: <span class="value" id="clusterVal">70</span>%</label>
+            <input type="range" id="clustering" min="0" max="100" value="70">
+        </div>
+
+        <div class="param">
+            <label>Transmission Rate: <span class="value" id="transVal">35</span>%</label>
+            <input type="range" id="transmission" min="10" max="70" value="35">
+        </div>
+
+        <div class="param">
+            <label>Inter-Community Travel: <span class="value" id="travelVal">10</span>%</label>
+            <input type="range" id="travel" min="0" max="50" value="10">
+        </div>
+
+        <div class="stats">
+            <div class="stat-row">
+                <span class="susceptible">Susceptible:</span>
+                <span id="susceptibleCount" class="susceptible">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="infected">Infected:</span>
+                <span id="infectedCount" class="infected">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="recovered">Recovered:</span>
+                <span id="recoveredCount" class="recovered">0</span>
+            </div>
+            <div class="stat-row">
+                <span>Hotspots:</span>
+                <span id="hotspotCount">0</span>
+            </div>
+        </div>
+
+        <div class="highlight">
+            <strong>Observation:</strong> Disease spreads rapidly within communities but slower between them,
+            creating distinct infection hotspots.
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let params = {
+            clustering: 70,
+            transmission: 35,
+            travel: 10
+        };
+
+        const SUSCEPTIBLE = 0;
+        const INFECTED = 1;
+        const RECOVERED = 2;
+
+        let agents = [];
+        let communities = [];
+        let time = 0;
+        let heatmapGrid = [];
+        const gridSize = 20;
+
+        class Community {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.radius = 150;
+                this.color = color;
+            }
+
+            draw() {
+                ctx.fillStyle = this.color + '15';
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.strokeStyle = this.color + '40';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        class Agent {
+            constructor(community, state = SUSCEPTIBLE) {
+                this.community = community;
+                this.x = community.x + (Math.random() - 0.5) * 120;
+                this.y = community.y + (Math.random() - 0.5) * 120;
+                this.vx = (Math.random() - 0.5) * 1.5;
+                this.vy = (Math.random() - 0.5) * 1.5;
+                this.state = state;
+                this.radius = 4;
+            }
+
+            update() {
+                // Occasionally travel to another community
+                if (Math.random() * 100 < params.travel / 100) {
+                    this.community = communities[Math.floor(Math.random() * communities.length)];
+                }
+
+                // Move toward community center
+                const dx = this.community.x - this.x;
+                const dy = this.community.y - this.y;
+                const distFromCenter = Math.sqrt(dx * dx + dy * dy);
+
+                if (distFromCenter > this.community.radius * 0.8) {
+                    this.vx += dx * 0.001 * (params.clustering / 100);
+                    this.vy += dy * 0.001 * (params.clustering / 100);
+                }
+
+                this.x += this.vx;
+                this.y += this.vy;
+
+                this.vx += (Math.random() - 0.5) * 0.15;
+                this.vy += (Math.random() - 0.5) * 0.15;
+
+                const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+                if (speed > 1.5) {
+                    this.vx = (this.vx / speed) * 1.5;
+                    this.vy = (this.vy / speed) * 1.5;
+                }
+
+                // Boundary
+                this.x = Math.max(0, Math.min(canvas.width, this.x));
+                this.y = Math.max(0, Math.min(canvas.height, this.y));
+            }
+
+            draw() {
+                let color;
+                switch (this.state) {
+                    case SUSCEPTIBLE: color = '#4ade80'; break;
+                    case INFECTED: color = '#ef4444'; break;
+                    case RECOVERED: color = '#94a3b8'; break;
+                }
+
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function init() {
+            agents = [];
+            communities = [];
+            time = 0;
+
+            // Create 4 communities
+            const colors = ['#667eea', '#f59e0b', '#10b981', '#ec4899'];
+            const positions = [
+                { x: canvas.width * 0.3, y: canvas.height * 0.3 },
+                { x: canvas.width * 0.7, y: canvas.height * 0.3 },
+                { x: canvas.width * 0.3, y: canvas.height * 0.7 },
+                { x: canvas.width * 0.7, y: canvas.height * 0.7 }
+            ];
+
+            positions.forEach((pos, i) => {
+                communities.push(new Community(pos.x, pos.y, colors[i]));
+            });
+
+            // Create agents
+            for (let i = 0; i < 300; i++) {
+                const community = communities[Math.floor(Math.random() * communities.length)];
+                const state = i < 10 && community === communities[0] ? INFECTED : SUSCEPTIBLE;
+                agents.push(new Agent(community, state));
+            }
+
+            // Initialize heatmap
+            heatmapGrid = Array(gridSize).fill(0).map(() => Array(gridSize).fill(0));
+        }
+
+        function updateHeatmap() {
+            // Reset heatmap
+            heatmapGrid = heatmapGrid.map(row => row.map(() => 0));
+
+            // Count infected in each grid cell
+            agents.forEach(agent => {
+                if (agent.state === INFECTED) {
+                    const gridX = Math.floor((agent.x / canvas.width) * gridSize);
+                    const gridY = Math.floor((agent.y / canvas.height) * gridSize);
+
+                    if (gridX >= 0 && gridX < gridSize && gridY >= 0 && gridY < gridSize) {
+                        heatmapGrid[gridY][gridX]++;
+                    }
+                }
+            });
+        }
+
+        function drawHeatmap() {
+            const cellWidth = canvas.width / gridSize;
+            const cellHeight = canvas.height / gridSize;
+            const maxCount = Math.max(...heatmapGrid.flat(), 1);
+
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    const count = heatmapGrid[y][x];
+                    if (count > 0) {
+                        const intensity = count / maxCount;
+                        ctx.fillStyle = `rgba(239, 68, 68, ${intensity * 0.3})`;
+                        ctx.fillRect(x * cellWidth, y * cellHeight, cellWidth, cellHeight);
+                    }
+                }
+            }
+        }
+
+        function checkTransmission() {
+            const infectionRadius = 15;
+
+            for (let i = 0; i < agents.length; i++) {
+                if (agents[i].state !== INFECTED) continue;
+
+                for (let j = 0; j < agents.length; j++) {
+                    if (i === j || agents[j].state !== SUSCEPTIBLE) continue;
+
+                    const dx = agents[i].x - agents[j].x;
+                    const dy = agents[i].y - agents[j].y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist < infectionRadius && Math.random() * 100 < params.transmission) {
+                        agents[j].state = INFECTED;
+                    }
+                }
+            }
+        }
+
+        function recover() {
+            for (let agent of agents) {
+                if (agent.state === INFECTED && Math.random() * 100 < 10) {
+                    agent.state = RECOVERED;
+                }
+            }
+        }
+
+        function countHotspots() {
+            return heatmapGrid.flat().filter(count => count >= 5).length;
+        }
+
+        function updateStats() {
+            let susceptible = 0, infected = 0, recovered = 0;
+
+            agents.forEach(agent => {
+                switch (agent.state) {
+                    case SUSCEPTIBLE: susceptible++; break;
+                    case INFECTED: infected++; break;
+                    case RECOVERED: recovered++; break;
+                }
+            });
+
+            document.getElementById('susceptibleCount').textContent = susceptible;
+            document.getElementById('infectedCount').textContent = infected;
+            document.getElementById('recoveredCount').textContent = recovered;
+            document.getElementById('hotspotCount').textContent = countHotspots();
+        }
+
+        function animate() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            communities.forEach(c => c.draw());
+
+            updateHeatmap();
+            drawHeatmap();
+
+            agents.forEach(agent => agent.update());
+            checkTransmission();
+            recover();
+            agents.forEach(agent => agent.draw());
+
+            time++;
+            if (time % 5 === 0) updateStats();
+
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('clustering').addEventListener('input', (e) => {
+            params.clustering = parseInt(e.target.value);
+            document.getElementById('clusterVal').textContent = params.clustering;
+        });
+
+        document.getElementById('transmission').addEventListener('input', (e) => {
+            params.transmission = parseInt(e.target.value);
+            document.getElementById('transVal').textContent = params.transmission;
+        });
+
+        document.getElementById('travel').addEventListener('input', (e) => {
+            params.travel = parseInt(e.target.value);
+            document.getElementById('travelVal').textContent = params.travel;
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            init();
+        });
+
+        init();
+        animate();
+    </script>
+</body>
+</html>
