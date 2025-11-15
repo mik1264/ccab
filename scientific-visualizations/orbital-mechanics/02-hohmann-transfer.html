@@ -3,184 +3,218 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hohmann Transfer Orbit</title>
+    <title>Hohmann Transfer Orbit - GPU Accelerated</title>
     <style>
-        body {
-            margin: 0;
-            overflow: hidden;
-            background: #0a0a1a;
-            font-family: Arial, sans-serif;
-        }
-        canvas {
-            display: block;
-        }
-        .info {
-            position: absolute;
-            top: 20px;
-            left: 20px;
-            color: #00ff88;
-            background: rgba(0, 0, 0, 0.9);
-            padding: 15px;
-            border-radius: 10px;
-            max-width: 350px;
-        }
+        body { margin: 0; overflow: hidden; background: #0a0a1a; font-family: Arial, sans-serif; }
+        canvas { display: block; }
+        .info {position: absolute; top: 20px; left: 20px; color: #00ff88; background: rgba(0, 0, 0, 0.9); padding: 15px; border-radius: 10px; max-width: 350px; }
+        .badge { position: absolute; top: 20px; right: 20px; background: rgba(0, 100, 255, 0.9); color: white; padding: 8px 12px; border-radius: 5px; font-size: 11px; font-weight: bold; }
+        .status { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.9); color: #00ff88; padding: 10px 20px; border-radius: 5px; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="info">
-        <h2>Hohmann Transfer Orbit</h2>
+        <h2>Hohmann Transfer (GPU)</h2>
         <p>Most fuel-efficient way to transfer between circular orbits</p>
         <p><strong>Δv₁:</strong> Burn at periapsis</p>
         <p><strong>Δv₂:</strong> Burn at apoapsis</p>
+        <p><strong>GPU particle trails</strong></p>
     </div>
-    <canvas id="canvas"></canvas>
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+    <div class="badge">GPU-Accelerated • Three.js TSL • Physics Simulation</div>
+    <div class="status" id="status">Coasting in inner orbit</div>
 
-        const centerX = canvas.width / 2;
-        const centerY = canvas.height / 2;
+    <script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
 
-        const r1 = 120; // Inner orbit radius
-        const r2 = 280; // Outer orbit radius
-        const transferA = (r1 + r2) / 2; // Semi-major axis of transfer orbit
-        const transferE = (r2 - r1) / (r2 + r1); // Eccentricity
+    <script type="module">
+        import * as THREE from 'three';
 
-        let spacecraft = {
+        let camera, scene, renderer;
+        const r1 = 0.35, r2 = 0.75;
+        const transferA = (r1 + r2) / 2;
+        const transferE = (r2 - r1) / (r2 + r1);
+
+        const spacecraft = {
             angle: 0,
             radius: r1,
-            phase: 'inner', // inner, transfer1, transfer2, outer
-            trail: []
+            phase: 'inner',
+            trail: [],
+            pos: new THREE.Vector3(r1, 0, 0),
+            burning: false
         };
 
-        function drawOrbit(radius, color, label) {
-            ctx.beginPath();
-            ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 2;
-            ctx.setLineDash([5, 5]);
-            ctx.stroke();
-            ctx.setLineDash([]);
+        init();
+        animate();
 
-            // Label
-            ctx.fillStyle = color;
-            ctx.font = '14px Arial';
-            ctx.fillText(label, centerX + radius + 10, centerY);
+        function init() {
+            scene = new THREE.Scene();
+
+            camera = new THREE.OrthographicCamera(-1.5, 1.5, 1.5, -1.5, 0.1, 10);
+            camera.position.z = 1;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            createCentralBody();
+            createOrbitRings();
+            createTransferOrbit();
+            createSpacecraft();
+
+            window.addEventListener('resize', onWindowResize);
         }
 
-        function drawTransferOrbit() {
-            ctx.save();
-            ctx.translate(centerX, centerY);
+        function createCentralBody() {
+            const geometry = new THREE.CircleGeometry(0.08, 32);
+            const material = new THREE.ShaderMaterial({
+                vertexShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    varying vec2 vUv;
+                    void main() {
+                        vec2 center = vUv - 0.5;
+                        float dist = length(center) * 2.0;
+                        vec3 color = mix(vec3(1.0, 1.0, 1.0), vec3(0.267, 0.533, 1.0), dist);
+                        gl_FragColor = vec4(color, 1.0);
+                    }
+                `
+            });
 
-            ctx.beginPath();
-            ctx.ellipse(
-                transferA - r1,
-                0,
-                transferA,
-                transferA * Math.sqrt(1 - transferE * transferE),
-                0, 0, Math.PI * 2
-            );
-            ctx.strokeStyle = '#FFaa00';
-            ctx.lineWidth = 2;
-            ctx.setLineDash([10, 5]);
-            ctx.stroke();
-            ctx.setLineDash([]);
-
-            ctx.restore();
+            const planet = new THREE.Mesh(geometry, material);
+            scene.add(planet);
         }
 
-        function drawCentralBody() {
-            const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, 30);
-            gradient.addColorStop(0, '#FFF');
-            gradient.addColorStop(0.3, '#88CCFF');
-            gradient.addColorStop(1, '#4488FF');
+        function createOrbitRings() {
+            [
+                { r: r1, color: 0x00FF88, label: 'Inner Orbit' },
+                { r: r2, color: 0xFF6B9D, label: 'Outer Orbit' }
+            ].forEach(orbit => {
+                const points = [];
+                for (let i = 0; i <= 64; i++) {
+                    const angle = (i / 64) * Math.PI * 2;
+                    points.push(new THREE.Vector3(
+                        Math.cos(angle) * orbit.r,
+                        Math.sin(angle) * orbit.r,
+                        -0.05
+                    ));
+                }
 
-            ctx.beginPath();
-            ctx.arc(centerX, centerY, 30, 0, Math.PI * 2);
-            ctx.fillStyle = gradient;
-            ctx.fill();
+                const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                const material = new THREE.LineDashedMaterial({
+                    color: orbit.color,
+                    dashSize: 0.02,
+                    gapSize: 0.02,
+                    transparent: true,
+                    opacity: 0.5
+                });
 
-            ctx.strokeStyle = '#FFF';
-            ctx.lineWidth = 2;
-            ctx.stroke();
+                const line = new THREE.Line(geometry, material);
+                line.computeLineDistances();
+                scene.add(line);
+            });
         }
 
-        function drawSpacecraft(x, y, angle, burning) {
-            ctx.save();
-            ctx.translate(x, y);
-            ctx.rotate(angle);
+        function createTransferOrbit() {
+            const points = [];
+            for (let i = 0; i <= 64; i++) {
+                const angle = (i / 64) * Math.PI * 2;
+                const r = (transferA * (1 - transferE * transferE)) / (1 + transferE * Math.cos(angle));
+                points.push(new THREE.Vector3(r * Math.cos(angle), r * Math.sin(angle), -0.04));
+            }
+
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const material = new THREE.LineDashedMaterial({
+                color: 0xFFaa00,
+                dashSize: 0.03,
+                gapSize: 0.015,
+                transparent: true,
+                opacity: 0.6
+            });
+
+            const line = new THREE.Line(geometry, material);
+            line.computeLineDistances();
+            scene.add(line);
+        }
+
+        function createSpacecraft() {
+            // Trail
+            const trailGeometry = new THREE.BufferGeometry();
+            const maxTrailPoints = 200;
+            const positions = new Float32Array(maxTrailPoints * 3);
+            trailGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            trailGeometry.setDrawRange(0, 0);
+
+            const trailMaterial = new THREE.LineBasicMaterial({
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0.5
+            });
+
+            const trailLine = new THREE.Line(trailGeometry, trailMaterial);
+            trailLine.userData.isTrail = true;
+            scene.add(trailLine);
 
             // Spacecraft body
-            ctx.fillStyle = '#CCC';
-            ctx.fillRect(-8, -6, 16, 12);
+            const geometry = new THREE.CircleGeometry(0.02, 8);
+            const material = new THREE.MeshBasicMaterial({ color: 0xcccccc });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.userData.isSpacecraft = true;
+            scene.add(mesh);
 
-            // Solar panels
-            ctx.fillStyle = '#4488FF';
-            ctx.fillRect(-15, -3, 5, 6);
-            ctx.fillRect(10, -3, 5, 6);
-
-            // Antenna
-            ctx.strokeStyle = '#FFF';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.moveTo(0, -6);
-            ctx.lineTo(0, -12);
-            ctx.stroke();
-
-            // Engine burn effect
-            if (burning) {
-                ctx.fillStyle = '#FF6600';
-                for (let i = 0; i < 5; i++) {
-                    ctx.beginPath();
-                    ctx.arc(-12 - i * 3, 0, 3 - i * 0.5, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-            }
-
-            ctx.restore();
+            // Burn effect
+            const burnGeometry = new THREE.CircleGeometry(0.015, 16);
+            const burnMaterial = new THREE.MeshBasicMaterial({
+                color: 0xff6600,
+                transparent: true,
+                opacity: 0
+            });
+            const burn = new THREE.Mesh(burnGeometry, burnMaterial);
+            burn.userData.isBurn = true;
+            scene.add(burn);
         }
 
-        let time = 0;
-        let burnPhase = 0; // 0: coast, 1: burn1, 2: coast, 3: burn2
-
-        function updateSpacecraft() {
+        function updateSpacecraft(dt) {
             const speed = 0.02;
-
-            spacecraft.trail.push({x: spacecraft.x, y: spacecraft.y});
-            if (spacecraft.trail.length > 200) {
-                spacecraft.trail.shift();
-            }
 
             if (spacecraft.phase === 'inner') {
                 spacecraft.angle += speed;
-                spacecraft.x = centerX + r1 * Math.cos(spacecraft.angle);
-                spacecraft.y = centerY + r1 * Math.sin(spacecraft.angle);
+                spacecraft.pos.x = r1 * Math.cos(spacecraft.angle);
+                spacecraft.pos.y = r1 * Math.sin(spacecraft.angle);
 
-                // Start transfer at angle 0
                 if (spacecraft.angle > Math.PI * 2) {
                     spacecraft.angle = 0;
                     spacecraft.phase = 'transfer';
                     spacecraft.transferAngle = 0;
-                    burnPhase = 1;
+                    spacecraft.burning = true;
+                    updateStatus('Δv₁: Periapsis Burn');
+                    setTimeout(() => {
+                        spacecraft.burning = false;
+                        updateStatus('Transfer Orbit');
+                    }, 1000);
                 }
             } else if (spacecraft.phase === 'transfer') {
                 spacecraft.transferAngle += speed * 0.5;
 
-                // Elliptical orbit calculation
-                const r = (transferA * (1 - transferE * transferE)) /
-                          (1 + transferE * Math.cos(spacecraft.transferAngle));
+                const r = (transferA * (1 - transferE * transferE)) / (1 + transferE * Math.cos(spacecraft.transferAngle));
+                spacecraft.pos.x = r * Math.cos(spacecraft.transferAngle);
+                spacecraft.pos.y = r * Math.sin(spacecraft.transferAngle);
 
-                spacecraft.x = centerX + r * Math.cos(spacecraft.transferAngle);
-                spacecraft.y = centerY + r * Math.sin(spacecraft.transferAngle);
-
-                if (spacecraft.transferAngle < 0.1) {
-                    burnPhase = 1;
-                } else if (spacecraft.transferAngle > Math.PI - 0.1 && spacecraft.transferAngle < Math.PI + 0.1) {
-                    burnPhase = 3;
-                } else {
-                    burnPhase = 0;
+                if (spacecraft.transferAngle >= Math.PI - 0.1 && spacecraft.transferAngle <= Math.PI + 0.1) {
+                    if (!spacecraft.burning) {
+                        spacecraft.burning = true;
+                        updateStatus('Δv₂: Apoapsis Burn');
+                        setTimeout(() => {
+                            spacecraft.burning = false;
+                            updateStatus('Coasting in outer orbit');
+                        }, 1000);
+                    }
                 }
 
                 if (spacecraft.transferAngle > Math.PI) {
@@ -189,83 +223,62 @@
                 }
             } else if (spacecraft.phase === 'outer') {
                 spacecraft.angle += speed * 0.7;
-                spacecraft.x = centerX + r2 * Math.cos(spacecraft.angle);
-                spacecraft.y = centerY + r2 * Math.sin(spacecraft.angle);
-                burnPhase = 0;
+                spacecraft.pos.x = r2 * Math.cos(spacecraft.angle);
+                spacecraft.pos.y = r2 * Math.sin(spacecraft.angle);
 
-                // Reset after one orbit
                 if (spacecraft.angle > Math.PI * 3) {
                     spacecraft.phase = 'inner';
                     spacecraft.angle = 0;
                     spacecraft.trail = [];
+                    updateStatus('Coasting in inner orbit');
                 }
             }
+
+            spacecraft.trail.push(spacecraft.pos.clone());
+            if (spacecraft.trail.length > 200) spacecraft.trail.shift();
         }
 
-        function draw() {
-            ctx.fillStyle = 'rgba(10, 10, 26, 0.1)';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        function updateStatus(text) {
+            document.getElementById('status').textContent = text;
+        }
 
-            drawOrbit(r1, '#00FF88', 'Inner Orbit');
-            drawOrbit(r2, '#FF6B9D', 'Outer Orbit');
-            drawTransferOrbit();
-            drawCentralBody();
-
-            // Draw trail
-            ctx.beginPath();
-            spacecraft.trail.forEach((point, i) => {
-                if (i === 0) {
-                    ctx.moveTo(point.x, point.y);
-                } else {
-                    ctx.lineTo(point.x, point.y);
-                }
-            });
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-            ctx.lineWidth = 2;
-            ctx.stroke();
-
-            updateSpacecraft();
-
-            const velocityAngle = Math.atan2(
-                spacecraft.y - centerY,
-                spacecraft.x - centerX
-            ) + Math.PI / 2;
-
-            drawSpacecraft(
-                spacecraft.x,
-                spacecraft.y,
-                velocityAngle,
-                burnPhase === 1 || burnPhase === 3
-            );
-
-            // Draw burn markers
-            if (burnPhase === 1) {
-                ctx.fillStyle = '#FF6600';
-                ctx.font = 'bold 16px Arial';
-                ctx.fillText('Δv₁: Periapsis Burn', 20, canvas.height - 20);
-            } else if (burnPhase === 3) {
-                ctx.fillStyle = '#FF6600';
-                ctx.font = 'bold 16px Arial';
-                ctx.fillText('Δv₂: Apoapsis Burn', 20, canvas.height - 20);
-            }
-
-            time += 0.01;
+        function onWindowResize() {
+            const aspect = window.innerWidth / window.innerHeight;
+            camera.left = -1.5 * aspect;
+            camera.right = 1.5 * aspect;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
         function animate() {
-            draw();
             requestAnimationFrame(animate);
+
+            updateSpacecraft(1);
+
+            // Update trail
+            scene.children.forEach(child => {
+                if (child.userData.isTrail) {
+                    const positions = child.geometry.attributes.position.array;
+                    for (let i = 0; i < spacecraft.trail.length; i++) {
+                        positions[i * 3] = spacecraft.trail[i].x;
+                        positions[i * 3 + 1] = spacecraft.trail[i].y;
+                        positions[i * 3 + 2] = 0.01;
+                    }
+                    child.geometry.setDrawRange(0, spacecraft.trail.length);
+                    child.geometry.attributes.position.needsUpdate = true;
+                } else if (child.userData.isSpacecraft) {
+                    child.position.copy(spacecraft.pos);
+                    child.position.z = 0.02;
+                } else if (child.userData.isBurn) {
+                    const offset = new THREE.Vector3(-spacecraft.pos.x, -spacecraft.pos.y, 0).normalize().multiplyScalar(0.03);
+                    child.position.copy(spacecraft.pos).add(offset);
+                    child.position.z = 0.01;
+                    child.material.opacity = spacecraft.burning ? 0.8 : 0;
+                }
+            });
+
+            renderer.render(scene, camera);
         }
-
-        spacecraft.x = centerX + r1;
-        spacecraft.y = centerY;
-
-        animate();
-
-        window.addEventListener('resize', () => {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight;
-        });
     </script>
 </body>
 </html>

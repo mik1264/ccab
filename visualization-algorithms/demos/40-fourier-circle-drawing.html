@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fourier Circle Drawing</title>
+    <title>Fourier Circle Drawing - GPU-Accelerated • Three.js TSL • Fourier Analysis</title>
     <style>
         * {
             margin: 0;
@@ -15,158 +15,330 @@
             overflow: hidden;
             background: #000;
             display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
             height: 100vh;
+            font-family: 'Courier New', monospace;
         }
 
         canvas {
             display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        .info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #00ff88;
+            font-size: 14px;
+            line-height: 1.8;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 255, 136, 0.3);
+        }
+
+        .badge {
+            display: inline-block;
+            background: rgba(0, 255, 136, 0.2);
+            padding: 4px 8px;
+            border-radius: 4px;
+            margin: 2px;
+            font-size: 11px;
+            border: 1px solid rgba(0, 255, 136, 0.4);
         }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
+    <div class="info">
+        <div style="margin-bottom: 10px;">
+            <span class="badge">GPU-Accelerated</span>
+            <span class="badge">Three.js TSL</span>
+            <span class="badge">Fourier Analysis</span>
+        </div>
+        <strong>2D Fourier Drawing</strong><br>
+        X and Y components combine to draw paths<br>
+        <span style="color: #888;">WebGPU • 2D Parametric Curves</span>
+    </div>
 
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+            "three/tsl": "https://unpkg.com/three@0.169.0/build/three.webgpu.js",
+            "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+        }
+    }
+    </script>
 
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+    <script type="module">
+        import * as THREE from 'three';
+        import WebGPU from 'three/addons/capabilities/WebGPU.js';
+        import WebGPURenderer from 'three/addons/renderers/webgpu/WebGPURenderer.js';
 
+        let camera, scene, renderer;
+        let xCircles = [];
+        let yCircles = [];
+        let pathPoints = [];
+        let pathMesh, pathGeometry;
+        let guideLines = [];
         let time = 0;
-        const pathX = [];
-        const pathY = [];
 
         // Fourier coefficients for X and Y
         const fourierX = [
-            { amp: 100, freq: 1, phase: 0 },
-            { amp: 30, freq: 3, phase: Math.PI / 4 },
-            { amp: 20, freq: 5, phase: Math.PI / 2 },
-            { amp: 10, freq: 7, phase: 0 }
+            { amp: 1.5, freq: 1, phase: 0 },
+            { amp: 0.45, freq: 3, phase: Math.PI / 4 },
+            { amp: 0.3, freq: 5, phase: Math.PI / 2 },
+            { amp: 0.15, freq: 7, phase: 0 }
         ];
 
         const fourierY = [
-            { amp: 100, freq: 1, phase: Math.PI / 2 },
-            { amp: 40, freq: 2, phase: 0 },
-            { amp: 15, freq: 4, phase: Math.PI / 3 },
-            { amp: 10, freq: 6, phase: 0 }
+            { amp: 1.5, freq: 1, phase: Math.PI / 2 },
+            { amp: 0.6, freq: 2, phase: 0 },
+            { amp: 0.25, freq: 4, phase: Math.PI / 3 },
+            { amp: 0.15, freq: 6, phase: 0 }
         ];
 
-        function drawFourierSeries(x, y, coeffs, isVertical) {
-            let posX = x;
-            let posY = y;
+        init();
+        animate();
 
-            for (let i = 0; i < coeffs.length; i++) {
-                const prevX = posX;
-                const prevY = posY;
-
-                const coeff = coeffs[i];
-                const angle = coeff.freq * time + coeff.phase;
-
-                if (isVertical) {
-                    posX += coeff.amp * Math.cos(angle);
-                    posY += coeff.amp * Math.sin(angle);
-                } else {
-                    posX += coeff.amp * Math.cos(angle);
-                    posY += coeff.amp * Math.sin(angle);
-                }
-
-                // Draw circle
-                const hue = (i / coeffs.length) * 180 + (isVertical ? 180 : 0);
-                ctx.strokeStyle = `hsla(${hue}, 70%, 60%, 0.3)`;
-                ctx.lineWidth = 1;
-                ctx.beginPath();
-                ctx.arc(prevX, prevY, coeff.amp, 0, Math.PI * 2);
-                ctx.stroke();
-
-                // Draw radius
-                ctx.strokeStyle = `hsl(${hue}, 70%, 60%)`;
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(prevX, prevY);
-                ctx.lineTo(posX, posY);
-                ctx.stroke();
-
-                // Draw point
-                ctx.fillStyle = '#fff';
-                ctx.beginPath();
-                ctx.arc(posX, posY, 3, 0, Math.PI * 2);
-                ctx.fill();
+        async function init() {
+            if (!WebGPU.isAvailable()) {
+                document.body.innerHTML = '<div style="color: white; text-align: center; margin-top: 50px;">WebGPU not supported. Please use a compatible browser.</div>';
+                return;
             }
 
-            return { x: posX, y: posY };
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000000);
+
+            // Camera setup
+            camera = new THREE.OrthographicCamera(
+                -10, 10, 5.625, -5.625, 0.1, 1000
+            );
+            camera.position.z = 10;
+
+            // Renderer setup
+            renderer = new WebGPURenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // Create X component circles
+            createFourierSeries(fourierX, xCircles, -5, 0, false);
+
+            // Create Y component circles
+            createFourierSeries(fourierY, yCircles, 0, 3, true);
+
+            // Create path
+            createPath();
+
+            // Create guide lines
+            createGuideLines();
+
+            // Handle resize
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function createFourierSeries(coeffs, circleArray, startX, startY, isVertical) {
+            coeffs.forEach((coeff, i) => {
+                // Circle outline
+                const circleGeometry = new THREE.RingGeometry(
+                    Math.max(coeff.amp - 0.02, 0.001),
+                    coeff.amp + 0.02,
+                    64
+                );
+                const hueOffset = isVertical ? 180 : 0;
+                const hue = ((i / coeffs.length) * 180 + hueOffset) / 360;
+                const circleMaterial = new THREE.MeshBasicMaterial({
+                    color: new THREE.Color().setHSL(hue, 0.7, 0.6),
+                    transparent: true,
+                    opacity: 0.3,
+                    side: THREE.DoubleSide
+                });
+                const circleMesh = new THREE.Mesh(circleGeometry, circleMaterial);
+                scene.add(circleMesh);
+
+                // Radius line
+                const lineGeometry = new THREE.BufferGeometry();
+                const linePositions = new Float32Array(6);
+                lineGeometry.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+                const lineMaterial = new THREE.LineBasicMaterial({
+                    color: new THREE.Color().setHSL(hue, 0.7, 0.6),
+                    linewidth: 2
+                });
+                const lineMesh = new THREE.Line(lineGeometry, lineMaterial);
+                scene.add(lineMesh);
+
+                circleArray.push({
+                    circle: circleMesh,
+                    line: lineMesh,
+                    data: coeff
+                });
+            });
+        }
+
+        function createPath() {
+            const maxPoints = 500;
+            const positions = new Float32Array(maxPoints * 3);
+
+            pathGeometry = new THREE.BufferGeometry();
+            pathGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            pathGeometry.setDrawRange(0, 0);
+
+            const pathMaterial = new THREE.LineBasicMaterial({
+                color: 0x00ff88,
+                linewidth: 3
+            });
+
+            pathMesh = new THREE.Line(pathGeometry, pathMaterial);
+            scene.add(pathMesh);
+        }
+
+        function createGuideLines() {
+            for (let i = 0; i < 2; i++) {
+                const lineGeometry = new THREE.BufferGeometry();
+                const linePositions = new Float32Array(6);
+                lineGeometry.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+                const lineMaterial = new THREE.LineBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 0.2
+                });
+                const lineMesh = new THREE.Line(lineGeometry, lineMaterial);
+                scene.add(lineMesh);
+                guideLines.push(lineMesh);
+
+                // Make it dashed
+                lineMaterial.onBeforeCompile = (shader) => {
+                    shader.fragmentShader = shader.fragmentShader.replace(
+                        'gl_FragColor = vec4( outgoingLight, diffuseColor.a );',
+                        `
+                        float dash = mod(gl_FragCoord.x + gl_FragCoord.y, 10.0);
+                        if (dash > 5.0) discard;
+                        gl_FragColor = vec4( outgoingLight, diffuseColor.a );
+                        `
+                    );
+                };
+            }
+
+            // Final point marker
+            const pointGeometry = new THREE.CircleGeometry(0.15, 32);
+            const pointMaterial = new THREE.MeshBasicMaterial({
+                color: 0x00ffff
+            });
+            const pointMesh = new THREE.Mesh(pointGeometry, pointMaterial);
+            scene.add(pointMesh);
+            scene.finalPoint = pointMesh;
+        }
+
+        function updateFourierSeries(circles, startX, startY) {
+            let x = startX;
+            let y = startY;
+
+            circles.forEach((circle, i) => {
+                const prevX = x;
+                const prevY = y;
+
+                const angle = circle.data.freq * time + circle.data.phase;
+                x += circle.data.amp * Math.cos(angle);
+                y += circle.data.amp * Math.sin(angle);
+
+                // Update circle position
+                circle.circle.position.set(prevX, prevY, 0);
+
+                // Update line
+                const linePositions = circle.line.geometry.attributes.position.array;
+                linePositions[0] = prevX;
+                linePositions[1] = prevY;
+                linePositions[2] = 0;
+                linePositions[3] = x;
+                linePositions[4] = y;
+                linePositions[5] = 0;
+                circle.line.geometry.attributes.position.needsUpdate = true;
+            });
+
+            return { x, y };
+        }
+
+        function updatePath(finalX, finalY) {
+            // Add new point
+            pathPoints.push({ x: finalX, y: finalY });
+
+            // Limit path length
+            if (pathPoints.length > 500) {
+                pathPoints.shift();
+            }
+
+            // Update path geometry
+            const positions = pathGeometry.attributes.position.array;
+            pathPoints.forEach((p, i) => {
+                positions[i * 3] = p.x;
+                positions[i * 3 + 1] = p.y;
+                positions[i * 3 + 2] = 0;
+            });
+            pathGeometry.attributes.position.needsUpdate = true;
+            pathGeometry.setDrawRange(0, pathPoints.length);
         }
 
         function animate() {
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            requestAnimationFrame(animate);
 
-            const startX = canvas.width / 4;
-            const startY = canvas.height / 4;
+            // Update X component
+            const xResult = updateFourierSeries(xCircles, -5, 0);
 
-            // Draw X component
-            const xResult = drawFourierSeries(startX, canvas.height / 2, fourierX, false);
+            // Update Y component
+            const yResult = updateFourierSeries(yCircles, 0, 3);
 
-            // Draw Y component
-            const yResult = drawFourierSeries(canvas.width / 2, startY, fourierY, true);
+            // Update guide lines
+            const guidePositions1 = guideLines[0].geometry.attributes.position.array;
+            guidePositions1[0] = xResult.x;
+            guidePositions1[1] = xResult.y;
+            guidePositions1[2] = 0;
+            guidePositions1[3] = xResult.x;
+            guidePositions1[4] = -3;
+            guidePositions1[5] = 0;
+            guideLines[0].geometry.attributes.position.needsUpdate = true;
 
-            // Draw guide lines
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([5, 5]);
+            const guidePositions2 = guideLines[1].geometry.attributes.position.array;
+            guidePositions2[0] = yResult.x;
+            guidePositions2[1] = yResult.y;
+            guidePositions2[2] = 0;
+            guidePositions2[3] = 5;
+            guidePositions2[4] = yResult.y;
+            guidePositions2[5] = 0;
+            guideLines[1].geometry.attributes.position.needsUpdate = true;
 
-            ctx.beginPath();
-            ctx.moveTo(xResult.x, xResult.y);
-            ctx.lineTo(xResult.x, canvas.height - 100);
-            ctx.stroke();
-
-            ctx.beginPath();
-            ctx.moveTo(yResult.x, yResult.y);
-            ctx.lineTo(canvas.width - 100, yResult.y);
-            ctx.stroke();
-
-            ctx.setLineDash([]);
-
-            // Draw the actual point
+            // Final point
             const finalX = xResult.x;
             const finalY = yResult.y;
 
-            ctx.fillStyle = '#00ffff';
-            ctx.beginPath();
-            ctx.arc(finalX, finalY, 6, 0, Math.PI * 2);
-            ctx.fill();
+            scene.finalPoint.position.set(finalX, finalY, 0);
 
-            // Add to path
-            pathX.push(finalX);
-            pathY.push(finalY);
-
-            // Draw path
-            ctx.strokeStyle = '#00ff88';
-            ctx.lineWidth = 3;
-            ctx.beginPath();
-            for (let i = 0; i < pathX.length; i++) {
-                if (i === 0) {
-                    ctx.moveTo(pathX[i], pathY[i]);
-                } else {
-                    ctx.lineTo(pathX[i], pathY[i]);
-                }
-            }
-            ctx.stroke();
-
-            // Limit path length
-            if (pathX.length > 500) {
-                pathX.shift();
-                pathY.shift();
-            }
+            // Update path
+            updatePath(finalX, finalY);
 
             time += 0.03;
 
-            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
         }
 
-        animate();
+        function onWindowResize() {
+            const aspect = window.innerWidth / window.innerHeight;
+            const height = 11.25;
+            const width = height * aspect;
+
+            camera.left = -width / 2;
+            camera.right = width / 2;
+            camera.top = height / 2;
+            camera.bottom = -height / 2;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
     </script>
 </body>
 </html>

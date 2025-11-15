@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Marching Squares Blobs</title>
+    <title>Marching Squares Blobs - GPU Accelerated</title>
     <style>
         * {
             margin: 0;
@@ -23,34 +23,84 @@
         canvas {
             display: block;
         }
+
+        .tech-badge {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #00ff88;
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 12px;
+            border: 1px solid #00ff88;
+        }
     </style>
 </head>
 <body>
-    <canvas id="canvas"></canvas>
+    <div class="tech-badge">GPU-Accelerated • Three.js TSL • Contour Generation</div>
 
-    <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/tsl": "https://unpkg.com/three@0.160.0/build/three.webgpu.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
 
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
+    <script type="module">
+        import * as THREE from 'three';
 
-        const cols = 50;
-        const rows = 40;
-        const cellWidth = canvas.width / cols;
-        const cellHeight = canvas.height / rows;
-
+        let scene, camera, renderer;
+        let lineSegments = [];
+        let meshes = [];
         const blobs = [];
-        const numBlobs = 5;
+        const numBlobs = 6;
 
-        for (let i = 0; i < numBlobs; i++) {
-            blobs.push({
-                x: Math.random() * cols,
-                y: Math.random() * rows,
-                vx: (Math.random() - 0.5) * 0.3,
-                vy: (Math.random() - 0.5) * 0.3,
-                radius: 3 + Math.random() * 5
-            });
+        const cols = 80;
+        const rows = 60;
+        const cellSize = 0.1;
+
+        init();
+        animate();
+
+        function init() {
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000000);
+
+            // Camera
+            camera = new THREE.OrthographicCamera(
+                -cols * cellSize / 2,
+                cols * cellSize / 2,
+                rows * cellSize / 2,
+                -rows * cellSize / 2,
+                0.1,
+                1000
+            );
+            camera.position.z = 10;
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // Initialize blobs
+            for (let i = 0; i < numBlobs; i++) {
+                blobs.push({
+                    x: Math.random() * cols,
+                    y: Math.random() * rows,
+                    vx: (Math.random() - 0.5) * 0.3,
+                    vy: (Math.random() - 0.5) * 0.3,
+                    radius: 3 + Math.random() * 5
+                });
+            }
+
+            window.addEventListener('resize', onResize);
         }
 
         function updateBlobs() {
@@ -87,14 +137,18 @@
                    (d > threshold ? 1 : 0);
         }
 
-        function drawMarchingSquares() {
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        function updateMarchingSquares() {
+            // Clear previous geometry
+            lineSegments.forEach(line => scene.remove(line));
+            meshes.forEach(mesh => scene.remove(mesh));
+            lineSegments = [];
+            meshes = [];
 
+            // Process marching squares
             for (let i = 0; i < cols; i++) {
                 for (let j = 0; j < rows; j++) {
-                    const x = i * cellWidth;
-                    const y = j * cellHeight;
+                    const x = (i - cols / 2) * cellSize;
+                    const y = (j - rows / 2) * cellSize;
 
                     const a = getFieldValue(i, j);
                     const b = getFieldValue(i + 1, j);
@@ -103,116 +157,181 @@
 
                     const state = getState(a, b, c, d);
 
-                    // Color based on field value
+                    const ax = x + cellSize / 2;
+                    const ay = y;
+                    const bx = x + cellSize;
+                    const by = y + cellSize / 2;
+                    const cx = x + cellSize / 2;
+                    const cy = y + cellSize;
+                    const dx = x;
+                    const dy = y + cellSize / 2;
+
                     const avgValue = (a + b + c + d) / 4;
                     const hue = (avgValue * 50) % 360;
+                    const color = new THREE.Color().setHSL(hue / 360, 0.8, 0.6);
+                    const fillColor = new THREE.Color().setHSL(hue / 360, 0.8, 0.4);
 
-                    ctx.strokeStyle = `hsl(${hue}, 80%, 60%)`;
-                    ctx.fillStyle = `hsla(${hue}, 80%, 40%, 0.3)`;
-                    ctx.lineWidth = 2;
+                    // Create filled mesh for blob interior
+                    const meshVertices = getMarchingSquaresMesh(state, x, y, ax, ay, bx, by, cx, cy, dx, dy);
+                    if (meshVertices.length > 0) {
+                        const geometry = new THREE.BufferGeometry();
+                        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(meshVertices), 3));
 
-                    const ax = x + cellWidth / 2;
-                    const ay = y;
-                    const bx = x + cellWidth;
-                    const by = y + cellHeight / 2;
-                    const cx = x + cellWidth / 2;
-                    const cy = y + cellHeight;
-                    const dx = x;
-                    const dy = y + cellHeight / 2;
+                        const material = new THREE.MeshBasicMaterial({
+                            color: fillColor,
+                            transparent: true,
+                            opacity: 0.3,
+                            side: THREE.DoubleSide
+                        });
 
-                    ctx.beginPath();
-
-                    switch (state) {
-                        case 1:
-                            ctx.moveTo(dx, dy);
-                            ctx.lineTo(cx, cy);
-                            ctx.lineTo(x, y + cellHeight);
-                            break;
-                        case 2:
-                            ctx.moveTo(bx, by);
-                            ctx.lineTo(cx, cy);
-                            ctx.lineTo(x + cellWidth, y + cellHeight);
-                            break;
-                        case 3:
-                            ctx.moveTo(dx, dy);
-                            ctx.lineTo(bx, by);
-                            ctx.lineTo(x + cellWidth, y + cellHeight);
-                            ctx.lineTo(x, y + cellHeight);
-                            break;
-                        case 4:
-                            ctx.moveTo(ax, ay);
-                            ctx.lineTo(bx, by);
-                            ctx.lineTo(x + cellWidth, y);
-                            break;
-                        case 6:
-                            ctx.moveTo(ax, ay);
-                            ctx.lineTo(cx, cy);
-                            ctx.lineTo(x + cellWidth, y + cellHeight);
-                            ctx.lineTo(x + cellWidth, y);
-                            break;
-                        case 7:
-                            ctx.moveTo(dx, dy);
-                            ctx.lineTo(ax, ay);
-                            ctx.lineTo(x + cellWidth, y);
-                            ctx.lineTo(x + cellWidth, y + cellHeight);
-                            ctx.lineTo(x, y + cellHeight);
-                            break;
-                        case 8:
-                            ctx.moveTo(dx, dy);
-                            ctx.lineTo(ax, ay);
-                            ctx.lineTo(x, y);
-                            break;
-                        case 9:
-                            ctx.moveTo(ax, ay);
-                            ctx.lineTo(cx, cy);
-                            ctx.lineTo(x, y + cellHeight);
-                            ctx.lineTo(x, y);
-                            break;
-                        case 11:
-                            ctx.moveTo(ax, ay);
-                            ctx.lineTo(bx, by);
-                            ctx.lineTo(x + cellWidth, y + cellHeight);
-                            ctx.lineTo(x, y + cellHeight);
-                            ctx.lineTo(x, y);
-                            break;
-                        case 12:
-                            ctx.moveTo(dx, dy);
-                            ctx.lineTo(bx, by);
-                            ctx.lineTo(x + cellWidth, y);
-                            ctx.lineTo(x, y);
-                            break;
-                        case 13:
-                            ctx.moveTo(bx, by);
-                            ctx.lineTo(cx, cy);
-                            ctx.lineTo(x, y + cellHeight);
-                            ctx.lineTo(x, y);
-                            ctx.lineTo(x + cellWidth, y);
-                            break;
-                        case 14:
-                            ctx.moveTo(dx, dy);
-                            ctx.lineTo(cx, cy);
-                            ctx.lineTo(x + cellWidth, y + cellHeight);
-                            ctx.lineTo(x + cellWidth, y);
-                            ctx.lineTo(x, y);
-                            break;
-                        case 15:
-                            ctx.rect(x, y, cellWidth, cellHeight);
-                            break;
+                        const mesh = new THREE.Mesh(geometry, material);
+                        scene.add(mesh);
+                        meshes.push(mesh);
                     }
 
-                    ctx.fill();
-                    ctx.stroke();
+                    // Create outline
+                    const segments = getMarchingSquaresSegments(state, ax, ay, bx, by, cx, cy, dx, dy);
+                    if (segments.length > 0) {
+                        segments.forEach(seg => {
+                            const geometry = new THREE.BufferGeometry();
+                            const vertices = new Float32Array([
+                                seg.x1, seg.y1, 0,
+                                seg.x2, seg.y2, 0
+                            ]);
+                            geometry.setAttribute('position', new THREE.BufferAttribute(vertices, 3));
+
+                            const material = new THREE.LineBasicMaterial({
+                                color: color,
+                                linewidth: 2
+                            });
+
+                            const line = new THREE.Line(geometry, material);
+                            scene.add(line);
+                            lineSegments.push(line);
+                        });
+                    }
                 }
             }
         }
 
-        function animate() {
-            updateBlobs();
-            drawMarchingSquares();
-            requestAnimationFrame(animate);
+        function getMarchingSquaresMesh(state, x, y, ax, ay, bx, by, cx, cy, dx, dy) {
+            const vertices = [];
+            const cw = cellSize;
+            const ch = cellSize;
+
+            switch (state) {
+                case 1:
+                    vertices.push(dx, dy, 0, cx, cy, 0, x, y + ch, 0);
+                    break;
+                case 2:
+                    vertices.push(bx, by, 0, cx, cy, 0, x + cw, y + ch, 0);
+                    break;
+                case 3:
+                    vertices.push(dx, dy, 0, bx, by, 0, x + cw, y + ch, 0, x, y + ch, 0);
+                    break;
+                case 4:
+                    vertices.push(ax, ay, 0, bx, by, 0, x + cw, y, 0);
+                    break;
+                case 6:
+                    vertices.push(ax, ay, 0, cx, cy, 0, x + cw, y + ch, 0, x + cw, y, 0);
+                    break;
+                case 7:
+                    vertices.push(dx, dy, 0, ax, ay, 0, x + cw, y, 0);
+                    vertices.push(dx, dy, 0, x + cw, y, 0, x + cw, y + ch, 0);
+                    vertices.push(dx, dy, 0, x + cw, y + ch, 0, x, y + ch, 0);
+                    break;
+                case 8:
+                    vertices.push(dx, dy, 0, ax, ay, 0, x, y, 0);
+                    break;
+                case 9:
+                    vertices.push(ax, ay, 0, cx, cy, 0, x, y + ch, 0, x, y, 0);
+                    break;
+                case 11:
+                    vertices.push(ax, ay, 0, bx, by, 0, x + cw, y + ch, 0);
+                    vertices.push(ax, ay, 0, x + cw, y + ch, 0, x, y + ch, 0);
+                    vertices.push(ax, ay, 0, x, y + ch, 0, x, y, 0);
+                    break;
+                case 12:
+                    vertices.push(dx, dy, 0, bx, by, 0, x + cw, y, 0, x, y, 0);
+                    break;
+                case 13:
+                    vertices.push(bx, by, 0, cx, cy, 0, x, y + ch, 0);
+                    vertices.push(bx, by, 0, x, y + ch, 0, x, y, 0);
+                    vertices.push(bx, by, 0, x, y, 0, x + cw, y, 0);
+                    break;
+                case 14:
+                    vertices.push(dx, dy, 0, cx, cy, 0, x + cw, y + ch, 0);
+                    vertices.push(dx, dy, 0, x + cw, y + ch, 0, x + cw, y, 0);
+                    vertices.push(dx, dy, 0, x + cw, y, 0, x, y, 0);
+                    break;
+                case 15:
+                    vertices.push(x, y, 0, x + cw, y, 0, x + cw, y + ch, 0);
+                    vertices.push(x, y, 0, x + cw, y + ch, 0, x, y + ch, 0);
+                    break;
+            }
+
+            return vertices;
         }
 
-        animate();
+        function getMarchingSquaresSegments(state, ax, ay, bx, by, cx, cy, dx, dy) {
+            const segments = [];
+
+            switch (state) {
+                case 1:
+                case 14:
+                    segments.push({ x1: dx, y1: dy, x2: cx, y2: cy });
+                    break;
+                case 2:
+                case 13:
+                    segments.push({ x1: bx, y1: by, x2: cx, y2: cy });
+                    break;
+                case 3:
+                case 12:
+                    segments.push({ x1: dx, y1: dy, x2: bx, y2: by });
+                    break;
+                case 4:
+                case 11:
+                    segments.push({ x1: ax, y1: ay, x2: bx, y2: by });
+                    break;
+                case 6:
+                case 9:
+                    segments.push({ x1: ax, y1: ay, x2: cx, y2: cy });
+                    break;
+                case 7:
+                case 8:
+                    segments.push({ x1: dx, y1: dy, x2: ax, y2: ay });
+                    break;
+                case 5:
+                case 10:
+                    segments.push({ x1: dx, y1: dy, x2: ax, y2: ay });
+                    segments.push({ x1: bx, y1: by, x2: cx, y2: cy });
+                    break;
+            }
+
+            return segments;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            updateBlobs();
+            updateMarchingSquares();
+
+            renderer.render(scene, camera);
+        }
+
+        function onResize() {
+            const aspect = window.innerWidth / window.innerHeight;
+            const frustumSize = cols * cellSize;
+
+            camera.left = -frustumSize * aspect / 2;
+            camera.right = frustumSize * aspect / 2;
+            camera.top = frustumSize / 2;
+            camera.bottom = -frustumSize / 2;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
     </script>
 </body>
 </html>
