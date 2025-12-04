@@ -14,29 +14,30 @@ This is a **static HTML/CSS/JavaScript** project with no build system, no depend
 
 The project follows a two-tier navigation structure:
 
-1. **Main Index** (`index.html`): Landing page with 20 category sections
+1. **Main Index** (`index.html`): Landing page with 83 galleries organized into 8 sections
 2. **Gallery Indexes**: Each category has its own `index.html` linking to individual demos
 3. **Individual Demos**: Self-contained HTML files with inline CSS/JavaScript
 
+**Two Types of Gallery Pages:**
+- **Multi-demo galleries** (52): Have separate HTML files for each demo (e.g., `threejs/01-rotating-cube.html`)
+- **Single-page demos** (28+): The `index.html` IS the demo itself (e.g., `wolfram-ca/index.html`, `algorithmic-art/index.html`)
+
 ```
 ccab/
-├── index.html                      # Main landing page (20 categories, 364+ demos)
-├── algorithmic-art/
-│   └── index.html                  # Gallery: 20+ demos in one page
-├── d3js/
-│   ├── index.html                  # Gallery: 18 demos across 6 subcategories
-│   ├── force-directed/             # Subcategory
-│   ├── hierarchical-trees/         # Subcategory
-│   └── ...
-├── threejs/
-│   ├── index.html                  # Gallery: 30 demos
+├── index.html                      # Main landing page (83 galleries, 1,072+ demos)
+├── threejs/                        # Multi-demo gallery example
+│   ├── index.html                  # Gallery index listing demos
 │   ├── 01-rotating-cube.html       # Individual demo
 │   ├── 02-spinning-torus.html
 │   └── ...
-└── [12 more gallery directories]
+├── wolfram-ca/                     # Single-page demo example
+│   └── index.html                  # The demo IS the index
+├── algorithmic-art/
+│   └── index.html                  # Single-page: multi-demo gallery in one file
+└── [80+ more gallery directories]
 ```
 
-### 20 Gallery Categories
+### 83 Gallery Categories (8 Sections)
 
 **Original (6):**
 - `algorithmic-art/` - Fractals, patterns, generative art (20+ demos)
@@ -72,17 +73,38 @@ Every demo is a complete standalone file:
 - External libraries loaded via CDN (unpkg.com, cdnjs.com)
 - No local dependencies
 
-### 2. Gallery Index Structure
+### 2. Gallery Index Structure (Organic-Nature Theme)
 
-Each gallery's `index.html` follows this pattern:
+Multi-demo gallery `index.html` files follow the organic-nature template:
 ```html
-<div class="category">
-    <h2>Section Title</h2>
-    <p class="category-description">Description text</p>
-    <div class="items-grid">
-        <a href="path/to/demo.html" class="item-link">Demo Name</a>
+<!-- Organic background shapes -->
+<div class="organic-shape shape-1"></div>
+<div class="organic-shape shape-2"></div>
+
+<main class="container">
+    <header class="header">
+        <a href="../index.html" class="back-link">← Back to Gallery</a>
+        <h1>Gallery Title</h1>
+        <p class="subtitle">Description</p>
+    </header>
+
+    <div class="demos-grid">
+        <a href="01-demo-name.html" class="demo-card">
+            <span class="demo-number">01</span>
+            <h3>Demo Title</h3>
+            <p>Short description</p>
+        </a>
+        <!-- More demo cards -->
     </div>
-</div>
+</main>
+```
+
+Single-page demos include a floating back-link:
+```html
+<a href="../index.html" class="organic-back-link">
+    <span class="back-arrow">←</span>
+    <span class="back-text">Gallery</span>
+</a>
 ```
 
 ### 3. Technology Stack by Gallery
@@ -349,17 +371,31 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ### Updating Main Gallery Stats
 
-When demos are added/removed, update the stats in `index.html`:
+When demos are added/removed, update the stats in `index.html` (organic-nature format):
 ```html
 <div class="stats">
-    <h3>364+ Interactive Demos</h3>  <!-- Update this number -->
-    <p>From vanilla HTML/CSS/JavaScript to WebGL, WebGPU, Three.js, P5.js, D3.js, Pixi.js, and WebAssembly</p>
+    <div class="stat">
+        <div class="stat-number">1,072+</div>
+        <div class="stat-label">Interactive Demos</div>
+    </div>
+    <div class="stat">
+        <div class="stat-number">83</div>
+        <div class="stat-label">Galleries</div>
+    </div>
+    <!-- Add more stat blocks as needed -->
 </div>
 ```
 
 ### Adding New Category Section
 
-Insert new `<div class="category">` blocks **before** the `<div class="stats">` section to maintain layout.
+Add gallery cards inside the appropriate `<section class="category">` block. Each gallery is a card:
+```html
+<a href="new-gallery/index.html" class="gallery-card">
+    <span class="card-number">84</span>
+    <h3>New Gallery</h3>
+    <p>Description of gallery contents</p>
+</a>
+```
 
 ### Gallery Index Naming Conventions
 
@@ -383,16 +419,37 @@ Target: **Modern evergreen browsers** (Chrome, Firefox, Safari, Edge)
 - For heavy computation, consider Web Workers or WASM
 - GPU particle systems: Keep particle counts under 100K for broad compatibility
 
-## Visual Consistency
+## Visual Design System: Organic-Nature Theme
 
-Main gallery (`index.html`) uses:
-- **Gradient background**: `linear-gradient(135deg, #667eea 0%, #764ba2 100%)`
-- **Primary color**: `#667eea` (purple-blue)
-- **Font**: System font stack
-- **Card shadows**: `0 10px 30px rgba(0, 0, 0, 0.2)`
-- **Border radius**: 15px for categories, 8px for items
+All pages use a consistent organic-nature design aesthetic (December 2025 redesign):
 
-Individual gallery indexes may have their own styling but should maintain professional appearance.
+### Color Palette (CSS Variables)
+```css
+:root {
+    --sage: #8A9A5B;       /* Primary accent */
+    --moss: #606C38;       /* Headings, text emphasis */
+    --earth: #DDA15E;      /* Warm accent */
+    --cream: #FEFAE0;      /* Background base */
+    --terracotta: #BC6C25; /* Secondary accent */
+    --dark-moss: #3d4423;  /* Dark text */
+}
+```
+
+### Typography
+- **Headings**: `'Lora', serif` - Elegant, nature-inspired
+- **Body text**: `'Nunito', sans-serif` - Clean, readable
+- Load via Google Fonts: `https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap`
+
+### Key Design Elements
+- **Morphing organic shapes**: Animated blob backgrounds with `border-radius` morphing over 30s
+- **Glassmorphism cards**: `background: rgba(255,255,255,0.6); backdrop-filter: blur(10px)`
+- **Gradient background**: `linear-gradient(135deg, #FEFAE0 0%, #F4F1DE 50%, #EDE8D5 100%)`
+- **Border radius**: 20px for cards, organic rounded corners
+- **Hover animations**: Cubic-bezier easing, subtle transforms
+
+### Page Types
+1. **Multi-demo galleries**: Full organic template with numbered demo cards
+2. **Single-page demos**: Floating back-link in top-left corner with organic styling
 
 ## Historical Context
 
@@ -406,13 +463,14 @@ This project evolved through:
    - Created 4 production-ready demo templates with error handling
    - Built reusable utility library (demo-utils.js)
    - Added comprehensive SEO meta tags
-   - Implemented back-to-top button and skip-to-content link
    - Enhanced accessibility (WCAG 2.1 Level AA+)
-   - Fixed CSS formatting errors
-   - Added retina display support and FPS monitoring
-   - **Result**: 15+ improvements affecting all 1,072+ demos and future development
-7. **Current state**: 1,072+ demos across 50+ categories with professional-grade infrastructure
+7. **Organic-Nature Redesign** (Dec 2025): Complete visual overhaul
+   - Redesigned main index.html with organic-nature aesthetic
+   - Updated 52 multi-demo gallery pages with full organic template
+   - Added organic-styled floating back-links to 28 single-page demos
+   - New color palette: sage, moss, earth, cream, terracotta
+   - Typography: Lora (headings) + Nunito (body)
+   - Animated morphing blob backgrounds, glassmorphism cards
+8. **Current state**: 1,072+ demos across 83 galleries with consistent organic-nature design
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).
-
-**Latest improvements documented in:** `IMPROVEMENTS.md`
