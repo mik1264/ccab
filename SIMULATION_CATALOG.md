@@ -1,6 +1,6 @@
 # CCAB Simulation Catalog
 
-A comprehensive catalog of all 1,020 browser-based simulations and visualizations in the Creative Code Art Browser (CCAB) collection.
+A comprehensive catalog of all 936 browser-based simulations and visualizations in the Creative Code Art Browser (CCAB) collection.
 
 ---
 
@@ -8,9 +8,9 @@ A comprehensive catalog of all 1,020 browser-based simulations and visualization
 
 | Statistic | Value |
 |-----------|-------|
-| **Total Simulations** | 1,020 |
-| **Categories** | 70+ |
-| **Primary Technologies** | Canvas 2D, WebGL, Three.js, D3.js, PixiJS, Web Audio API |
+| **Total Simulations** | 936 |
+| **Categories** | 50 |
+| **Primary Technologies** | Canvas 2D, WebGL, Three.js, D3.js, PixiJS, Web Audio API, WebAssembly |
 
 ---
 
@@ -112,13 +112,13 @@ A comprehensive catalog of all 1,020 browser-based simulations and visualization
 
 ## ABM Economics
 
-Agent-based macroeconomic models with households, firms, and banks.
+Agent-based macroeconomic models with households, firms, and banks. Based on research from [INET Oxford](https://www.inet.ox.ac.uk/news/agent-based-modelling-comes-of-age) and central banks worldwide, these simulations demonstrate how aggregate economic behavior emerges from individual agent interactions, challenging traditional equilibrium-based DSGE models.
 
-| # | File | Visualization | Technology |
-|---|------|---------------|------------|
-| 1 | 01-simple-macro-abm.html | 100 households, 10 firms, 1 bank showing GDP, unemployment, inflation | Canvas 2D |
-| 2 | 02-intermediate-policy-lab.html | 1000 households, 50 firms, Taylor Rule monetary policy, Phillips Curve | Canvas 2D |
-| 3 | 03-full-netlogo-simulation.html | 5000 households, 200 firms, 5 banks, ODD protocol implementation | Canvas 2D |
+| # | File | Description | Technology |
+|---|------|-------------|------------|
+| 1 | 01-simple-macro-abm.html | **Introduction to Agent-Based Macroeconomics.** Simulates heterogeneous economic agents (100 households, 10 firms, 1 bank) making boundedly rational decisions. Demonstrates GDP, unemployment, and inflation emerging from bottom-up interactions. | Canvas 2D |
+| 2 | 02-intermediate-policy-lab.html | **Interactive policy experimentation platform.** 1000 households, 50 firms with Taylor Rule monetary policy. Explore how fiscal and monetary policies affect an agent-based economy. See emergent effects like clustered volatility that traditional models miss. | Canvas 2D |
+| 3 | 03-full-netlogo-simulation.html | **Full NetLogo-style comprehensive simulation.** 5000 households, 200 firms, 5 banks with ODD protocol. Demonstrates that ABMs can achieve forecasting performance competitive with VAR and DSGE models. | Canvas 2D |
 | 4 | index.html | Gallery navigation page | HTML/CSS |
 
 ---
@@ -161,11 +161,11 @@ Evolutionary game theory simulations studying cooperation vs selfishness.
 
 ## Ancient Economy ABM
 
-Agent-based models of historical economic systems.
+Agent-based models of historical economic systems, exploring pre-monetary exchange and the emergence of currency.
 
-| # | File | Visualization | Technology |
-|---|------|---------------|------------|
-| 1 | m0-prototype.html | Ancient economy agent-based model with spatial world | Canvas 2D |
+| # | File | Description | Technology |
+|---|------|-------------|------------|
+| 1 | m0-prototype.html | **Pre-monetary exchange systems and early economic structures.** Models bartering, gift economies, and the emergence of currency. Demonstrates how complex trade networks can emerge from simple agent rules in ancient societies. | Canvas 2D |
 | 2 | index.html | Gallery navigation page | HTML/CSS |
 
 ---
@@ -1088,15 +1088,15 @@ High-performance sprite animations using PixiJS (17 files).
 
 ## Renaissance EconSim
 
-Agent-based Renaissance economy simulation (5 files).
+Agent-based Renaissance economy simulation (5 files). Models the merchant economy of Renaissance Italy (14th-16th century), inspired by the rise of Florence, Venice, and Genoa. Features innovations pioneered by the [Medici Bank](https://en.wikipedia.org/wiki/Medici_Bank) that became the foundation of modern international banking.
 
-| # | File | Visualization | Technology |
-|---|------|---------------|------------|
-| 1 | 01-agent-based-trade.html | Merchant trade with supply/demand | Canvas 2D |
-| 2 | 02-trade-network.html | Trade route network graph | Canvas 2D |
-| 3 | 03-wealth-distribution.html | Wealth inequality dynamics | Canvas 2D |
-| 4 | 04-banking-system.html | Medici-style banking with loans | Canvas 2D |
-| 5 | 05-florence-economy.html | Complete Florence city-state economy | Canvas 2D |
+| # | File | Description | Technology |
+|---|------|-------------|------------|
+| 1 | 01-agent-based-trade.html | **Merchant economy of Renaissance Italy.** Models traders, guild systems, and commodity exchange inspired by Florence, Venice, and Genoa trading powerhouses. | Canvas 2D |
+| 2 | 02-trade-network.html | **International trade networks.** Visualizes Renaissance banking family networks. The Medici Bank had branches in Venice, Milan, Rome, London, Bruges, and Lyons, with correspondents in Constantinople, Alexandria, and Cairo. | Canvas 2D |
+| 3 | 03-wealth-distribution.html | **Wealth concentration among merchant families.** The Medici, Peruzzi, Bardi, and Acciaiuoli controlled much of European finance. Demonstrates early examples of Pareto distribution in wealth. | Canvas 2D |
+| 4 | 04-banking-system.html | **Revolutionary banking innovations.** Double-entry bookkeeping, letters of credit, and bills of exchange. The Medici pioneered practices that became modern international banking. | Canvas 2D |
+| 5 | 05-florence-economy.html | **Complete Florence city-state simulation.** Models the textile industry (wool and silk), banking sector, and political economy. Florence lost banking dominance after the Medici collapse in 1494. | Canvas 2D |
 
 ---
 
@@ -1176,21 +1176,58 @@ Space weather and solar activity (40 files).
 
 ## Sugarscape
 
-Epstein & Axtell's artificial society model (20 files).
+[Epstein & Axtell's "Growing Artificial Societies" (1996)](https://en.wikipedia.org/wiki/Sugarscape) - the foundational agent-based model. Agents with vision and metabolism compete for sugar on a 2D landscape, demonstrating how wealth inequality emerges spontaneously from simple rules.
 
-| # | File | Visualization | Technology |
-|---|------|---------------|------------|
-| 1-20 | Various aspects of Sugarscape including resource gathering, agent movement, metabolism, vision, reproduction, trading, combat, disease | Canvas 2D |
+| # | File | Description | Technology |
+|---|------|-------------|------------|
+| 1 | 01-classic-sugarscape.html | **The original Epstein-Axtell model.** Autonomous agents with varying vision (1-6 cells) and metabolism compete for renewable sugar resources on a twin-peaked landscape. Demonstrates spontaneous wealth inequality emergence. | Canvas 2D |
+| 2 | 02-wealth-distribution.html | **Real-time wealth histogram.** Despite identical starting conditions, a Pareto-like distribution emerges where most agents have below-average wealth while a minority accumulates most resources. | Canvas 2D |
+| 3 | 03-gini-coefficient-tracker.html | **Gini coefficient tracking.** Named after Italian statistician [Corrado Gini (1912)](https://en.wikipedia.org/wiki/Gini_coefficient). Watch inequality rise from 0 (perfect equality) toward values typical of real economies (0.3-0.5). | Canvas 2D |
+| 4 | 04-vision-impact.html | **Information advantage.** Agents who can "see" farther consistently accumulate more wealth. Analogous to information asymmetry in real markets. | Canvas 2D |
+| 5 | 05-metabolism-survival.html | **Metabolic efficiency (frugality).** Low-metabolism agents survive longer on the same resources. Demonstrates the tension between consumption and accumulation. | Canvas 2D |
+| 6 | 06-age-demographics.html | **Population age distribution.** Shows how economic success correlates with longevity and how population structure evolves. | Canvas 2D |
+| 7 | 07-resource-heatmap.html | **Sugar concentration visualization.** The twin-peaked distribution creates natural migration patterns as agents seek high-resource areas. | Canvas 2D |
+| 8 | 08-agent-trails.html | **Movement trails.** Traces agent paths over time, revealing migration patterns and emergent territorial behavior. | Canvas 2D |
+| 9 | 10-lorenz-curve.html | **[Lorenz curve](https://en.wikipedia.org/wiki/Lorenz_curve) (Max Lorenz, 1905).** Shows cumulative wealth distribution. The further the curve bends from the diagonal, the more unequal. | Canvas 2D |
+| 10 | 11-population-dynamics.html | **Population size tracking.** Resource availability, metabolism distribution, and vision range all affect carrying capacity. | Canvas 2D |
+| 11 | 12-wealth-concentration.html | **Top X% wealth share.** Measures what percentage of total wealth is held by the top 10%, top 1%, etc. "Rich get richer" dynamics. | Canvas 2D |
+| 12 | 13-spatial-segregation.html | **Geographic wealth clustering.** Wealthy agents cluster in high-resource areas while poor agents are pushed to margins. | Canvas 2D |
+| 13 | 14-resource-depletion.html | **Boom-bust cycles.** When regeneration can't keep up with consumption, population crashes occur. | Canvas 2D |
+| 14 | 15-optimal-strategy.html | **Strategy comparison.** High vision + low metabolism is optimal, but resource competition means not everyone can be optimal. | Canvas 2D |
+| 15 | 16-lifespan-analysis.html | **Lifespan vs wealth correlation.** Wealthy agents tend to live longer, creating dynastic advantages. | Canvas 2D |
+| 16 | 17-migration-flows.html | **Migration flow vectors.** Shows how "invisible hand" market forces create orderly migration toward resources. | Canvas 2D |
+| 17 | 18-emergent-territories.html | **Emergent territorial clustering.** Distinct "tribal" territories form around resource peaks without explicit rules. | Canvas 2D |
+| 18 | 19-regeneration-comparison.html | **Regeneration strategy comparison.** Immediate growback vs. gradual regeneration creates different economic dynamics. | Canvas 2D |
+| 19 | 20-pareto-distribution.html | **[Pareto distribution](https://en.wikipedia.org/wiki/Pareto_principle) (80/20 Rule).** Vilfredo Pareto's observation that ~80% of wealth is held by ~20% of the population emerges naturally. | Canvas 2D |
 
 ---
 
 ## Sugarscape Inequality
 
-Economic inequality studies in Sugarscape (21 files).
+Deep dives into inequality mechanisms from the Sugarscape model (20 files). Explores how simple agent rules produce real-world inequality patterns.
 
-| # | File | Visualization | Technology |
-|---|------|---------------|------------|
-| 1-21 | Wealth distribution, Gini coefficient tracking, Lorenz curves, wealth accumulation, inheritance effects | Canvas 2D + Charts |
+| # | File | Description | Technology |
+|---|------|-------------|------------|
+| 1 | 01-basic-sugarscape-gini.html | **Baseline model with Gini tracking.** The Gini coefficient rises from 0 to 0.3-0.5 within ~100 time steps, matching real-world inequality levels. | Canvas 2D |
+| 2 | 02-spatial-luck.html | **Starting position matters.** Demonstrates how initial conditions create persistent inequality. Agents near resource peaks have permanent advantages - analogous to inherited wealth. | Canvas 2D |
+| 3 | 03-vision-heterogeneity.html | **Information advantage.** Explores how differences in "vision" (information access) drive inequality. Those who can see further outperform. | Canvas 2D |
+| 4 | 04-metabolic-efficiency.html | **Frugality wins.** Low-metabolism agents accumulate more wealth. Demonstrates the "millionaire next door" effect - frugality matters more than income. | Canvas 2D |
+| 5 | 05-lorenz-curve.html | **Interactive Lorenz curve.** Drag parameters to see how vision, metabolism, and population size affect curve shape and Gini coefficient. | Canvas 2D |
+| 6 | 06-wealth-histogram.html | **Pareto distribution emergence.** Real-time histogram showing power-law wealth distribution. Most agents cluster at low wealth while a long tail extends to very high values. | Canvas 2D |
+| 7 | 07-two-commodity-trading.html | **Sugar & Spice trading.** Extends Sugarscape with a second commodity. Trading increases overall welfare but also increases inequality. | Canvas 2D |
+| 8 | 08-inequality-timeline.html | **Three phases of inequality.** Time-series showing initial equality → rapid divergence → stable inequality. | Canvas 2D |
+| 9 | 09-survival-selection.html | **Natural selection.** Tracks which agent types survive over time. Natural selection favors efficient agents. | Canvas 2D |
+| 10 | 10-wealth-accumulation.html | **Individual trajectories.** Visualizes how agents accumulate (or lose) wealth. Some show steady growth; others volatility and crashes. | Canvas 2D |
+| 11 | 11-trade-network.html | **Trade relationship network.** Shows how some agents become trading hubs while others remain peripheral. | Canvas 2D |
+| 12 | 12-efficiency-equity-tradeoff.html | **Classic economics tradeoff.** Policies that increase total wealth (efficiency) often increase inequality, and vice versa. | Canvas 2D |
+| 13 | 13-initial-vs-final-distribution.html | **Starting vs ending wealth.** Even with equal starts, highly unequal outcomes emerge. | Canvas 2D |
+| 14 | 14-cobb-douglas-welfare.html | **[Cobb-Douglas utility function](https://en.wikipedia.org/wiki/Cobb–Douglas_production_function) 3D.** (Charles Cobb & Paul Douglas, 1927). Shows how agents value combinations of two goods. | Canvas 2D |
+| 15 | 15-resource-regeneration.html | **Regeneration strategies.** Different approaches and their effects on sustainability and wealth distribution. | Canvas 2D |
+| 16 | 16-parameter-sweep-gini.html | **Gini sensitivity analysis.** Systematically varies parameters to show which most strongly affect inequality. | Canvas 2D |
+| 17 | 17-agent-lifecycle.html | **Births, deaths, and wealth transfer.** Shows how economic "dynasties" form across generations. | Canvas 2D |
+| 18 | 18-marginal-rate-substitution.html | **MRS visualization.** How much of one good an agent would trade for another. Fundamental to understanding trade. | Canvas 2D |
+| 19 | 19-wealth-concentration.html | **Top 10% vs Bottom 50%.** Mirrors real-world statistics like "the top 1% owns 50% of wealth." | Canvas 2D |
+| 20 | 20-interactive-sandbox.html | **Full sandbox with all controls.** Experiment with population size, vision ranges, metabolism, resource regeneration. | Canvas 2D |
 
 ---
 
@@ -1293,11 +1330,29 @@ General visualization demos (10 files).
 
 ## Wealth Distribution
 
-Economic inequality simulations (20 files).
+Additional explorations of wealth inequality dynamics (19 files). Sugarscape-based simulations examining specific factors that drive inequality.
 
-| # | File | Visualization | Technology |
-|---|------|---------------|------------|
-| 1-20 | Wealth concentration dynamics, Gini coefficient visualization, Lorenz curves | Canvas 2D + D3.js |
+| # | File | Description | Technology |
+|---|------|-------------|------------|
+| 1 | 01-classic-wealth-distribution.html | **Standard Sugarscape setup.** Clear visualization of how simple rules produce complex wealth distributions. | Canvas 2D |
+| 2 | 02-vision-impact-comparison.html | **Vision distributions compared.** Side-by-side populations showing how information inequality drives wealth inequality. | Canvas 2D |
+| 3 | 03-metabolism-impact.html | **Metabolism distributions compared.** Low-metabolism populations accumulate more total wealth. | Canvas 2D |
+| 4 | 04-combined-fitness-advantages.html | **Compounding inequality.** Agents with BOTH high vision AND low metabolism dominate. Small initial advantages become large outcome differences. | Canvas 2D |
+| 5 | 05-spatial-wealth-segregation.html | **Geographic clustering.** Wealthy vs poor agents cluster spatially. Economic class becomes geographic class. | Canvas 2D |
+| 6 | 06-temporal-wealth-evolution.html | **Time-lapse evolution.** Shows the transition from initial equality to stable stratification. | Canvas 2D |
+| 7 | 07-lorenz-curve-interactive.html | **Interactive Lorenz curve analysis.** Adjust parameters and see immediate effects on curve shape. | Canvas 2D |
+| 8 | 08-wealth-histogram-distribution.html | **Pareto distribution.** Agent wealth follows a power-law distribution, just like real-world wealth data. | Canvas 2D |
+| 9 | 09-inheritance-effects.html | **Dynastic wealth.** Children inherit parent's position and wealth, creating persistent dynasties. | Canvas 2D |
+| 10 | 10-taxation-redistribution.html | **Taxation policy experiments.** Explores how different tax rates affect inequality and total welfare. | Canvas 2D |
+| 11 | 11-social-mobility-tracking.html | **Social mobility.** Tracks whether agents can move between wealth quintiles. Initial position predicts final position. | Canvas 2D |
+| 12 | 12-agent-lifespan-wealth-correlation.html | **Wealth and longevity.** Positive correlation between wealth and survival. Wealthy agents live longer, compounding advantages. | Canvas 2D |
+| 13 | 13-equal-vs-heterogeneous-start.html | **Starting conditions.** Equal vs. initial advantages both converge to similar inequality levels. | Canvas 2D |
+| 14 | 14-resource-regeneration-variants.html | **Resource abundance effects.** Counterintuitively, more resources can increase competition and inequality. | Canvas 2D |
+| 15 | 15-sparse-vs-dense-resources.html | **Resource distribution.** Concentrated resources create more extreme inequality than spread-out resources. | Canvas 2D |
+| 16 | 16-population-dynamics.html | **Population size effects.** How population affects per-capita wealth and inequality measures. | Canvas 2D |
+| 17 | 17-vision-range-comparison.html | **Vision range heterogeneity.** Narrow vs. wide vision distributions. More heterogeneity → more inequality. | Canvas 2D |
+| 18 | 18-multi-generation-analysis.html | **Multi-generation tracking.** Wealth patterns across multiple agent generations show persistence of family wealth. | Canvas 2D |
+| 19 | 20-pareto-principle-demonstration.html | **[Pareto principle](https://en.wikipedia.org/wiki/Pareto_principle) (80-20 Rule).** ~80% of wealth held by ~20% of agents. Named for Vilfredo Pareto (1848-1923). | Canvas 2D |
 
 ---
 
@@ -1395,5 +1450,5 @@ Predator-prey ecosystem simulations (20 files).
 ---
 
 *Generated: December 2024*
-*Total Simulations: 1,020*
-*Categories: 74*
+*Total Simulations: 936*
+*Categories: 50*
