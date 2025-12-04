@@ -82,7 +82,10 @@ class CCABNavigation {
       'web-audio-api': { name: 'Web Audio API', section: 'advanced', demos: 40 },
       'webassembly': { name: 'WebAssembly', section: 'advanced', demos: 18 },
       'visualization-algorithms': { name: 'Visualization Algorithms', section: 'advanced', demos: 40 },
-      'games': { name: 'Interactive Games', section: 'advanced', demos: 1 }
+      'games': { name: 'Interactive Games', section: 'advanced', demos: 1 },
+
+      // Educational Essays
+      'essays': { name: 'Visual Essays', section: 'educational', demos: 1 }
     };
   }
 
@@ -172,6 +175,7 @@ class CCABNavigation {
         <button class="filter-chip" data-filter="data">Data Viz</button>
         <button class="filter-chip" data-filter="graphics">3D/WebGL</button>
         <button class="filter-chip" data-filter="advanced">Advanced</button>
+        <button class="filter-chip" data-filter="educational">Essays</button>
       </div>
       <div class="search-results" id="searchResults"></div>
     `;
