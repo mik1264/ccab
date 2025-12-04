@@ -125,12 +125,45 @@ const program = createShaderProgram(vertexShader, fragmentShader);
 
 ### Adding a New Demo to Existing Gallery
 
-1. Create new HTML file in gallery directory (e.g., `threejs/41-new-demo.html`)
-2. Update gallery's `index.html` to add link:
-   ```html
-   <a href="41-new-demo.html" class="item-link">New Demo Title</a>
+**IMPORTANT: Always use templates when creating new demos!**
+
+1. **Copy the appropriate template** from `templates/` directory:
+   ```bash
+   # For Canvas 2D demos
+   cp templates/template-canvas.html your-gallery/your-demo.html
+
+   # For Three.js 3D demos
+   cp templates/template-threejs.html threejs/your-demo.html
+
+   # For P5.js creative coding
+   cp templates/template-p5js.html p5-generative-art/your-demo.html
+
+   # For raw WebGL shaders
+   cp templates/template-webgl.html webgl-shaders/your-demo.html
    ```
-3. No need to update main `index.html` (it links to gallery index)
+
+2. **Edit the template** - Look for sections marked `YOUR CODE GOES HERE` and replace with your visualization logic
+
+3. **Update gallery's `index.html`** to add link:
+   ```html
+   <a href="your-demo.html" class="item-link">Your Demo Title</a>
+   ```
+
+4. **Test thoroughly** - Verify error handling, loading states, and mobile responsiveness work
+
+5. No need to update main `index.html` (it links to gallery index)
+
+**Why Use Templates?**
+- ✅ Built-in error handling (CDN failures, runtime errors)
+- ✅ Loading states with spinners
+- ✅ Retina display support (crisp rendering)
+- ✅ FPS monitoring
+- ✅ Responsive resizing
+- ✅ Memory leak prevention
+- ✅ Accessibility features
+- ✅ Consistent UX across all demos
+
+See `templates/README.md` for detailed documentation.
 
 ### Adding a New Gallery Category
 
@@ -171,12 +204,88 @@ Based on `IMPLEMENTATION_STATUS.md`, these implementations failed:
 
 **Lesson:** Framework-based visualizations succeed better than complex physics simulations.
 
+## Reusable Components
+
+### Demo Templates (`templates/`)
+
+Production-ready templates for creating new demos with built-in best practices:
+
+1. **`template-canvas.html`** - HTML5 Canvas 2D graphics
+2. **`template-threejs.html`** - Three.js 3D WebGL scenes
+3. **`template-p5js.html`** - P5.js creative coding
+4. **`template-webgl.html`** - Raw WebGL shader art
+
+Each template includes:
+- Error handling for CDN failures and runtime errors
+- Loading states with animated spinners
+- FPS counters with color-coded performance indicators
+- Retina display support (automatic DPI scaling)
+- Responsive canvas/renderer resizing with debouncing
+- Memory leak prevention
+- WebGL support detection
+- Back navigation links
+- Proper resource cleanup
+
+**See `templates/README.md` for complete documentation.**
+
+### Utility Library (`assets/js/demo-utils.js`)
+
+Reusable JavaScript utilities that can be included in any demo:
+
+```html
+<script src="../assets/js/demo-utils.js"></script>
+<script>
+    const canvas = new CanvasManager('canvas'); // Retina-aware canvas
+    const fps = new FPSCounter({ position: 'top-right' });
+    const loader = new LoadingManager('Loading...');
+    const errorMgr = new ErrorManager();
+
+    // Math utilities
+    const x = lerp(0, 100, 0.5); // Linear interpolation
+    const rand = random(0, 10); // Random float
+    const angle = degToRad(45); // Degrees to radians
+
+    // Color utilities
+    const color = hslToRgb(360, 100, 50); // HSL to RGB
+    const colorStr = rgb(255, 100, 50, 0.8); // Create rgba string
+
+    // Animation loop
+    const loop = new AnimationLoop((deltaTime, totalTime) => {
+        fps.update();
+        // Render logic here
+    });
+    loop.start();
+</script>
+```
+
+**Available Classes:**
+- `FPSCounter` - Performance monitoring
+- `CanvasManager` - Retina canvas with auto-resize
+- `ErrorManager` - Centralized error UI
+- `LoadingManager` - Loading spinner management
+- `AnimationLoop` - Delta-time animation loop
+
+**Available Functions:**
+- Math: `clamp()`, `lerp()`, `map()`, `random()`, `randomInt()`, `degToRad()`, `radToDeg()`
+- Color: `hslToRgb()`, `rgb()`
+- Loading: `loadLibrary()`, `checkWebGLSupport()`, `checkWebGL2Support()`
+- Error: `setupGlobalErrorHandler()`
+
 ## Documentation Files
 
+### Project Documentation
+- `CLAUDE.md` - This file, guidance for Claude Code
+- `IMPROVEMENTS.md` - Detailed changelog of November 2025 improvements
+- `README.md` - *(If exists)* Project overview and setup
+
+### Historical Documentation
 - `IMPLEMENTATION_STATUS.md` - Tracks 19 automated branch implementations (13 successful, 6 failed)
 - `NEXT_STEPS.md` - Comprehensive 12-week roadmap for platform enhancement
 - `SIMULATIONS_ROADMAP.md` - Deep dive into 10 essential simulations beyond Game of Life
 - `SIMULATIONS_QUICK_GUIDE.md` - Quick reference for simulation priorities
+
+### Template Documentation
+- `templates/README.md` - Complete guide to using demo templates (400+ lines)
 
 ## Development Workflow
 
@@ -293,6 +402,17 @@ This project evolved through:
 3. **Consolidation**: All successful branches merged to main (Nov 2025)
 4. **Quality curation**: 560 → 348 demos (38% reduction, retaining highest quality)
 5. **Altruism Evolution**: Added educational evolutionary biology gallery (16 demos)
-6. **Current state**: 364+ demos across 20 categories
+6. **Platform improvements** (Nov 2025): Major code quality, UX, accessibility, and DX enhancements
+   - Created 4 production-ready demo templates with error handling
+   - Built reusable utility library (demo-utils.js)
+   - Added comprehensive SEO meta tags
+   - Implemented back-to-top button and skip-to-content link
+   - Enhanced accessibility (WCAG 2.1 Level AA+)
+   - Fixed CSS formatting errors
+   - Added retina display support and FPS monitoring
+   - **Result**: 15+ improvements affecting all 1,072+ demos and future development
+7. **Current state**: 1,072+ demos across 50+ categories with professional-grade infrastructure
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).
+
+**Latest improvements documented in:** `IMPROVEMENTS.md`
