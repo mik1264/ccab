@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spring Network Sequencer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a15;
+            min-height: 100vh;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; cursor: grab; }
+        canvas:active { cursor: grabbing; }
+        .controls {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+        }
+        button {
+            background: rgba(100,255,150,0.15);
+            border: 1px solid rgba(100,255,150,0.5);
+            color: #8f8;
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+        }
+        button:hover { background: rgba(100,255,150,0.25); }
+        .info {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(100,255,150,0.7);
+            font-size: 14px;
+        }
+        a.back { position: fixed; top: 20px; left: 20px; color: #8f8; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <a class="back" href="index.html">← Back</a>
+    <div class="info">Drag nodes to stretch springs • Oscillations create music</div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <button id="playBtn">▶ Play</button>
+        <button id="shakeBtn">Shake</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width = canvas.width = window.innerWidth;
+        let height = canvas.height = window.innerHeight;
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        let isPlaying = false;
+        const nodes = [];
+        const springs = [];
+        let draggedNode = null;
+
+        const notes = [130.81, 164.81, 196, 220, 261.63, 293.66, 329.63, 392, 440, 523.25];
+
+        class Node {
+            constructor(x, y, fixed = false) {
+                this.x = x;
+                this.y = y;
+                this.restX = x;
+                this.restY = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.fixed = fixed;
+                this.mass = 1;
+                this.hue = Math.random() * 360;
+                this.noteIndex = Math.floor(Math.random() * notes.length);
+                this.lastVelocity = 0;
+                this.glow = 0;
+            }
+
+            update() {
+                if (this.fixed || draggedNode === this) return;
+
+                // Apply velocity
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Damping
+                this.vx *= 0.98;
+                this.vy *= 0.98;
+
+                // Keep in bounds
+                if (this.x < 50) { this.x = 50; this.vx *= -0.5; }
+                if (this.x > width - 50) { this.x = width - 50; this.vx *= -0.5; }
+                if (this.y < 50) { this.y = 50; this.vy *= -0.5; }
+                if (this.y > height - 50) { this.y = height - 50; this.vy *= -0.5; }
+
+                // Sound on velocity change (crossing zero)
+                const currentVelocity = this.vy;
+                if (isPlaying && Math.abs(currentVelocity) > 0.5) {
+                    if ((this.lastVelocity > 0 && currentVelocity < 0) ||
+                        (this.lastVelocity < 0 && currentVelocity > 0)) {
+                        this.playNote();
+                    }
+                }
+                this.lastVelocity = currentVelocity;
+
+                if (this.glow > 0) this.glow -= 0.02;
+            }
+
+            playNote() {
+                const freq = notes[this.noteIndex];
+                const velocity = Math.hypot(this.vx, this.vy);
+
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+
+                osc.type = 'sine';
+                osc.frequency.value = freq;
+
+                const vol = Math.min(0.2, velocity * 0.02);
+                gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.4);
+
+                this.glow = 1;
+            }
+
+            draw() {
+                if (this.glow > 0) {
+                    ctx.shadowColor = `hsl(${this.hue}, 80%, 60%)`;
+                    ctx.shadowBlur = 20 * this.glow;
+                }
+
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.fixed ? 15 : 12, 0, Math.PI * 2);
+                ctx.fillStyle = this.fixed ? '#666' : `hsl(${this.hue}, 70%, 55%)`;
+                ctx.fill();
+
+                if (!this.fixed) {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, 8, 0, Math.PI * 2);
+                    ctx.fillStyle = `hsl(${this.hue}, 80%, 70%)`;
+                    ctx.fill();
+                }
+
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        class Spring {
+            constructor(nodeA, nodeB, restLength) {
+                this.nodeA = nodeA;
+                this.nodeB = nodeB;
+                this.restLength = restLength || Math.hypot(nodeB.x - nodeA.x, nodeB.y - nodeA.y);
+                this.stiffness = 0.03;
+            }
+
+            update() {
+                const dx = this.nodeB.x - this.nodeA.x;
+                const dy = this.nodeB.y - this.nodeA.y;
+                const dist = Math.hypot(dx, dy);
+                const diff = dist - this.restLength;
+
+                const force = diff * this.stiffness;
+                const fx = (dx / dist) * force;
+                const fy = (dy / dist) * force;
+
+                if (!this.nodeA.fixed && draggedNode !== this.nodeA) {
+                    this.nodeA.vx += fx / this.nodeA.mass;
+                    this.nodeA.vy += fy / this.nodeA.mass;
+                }
+                if (!this.nodeB.fixed && draggedNode !== this.nodeB) {
+                    this.nodeB.vx -= fx / this.nodeB.mass;
+                    this.nodeB.vy -= fy / this.nodeB.mass;
+                }
+            }
+
+            draw() {
+                const dx = this.nodeB.x - this.nodeA.x;
+                const dy = this.nodeB.y - this.nodeA.y;
+                const dist = Math.hypot(dx, dy);
+                const tension = Math.abs(dist - this.restLength) / this.restLength;
+
+                ctx.beginPath();
+                ctx.moveTo(this.nodeA.x, this.nodeA.y);
+                ctx.lineTo(this.nodeB.x, this.nodeB.y);
+
+                const hue = tension > 0.2 ? 0 : 120;
+                ctx.strokeStyle = `hsla(${hue}, 70%, 50%, ${0.3 + tension})`;
+                ctx.lineWidth = 2 + tension * 3;
+                ctx.stroke();
+            }
+        }
+
+        function initNetwork() {
+            nodes.length = 0;
+            springs.length = 0;
+
+            const cols = 5;
+            const rows = 4;
+            const spacingX = (width - 200) / (cols - 1);
+            const spacingY = (height - 200) / (rows - 1);
+
+            // Create nodes
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const fixed = r === 0 || r === rows - 1;
+                    const x = 100 + c * spacingX;
+                    const y = 100 + r * spacingY;
+                    nodes.push(new Node(x, y, fixed));
+                }
+            }
+
+            // Create springs
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const i = r * cols + c;
+                    // Horizontal
+                    if (c < cols - 1) {
+                        springs.push(new Spring(nodes[i], nodes[i + 1]));
+                    }
+                    // Vertical
+                    if (r < rows - 1) {
+                        springs.push(new Spring(nodes[i], nodes[i + cols]));
+                    }
+                    // Diagonal
+                    if (c < cols - 1 && r < rows - 1) {
+                        springs.push(new Spring(nodes[i], nodes[i + cols + 1]));
+                        springs.push(new Spring(nodes[i + 1], nodes[i + cols]));
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = 'rgba(10, 10, 21, 0.2)';
+            ctx.fillRect(0, 0, width, height);
+
+            // Update springs
+            springs.forEach(s => s.update());
+
+            // Draw springs
+            springs.forEach(s => s.draw());
+
+            // Update and draw nodes
+            nodes.forEach(n => {
+                n.update();
+                n.draw();
+            });
+
+            requestAnimationFrame(draw);
+        }
+
+        function getNodeAt(x, y) {
+            return nodes.find(n => Math.hypot(n.x - x, n.y - y) < 20);
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            draggedNode = getNodeAt(e.clientX, e.clientY);
+            if (draggedNode && !draggedNode.fixed) {
+                canvas.style.cursor = 'grabbing';
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (draggedNode && !draggedNode.fixed) {
+                draggedNode.x = e.clientX;
+                draggedNode.y = e.clientY;
+                draggedNode.vx = 0;
+                draggedNode.vy = 0;
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            draggedNode = null;
+            canvas.style.cursor = 'grab';
+        });
+
+        document.getElementById('playBtn').addEventListener('click', function() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            isPlaying = !isPlaying;
+            this.textContent = isPlaying ? '⏸ Pause' : '▶ Play';
+        });
+
+        document.getElementById('shakeBtn').addEventListener('click', () => {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            nodes.forEach(n => {
+                if (!n.fixed) {
+                    n.vx += (Math.random() - 0.5) * 20;
+                    n.vy += (Math.random() - 0.5) * 20;
+                }
+            });
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            nodes.forEach(n => {
+                n.x = n.restX;
+                n.y = n.restY;
+                n.vx = 0;
+                n.vy = 0;
+            });
+        });
+
+        window.addEventListener('resize', () => {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initNetwork();
+        });
+
+        initNetwork();
+        draw();
+    </script>
+</body>
+</html>

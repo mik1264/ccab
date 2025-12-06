@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markov Chain Sequencer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #1e1e3f 0%, #2d2d5a 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; }
+        .controls {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+        }
+        button {
+            background: rgba(138,43,226,0.2);
+            border: 1px solid rgba(138,43,226,0.6);
+            color: #9370db;
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+        }
+        button:hover { background: rgba(138,43,226,0.3); }
+        .info {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(138,43,226,0.8);
+            font-size: 14px;
+        }
+        a.back { position: fixed; top: 20px; left: 20px; color: #9370db; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <a class="back" href="index.html">← Back</a>
+    <div class="info">Probabilistic state transitions create evolving melodies</div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <button id="playBtn">▶ Play</button>
+        <button id="randomizeBtn">Randomize</button>
+        <button id="presetBtn">Preset: Ambient</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width = canvas.width = window.innerWidth;
+        let height = canvas.height = window.innerHeight;
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        const numStates = 8;
+        let currentState = 0;
+        let isPlaying = false;
+        let lastStep = 0;
+        const stepInterval = 300;
+
+        // Transition probability matrix (each row sums to ~1)
+        let transitions = [];
+
+        // Notes for each state (pentatonic)
+        const notes = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25];
+        const noteNames = ['C4', 'D4', 'E4', 'G4', 'A4', 'C5', 'D5', 'E5'];
+        const stateColors = ['#ff6b6b', '#feca57', '#48dbfb', '#ff9ff3', '#54a0ff', '#5f27cd', '#00d2d3', '#1dd1a1'];
+
+        // State positions in circle
+        const statePositions = [];
+        const radius = Math.min(width, height) * 0.3;
+
+        function initStates() {
+            statePositions.length = 0;
+            for (let i = 0; i < numStates; i++) {
+                const angle = (i / numStates) * Math.PI * 2 - Math.PI / 2;
+                statePositions.push({
+                    x: width / 2 + Math.cos(angle) * radius,
+                    y: height / 2 + Math.sin(angle) * radius,
+                    glow: 0
+                });
+            }
+        }
+
+        function initTransitions(preset = 'ambient') {
+            transitions = [];
+
+            if (preset === 'ambient') {
+                // Favor nearby states for smooth progressions
+                for (let i = 0; i < numStates; i++) {
+                    transitions[i] = [];
+                    for (let j = 0; j < numStates; j++) {
+                        const dist = Math.min(Math.abs(i - j), numStates - Math.abs(i - j));
+                        transitions[i][j] = Math.pow(0.5, dist);
+                    }
+                    // Normalize
+                    const sum = transitions[i].reduce((a, b) => a + b, 0);
+                    transitions[i] = transitions[i].map(p => p / sum);
+                }
+            } else if (preset === 'chaotic') {
+                // Random transitions
+                for (let i = 0; i < numStates; i++) {
+                    transitions[i] = [];
+                    let sum = 0;
+                    for (let j = 0; j < numStates; j++) {
+                        transitions[i][j] = Math.random();
+                        sum += transitions[i][j];
+                    }
+                    transitions[i] = transitions[i].map(p => p / sum);
+                }
+            } else if (preset === 'melodic') {
+                // Favor 4ths and 5ths
+                const favored = [0, 3, 4, 5, 7];
+                for (let i = 0; i < numStates; i++) {
+                    transitions[i] = [];
+                    for (let j = 0; j < numStates; j++) {
+                        const interval = (j - i + numStates) % numStates;
+                        transitions[i][j] = favored.includes(interval) ? 0.3 : 0.05;
+                    }
+                    const sum = transitions[i].reduce((a, b) => a + b, 0);
+                    transitions[i] = transitions[i].map(p => p / sum);
+                }
+            }
+        }
+
+        function nextState() {
+            const probs = transitions[currentState];
+            const rand = Math.random();
+            let cumulative = 0;
+
+            for (let i = 0; i < numStates; i++) {
+                cumulative += probs[i];
+                if (rand < cumulative) {
+                    return i;
+                }
+            }
+            return numStates - 1;
+        }
+
+        function playNote(state) {
+            const osc = audioCtx.createOscillator();
+            const osc2 = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+
+            osc.type = 'sine';
+            osc.frequency.value = notes[state];
+            osc2.type = 'triangle';
+            osc2.frequency.value = notes[state] * 2.01;
+
+            const gain2 = audioCtx.createGain();
+            gain2.gain.value = 0.15;
+
+            filter.type = 'lowpass';
+            filter.frequency.value = 1500;
+
+            gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+
+            osc.connect(filter);
+            osc2.connect(gain2);
+            gain2.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start();
+            osc2.start();
+            osc.stop(audioCtx.currentTime + 0.5);
+            osc2.stop(audioCtx.currentTime + 0.5);
+
+            statePositions[state].glow = 1;
+        }
+
+        function draw(timestamp) {
+            ctx.fillStyle = 'rgba(30, 30, 63, 0.15)';
+            ctx.fillRect(0, 0, width, height);
+
+            // Step logic
+            if (isPlaying && timestamp - lastStep > stepInterval) {
+                const newState = nextState();
+                drawTransition(currentState, newState);
+                currentState = newState;
+                playNote(currentState);
+                lastStep = timestamp;
+            }
+
+            // Draw transition arrows
+            ctx.lineWidth = 1;
+            for (let i = 0; i < numStates; i++) {
+                for (let j = 0; j < numStates; j++) {
+                    if (i !== j && transitions[i][j] > 0.05) {
+                        const from = statePositions[i];
+                        const to = statePositions[j];
+                        const alpha = transitions[i][j] * 0.5;
+
+                        ctx.beginPath();
+                        // Curved arrow
+                        const midX = (from.x + to.x) / 2 + (from.y - to.y) * 0.2;
+                        const midY = (from.y + to.y) / 2 + (to.x - from.x) * 0.2;
+                        ctx.moveTo(from.x, from.y);
+                        ctx.quadraticCurveTo(midX, midY, to.x, to.y);
+                        ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // Draw states
+            statePositions.forEach((pos, i) => {
+                const isActive = i === currentState;
+                const size = isActive ? 45 : 35;
+
+                if (pos.glow > 0) {
+                    ctx.shadowColor = stateColors[i];
+                    ctx.shadowBlur = 30 * pos.glow;
+                    pos.glow -= 0.02;
+                }
+
+                // Outer ring
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, size, 0, Math.PI * 2);
+                ctx.fillStyle = isActive ? stateColors[i] : `${stateColors[i]}40`;
+                ctx.fill();
+                ctx.shadowBlur = 0;
+
+                // Inner circle
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, size - 8, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(30, 30, 63, 0.8)';
+                ctx.fill();
+
+                // Note name
+                ctx.font = 'bold 16px Segoe UI';
+                ctx.fillStyle = isActive ? '#fff' : 'rgba(255,255,255,0.6)';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(noteNames[i], pos.x, pos.y);
+
+                // Probability indicator
+                if (isActive && isPlaying) {
+                    for (let j = 0; j < numStates; j++) {
+                        if (transitions[i][j] > 0.1) {
+                            const target = statePositions[j];
+                            const prob = transitions[i][j];
+
+                            ctx.beginPath();
+                            ctx.arc(target.x, target.y, size + 5 + prob * 20, 0, Math.PI * 2);
+                            ctx.strokeStyle = `${stateColors[j]}60`;
+                            ctx.lineWidth = 2;
+                            ctx.stroke();
+                        }
+                    }
+                }
+            });
+
+            requestAnimationFrame(draw);
+        }
+
+        function drawTransition(from, to) {
+            const fromPos = statePositions[from];
+            const toPos = statePositions[to];
+
+            // Animated line
+            ctx.beginPath();
+            ctx.moveTo(fromPos.x, fromPos.y);
+            ctx.lineTo(toPos.x, toPos.y);
+            ctx.strokeStyle = stateColors[to];
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        let currentPreset = 'ambient';
+        const presets = ['ambient', 'chaotic', 'melodic'];
+
+        document.getElementById('playBtn').addEventListener('click', function() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            isPlaying = !isPlaying;
+            this.textContent = isPlaying ? '⏸ Pause' : '▶ Play';
+        });
+
+        document.getElementById('randomizeBtn').addEventListener('click', () => {
+            currentPreset = 'chaotic';
+            initTransitions('chaotic');
+            document.getElementById('presetBtn').textContent = 'Preset: Chaotic';
+        });
+
+        document.getElementById('presetBtn').addEventListener('click', function() {
+            const idx = (presets.indexOf(currentPreset) + 1) % presets.length;
+            currentPreset = presets[idx];
+            initTransitions(currentPreset);
+            this.textContent = `Preset: ${currentPreset.charAt(0).toUpperCase() + currentPreset.slice(1)}`;
+        });
+
+        window.addEventListener('resize', () => {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            initStates();
+        });
+
+        initStates();
+        initTransitions('ambient');
+        requestAnimationFrame(draw);
+    </script>
+</body>
+</html>
