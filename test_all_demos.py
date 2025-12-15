@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-BASE_DIR = Path("/Users/mik1264/experiments/ccab/ccab")
+BASE_DIR = Path(__file__).parent.resolve()
 BASE_URL = "http://localhost:8889"
 TIMEOUT = 10000  # 10 seconds per page
 

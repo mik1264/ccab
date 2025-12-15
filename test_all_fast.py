@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-BASE_DIR = Path("/Users/mik1264/experiments/ccab/ccab")
+BASE_DIR = Path(__file__).parent.resolve()
 BASE_URL = "http://localhost:8889"
 TIMEOUT = 8000  # 8 seconds per page
 WAIT_TIME = 1500  # 1.5 seconds for JS to execute
