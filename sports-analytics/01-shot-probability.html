@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shot Probability | Sports Analytics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        #canvas { display: block; cursor: crosshair; }
+        .controls {
+            position: fixed;
+            top: 20px; right: 20px;
+            background: rgba(0,0,0,0.85);
+            padding: 20px; border-radius: 15px;
+            min-width: 280px;
+            border: 1px solid rgba(20, 184, 166, 0.3);
+        }
+        h1 { color: #14b8a6; font-size: 1.3em; margin-bottom: 15px; }
+        .control-group { margin: 15px 0; }
+        label { display: block; margin-bottom: 5px; color: #aaa; font-size: 0.9em; }
+        input[type="range"], select { width: 100%; }
+        .value { float: right; color: #14b8a6; }
+        button {
+            width: 100%; padding: 10px; margin: 5px 0;
+            border: none; border-radius: 8px;
+            background: #14b8a6; color: white;
+            font-weight: bold; cursor: pointer;
+        }
+        button:hover { background: #2dd4bf; }
+        .stats { margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1); }
+        .stat-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 0.9em; }
+        .stat-label { color: #888; }
+        .stat-value { color: #14b8a6; font-weight: bold; }
+        .info { font-size: 0.8em; color: #666; margin-top: 15px; line-height: 1.5; }
+        a.back-link {
+            position: fixed; top: 20px; left: 20px;
+            color: #14b8a6; text-decoration: none;
+            background: rgba(0,0,0,0.8); padding: 10px 20px;
+            border-radius: 25px; font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <a href="index.html" class="back-link">← Back to Sports Analytics</a>
+
+    <div class="controls">
+        <h1>Shot Probability Heatmap</h1>
+        <p style="font-size:0.85em; color:#888; margin-bottom:15px;">Basketball court shot analysis</p>
+
+        <div class="control-group">
+            <label>View Mode</label>
+            <select id="viewMode">
+                <option value="heatmap">Probability Heatmap</option>
+                <option value="zones">Shot Zones</option>
+                <option value="hexbin">Hexbin Chart</option>
+            </select>
+        </div>
+
+        <div class="control-group">
+            <label>Player Skill: <span class="value" id="skillValue">0.5</span></label>
+            <input type="range" id="skill" min="0.2" max="0.8" step="0.05" value="0.5">
+        </div>
+
+        <div class="control-group">
+            <label>3-Point Bonus: <span class="value" id="threeValue">0.35</span></label>
+            <input type="range" id="threeBonus" min="0.2" max="0.5" step="0.01" value="0.35">
+        </div>
+
+        <button id="shootBtn">Take Shot (or click court)</button>
+        <button id="simBtn">Simulate 100 Shots</button>
+        <button id="clearBtn" style="background:#444">Clear Shots</button>
+
+        <div class="stats">
+            <div class="stat-row">
+                <span class="stat-label">Total Shots</span>
+                <span class="stat-value" id="totalShots">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Makes</span>
+                <span class="stat-value" id="makes">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">FG%</span>
+                <span class="stat-value" id="fgPct">0%</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Expected Points/Shot</span>
+                <span class="stat-value" id="expectedPts">0</span>
+            </div>
+        </div>
+
+        <div class="info">
+            <strong>Click on court</strong> to take a shot.<br>
+            <strong>Closer shots:</strong> Higher probability.<br>
+            <strong>3-pointers:</strong> Lower % but worth more.
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resize();
+        window.onresize = resize;
+
+        let viewMode = 'heatmap';
+        let skill = 0.5;
+        let threeBonus = 0.35;
+        let shots = [];
+
+        // Court dimensions (relative)
+        const courtWidth = 500;
+        const courtHeight = 470;
+        const threePointRadius = 237.5;
+        const rimX = courtWidth / 2;
+        const rimY = 55;
+
+        function getCourtOffset() {
+            return {
+                x: (canvas.width - 350 - courtWidth) / 2,
+                y: (canvas.height - courtHeight) / 2
+            };
+        }
+
+        function distanceToRim(x, y) {
+            return Math.sqrt(Math.pow(x - rimX, 2) + Math.pow(y - rimY, 2));
+        }
+
+        function isThreePointer(x, y) {
+            const dist = distanceToRim(x, y);
+            return dist > threePointRadius || y > 140;
+        }
+
+        function shotProbability(x, y) {
+            const dist = distanceToRim(x, y);
+            const maxDist = 350;
+            let prob = skill * (1 - dist / maxDist * 0.7);
+
+            // Bonus for shots at rim
+            if (dist < 30) prob = Math.min(0.9, prob + 0.3);
+
+            // Penalty for very long shots
+            if (dist > 280) prob *= 0.7;
+
+            // Corner 3 bonus
+            if (isThreePointer(x, y) && (x < 50 || x > 450)) {
+                prob += 0.05;
+            }
+
+            return Math.max(0.1, Math.min(0.85, prob));
+        }
+
+        function takeShot(courtX, courtY) {
+            const prob = shotProbability(courtX, courtY);
+            const made = Math.random() < prob;
+            const points = isThreePointer(courtX, courtY) ? 3 : 2;
+
+            shots.push({
+                x: courtX,
+                y: courtY,
+                made: made,
+                points: points,
+                prob: prob
+            });
+
+            updateStats();
+        }
+
+        function updateStats() {
+            const total = shots.length;
+            const makes = shots.filter(s => s.made).length;
+            const totalPoints = shots.filter(s => s.made).reduce((sum, s) => sum + s.points, 0);
+
+            document.getElementById('totalShots').textContent = total;
+            document.getElementById('makes').textContent = makes;
+            document.getElementById('fgPct').textContent = total > 0 ? (makes / total * 100).toFixed(1) + '%' : '0%';
+            document.getElementById('expectedPts').textContent = total > 0 ? (totalPoints / total).toFixed(2) : '0';
+        }
+
+        function drawCourt() {
+            const offset = getCourtOffset();
+
+            // Court background
+            ctx.fillStyle = '#c9a55c';
+            ctx.fillRect(offset.x, offset.y, courtWidth, courtHeight);
+
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+
+            // Court outline
+            ctx.strokeRect(offset.x, offset.y, courtWidth, courtHeight);
+
+            // Paint/key
+            ctx.strokeRect(offset.x + 170, offset.y, 160, 190);
+
+            // Free throw circle
+            ctx.beginPath();
+            ctx.arc(offset.x + rimX, offset.y + 190, 60, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Restricted area
+            ctx.beginPath();
+            ctx.arc(offset.x + rimX, offset.y + 55, 40, 0, Math.PI);
+            ctx.stroke();
+
+            // Three point line
+            ctx.beginPath();
+            ctx.moveTo(offset.x, offset.y + 140);
+            ctx.lineTo(offset.x + 30, offset.y + 140);
+            ctx.arc(offset.x + rimX, offset.y + 55, threePointRadius, Math.PI + 0.4, -0.4);
+            ctx.lineTo(offset.x + courtWidth, offset.y + 140);
+            ctx.stroke();
+
+            // Rim
+            ctx.beginPath();
+            ctx.arc(offset.x + rimX, offset.y + rimY, 10, 0, Math.PI * 2);
+            ctx.strokeStyle = '#ff6600';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // Backboard
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(offset.x + rimX - 30, offset.y + 40);
+            ctx.lineTo(offset.x + rimX + 30, offset.y + 40);
+            ctx.stroke();
+        }
+
+        function drawHeatmap() {
+            const offset = getCourtOffset();
+            const resolution = 15;
+
+            for (let x = 0; x < courtWidth; x += resolution) {
+                for (let y = 0; y < courtHeight; y += resolution) {
+                    const prob = shotProbability(x, y);
+                    const points = isThreePointer(x, y) ? 3 : 2;
+                    const ev = prob * points;
+
+                    // Color based on expected value
+                    const hue = ev * 50; // 0-3 EV range
+                    ctx.fillStyle = `hsla(${hue}, 80%, 50%, 0.6)`;
+                    ctx.fillRect(offset.x + x, offset.y + y, resolution, resolution);
+                }
+            }
+        }
+
+        function drawZones() {
+            const offset = getCourtOffset();
+
+            // Define zones
+            const zones = [
+                { name: 'Rim', x: rimX - 40, y: 15, w: 80, h: 80 },
+                { name: 'Paint', x: 170, y: 95, w: 160, h: 95 },
+                { name: 'Mid-Left', x: 50, y: 150, w: 120, h: 150 },
+                { name: 'Mid-Right', x: 330, y: 150, w: 120, h: 150 },
+                { name: 'Mid-Top', x: 170, y: 190, w: 160, h: 130 },
+                { name: 'Corner-L', x: 0, y: 0, w: 50, h: 140 },
+                { name: 'Corner-R', x: 450, y: 0, w: 50, h: 140 },
+                { name: '3PT-Wing-L', x: 0, y: 140, w: 100, h: 180 },
+                { name: '3PT-Wing-R', x: 400, y: 140, w: 100, h: 180 },
+                { name: '3PT-Top', x: 100, y: 320, w: 300, h: 150 }
+            ];
+
+            zones.forEach(zone => {
+                const prob = shotProbability(zone.x + zone.w / 2, zone.y + zone.h / 2);
+                const is3 = isThreePointer(zone.x + zone.w / 2, zone.y + zone.h / 2);
+                const ev = prob * (is3 ? 3 : 2);
+
+                const hue = ev * 50;
+                ctx.fillStyle = `hsla(${hue}, 70%, 45%, 0.7)`;
+                ctx.fillRect(offset.x + zone.x, offset.y + zone.y, zone.w, zone.h);
+
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(offset.x + zone.x, offset.y + zone.y, zone.w, zone.h);
+
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(`${(prob * 100).toFixed(0)}%`, offset.x + zone.x + zone.w / 2, offset.y + zone.y + zone.h / 2);
+                ctx.font = '10px sans-serif';
+                ctx.fillText(`EV: ${ev.toFixed(2)}`, offset.x + zone.x + zone.w / 2, offset.y + zone.y + zone.h / 2 + 15);
+            });
+        }
+
+        function drawHexbin() {
+            const offset = getCourtOffset();
+            const hexSize = 25;
+            const hexHeight = hexSize * Math.sqrt(3);
+
+            for (let row = 0; row < courtHeight / hexHeight + 1; row++) {
+                for (let col = 0; col < courtWidth / (hexSize * 1.5) + 1; col++) {
+                    const x = col * hexSize * 1.5;
+                    const y = row * hexHeight + (col % 2 ? hexHeight / 2 : 0);
+
+                    if (x > courtWidth || y > courtHeight) continue;
+
+                    const prob = shotProbability(x, y);
+                    const is3 = isThreePointer(x, y);
+                    const ev = prob * (is3 ? 3 : 2);
+
+                    ctx.beginPath();
+                    for (let i = 0; i < 6; i++) {
+                        const angle = Math.PI / 3 * i - Math.PI / 6;
+                        const hx = offset.x + x + hexSize * 0.8 * Math.cos(angle);
+                        const hy = offset.y + y + hexSize * 0.8 * Math.sin(angle);
+                        if (i === 0) ctx.moveTo(hx, hy);
+                        else ctx.lineTo(hx, hy);
+                    }
+                    ctx.closePath();
+
+                    const hue = ev * 50;
+                    ctx.fillStyle = `hsla(${hue}, 70%, 45%, 0.8)`;
+                    ctx.fill();
+                    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function drawShots() {
+            const offset = getCourtOffset();
+
+            shots.forEach(shot => {
+                ctx.beginPath();
+                ctx.arc(offset.x + shot.x, offset.y + shot.y, 6, 0, Math.PI * 2);
+                ctx.fillStyle = shot.made ? '#22c55e' : '#ef4444';
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            });
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 24px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Shot Probability Analysis', canvas.width / 2 - 100, 40);
+
+            // Draw visualization based on mode
+            switch (viewMode) {
+                case 'heatmap':
+                    drawHeatmap();
+                    break;
+                case 'zones':
+                    drawZones();
+                    break;
+                case 'hexbin':
+                    drawHexbin();
+                    break;
+            }
+
+            drawCourt();
+            drawShots();
+
+            // Legend
+            const legendX = 50;
+            const legendY = canvas.height - 80;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.fillRect(legendX, legendY - 20, 300, 60);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Expected Value (Points/Shot):', legendX + 10, legendY);
+
+            const gradW = 150;
+            const gradient = ctx.createLinearGradient(legendX + 10, 0, legendX + 10 + gradW, 0);
+            gradient.addColorStop(0, 'hsl(0, 80%, 50%)');
+            gradient.addColorStop(0.5, 'hsl(75, 80%, 50%)');
+            gradient.addColorStop(1, 'hsl(150, 80%, 50%)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(legendX + 10, legendY + 10, gradW, 15);
+
+            ctx.fillStyle = '#888';
+            ctx.fillText('Low', legendX + 10, legendY + 40);
+            ctx.fillText('High', legendX + gradW - 10, legendY + 40);
+
+            // Shot legend
+            ctx.fillStyle = '#22c55e';
+            ctx.beginPath();
+            ctx.arc(legendX + 200, legendY + 5, 6, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#888';
+            ctx.fillText('Made', legendX + 215, legendY + 10);
+
+            ctx.fillStyle = '#ef4444';
+            ctx.beginPath();
+            ctx.arc(legendX + 200, legendY + 25, 6, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#888';
+            ctx.fillText('Missed', legendX + 215, legendY + 30);
+
+            requestAnimationFrame(draw);
+        }
+
+        // Event listeners
+        document.getElementById('viewMode').onchange = (e) => {
+            viewMode = e.target.value;
+        };
+
+        document.getElementById('skill').oninput = (e) => {
+            skill = parseFloat(e.target.value);
+            document.getElementById('skillValue').textContent = skill.toFixed(2);
+        };
+
+        document.getElementById('threeBonus').oninput = (e) => {
+            threeBonus = parseFloat(e.target.value);
+            document.getElementById('threeValue').textContent = threeBonus.toFixed(2);
+        };
+
+        document.getElementById('shootBtn').onclick = () => {
+            const x = 100 + Math.random() * 300;
+            const y = 50 + Math.random() * 350;
+            takeShot(x, y);
+        };
+
+        document.getElementById('simBtn').onclick = () => {
+            for (let i = 0; i < 100; i++) {
+                const x = 30 + Math.random() * 440;
+                const y = 20 + Math.random() * 400;
+                takeShot(x, y);
+            }
+        };
+
+        document.getElementById('clearBtn').onclick = () => {
+            shots = [];
+            updateStats();
+        };
+
+        canvas.onclick = (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const offset = getCourtOffset();
+            const x = e.clientX - rect.left - offset.x;
+            const y = e.clientY - rect.top - offset.y;
+
+            if (x >= 0 && x <= courtWidth && y >= 0 && y <= courtHeight) {
+                takeShot(x, y);
+            }
+        };
+
+        draw();
+    </script>
+</body>
+</html>

@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spectrum Analyzer | Music Acoustics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        #canvas { display: block; }
+        .controls {
+            position: fixed;
+            top: 20px; right: 20px;
+            background: rgba(0,0,0,0.85);
+            padding: 20px; border-radius: 15px;
+            min-width: 280px;
+            border: 1px solid rgba(251, 146, 60, 0.3);
+        }
+        h1 { color: #fb923c; font-size: 1.3em; margin-bottom: 15px; }
+        .control-group { margin: 15px 0; }
+        label { display: block; margin-bottom: 5px; color: #aaa; font-size: 0.9em; }
+        input[type="range"], select { width: 100%; }
+        .value { float: right; color: #fb923c; }
+        button {
+            width: 100%; padding: 10px; margin: 5px 0;
+            border: none; border-radius: 8px;
+            background: #fb923c; color: white;
+            font-weight: bold; cursor: pointer;
+        }
+        button:hover { background: #fdba74; }
+        .stats { margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1); }
+        .stat-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 0.9em; }
+        .stat-label { color: #888; }
+        .stat-value { color: #fb923c; font-weight: bold; }
+        .info { font-size: 0.8em; color: #666; margin-top: 15px; line-height: 1.5; }
+        a.back-link {
+            position: fixed; top: 20px; left: 20px;
+            color: #fb923c; text-decoration: none;
+            background: rgba(0,0,0,0.8); padding: 10px 20px;
+            border-radius: 25px; font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <a href="index.html" class="back-link">← Back to Music Acoustics</a>
+
+    <div class="controls">
+        <h1>Spectrum Analyzer</h1>
+        <p style="font-size:0.85em; color:#888; margin-bottom:15px;">Frequency domain visualization</p>
+
+        <div class="control-group">
+            <label>Input Source</label>
+            <select id="source">
+                <option value="synth">Synthesizer</option>
+                <option value="chord">Major Chord</option>
+                <option value="noise">White Noise</option>
+                <option value="sweep">Frequency Sweep</option>
+            </select>
+        </div>
+
+        <div class="control-group">
+            <label>Base Frequency: <span class="value" id="freqValue">220</span> Hz</label>
+            <input type="range" id="baseFreq" min="110" max="880" step="10" value="220">
+        </div>
+
+        <div class="control-group">
+            <label>FFT Size</label>
+            <select id="fftSize">
+                <option value="256">256 (fast)</option>
+                <option value="512">512</option>
+                <option value="1024" selected>1024</option>
+                <option value="2048">2048 (detailed)</option>
+            </select>
+        </div>
+
+        <div class="control-group">
+            <label>Display Mode</label>
+            <select id="displayMode">
+                <option value="bars">Frequency Bars</option>
+                <option value="line">Line Graph</option>
+                <option value="spectrogram">Spectrogram</option>
+            </select>
+        </div>
+
+        <button id="startBtn">Start Audio</button>
+        <button id="resetBtn" style="background:#444">Reset</button>
+
+        <div class="stats">
+            <div class="stat-row">
+                <span class="stat-label">Dominant Freq</span>
+                <span class="stat-value" id="dominantFreq">0 Hz</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Sample Rate</span>
+                <span class="stat-value" id="sampleRate">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Bin Resolution</span>
+                <span class="stat-value" id="binRes">0 Hz</span>
+            </div>
+        </div>
+
+        <div class="info">
+            <strong>FFT:</strong> Fast Fourier Transform decomposes signal.<br>
+            <strong>Bins:</strong> Each bar represents a frequency range.<br>
+            <strong>Spectrogram:</strong> Time vs frequency heatmap.
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resize();
+        window.onresize = resize;
+
+        let audioCtx = null;
+        let analyser = null;
+        let oscillators = [];
+        let isPlaying = false;
+        let source = 'synth';
+        let baseFreq = 220;
+        let fftSize = 1024;
+        let displayMode = 'bars';
+        let spectrogramData = [];
+        let sweepFreq = 100;
+        let sweepDirection = 1;
+
+        function createAudio() {
+            if (audioCtx) {
+                audioCtx.close();
+            }
+
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = fftSize;
+            analyser.smoothingTimeConstant = 0.8;
+
+            const gainNode = audioCtx.createGain();
+            gainNode.gain.value = 0.3;
+
+            oscillators = [];
+
+            switch (source) {
+                case 'synth':
+                    const osc = audioCtx.createOscillator();
+                    osc.frequency.value = baseFreq;
+                    osc.type = 'sawtooth';
+                    osc.connect(gainNode);
+                    osc.start();
+                    oscillators.push(osc);
+                    break;
+
+                case 'chord':
+                    // Major chord: root, major 3rd, 5th
+                    [1, 1.26, 1.5, 2].forEach(ratio => {
+                        const osc = audioCtx.createOscillator();
+                        osc.frequency.value = baseFreq * ratio;
+                        osc.type = 'sine';
+                        osc.connect(gainNode);
+                        osc.start();
+                        oscillators.push(osc);
+                    });
+                    break;
+
+                case 'noise':
+                    const bufferSize = 2 * audioCtx.sampleRate;
+                    const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+                    const output = noiseBuffer.getChannelData(0);
+                    for (let i = 0; i < bufferSize; i++) {
+                        output[i] = Math.random() * 2 - 1;
+                    }
+                    const noiseSource = audioCtx.createBufferSource();
+                    noiseSource.buffer = noiseBuffer;
+                    noiseSource.loop = true;
+                    noiseSource.connect(gainNode);
+                    noiseSource.start();
+                    oscillators.push(noiseSource);
+                    break;
+
+                case 'sweep':
+                    const sweepOsc = audioCtx.createOscillator();
+                    sweepOsc.frequency.value = sweepFreq;
+                    sweepOsc.type = 'sine';
+                    sweepOsc.connect(gainNode);
+                    sweepOsc.start();
+                    oscillators.push(sweepOsc);
+                    break;
+            }
+
+            gainNode.connect(analyser);
+            analyser.connect(audioCtx.destination);
+
+            document.getElementById('sampleRate').textContent = audioCtx.sampleRate + ' Hz';
+            document.getElementById('binRes').textContent = (audioCtx.sampleRate / fftSize).toFixed(1) + ' Hz';
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const graphWidth = canvas.width - 400;
+            const graphHeight = canvas.height - 200;
+
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 24px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Audio Spectrum Analyzer', canvas.width / 2 - 100, 40);
+
+            if (!analyser || !isPlaying) {
+                ctx.fillStyle = '#888';
+                ctx.font = '16px sans-serif';
+                ctx.fillText('Click "Start Audio" to begin', canvas.width / 2 - 100, canvas.height / 2);
+                requestAnimationFrame(draw);
+                return;
+            }
+
+            // Update sweep frequency
+            if (source === 'sweep' && oscillators[0]) {
+                sweepFreq += sweepDirection * 5;
+                if (sweepFreq > 2000) sweepDirection = -1;
+                if (sweepFreq < 100) sweepDirection = 1;
+                oscillators[0].frequency.value = sweepFreq;
+            }
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            analyser.getByteFrequencyData(dataArray);
+
+            // Find dominant frequency
+            let maxIndex = 0;
+            let maxValue = 0;
+            for (let i = 0; i < bufferLength; i++) {
+                if (dataArray[i] > maxValue) {
+                    maxValue = dataArray[i];
+                    maxIndex = i;
+                }
+            }
+            const dominantFreq = maxIndex * audioCtx.sampleRate / fftSize;
+            document.getElementById('dominantFreq').textContent = dominantFreq.toFixed(0) + ' Hz';
+
+            const startX = 50;
+            const startY = 100;
+
+            if (displayMode === 'bars') {
+                // Frequency bars
+                const barWidth = graphWidth / bufferLength * 2;
+
+                for (let i = 0; i < bufferLength / 2; i++) {
+                    const barHeight = (dataArray[i] / 255) * graphHeight;
+                    const x = startX + i * barWidth;
+
+                    // Color gradient based on frequency
+                    const hue = (i / bufferLength) * 300;
+                    ctx.fillStyle = `hsl(${hue}, 80%, 50%)`;
+                    ctx.fillRect(x, startY + graphHeight - barHeight, barWidth - 1, barHeight);
+                }
+
+            } else if (displayMode === 'line') {
+                // Line graph
+                ctx.beginPath();
+                ctx.strokeStyle = '#fb923c';
+                ctx.lineWidth = 2;
+
+                for (let i = 0; i < bufferLength / 2; i++) {
+                    const x = startX + (i / (bufferLength / 2)) * graphWidth;
+                    const y = startY + graphHeight - (dataArray[i] / 255) * graphHeight;
+
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Fill under curve
+                ctx.lineTo(startX + graphWidth, startY + graphHeight);
+                ctx.lineTo(startX, startY + graphHeight);
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(251, 146, 60, 0.2)';
+                ctx.fill();
+
+            } else if (displayMode === 'spectrogram') {
+                // Store current frame
+                spectrogramData.push(Array.from(dataArray.slice(0, bufferLength / 2)));
+                if (spectrogramData.length > graphWidth) {
+                    spectrogramData.shift();
+                }
+
+                // Draw spectrogram
+                const rowHeight = graphHeight / (bufferLength / 2);
+
+                for (let t = 0; t < spectrogramData.length; t++) {
+                    for (let f = 0; f < spectrogramData[t].length; f++) {
+                        const value = spectrogramData[t][f];
+                        const hue = 240 - (value / 255) * 240;
+                        ctx.fillStyle = `hsl(${hue}, 100%, ${value / 5}%)`;
+                        ctx.fillRect(
+                            startX + t,
+                            startY + graphHeight - (f + 1) * rowHeight,
+                            1,
+                            rowHeight
+                        );
+                    }
+                }
+            }
+
+            // Draw axes
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(startX, startY);
+            ctx.lineTo(startX, startY + graphHeight);
+            ctx.lineTo(startX + graphWidth, startY + graphHeight);
+            ctx.stroke();
+
+            // Frequency labels
+            ctx.fillStyle = '#888';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center';
+
+            const maxFreq = audioCtx.sampleRate / 2;
+            const freqLabels = [0, 500, 1000, 2000, 4000, 8000];
+            for (const freq of freqLabels) {
+                if (freq <= maxFreq) {
+                    const x = startX + (freq / maxFreq) * graphWidth;
+                    ctx.fillText(freq + 'Hz', x, startY + graphHeight + 20);
+
+                    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+                    ctx.beginPath();
+                    ctx.moveTo(x, startY);
+                    ctx.lineTo(x, startY + graphHeight);
+                    ctx.stroke();
+                }
+            }
+
+            // dB scale
+            ctx.textAlign = 'right';
+            for (let db = 0; db <= 100; db += 25) {
+                const y = startY + graphHeight - (db / 100) * graphHeight;
+                ctx.fillText(db + '%', startX - 5, y + 4);
+            }
+
+            // Draw waveform
+            const waveY = canvas.height - 80;
+            const timeData = new Uint8Array(bufferLength);
+            analyser.getByteTimeDomainData(timeData);
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(startX, waveY - 40, graphWidth, 60);
+
+            ctx.beginPath();
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 2;
+
+            for (let i = 0; i < bufferLength; i++) {
+                const x = startX + (i / bufferLength) * graphWidth;
+                const y = waveY - 10 + ((timeData[i] - 128) / 128) * 30;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Waveform (Time Domain)', startX, waveY - 50);
+
+            requestAnimationFrame(draw);
+        }
+
+        function toggleAudio() {
+            if (isPlaying) {
+                oscillators.forEach(osc => osc.stop());
+                isPlaying = false;
+                document.getElementById('startBtn').textContent = 'Start Audio';
+            } else {
+                createAudio();
+                isPlaying = true;
+                document.getElementById('startBtn').textContent = 'Stop Audio';
+            }
+        }
+
+        // Event listeners
+        document.getElementById('source').onchange = (e) => {
+            source = e.target.value;
+            if (isPlaying) {
+                oscillators.forEach(osc => osc.stop());
+                createAudio();
+            }
+        };
+
+        document.getElementById('baseFreq').oninput = (e) => {
+            baseFreq = parseInt(e.target.value);
+            document.getElementById('freqValue').textContent = baseFreq;
+            if (isPlaying && source === 'synth' && oscillators[0]) {
+                oscillators[0].frequency.value = baseFreq;
+            }
+            if (isPlaying && source === 'chord') {
+                [1, 1.26, 1.5, 2].forEach((ratio, i) => {
+                    if (oscillators[i]) oscillators[i].frequency.value = baseFreq * ratio;
+                });
+            }
+        };
+
+        document.getElementById('fftSize').onchange = (e) => {
+            fftSize = parseInt(e.target.value);
+            spectrogramData = [];
+            if (isPlaying) {
+                oscillators.forEach(osc => osc.stop());
+                createAudio();
+            }
+        };
+
+        document.getElementById('displayMode').onchange = (e) => {
+            displayMode = e.target.value;
+            spectrogramData = [];
+        };
+
+        document.getElementById('startBtn').onclick = toggleAudio;
+
+        document.getElementById('resetBtn').onclick = () => {
+            if (isPlaying) {
+                oscillators.forEach(osc => osc.stop());
+                isPlaying = false;
+            }
+            spectrogramData = [];
+            document.getElementById('startBtn').textContent = 'Start Audio';
+        };
+
+        draw();
+    </script>
+</body>
+</html>

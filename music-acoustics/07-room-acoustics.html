@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Room Acoustics | Music Acoustics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        #canvas { display: block; cursor: crosshair; }
+        .controls {
+            position: fixed;
+            top: 20px; right: 20px;
+            background: rgba(0,0,0,0.85);
+            padding: 20px; border-radius: 15px;
+            min-width: 280px;
+            border: 1px solid rgba(251, 146, 60, 0.3);
+        }
+        h1 { color: #fb923c; font-size: 1.3em; margin-bottom: 15px; }
+        .control-group { margin: 15px 0; }
+        label { display: block; margin-bottom: 5px; color: #aaa; font-size: 0.9em; }
+        input[type="range"], select { width: 100%; }
+        .value { float: right; color: #fb923c; }
+        button {
+            width: 100%; padding: 10px; margin: 5px 0;
+            border: none; border-radius: 8px;
+            background: #fb923c; color: white;
+            font-weight: bold; cursor: pointer;
+        }
+        button:hover { background: #fdba74; }
+        .stats { margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1); }
+        .stat-row { display: flex; justify-content: space-between; padding: 5px 0; font-size: 0.9em; }
+        .stat-label { color: #888; }
+        .stat-value { color: #fb923c; font-weight: bold; }
+        .info { font-size: 0.8em; color: #666; margin-top: 15px; line-height: 1.5; }
+        a.back-link {
+            position: fixed; top: 20px; left: 20px;
+            color: #fb923c; text-decoration: none;
+            background: rgba(0,0,0,0.8); padding: 10px 20px;
+            border-radius: 25px; font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <a href="index.html" class="back-link">← Back to Music Acoustics</a>
+
+    <div class="controls">
+        <h1>Room Acoustics</h1>
+        <p style="font-size:0.85em; color:#888; margin-bottom:15px;">Echoes and reverberation</p>
+
+        <div class="control-group">
+            <label>Room Preset</label>
+            <select id="roomPreset">
+                <option value="small">Small Room (4×3m)</option>
+                <option value="medium" selected>Medium Room (8×6m)</option>
+                <option value="large">Concert Hall (20×15m)</option>
+                <option value="cathedral">Cathedral (40×20m)</option>
+            </select>
+        </div>
+
+        <div class="control-group">
+            <label>Wall Absorption: <span class="value" id="absorbValue">0.3</span></label>
+            <input type="range" id="absorption" min="0.1" max="0.9" step="0.05" value="0.3">
+        </div>
+
+        <div class="control-group">
+            <label>Sound Speed: <span class="value" id="speedValue">343</span> m/s</label>
+            <input type="range" id="soundSpeed" min="300" max="400" step="1" value="343">
+        </div>
+
+        <div class="control-group">
+            <label>Max Reflections: <span class="value" id="reflectValue">10</span></label>
+            <input type="range" id="maxReflect" min="1" max="20" step="1" value="10">
+        </div>
+
+        <button id="emitBtn">Emit Sound (or click in room)</button>
+        <button id="clearBtn" style="background:#444">Clear Rays</button>
+
+        <div class="stats">
+            <div class="stat-row">
+                <span class="stat-label">RT60 (Reverb Time)</span>
+                <span class="stat-value" id="rt60">0 s</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Direct Path</span>
+                <span class="stat-value" id="directPath">0 ms</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">First Reflection</span>
+                <span class="stat-value" id="firstReflect">0 ms</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Active Rays</span>
+                <span class="stat-value" id="rayCount">0</span>
+            </div>
+        </div>
+
+        <div class="info">
+            <strong>Click in room</strong> to place sound source.<br>
+            <strong>RT60:</strong> Time for 60dB decay.<br>
+            <strong>Absorption:</strong> Higher = less reverb.
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resize();
+        window.onresize = resize;
+
+        let roomWidth = 8;
+        let roomHeight = 6;
+        let absorption = 0.3;
+        let soundSpeed = 343;
+        let maxReflections = 10;
+
+        let sourceX = 0.3;
+        let sourceY = 0.5;
+        let listenerX = 0.7;
+        let listenerY = 0.5;
+
+        let rays = [];
+        let impulseResponse = [];
+        let time = 0;
+
+        const scale = 40; // pixels per meter
+
+        function getScreenCoords(rx, ry) {
+            const roomScreenW = roomWidth * scale;
+            const roomScreenH = roomHeight * scale;
+            const offsetX = (canvas.width - 400 - roomScreenW) / 2;
+            const offsetY = (canvas.height - roomScreenH) / 2;
+            return {
+                x: offsetX + rx * roomWidth * scale,
+                y: offsetY + ry * roomHeight * scale
+            };
+        }
+
+        function getRoomCoords(sx, sy) {
+            const roomScreenW = roomWidth * scale;
+            const roomScreenH = roomHeight * scale;
+            const offsetX = (canvas.width - 400 - roomScreenW) / 2;
+            const offsetY = (canvas.height - roomScreenH) / 2;
+            return {
+                x: (sx - offsetX) / (roomWidth * scale),
+                y: (sy - offsetY) / (roomHeight * scale)
+            };
+        }
+
+        function emitRays() {
+            rays = [];
+            impulseResponse = [];
+
+            const numRays = 36;
+            for (let i = 0; i < numRays; i++) {
+                const angle = (i / numRays) * Math.PI * 2;
+                rays.push({
+                    x: sourceX,
+                    y: sourceY,
+                    dx: Math.cos(angle),
+                    dy: Math.sin(angle),
+                    amplitude: 1.0,
+                    reflections: 0,
+                    distance: 0,
+                    history: [{ x: sourceX, y: sourceY }],
+                    active: true
+                });
+            }
+        }
+
+        function updateRays() {
+            const step = 0.01;
+
+            for (const ray of rays) {
+                if (!ray.active) continue;
+
+                ray.x += ray.dx * step;
+                ray.y += ray.dy * step;
+                ray.distance += step * Math.sqrt(roomWidth * roomWidth + roomHeight * roomHeight);
+
+                // Check wall collisions
+                if (ray.x <= 0 || ray.x >= 1) {
+                    ray.dx = -ray.dx;
+                    ray.x = Math.max(0.001, Math.min(0.999, ray.x));
+                    ray.amplitude *= (1 - absorption);
+                    ray.reflections++;
+                    ray.history.push({ x: ray.x, y: ray.y });
+
+                    // Record impulse
+                    const timeMs = (ray.distance * roomWidth) / soundSpeed * 1000;
+                    impulseResponse.push({ time: timeMs, amplitude: ray.amplitude });
+                }
+
+                if (ray.y <= 0 || ray.y >= 1) {
+                    ray.dy = -ray.dy;
+                    ray.y = Math.max(0.001, Math.min(0.999, ray.y));
+                    ray.amplitude *= (1 - absorption);
+                    ray.reflections++;
+                    ray.history.push({ x: ray.x, y: ray.y });
+
+                    const timeMs = (ray.distance * roomWidth) / soundSpeed * 1000;
+                    impulseResponse.push({ time: timeMs, amplitude: ray.amplitude });
+                }
+
+                // Check if ray hit listener
+                const dx = ray.x - listenerX;
+                const dy = ray.y - listenerY;
+                if (Math.sqrt(dx * dx + dy * dy) < 0.03) {
+                    const timeMs = (ray.distance * roomWidth) / soundSpeed * 1000;
+                    impulseResponse.push({ time: timeMs, amplitude: ray.amplitude, direct: ray.reflections === 0 });
+                }
+
+                if (ray.reflections >= maxReflections || ray.amplitude < 0.01) {
+                    ray.active = false;
+                }
+            }
+        }
+
+        function calculateRT60() {
+            // Sabine formula: RT60 = 0.161 * V / A
+            // where V = volume, A = total absorption
+            const volume = roomWidth * roomHeight * 3; // assume 3m height
+            const surfaceArea = 2 * (roomWidth * roomHeight + roomWidth * 3 + roomHeight * 3);
+            const totalAbsorption = surfaceArea * absorption;
+            return 0.161 * volume / totalAbsorption;
+        }
+
+        function updateStats() {
+            const rt60 = calculateRT60();
+            document.getElementById('rt60').textContent = rt60.toFixed(2) + ' s';
+
+            // Direct path
+            const directDist = Math.sqrt(
+                Math.pow((listenerX - sourceX) * roomWidth, 2) +
+                Math.pow((listenerY - sourceY) * roomHeight, 2)
+            );
+            const directTime = (directDist / soundSpeed) * 1000;
+            document.getElementById('directPath').textContent = directTime.toFixed(1) + ' ms';
+
+            // First reflection (approximate)
+            const firstReflect = directTime * 1.5;
+            document.getElementById('firstReflect').textContent = firstReflect.toFixed(1) + ' ms';
+
+            document.getElementById('rayCount').textContent = rays.filter(r => r.active).length;
+        }
+
+        function setRoom(preset) {
+            switch (preset) {
+                case 'small':
+                    roomWidth = 4; roomHeight = 3;
+                    break;
+                case 'medium':
+                    roomWidth = 8; roomHeight = 6;
+                    break;
+                case 'large':
+                    roomWidth = 20; roomHeight = 15;
+                    break;
+                case 'cathedral':
+                    roomWidth = 40; roomHeight = 20;
+                    break;
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            time++;
+            if (time % 2 === 0) updateRays();
+            updateStats();
+
+            const roomScreenW = roomWidth * scale;
+            const roomScreenH = roomHeight * scale;
+            const offsetX = (canvas.width - 400 - roomScreenW) / 2;
+            const offsetY = (canvas.height - roomScreenH) / 2;
+
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 24px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Room Acoustics Simulation', canvas.width / 2 - 100, 40);
+
+            // Draw room
+            ctx.fillStyle = 'rgba(50, 50, 50, 0.5)';
+            ctx.fillRect(offsetX, offsetY, roomScreenW, roomScreenH);
+
+            ctx.strokeStyle = '#fb923c';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(offsetX, offsetY, roomScreenW, roomScreenH);
+
+            // Draw rays
+            for (const ray of rays) {
+                if (ray.history.length < 2) continue;
+
+                ctx.beginPath();
+                ctx.strokeStyle = `rgba(251, 146, 60, ${ray.amplitude * 0.8})`;
+                ctx.lineWidth = 1;
+
+                for (let i = 0; i < ray.history.length; i++) {
+                    const { x, y } = getScreenCoords(ray.history[i].x, ray.history[i].y);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+
+                if (ray.active) {
+                    const { x, y } = getScreenCoords(ray.x, ray.y);
+                    ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Draw current position
+                if (ray.active) {
+                    const { x, y } = getScreenCoords(ray.x, ray.y);
+                    ctx.beginPath();
+                    ctx.arc(x, y, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(251, 146, 60, ${ray.amplitude})`;
+                    ctx.fill();
+                }
+            }
+
+            // Draw source
+            const srcPos = getScreenCoords(sourceX, sourceY);
+            ctx.beginPath();
+            ctx.arc(srcPos.x, srcPos.y, 12, 0, Math.PI * 2);
+            ctx.fillStyle = '#ef4444';
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('S', srcPos.x, srcPos.y + 4);
+
+            // Draw listener
+            const listPos = getScreenCoords(listenerX, listenerY);
+            ctx.beginPath();
+            ctx.arc(listPos.x, listPos.y, 12, 0, Math.PI * 2);
+            ctx.fillStyle = '#22c55e';
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.fillText('L', listPos.x, listPos.y + 4);
+
+            // Draw impulse response
+            const irX = offsetX;
+            const irY = offsetY + roomScreenH + 40;
+            const irW = roomScreenW;
+            const irH = 100;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(irX, irY, irW, irH);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Impulse Response (Energy vs Time)', irX, irY - 10);
+
+            if (impulseResponse.length > 0) {
+                const maxTime = Math.max(...impulseResponse.map(i => i.time), 100);
+
+                ctx.beginPath();
+                ctx.strokeStyle = '#fb923c';
+                ctx.lineWidth = 1;
+
+                for (const imp of impulseResponse) {
+                    const x = irX + (imp.time / maxTime) * irW;
+                    const h = imp.amplitude * irH * 0.8;
+                    ctx.moveTo(x, irY + irH);
+                    ctx.lineTo(x, irY + irH - h);
+                }
+                ctx.stroke();
+
+                // Mark direct sound
+                const directImp = impulseResponse.find(i => i.direct);
+                if (directImp) {
+                    const x = irX + (directImp.time / maxTime) * irW;
+                    ctx.fillStyle = '#22c55e';
+                    ctx.beginPath();
+                    ctx.arc(x, irY + irH - directImp.amplitude * irH * 0.8, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // Time axis
+            ctx.fillStyle = '#666';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('0ms', irX, irY + irH + 15);
+            ctx.fillText('Time →', irX + irW / 2, irY + irH + 15);
+
+            // Room dimensions
+            ctx.fillStyle = '#888';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${roomWidth}m × ${roomHeight}m`, offsetX + roomScreenW / 2, offsetY - 10);
+
+            // Legend
+            ctx.fillStyle = '#ef4444';
+            ctx.beginPath();
+            ctx.arc(offsetX + 20, offsetY + roomScreenH + 150, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#888';
+            ctx.textAlign = 'left';
+            ctx.fillText('Sound Source (S)', offsetX + 35, offsetY + roomScreenH + 154);
+
+            ctx.fillStyle = '#22c55e';
+            ctx.beginPath();
+            ctx.arc(offsetX + 150, offsetY + roomScreenH + 150, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#888';
+            ctx.fillText('Listener (L)', offsetX + 165, offsetY + roomScreenH + 154);
+
+            requestAnimationFrame(draw);
+        }
+
+        // Event listeners
+        document.getElementById('roomPreset').onchange = (e) => {
+            setRoom(e.target.value);
+            rays = [];
+        };
+
+        document.getElementById('absorption').oninput = (e) => {
+            absorption = parseFloat(e.target.value);
+            document.getElementById('absorbValue').textContent = absorption.toFixed(2);
+        };
+
+        document.getElementById('soundSpeed').oninput = (e) => {
+            soundSpeed = parseInt(e.target.value);
+            document.getElementById('speedValue').textContent = soundSpeed;
+        };
+
+        document.getElementById('maxReflect').oninput = (e) => {
+            maxReflections = parseInt(e.target.value);
+            document.getElementById('reflectValue').textContent = maxReflections;
+        };
+
+        document.getElementById('emitBtn').onclick = emitRays;
+        document.getElementById('clearBtn').onclick = () => {
+            rays = [];
+            impulseResponse = [];
+        };
+
+        canvas.onclick = (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const coords = getRoomCoords(e.clientX - rect.left, e.clientY - rect.top);
+
+            if (coords.x >= 0 && coords.x <= 1 && coords.y >= 0 && coords.y <= 1) {
+                sourceX = coords.x;
+                sourceY = coords.y;
+                emitRays();
+            }
+        };
+
+        draw();
+    </script>
+</body>
+</html>
