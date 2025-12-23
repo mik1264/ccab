@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drawing Sequencer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #1a0a2e 0%, #2d1b4e 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; cursor: crosshair; }
+        .controls {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+        }
+        button {
+            background: rgba(147,112,219,0.2);
+            border: 1px solid rgba(147,112,219,0.6);
+            color: #9370db;
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+        }
+        button:hover { background: rgba(147,112,219,0.3); }
+        .info {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(147,112,219,0.8);
+            font-size: 14px;
+        }
+        a.back { position: fixed; top: 20px; left: 20px; color: #9370db; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <a class="back" href="index.html">← Back</a>
+    <div class="info">Draw patterns with your mouse • The playhead loops through your drawing</div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <button id="playBtn">▶ Play</button>
+        <button id="clearBtn">Clear</button>
+        <button id="mirrorBtn">Mirror: Off</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width = canvas.width = window.innerWidth;
+        let height = canvas.height = window.innerHeight;
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        const strokes = []; // Array of stroke paths
+        let currentStroke = [];
+        let isDrawing = false;
+        let isPlaying = false;
+        let playheadX = 0;
+        let mirror = false;
+
+        // Scale for Y position to frequency
+        const minFreq = 110;
+        const maxFreq = 1760;
+
+        function yToFreq(y) {
+            const normalized = 1 - (y / height);
+            return minFreq * Math.pow(maxFreq / minFreq, normalized);
+        }
+
+        function playNote(freq, x) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+            const panner = audioCtx.createStereoPanner();
+
+            osc.type = 'sine';
+            osc.frequency.value = freq;
+
+            // Add harmonics
+            const osc2 = audioCtx.createOscillator();
+            osc2.type = 'triangle';
+            osc2.frequency.value = freq * 2;
+            const gain2 = audioCtx.createGain();
+            gain2.gain.value = 0.1;
+
+            filter.type = 'lowpass';
+            filter.frequency.value = 2000;
+
+            // Pan based on x position
+            panner.pan.value = (x / width) * 2 - 1;
+
+            gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+
+            osc.connect(filter);
+            osc2.connect(gain2);
+            gain2.connect(filter);
+            filter.connect(gain);
+            gain.connect(panner);
+            panner.connect(audioCtx.destination);
+
+            osc.start();
+            osc2.start();
+            osc.stop(audioCtx.currentTime + 0.2);
+            osc2.stop(audioCtx.currentTime + 0.2);
+        }
+
+        function draw() {
+            ctx.fillStyle = 'rgba(26, 10, 46, 0.1)';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw grid lines
+            ctx.strokeStyle = 'rgba(147, 112, 219, 0.1)';
+            ctx.lineWidth = 1;
+            for (let y = 0; y < height; y += 50) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+            for (let x = 0; x < width; x += 50) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, height);
+                ctx.stroke();
+            }
+
+            // Draw all strokes
+            strokes.forEach(stroke => {
+                if (stroke.length < 2) return;
+
+                ctx.beginPath();
+                ctx.moveTo(stroke[0].x, stroke[0].y);
+                for (let i = 1; i < stroke.length; i++) {
+                    ctx.lineTo(stroke[i].x, stroke[i].y);
+                }
+                ctx.strokeStyle = 'rgba(147, 112, 219, 0.6)';
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.stroke();
+
+                // Draw mirrored stroke
+                if (mirror) {
+                    ctx.beginPath();
+                    ctx.moveTo(width - stroke[0].x, stroke[0].y);
+                    for (let i = 1; i < stroke.length; i++) {
+                        ctx.lineTo(width - stroke[i].x, stroke[i].y);
+                    }
+                    ctx.strokeStyle = 'rgba(219, 112, 147, 0.6)';
+                    ctx.stroke();
+                }
+            });
+
+            // Draw current stroke
+            if (currentStroke.length > 1) {
+                ctx.beginPath();
+                ctx.moveTo(currentStroke[0].x, currentStroke[0].y);
+                for (let i = 1; i < currentStroke.length; i++) {
+                    ctx.lineTo(currentStroke[i].x, currentStroke[i].y);
+                }
+                ctx.strokeStyle = 'rgba(147, 112, 219, 0.9)';
+                ctx.lineWidth = 4;
+                ctx.stroke();
+            }
+
+            // Playhead and sound triggering
+            if (isPlaying) {
+                // Draw playhead
+                ctx.beginPath();
+                ctx.moveTo(playheadX, 0);
+                ctx.lineTo(playheadX, height);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Glow effect
+                const gradient = ctx.createLinearGradient(playheadX - 30, 0, playheadX + 30, 0);
+                gradient.addColorStop(0, 'rgba(147, 112, 219, 0)');
+                gradient.addColorStop(0.5, 'rgba(147, 112, 219, 0.3)');
+                gradient.addColorStop(1, 'rgba(147, 112, 219, 0)');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(playheadX - 30, 0, 60, height);
+
+                // Check for intersections
+                strokes.forEach(stroke => {
+                    for (let i = 0; i < stroke.length - 1; i++) {
+                        const p1 = stroke[i];
+                        const p2 = stroke[i + 1];
+
+                        // Check if playhead crosses this segment
+                        if ((p1.x <= playheadX && p2.x > playheadX) ||
+                            (p1.x >= playheadX && p2.x < playheadX)) {
+                            // Interpolate Y at playhead X
+                            const t = (playheadX - p1.x) / (p2.x - p1.x);
+                            const y = p1.y + t * (p2.y - p1.y);
+                            const freq = yToFreq(y);
+
+                            if (!p1.triggered) {
+                                playNote(freq, playheadX);
+                                p1.triggered = true;
+
+                                // Visual burst
+                                ctx.beginPath();
+                                ctx.arc(playheadX, y, 15, 0, Math.PI * 2);
+                                ctx.fillStyle = 'rgba(147, 112, 219, 0.8)';
+                                ctx.fill();
+                            }
+                        } else {
+                            p1.triggered = false;
+                        }
+
+                        // Mirror stroke sounds
+                        if (mirror) {
+                            const mx1 = width - p1.x;
+                            const mx2 = width - p2.x;
+                            if ((mx1 <= playheadX && mx2 > playheadX) ||
+                                (mx1 >= playheadX && mx2 < playheadX)) {
+                                const t = (playheadX - mx1) / (mx2 - mx1);
+                                const y = p1.y + t * (p2.y - p1.y);
+                                const freq = yToFreq(y);
+
+                                if (!p1.mirrorTriggered) {
+                                    playNote(freq, playheadX);
+                                    p1.mirrorTriggered = true;
+                                }
+                            } else {
+                                p1.mirrorTriggered = false;
+                            }
+                        }
+                    }
+                });
+
+                playheadX += 3;
+                if (playheadX > width) playheadX = 0;
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            isDrawing = true;
+            currentStroke = [{ x: e.clientX, y: e.clientY }];
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDrawing) return;
+            currentStroke.push({ x: e.clientX, y: e.clientY });
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            if (currentStroke.length > 1) {
+                strokes.push([...currentStroke]);
+            }
+            currentStroke = [];
+            isDrawing = false;
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            if (currentStroke.length > 1) {
+                strokes.push([...currentStroke]);
+            }
+            currentStroke = [];
+            isDrawing = false;
+        });
+
+        document.getElementById('playBtn').addEventListener('click', function() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            isPlaying = !isPlaying;
+            this.textContent = isPlaying ? '⏸ Pause' : '▶ Play';
+        });
+
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            strokes.length = 0;
+            currentStroke = [];
+            ctx.fillStyle = 'rgba(26, 10, 46, 1)';
+            ctx.fillRect(0, 0, width, height);
+        });
+
+        document.getElementById('mirrorBtn').addEventListener('click', function() {
+            mirror = !mirror;
+            this.textContent = `Mirror: ${mirror ? 'On' : 'Off'}`;
+        });
+
+        window.addEventListener('resize', () => {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        });
+
+        draw();
+    </script>
+</body>
+</html>

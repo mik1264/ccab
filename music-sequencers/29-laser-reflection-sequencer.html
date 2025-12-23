@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Laser Reflection Sequencer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0f;
+            min-height: 100vh;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; cursor: crosshair; }
+        .controls {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+        }
+        button {
+            background: rgba(255,0,0,0.15);
+            border: 1px solid rgba(255,0,0,0.5);
+            color: #f44;
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+        }
+        button:hover { background: rgba(255,0,0,0.25); }
+        .info {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255,100,100,0.7);
+            font-size: 14px;
+        }
+        a.back { position: fixed; top: 20px; left: 20px; color: #f44; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <a class="back" href="index.html">← Back</a>
+    <div class="info">Click and drag to place mirrors • Laser bounces create notes</div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <button id="playBtn">▶ Fire Laser</button>
+        <button id="clearBtn">Clear Mirrors</button>
+        <button id="angleBtn">Laser Angle: 45°</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width = canvas.width = window.innerWidth;
+        let height = canvas.height = window.innerHeight;
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        let isPlaying = false;
+        const mirrors = [];
+        let laserAngle = 45;
+        let laserPath = [];
+        let currentSegment = 0;
+        let segmentProgress = 0;
+
+        const notes = [261.63, 293.66, 329.63, 349.23, 392, 440, 493.88, 523.25, 587.33, 659.25];
+
+        // Drag state
+        let isDragging = false;
+        let dragStart = null;
+
+        class Mirror {
+            constructor(x1, y1, x2, y2) {
+                this.x1 = x1;
+                this.y1 = y1;
+                this.x2 = x2;
+                this.y2 = y2;
+                this.hue = Math.random() * 360;
+                this.noteIndex = Math.floor(Math.random() * notes.length);
+                this.glow = 0;
+            }
+
+            draw() {
+                if (this.glow > 0) {
+                    ctx.shadowColor = `hsl(${this.hue}, 80%, 60%)`;
+                    ctx.shadowBlur = 20 * this.glow;
+                    this.glow -= 0.02;
+                }
+
+                ctx.beginPath();
+                ctx.moveTo(this.x1, this.y1);
+                ctx.lineTo(this.x2, this.y2);
+                ctx.strokeStyle = `hsl(${this.hue}, 60%, 50%)`;
+                ctx.lineWidth = 5;
+                ctx.lineCap = 'round';
+                ctx.stroke();
+
+                ctx.shadowBlur = 0;
+            }
+
+            getNormal() {
+                const dx = this.x2 - this.x1;
+                const dy = this.y2 - this.y1;
+                const len = Math.hypot(dx, dy);
+                return { x: -dy / len, y: dx / len };
+            }
+        }
+
+        function lineIntersection(x1, y1, x2, y2, x3, y3, x4, y4) {
+            const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+            if (Math.abs(denom) < 0.0001) return null;
+
+            const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
+            const u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
+
+            if (t > 0.001 && t < 1 && u > 0.001 && u < 1) {
+                return {
+                    x: x1 + t * (x2 - x1),
+                    y: y1 + t * (y2 - y1),
+                    t
+                };
+            }
+            return null;
+        }
+
+        function reflect(dirX, dirY, normalX, normalY) {
+            const dot = dirX * normalX + dirY * normalY;
+            return {
+                x: dirX - 2 * dot * normalX,
+                y: dirY - 2 * dot * normalY
+            };
+        }
+
+        function calculateLaserPath() {
+            laserPath = [];
+            const maxBounces = 50;
+
+            let x = 50;
+            let y = height - 50;
+            let angle = (90 - laserAngle) * Math.PI / 180;
+            let dirX = Math.cos(angle);
+            let dirY = -Math.sin(angle);
+
+            laserPath.push({ x, y });
+
+            for (let bounce = 0; bounce < maxBounces; bounce++) {
+                // Find nearest mirror intersection
+                let nearestHit = null;
+                let nearestDist = Infinity;
+                let hitMirror = null;
+
+                // Check walls
+                const endX = x + dirX * 10000;
+                const endY = y + dirY * 10000;
+
+                // Top wall
+                const topHit = lineIntersection(x, y, endX, endY, 0, 0, width, 0);
+                if (topHit && topHit.t < nearestDist) {
+                    nearestDist = topHit.t;
+                    nearestHit = topHit;
+                    hitMirror = { getNormal: () => ({ x: 0, y: 1 }) };
+                }
+
+                // Right wall
+                const rightHit = lineIntersection(x, y, endX, endY, width, 0, width, height);
+                if (rightHit && rightHit.t < nearestDist) {
+                    nearestDist = rightHit.t;
+                    nearestHit = rightHit;
+                    hitMirror = { getNormal: () => ({ x: -1, y: 0 }) };
+                }
+
+                // Bottom wall
+                const bottomHit = lineIntersection(x, y, endX, endY, 0, height, width, height);
+                if (bottomHit && bottomHit.t < nearestDist) {
+                    nearestDist = bottomHit.t;
+                    nearestHit = bottomHit;
+                    hitMirror = { getNormal: () => ({ x: 0, y: -1 }) };
+                }
+
+                // Left wall
+                const leftHit = lineIntersection(x, y, endX, endY, 0, 0, 0, height);
+                if (leftHit && leftHit.t < nearestDist) {
+                    nearestDist = leftHit.t;
+                    nearestHit = leftHit;
+                    hitMirror = { getNormal: () => ({ x: 1, y: 0 }) };
+                }
+
+                // Check mirrors
+                mirrors.forEach(mirror => {
+                    const hit = lineIntersection(x, y, endX, endY, mirror.x1, mirror.y1, mirror.x2, mirror.y2);
+                    if (hit) {
+                        const dist = Math.hypot(hit.x - x, hit.y - y);
+                        if (dist > 1 && hit.t < nearestDist) {
+                            nearestDist = hit.t;
+                            nearestHit = hit;
+                            hitMirror = mirror;
+                        }
+                    }
+                });
+
+                if (nearestHit) {
+                    laserPath.push({ x: nearestHit.x, y: nearestHit.y, mirror: hitMirror });
+
+                    // Reflect
+                    const normal = hitMirror.getNormal();
+                    const newDir = reflect(dirX, dirY, normal.x, normal.y);
+                    dirX = newDir.x;
+                    dirY = newDir.y;
+                    x = nearestHit.x;
+                    y = nearestHit.y;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        function playNote(mirror) {
+            if (!(mirror instanceof Mirror)) return;
+
+            const freq = notes[mirror.noteIndex];
+
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = 'sine';
+            osc.frequency.value = freq;
+
+            gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.3);
+
+            mirror.glow = 1;
+        }
+
+        function draw() {
+            ctx.fillStyle = 'rgba(10, 10, 15, 0.2)';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw laser source
+            ctx.beginPath();
+            ctx.arc(50, height - 50, 15, 0, Math.PI * 2);
+            ctx.fillStyle = '#f44';
+            ctx.shadowColor = '#f44';
+            ctx.shadowBlur = 20;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+
+            // Draw mirrors
+            mirrors.forEach(m => m.draw());
+
+            // Draw preview line when dragging
+            if (isDragging && dragStart) {
+                ctx.beginPath();
+                ctx.moveTo(dragStart.x, dragStart.y);
+                ctx.lineTo(dragStart.endX, dragStart.endY);
+                ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+
+            // Animate laser
+            if (isPlaying && laserPath.length > 1) {
+                // Draw full path faintly
+                ctx.beginPath();
+                ctx.moveTo(laserPath[0].x, laserPath[0].y);
+                for (let i = 1; i < laserPath.length; i++) {
+                    ctx.lineTo(laserPath[i].x, laserPath[i].y);
+                }
+                ctx.strokeStyle = 'rgba(255, 50, 50, 0.2)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Animate current segment
+                if (currentSegment < laserPath.length - 1) {
+                    const start = laserPath[currentSegment];
+                    const end = laserPath[currentSegment + 1];
+
+                    segmentProgress += 0.05;
+
+                    if (segmentProgress >= 1) {
+                        segmentProgress = 0;
+                        if (end.mirror) playNote(end.mirror);
+                        currentSegment++;
+                    }
+
+                    if (currentSegment < laserPath.length - 1) {
+                        const currentX = start.x + (end.x - start.x) * segmentProgress;
+                        const currentY = start.y + (end.y - start.y) * segmentProgress;
+
+                        // Draw animated beam
+                        ctx.beginPath();
+                        ctx.moveTo(laserPath[0].x, laserPath[0].y);
+                        for (let i = 1; i <= currentSegment; i++) {
+                            ctx.lineTo(laserPath[i].x, laserPath[i].y);
+                        }
+                        ctx.lineTo(currentX, currentY);
+
+                        ctx.strokeStyle = '#f44';
+                        ctx.lineWidth = 3;
+                        ctx.shadowColor = '#f44';
+                        ctx.shadowBlur = 10;
+                        ctx.stroke();
+                        ctx.shadowBlur = 0;
+
+                        // Beam head
+                        ctx.beginPath();
+                        ctx.arc(currentX, currentY, 5, 0, Math.PI * 2);
+                        ctx.fillStyle = '#fff';
+                        ctx.fill();
+                    }
+                } else {
+                    // Finished
+                    isPlaying = false;
+                    document.getElementById('playBtn').textContent = '▶ Fire Laser';
+                }
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            dragStart = { x: e.clientX, y: e.clientY, endX: e.clientX, endY: e.clientY };
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (isDragging && dragStart) {
+                dragStart.endX = e.clientX;
+                dragStart.endY = e.clientY;
+            }
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            if (isDragging && dragStart) {
+                const len = Math.hypot(dragStart.endX - dragStart.x, dragStart.endY - dragStart.y);
+                if (len > 20) {
+                    mirrors.push(new Mirror(dragStart.x, dragStart.y, dragStart.endX, dragStart.endY));
+                    calculateLaserPath();
+                }
+            }
+            isDragging = false;
+            dragStart = null;
+        });
+
+        document.getElementById('playBtn').addEventListener('click', function() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            calculateLaserPath();
+            isPlaying = true;
+            currentSegment = 0;
+            segmentProgress = 0;
+            this.textContent = '⏸ Firing...';
+        });
+
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            mirrors.length = 0;
+            laserPath = [];
+            isPlaying = false;
+        });
+
+        document.getElementById('angleBtn').addEventListener('click', function() {
+            laserAngle = laserAngle === 45 ? 30 : laserAngle === 30 ? 60 : laserAngle === 60 ? 15 : 45;
+            this.textContent = `Laser Angle: ${laserAngle}°`;
+            calculateLaserPath();
+        });
+
+        window.addEventListener('resize', () => {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        });
+
+        draw();
+    </script>
+</body>
+</html>

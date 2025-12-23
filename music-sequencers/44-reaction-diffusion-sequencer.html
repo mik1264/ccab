@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reaction-Diffusion Sequencer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a15; min-height: 100vh; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; cursor: crosshair; }
+        .controls { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 15px; }
+        button { background: rgba(150,100,200,0.2); border: 1px solid rgba(150,100,200,0.5); color: #a6c; padding: 10px 20px; border-radius: 20px; cursor: pointer; }
+        button:hover { background: rgba(150,100,200,0.3); }
+        .info { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: rgba(150,100,200,0.7); font-size: 14px; }
+        a.back { position: fixed; top: 20px; left: 20px; color: #a6c; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <a class="back" href="index.html">← Back</a>
+    <div class="info">Click to seed patterns • Turing patterns trigger sounds</div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <button id="playBtn">▶ Play</button>
+        <button id="seedBtn">Random Seed</button>
+        <button id="clearBtn">Clear</button>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const scale = 4;
+        let cols, rows;
+        let gridA, gridB, nextA, nextB;
+
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let isPlaying = false;
+        let scanLine = 0;
+        const notes = [196, 220, 246.94, 261.63, 293.66, 329.63, 349.23, 392, 440];
+
+        // Reaction-diffusion parameters
+        const dA = 1.0;
+        const dB = 0.5;
+        const feed = 0.055;
+        const kill = 0.062;
+
+        function init() {
+            cols = Math.floor(window.innerWidth / scale);
+            rows = Math.floor(window.innerHeight / scale);
+            canvas.width = cols * scale;
+            canvas.height = rows * scale;
+
+            gridA = new Float32Array(cols * rows);
+            gridB = new Float32Array(cols * rows);
+            nextA = new Float32Array(cols * rows);
+            nextB = new Float32Array(cols * rows);
+
+            // Initialize with chemical A everywhere
+            gridA.fill(1);
+            gridB.fill(0);
+        }
+
+        function seed(x, y, radius = 10) {
+            const cx = Math.floor(x / scale);
+            const cy = Math.floor(y / scale);
+            for (let i = -radius; i <= radius; i++) {
+                for (let j = -radius; j <= radius; j++) {
+                    const px = cx + i;
+                    const py = cy + j;
+                    if (px >= 0 && px < cols && py >= 0 && py < rows) {
+                        if (i*i + j*j < radius*radius) {
+                            const idx = py * cols + px;
+                            gridB[idx] = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        function laplacianA(x, y) {
+            let sum = 0;
+            const idx = y * cols + x;
+            sum += gridA[idx] * -1;
+            if (x > 0) sum += gridA[idx - 1] * 0.2;
+            if (x < cols - 1) sum += gridA[idx + 1] * 0.2;
+            if (y > 0) sum += gridA[idx - cols] * 0.2;
+            if (y < rows - 1) sum += gridA[idx + cols] * 0.2;
+            if (x > 0 && y > 0) sum += gridA[idx - cols - 1] * 0.05;
+            if (x < cols - 1 && y > 0) sum += gridA[idx - cols + 1] * 0.05;
+            if (x > 0 && y < rows - 1) sum += gridA[idx + cols - 1] * 0.05;
+            if (x < cols - 1 && y < rows - 1) sum += gridA[idx + cols + 1] * 0.05;
+            return sum;
+        }
+
+        function laplacianB(x, y) {
+            let sum = 0;
+            const idx = y * cols + x;
+            sum += gridB[idx] * -1;
+            if (x > 0) sum += gridB[idx - 1] * 0.2;
+            if (x < cols - 1) sum += gridB[idx + 1] * 0.2;
+            if (y > 0) sum += gridB[idx - cols] * 0.2;
+            if (y < rows - 1) sum += gridB[idx + cols] * 0.2;
+            if (x > 0 && y > 0) sum += gridB[idx - cols - 1] * 0.05;
+            if (x < cols - 1 && y > 0) sum += gridB[idx - cols + 1] * 0.05;
+            if (x > 0 && y < rows - 1) sum += gridB[idx + cols - 1] * 0.05;
+            if (x < cols - 1 && y < rows - 1) sum += gridB[idx + cols + 1] * 0.05;
+            return sum;
+        }
+
+        function update() {
+            for (let x = 1; x < cols - 1; x++) {
+                for (let y = 1; y < rows - 1; y++) {
+                    const idx = y * cols + x;
+                    const a = gridA[idx];
+                    const b = gridB[idx];
+                    const reaction = a * b * b;
+
+                    nextA[idx] = a + (dA * laplacianA(x, y) - reaction + feed * (1 - a));
+                    nextB[idx] = b + (dB * laplacianB(x, y) + reaction - (kill + feed) * b);
+
+                    nextA[idx] = Math.max(0, Math.min(1, nextA[idx]));
+                    nextB[idx] = Math.max(0, Math.min(1, nextB[idx]));
+                }
+            }
+
+            [gridA, nextA] = [nextA, gridA];
+            [gridB, nextB] = [nextB, gridB];
+        }
+
+        function playNote(freq, volume) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = 'sine';
+            osc.frequency.value = freq;
+
+            gain.gain.setValueAtTime(volume * 0.1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.2);
+        }
+
+        function draw() {
+            const imageData = ctx.createImageData(cols * scale, rows * scale);
+            const data = imageData.data;
+
+            for (let x = 0; x < cols; x++) {
+                for (let y = 0; y < rows; y++) {
+                    const idx = y * cols + x;
+                    const a = gridA[idx];
+                    const b = gridB[idx];
+                    const c = Math.floor((a - b) * 255);
+
+                    const r = Math.max(0, Math.min(255, 150 + c * 0.4));
+                    const g = Math.max(0, Math.min(255, 100 + c * 0.3));
+                    const bl = Math.max(0, Math.min(255, 200 + c * 0.2));
+
+                    // Fill scaled pixels
+                    for (let sx = 0; sx < scale; sx++) {
+                        for (let sy = 0; sy < scale; sy++) {
+                            const px = (y * scale + sy) * cols * scale + (x * scale + sx);
+                            data[px * 4] = r;
+                            data[px * 4 + 1] = g;
+                            data[px * 4 + 2] = bl;
+                            data[px * 4 + 3] = 255;
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+
+            // Draw scan line
+            if (isPlaying) {
+                ctx.beginPath();
+                ctx.moveTo(scanLine * scale, 0);
+                ctx.lineTo(scanLine * scale, canvas.height);
+                ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Play notes based on pattern at scan line
+                const samplePoints = 9;
+                for (let i = 0; i < samplePoints; i++) {
+                    const y = Math.floor((i / samplePoints) * rows);
+                    const idx = y * cols + scanLine;
+                    const b = gridB[idx];
+
+                    if (b > 0.3) {
+                        playNote(notes[i], b);
+                    }
+                }
+
+                scanLine = (scanLine + 1) % cols;
+            }
+
+            // Update simulation
+            for (let i = 0; i < 5; i++) update();
+
+            requestAnimationFrame(draw);
+        }
+
+        canvas.addEventListener('click', (e) => {
+            seed(e.clientX, e.clientY, 15);
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (e.buttons === 1) {
+                seed(e.clientX, e.clientY, 5);
+            }
+        });
+
+        document.getElementById('playBtn').addEventListener('click', function() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            isPlaying = !isPlaying;
+            this.textContent = isPlaying ? '⏸ Pause' : '▶ Play';
+        });
+
+        document.getElementById('seedBtn').addEventListener('click', () => {
+            for (let i = 0; i < 10; i++) {
+                seed(Math.random() * canvas.width, Math.random() * canvas.height, 10 + Math.random() * 15);
+            }
+        });
+
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            gridA.fill(1);
+            gridB.fill(0);
+        });
+
+        window.addEventListener('resize', init);
+
+        init();
+        // Initial seeds
+        for (let i = 0; i < 5; i++) {
+            seed(Math.random() * canvas.width, Math.random() * canvas.height, 15);
+        }
+        draw();
+    </script>
+</body>
+</html>
