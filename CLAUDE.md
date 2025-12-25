@@ -228,6 +228,31 @@ Based on `IMPLEMENTATION_STATUS.md`, these implementations failed:
 
 ## Reusable Components
 
+### Shared CSS (`assets/css/`)
+
+The project uses consolidated external stylesheets to reduce code duplication:
+
+1. **`organic-theme.css`** - Complete organic-nature theme for gallery index pages
+   - CSS variables (color palette)
+   - Organic morphing background shapes with keyframe animations
+   - Demo card grid layout and styling
+   - Navigation components (back-link, organic-back-link)
+   - Responsive breakpoints
+   - Footer styling
+
+**Gallery Index Pattern:**
+```html
+<head>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="../assets/css/organic-theme.css">
+</head>
+```
+
+**51 gallery index files** now use this external stylesheet instead of inline CSS (~200 lines each), eliminating ~10,000 lines of duplicate CSS.
+
+2. **`gallery-standard.css`** - Alternative gradient theme (purple/blue)
+3. **`navigation.css`** - Digital museum navigation system
+
 ### Demo Templates (`templates/`)
 
 Production-ready templates for creating new demos with built-in best practices:
@@ -471,6 +496,12 @@ This project evolved through:
    - New color palette: sage, moss, earth, cream, terracotta
    - Typography: Lora (headings) + Nunito (body)
    - Animated morphing blob backgrounds, glassmorphism cards
-8. **Current state**: 1,072+ demos across 83 galleries with consistent organic-nature design
+8. **CSS Consolidation** (Dec 2025): Major codebase refactoring
+   - Created `assets/css/organic-theme.css` (consolidated theme stylesheet)
+   - Migrated 51 gallery index files from inline CSS to external stylesheet
+   - Eliminated ~10,000 lines of duplicate CSS code
+   - Fixed merge conflicts in algorithmic-art/index.html
+   - Standardized gallery index structure across all galleries
+9. **Current state**: 1,072+ demos across 83 galleries with consistent organic-nature design and consolidated CSS
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).
