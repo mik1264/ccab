@@ -228,6 +228,39 @@ Based on `IMPLEMENTATION_STATUS.md`, these implementations failed:
 
 ## Reusable Components
 
+### Unified CSS System (`assets/css/`)
+
+The project uses a unified CSS system with two main stylesheets:
+
+**1. `main.css`** - Base styles for all demos
+```html
+<link rel="stylesheet" href="../assets/css/main.css">
+```
+Includes:
+- CSS reset and base styles
+- Design tokens (colors, spacing, typography)
+- Organic-Nature color palette (sage, moss, earth, cream, terracotta)
+- Dark theme variables
+- Back navigation styles (`.back-link`, `.organic-back-link`)
+- Loading and error state components
+- FPS counter styles
+- Canvas patterns
+- Utility classes (flexbox, spacing, text)
+- Responsive breakpoints
+- Accessibility features (focus-visible, reduced motion, high contrast)
+
+**2. `gallery-index.css`** - Gallery index page styles
+```html
+<link rel="stylesheet" href="../assets/css/gallery-index.css">
+```
+Includes:
+- Organic background shapes (morphing blobs)
+- Gallery header and container
+- Demo card grid layout
+- Category sections
+- Stats display
+- Animation effects
+
 ### Demo Templates (`templates/`)
 
 Production-ready templates for creating new demos with built-in best practices:
@@ -252,24 +285,39 @@ Each template includes:
 
 ### Utility Library (`assets/js/demo-utils.js`)
 
-Reusable JavaScript utilities that can be included in any demo:
+Comprehensive JavaScript utilities for demos (1000+ lines):
 
 ```html
 <script src="../assets/js/demo-utils.js"></script>
 <script>
+    // Canvas & Display
     const canvas = new CanvasManager('canvas'); // Retina-aware canvas
     const fps = new FPSCounter({ position: 'top-right' });
     const loader = new LoadingManager('Loading...');
-    const errorMgr = new ErrorManager();
+    const resize = new ResizeManager(() => { /* handle resize */ });
+
+    // Physics & Simulation
+    const vec = new Vector2D(100, 200);
+    const noise = new NoiseGenerator();
+    const particle = new Particle(x, y, { radius: 5, life: 100 });
+
+    // Input Handling
+    const keyboard = new KeyboardHandler();
+    const mouse = new MouseHandler(canvas);
+    if (keyboard.isPressed('ArrowUp')) { /* move up */ }
+
+    // State Management
+    const state = new StateManager({ score: 0, level: 1 });
+    state.subscribe((newState) => updateUI(newState));
+
+    // Back Navigation
+    createBackLink('../index.html', 'Back to Gallery');
 
     // Math utilities
-    const x = lerp(0, 100, 0.5); // Linear interpolation
-    const rand = random(0, 10); // Random float
-    const angle = degToRad(45); // Degrees to radians
-
-    // Color utilities
-    const color = hslToRgb(360, 100, 50); // HSL to RGB
-    const colorStr = rgb(255, 100, 50, 0.8); // Create rgba string
+    const x = lerp(0, 100, 0.5);
+    const d = distance(x1, y1, x2, y2);
+    const eased = easeInOutCubic(t);
+    const wave = oscillate(time, frequency);
 
     // Animation loop
     const loop = new AnimationLoop((deltaTime, totalTime) => {
@@ -281,24 +329,38 @@ Reusable JavaScript utilities that can be included in any demo:
 ```
 
 **Available Classes:**
-- `FPSCounter` - Performance monitoring
+- `FPSCounter` - Performance monitoring with color-coded display
 - `CanvasManager` - Retina canvas with auto-resize
-- `ErrorManager` - Centralized error UI
+- `ErrorManager` - Centralized error display UI
 - `LoadingManager` - Loading spinner management
-- `AnimationLoop` - Delta-time animation loop
+- `AnimationLoop` - Delta-time based animation loop
+- `ResizeManager` - Debounced window resize handling
+- `Vector2D` - 2D vector math for physics simulations
+- `Particle` - Base particle class for particle systems
+- `NoiseGenerator` - Perlin-like noise generation
+- `StateManager` - Simple reactive state management
+- `KeyboardHandler` - Keyboard input state tracking
+- `MouseHandler` - Mouse position and button state tracking
 
 **Available Functions:**
-- Math: `clamp()`, `lerp()`, `map()`, `random()`, `randomInt()`, `degToRad()`, `radToDeg()`
+- Math: `clamp()`, `lerp()`, `map()`, `random()`, `randomInt()`, `degToRad()`, `radToDeg()`, `distance()`, `angle()`, `softClamp()`, `smoothstep()`, `easeInOutCubic()`, `oscillate()`
 - Color: `hslToRgb()`, `rgb()`
-- Loading: `loadLibrary()`, `checkWebGLSupport()`, `checkWebGL2Support()`
-- Error: `setupGlobalErrorHandler()`
+- Setup: `createBackLink()`, `loadLibrary()`, `checkWebGLSupport()`, `checkWebGL2Support()`, `setupGlobalErrorHandler()`
 
 ## Documentation Files
 
 ### Project Documentation
 - `CLAUDE.md` - This file, guidance for Claude Code
-- `IMPROVEMENTS.md` - Detailed changelog of November 2025 improvements
+- `IMPROVEMENTS.md` - Detailed changelog of platform improvements
 - `README.md` - *(If exists)* Project overview and setup
+
+### CSS & JavaScript Assets
+- `assets/css/main.css` - Unified CSS system (design tokens, reset, utilities, accessibility)
+- `assets/css/gallery-index.css` - Gallery index page styles (organic-nature theme)
+- `assets/css/navigation.css` - Navigation system styles (digital museum aesthetic)
+- `assets/css/gallery-standard.css` - Legacy gallery styles (deprecated, use gallery-index.css)
+- `assets/js/demo-utils.js` - Comprehensive utility library (1000+ lines)
+- `assets/js/navigation.js` - Navigation and breadcrumb system
 
 ### Historical Documentation
 - `IMPLEMENTATION_STATUS.md` - Tracks 19 automated branch implementations (13 successful, 6 failed)
