@@ -115,7 +115,7 @@
 
 - [x] Add Terms of Service
 - [x] Add Privacy Policy
-- [ ] Add DMCA compliance statement
+- [x] Add DMCA compliance statement
 
 ---
 
