@@ -9,9 +9,9 @@
 ## 1.  Infrastructure & Features
 
 ### 1.1 Search & Discovery
-- [ ] Implement gallery-wide text search
-- [ ] Add tag filtering (framework, difficulty, category)
-- [ ] Add technology filter (WebGL, WebGPU, Canvas2D)
+- [x] Implement gallery-wide text search
+- [x] Add tag filtering (framework, difficulty, category)
+- [x] Add technology filter (WebGL, WebGPU, Canvas2D)
 - [ ] Add sort options (newest, popular, difficulty, name)
 - [x] Generate `demo-index.json` from file system
 
