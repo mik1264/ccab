@@ -113,8 +113,8 @@
 
 ## 6. LOW: Legal & Protection
 
-- [ ] Add Terms of Service
-- [ ] Add Privacy Policy
+- [x] Add Terms of Service
+- [x] Add Privacy Policy
 - [ ] Add DMCA compliance statement
 
 ---
