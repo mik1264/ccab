@@ -91,8 +91,8 @@
 - [ ] Add URL parameter state loading
 
 ### 4.2 Community Foundation
-- [ ] Write Code of Conduct
-- [ ] Create contribution guidelines
+- [x] Write Code of Conduct
+- [x] Create contribution guidelines
 - [ ] Set up moderation tools
 
 ---
