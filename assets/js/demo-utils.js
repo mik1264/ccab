@@ -1164,6 +1164,75 @@ class ExportManager {
             navigator.clipboard.write([item]);
         });
     }
+
+    /**
+     * Export current page as standalone HTML file
+     * Captures current state including any parameter modifications
+     */
+    static exportDemo(filename = 'ccab-demo') {
+        // Clone the document
+        const html = document.documentElement.cloneNode(true);
+
+        // Remove CCAB UI elements that shouldn't be in export
+        const removeSelectors = [
+            '#ccab-search',
+            '.ccab-fps-counter',
+            '.ccab-perf-monitor',
+            '.ccab-stats',
+            '.ccab-loading',
+            '.pause-animations-btn',
+            '.colorblind-toggle-btn',
+            '#pwa-install-btn',
+            '.skip-link'
+        ];
+        removeSelectors.forEach(sel => {
+            html.querySelectorAll(sel).forEach(el => el.remove());
+        });
+
+        // Get current URL parameters and embed them
+        const params = new URLSearchParams(window.location.search);
+        if (params.toString()) {
+            const script = document.createElement('script');
+            script.textContent = `
+                // Embedded parameters from export
+                window.CCAB_EXPORT_PARAMS = ${JSON.stringify(Object.fromEntries(params))};
+            `;
+            html.querySelector('head').insertBefore(script, html.querySelector('head').firstChild);
+        }
+
+        // Create download
+        const blob = new Blob(['<!DOCTYPE html>\n' + html.outerHTML], { type: 'text/html' });
+        const link = document.createElement('a');
+        link.download = `${filename}-${Date.now()}.html`;
+        link.href = URL.createObjectURL(blob);
+        link.click();
+        URL.revokeObjectURL(link.href);
+    }
+
+    /**
+     * Export demo with custom parameters embedded
+     */
+    static exportDemoWithParams(params, filename = 'ccab-demo') {
+        const html = document.documentElement.cloneNode(true);
+
+        // Remove CCAB UI elements
+        const removeSelectors = ['#ccab-search', '.ccab-fps-counter', '.ccab-perf-monitor', '.pause-animations-btn', '.colorblind-toggle-btn', '#pwa-install-btn'];
+        removeSelectors.forEach(sel => {
+            html.querySelectorAll(sel).forEach(el => el.remove());
+        });
+
+        // Embed parameters
+        const script = document.createElement('script');
+        script.textContent = `window.CCAB_EXPORT_PARAMS = ${JSON.stringify(params)};`;
+        html.querySelector('head').insertBefore(script, html.querySelector('head').firstChild);
+
+        const blob = new Blob(['<!DOCTYPE html>\n' + html.outerHTML], { type: 'text/html' });
+        const link = document.createElement('a');
+        link.download = `${filename}-${Date.now()}.html`;
+        link.href = URL.createObjectURL(blob);
+        link.click();
+        URL.revokeObjectURL(link.href);
+    }
 }
 
 // ============================================

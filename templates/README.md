@@ -266,9 +266,263 @@ When adding a new template:
 
 ---
 
+---
+
+## Control Panel Templates
+
+These templates provide ready-to-use control panels for different simulation types. Copy into your demo and customize the parameters.
+
+### 5. `controls-standard.html` - Standard Simulation Controls
+**Best for:** General-purpose simulations with parameter sliders
+
+**Features:**
+- ✅ Parameter sliders with value display
+- ✅ Play/Pause/Reset/Step buttons
+- ✅ Preset buttons for quick configuration
+- ✅ Statistics display grid
+- ✅ Export (screenshot/data) buttons
+- ✅ Keyboard shortcuts (Space, R, S)
+
+**Usage:**
+```javascript
+const controls = new ControlsManager({
+    container: '.controls',
+    params: { speed: 1, count: 100 },
+    callbacks: {
+        'play-pause': () => togglePause(),
+        reset: () => resetSimulation(),
+        onParamChange: (param, value) => console.log(param, value)
+    },
+    presets: {
+        default: { speed: 1, count: 100 },
+        fast: { speed: 3, count: 50 }
+    }
+});
+```
+
+---
+
+### 6. `controls-drawing.html` - Drawing/Painting Controls
+**Best for:** Cellular automata, interactive canvas painting, pattern editors
+
+**Features:**
+- ✅ Tool selector (Paint, Erase, Spray, Line)
+- ✅ Brush size and density sliders
+- ✅ Color/state palette
+- ✅ Pattern library buttons
+- ✅ Clear/Randomize canvas
+
+**Usage:**
+```javascript
+const touch = new TouchHandler(canvas, {
+    onStart: (pos) => drawAt(pos),
+    onMove: (pos) => drawAt(pos)
+});
+```
+
+---
+
+### 7. `controls-physics.html` - Physics Simulation Controls
+**Best for:** Physics simulations with force, mass, and time controls
+
+**Features:**
+- ✅ Force controls (gravity, friction, restitution)
+- ✅ Object property controls (mass, velocity, angle)
+- ✅ Time scale and step controls
+- ✅ Toggle switches for visualization options
+- ✅ Energy bar charts (kinetic, potential, total)
+- ✅ Physics presets (Earth, Moon, Mars, Space)
+
+---
+
+### 8. `controls-abm.html` - Agent-Based Model Controls
+**Best for:** Evolution simulations, population dynamics, social simulations
+
+**Features:**
+- ✅ Population parameters (size, distribution)
+- ✅ Evolution parameters (mutation, reproduction, death rates)
+- ✅ Behavior parameters (altruism benefit/cost)
+- ✅ Environment parameters (harshness, disease, scarcity)
+- ✅ Scenario presets with descriptions
+- ✅ Visualization mode selector
+- ✅ Population statistics with bar charts
+
+---
+
+## Educational Panel System
+
+Add educational content to any demo using the edu-panel system.
+
+### Files
+- `../assets/css/edu-panel.css` - Organic-nature themed styling
+- `../assets/js/edu-panel.js` - Tab switching and collapse/expand logic
+
+### Basic Usage
+```html
+<link rel="stylesheet" href="../assets/css/edu-panel.css">
+<script src="../assets/js/edu-panel.js"></script>
+
+<div class="edu-panel">
+    <div class="edu-header">
+        <span class="edu-icon">📚</span>
+        <span class="edu-title">Learn More</span>
+        <span class="edu-toggle">▼</span>
+    </div>
+    <div class="edu-content">
+        <div class="edu-tabs">
+            <button class="edu-tab active" data-tab="theory">Theory</button>
+            <button class="edu-tab" data-tab="algorithm">Algorithm</button>
+            <button class="edu-tab" data-tab="applications">Applications</button>
+        </div>
+
+        <div class="edu-tab-content active" id="theory">
+            <h4>Mathematical Foundation</h4>
+            <p class="edu-intro">Brief accessible introduction...</p>
+            <div class="edu-equation">F = ma</div>
+        </div>
+        <!-- More tab content -->
+    </div>
+</div>
+```
+
+### Programmatic Usage
+```javascript
+const eduContent = {
+    title: 'About This Simulation',
+    icon: '🧬',
+    theory: {
+        intro: 'One-sentence accessible summary.',
+        equation: 'rB > C',
+        explanation: 'Detailed explanation...',
+        concepts: [
+            { term: 'Fitness', definition: 'Reproductive success...' }
+        ]
+    },
+    algorithm: {
+        overview: 'How the simulation works...',
+        steps: ['Initialize population', 'Evaluate fitness', 'Select parents'],
+        pseudocode: 'for each generation:\n  evaluate(population)'
+    },
+    applications: [
+        { icon: '🧬', field: 'Biology', description: 'Studying evolution...' }
+    ],
+    explore: [
+        'Try setting mutation rate to 0.1 and observe...',
+        'Compare cooperation vs defection strategies...'
+    ],
+    references: [
+        { title: 'Wikipedia: Game Theory', url: 'https://...', type: 'wikipedia' }
+    ]
+};
+
+const panel = createEduPanel(eduContent, '#after-canvas', { startOpen: true });
+```
+
+---
+
+## Extended Utility Library (demo-utils.js)
+
+The utility library now includes additional classes for simulations:
+
+### Vector2D
+2D vector mathematics for physics simulations:
+```javascript
+const v1 = new Vector2D(3, 4);
+const v2 = new Vector2D(1, 2);
+console.log(v1.add(v2));         // Vector2D(4, 6)
+console.log(v1.mag());           // 5
+console.log(v1.normalize());     // Unit vector
+console.log(v1.limit(3));        // Clamped magnitude
+console.log(Vector2D.random());  // Random unit vector
+```
+
+### GridManager
+Grid operations for cellular automata:
+```javascript
+const grid = new GridManager(100, 100, 5); // 100x100 grid, 5px cells
+grid.randomize(0.3);                       // 30% alive
+grid.countNeighbors(50, 50, true);         // Count with wrapping
+grid.forEach((x, y, value) => {...});
+grid.draw(ctx, (value) => value ? '#fff' : '#000');
+```
+
+### StatsDisplay
+Live statistics panel:
+```javascript
+const stats = new StatsDisplay(['Generation', 'Population', 'Avg Fitness'], {
+    position: 'top-left'
+});
+stats.updateAll({
+    'Generation': 100,
+    'Population': 500,
+    'Avg Fitness': 0.75
+});
+```
+
+### ControlsManager
+Unified control panel management:
+```javascript
+const controls = new ControlsManager({
+    container: '.controls',
+    params: { speed: 1.0, count: 100 },
+    callbacks: {
+        'play-pause': () => togglePause(),
+        reset: () => reset(),
+        onParamChange: (param, value) => updateSimulation()
+    },
+    presets: {
+        default: { speed: 1, count: 100 },
+        chaos: { speed: 5, count: 500 }
+    }
+});
+```
+
+### ExportManager
+Screenshot and data export:
+```javascript
+ExportManager.screenshot(canvas, 'my-simulation');
+ExportManager.exportJSON(simulationData, 'data');
+ExportManager.exportCSV(dataArray, ['x', 'y', 'value'], 'results');
+ExportManager.copyToClipboard(canvas);
+```
+
+### TouchHandler
+Mobile touch support:
+```javascript
+const touch = new TouchHandler(canvas, {
+    onStart: (pos) => startDraw(pos),
+    onMove: (pos, lastPos) => continueDraw(pos),
+    onEnd: (pos) => endDraw()
+});
+```
+
+### Easing Functions
+```javascript
+const t = Easing.easeOutCubic(progress);  // 0-1
+// Available: linear, easeInQuad, easeOutQuad, easeInOutQuad,
+//            easeInCubic, easeOutCubic, easeInOutCubic,
+//            easeInElastic, easeOutElastic, easeOutBounce
+```
+
+### Noise Generation
+```javascript
+Noise.seed(12345);                         // Reproducible
+const value = Noise.perlin2D(x * 0.01, y * 0.01);
+const terrain = Noise.fbm(x, y, 4);        // Fractal Brownian motion
+```
+
+---
+
 ## Template Version History
 
-**v1.0 (Current)**
+**v2.0 (Current)**
+- Added control panel templates (standard, drawing, physics, ABM)
+- Added educational panel system (edu-panel.css, edu-panel.js)
+- Extended demo-utils.js with Vector2D, GridManager, StatsDisplay
+- Added ControlsManager, ExportManager, TouchHandler utilities
+- Added Easing functions and Noise generation
+
+**v1.0**
 - Initial release with Canvas, Three.js, P5.js, and WebGL templates
 - Full error handling and loading states
 - Retina display support
