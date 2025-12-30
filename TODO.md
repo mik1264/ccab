@@ -44,17 +44,17 @@
 
 ### 2.2 Keyboard Navigation
 - [ ] Ensure all controls are keyboard accessible
-- [ ] Add visible focus indicators
+- [x] Add visible focus indicators
 - [ ] Test keyboard-only navigation through demos
 
 ### 2.3 Motion & Seizure Safety
-- [ ] Add reduced motion support (@prefers-reduced-motion)
+- [x] Add reduced motion support (@prefers-reduced-motion)
 - [ ] Add seizure warnings for strobing content
-- [ ] Add pause/stop buttons for all animations
+- [x] Add pause/stop buttons for all animations
 
 ### 2.4 Alternative Modalities
 - [ ] Add audio descriptions for visual effects (sonification)
-- [ ] Add high contrast mode support
+- [x] Add high contrast mode support
 - [ ] Add color-blind friendly palettes
 
 ---
