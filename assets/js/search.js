@@ -9,6 +9,8 @@
     let demoIndex = null;
     let searchInput = null;
     let resultsContainer = null;
+    let sortSelect = null;
+    let currentSort = 'name';
 
     // Initialize search when DOM is ready
     document.addEventListener('DOMContentLoaded', init);
@@ -34,6 +36,12 @@
         searchContainer.innerHTML = `
             <div class="search-box">
                 <input type="search" id="search-input" placeholder="Search 1,530+ demos..." aria-label="Search demos">
+                <select id="sort-select" aria-label="Sort results">
+                    <option value="name">A-Z</option>
+                    <option value="name-desc">Z-A</option>
+                    <option value="gallery">Gallery</option>
+                    <option value="size">Size</option>
+                </select>
                 <button id="search-clear" aria-label="Clear search">&times;</button>
             </div>
             <div id="search-results" class="search-results" aria-live="polite"></div>
@@ -67,6 +75,20 @@
             }
             #search-input::placeholder {
                 color: #8A9A5B;
+            }
+            #sort-select {
+                border: none;
+                background: rgba(138, 154, 91, 0.15);
+                font-size: 0.85rem;
+                color: #606C38;
+                padding: 0.25rem 0.5rem;
+                border-radius: 12px;
+                cursor: pointer;
+                outline: none;
+                margin-left: 0.5rem;
+            }
+            #sort-select:hover {
+                background: rgba(138, 154, 91, 0.25);
             }
             #search-clear {
                 background: none;
@@ -155,12 +177,35 @@
         // Get references
         searchInput = document.getElementById('search-input');
         resultsContainer = document.getElementById('search-results');
+        sortSelect = document.getElementById('sort-select');
         const clearBtn = document.getElementById('search-clear');
 
         // Event listeners
         searchInput.addEventListener('input', debounce(handleSearch, 200));
+        sortSelect.addEventListener('change', handleSortChange);
         clearBtn.addEventListener('click', clearSearch);
         document.addEventListener('click', handleOutsideClick);
+    }
+
+    function handleSortChange() {
+        currentSort = sortSelect.value;
+        handleSearch();
+    }
+
+    function sortResults(results) {
+        const sorted = [...results];
+        switch (currentSort) {
+            case 'name':
+                return sorted.sort((a, b) => a.title.localeCompare(b.title));
+            case 'name-desc':
+                return sorted.sort((a, b) => b.title.localeCompare(a.title));
+            case 'gallery':
+                return sorted.sort((a, b) => a.gallery.localeCompare(b.gallery) || a.title.localeCompare(b.title));
+            case 'size':
+                return sorted.sort((a, b) => (b.size_kb || 0) - (a.size_kb || 0));
+            default:
+                return sorted;
+        }
     }
 
     function handleSearch() {
@@ -171,13 +216,16 @@
             return;
         }
 
-        const results = demoIndex.demos.filter(demo => {
+        let results = demoIndex.demos.filter(demo => {
             return demo.title.toLowerCase().includes(query) ||
                    demo.path.toLowerCase().includes(query) ||
                    demo.gallery.toLowerCase().includes(query) ||
                    demo.technologies.some(t => t.includes(query)) ||
                    demo.categories.some(c => c.includes(query));
-        }).slice(0, 20); // Limit to 20 results
+        });
+
+        // Apply sort
+        results = sortResults(results).slice(0, 20); // Limit to 20 results
 
         displayResults(results, query);
     }

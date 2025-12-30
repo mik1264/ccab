@@ -103,3 +103,47 @@ async function updateCache(request) {
         // Network unavailable, ignore
     }
 }
+
+// Background sync for demo index updates
+self.addEventListener('sync', event => {
+    if (event.tag === 'sync-demo-index') {
+        event.waitUntil(syncDemoIndex());
+    }
+});
+
+async function syncDemoIndex() {
+    try {
+        const response = await fetch('/demo-index.json');
+        if (response && response.status === 200) {
+            const cache = await caches.open(CACHE_NAME);
+            await cache.put('/demo-index.json', response);
+            console.log('CCAB: Demo index synced in background');
+        }
+    } catch (e) {
+        console.log('CCAB: Background sync failed, will retry');
+    }
+}
+
+// Periodic background sync (if supported)
+self.addEventListener('periodicsync', event => {
+    if (event.tag === 'update-cache') {
+        event.waitUntil(updateAllCachedAssets());
+    }
+});
+
+async function updateAllCachedAssets() {
+    const cache = await caches.open(CACHE_NAME);
+    const requests = await cache.keys();
+
+    for (const request of requests) {
+        try {
+            const response = await fetch(request);
+            if (response && response.status === 200) {
+                await cache.put(request, response);
+            }
+        } catch (e) {
+            // Continue with other assets
+        }
+    }
+    console.log('CCAB: Periodic cache update complete');
+}
