@@ -236,7 +236,7 @@ Most worktree content already merged to main. Key findings:
 - [x] ~~Check color palette consistency (sage, moss, earth, cream, terracotta)~~
 - [x] ~~Check typography consistency (Lora, Nunito)~~
 - Note: `orbital-flythroughs` has intentional space-themed variant
-- Minor: 2 nested demos in `complex-showcases/` could use back-links
+- [x] ~~17 nested demos in `complex-showcases/` now have organic back-links~~
 
 ---
 
