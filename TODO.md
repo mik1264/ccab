@@ -105,9 +105,9 @@
 - [x] Add sections for new galleries (gallery list is current)
 
 ### 5.2 Update README.md
-- [ ] Update demo count
-- [ ] Add new gallery categories
-- [ ] Update technology list
+- [x] Update demo count
+- [x] Add new gallery categories
+- [x] Update technology list
 
 ---
 

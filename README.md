@@ -1,8 +1,16 @@
-# CCAB - Claude Code and AB (aka Algorithmic Beauty) Testing
+# CCAB - Claude Code and Algorithmic Beauty
 
-> **1001 Interactive Web Visualizations** across 52 galleries showcasing the creative possibilities of modern web technologies
+> **1,530+ Interactive Web Visualizations** across 97 galleries showcasing the creative possibilities of modern web technologies
 
 A comprehensive collection of creative coding demonstrations spanning vanilla JavaScript, advanced graphics frameworks, scientific simulations, and cutting-edge web APIs. All demos are self-contained HTML files requiring no build process—just open and explore.
+
+## New Features (December 2025)
+
+- **Gallery Search** - Search across all 1,530+ demos by title, technology, or category
+- **Offline Support** - Service worker caches visited demos for offline viewing
+- **PWA Ready** - Install as a Progressive Web App on mobile/desktop
+- **Accessibility** - Reduced motion support, seizure warnings, keyboard navigation
+- **Demo Index** - Full JSON catalog with technology and category metadata
 
 ## 📖 Complete Documentation
 
@@ -150,12 +158,11 @@ Explore cutting-edge techniques:
 
 ## 📊 Statistics
 
-- **Total Visualizations**: 1001
-- **Gallery Categories**: 52
-- **Active Galleries**: 49 (with demos)
+- **Total Visualizations**: 1,530+
+- **Gallery Categories**: 97
 - **Technologies**: 10+ frameworks/APIs
-- **Largest Gallery**: Physics Simulations (80+ demos)
-- **Lines of Code**: 150,000+
+- **Largest Gallery**: Jensen Linkage (160 demos)
+- **Lines of Code**: 200,000+
 - **Browser Compatibility**: Modern evergreen browsers
 - **Performance Target**: 60 FPS
 
@@ -295,4 +302,4 @@ Built with:
 
 **Explore. Learn. Create.** 🚀
 
-*1001 interactive visualizations across 52 galleries demonstrating the creative possibilities of web technologies*
+*1,530+ interactive visualizations across 97 galleries demonstrating the creative possibilities of web technologies*
