@@ -6,14 +6,14 @@
 
 ---
 
-## 1. MEDIUM: Infrastructure & Features
+## 1.  Infrastructure & Features
 
 ### 1.1 Search & Discovery
 - [ ] Implement gallery-wide text search
 - [ ] Add tag filtering (framework, difficulty, category)
 - [ ] Add technology filter (WebGL, WebGPU, Canvas2D)
 - [ ] Add sort options (newest, popular, difficulty, name)
-- [ ] Generate `demo-index.json` from file system
+- [x] Generate `demo-index.json` from file system
 
 ### 1.2 Performance Monitoring
 - [ ] Add FPS counter to all demos (use templates)
@@ -35,7 +35,7 @@
 
 ---
 
-## 2. MEDIUM: Accessibility (WCAG 2.1 AA)
+## 2.  Accessibility (WCAG 2.1 AA)
 
 ### 2.1 Screen Reader Support
 - [ ] Add text descriptions for all visual content
@@ -59,7 +59,7 @@
 
 ---
 
-## 3. MEDIUM: Educational Layer
+## 3.  Educational Layer
 
 ### 3.1 Explanations System for Each Demo
 - [ ] Add "What you're seeing" section
@@ -82,7 +82,7 @@
 
 ---
 
-## 4. LOW: Community Features
+## 4.  Community Features
 
 ### 4.1 Sharing System
 - [ ] Implement state serialization
