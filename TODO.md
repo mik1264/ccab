@@ -16,10 +16,10 @@
 - [x] Generate `demo-index.json` from file system
 
 ### 1.2 Performance Monitoring
-- [ ] Add FPS counter to all demos (use templates)
-- [ ] Add memory/heap usage display
-- [ ] Add performance degradation warnings
-- [ ] Display device info (GPU, browser, resolution)
+- [x] Add FPS counter to all demos (use templates)
+- [x] Add memory/heap usage display
+- [x] Add performance degradation warnings
+- [x] Display device info (GPU, browser, resolution)
 
 ### 1.3 Code Exploration
 - [ ] Add Monaco editor for syntax highlighting
@@ -85,10 +85,10 @@
 ## 4.  Community Features
 
 ### 4.1 Sharing System
-- [ ] Implement state serialization
-- [ ] Save parameters, timestamps, screenshots
-- [ ] Generate shareable URLs with full state
-- [ ] Add URL parameter state loading
+- [x] Implement state serialization
+- [x] Save parameters, timestamps, screenshots
+- [x] Generate shareable URLs with full state
+- [x] Add URL parameter state loading
 
 ### 4.2 Community Foundation
 - [x] Write Code of Conduct
