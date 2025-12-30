@@ -28,7 +28,7 @@
 - [ ] Generate shareable links with parameter state
 
 ### 1.4 Progressive Web App (PWA)
-- [ ] Add service worker for offline support
+- [x] Add service worker for offline support
 - [ ] Add install prompts
 - [ ] Implement background sync
 - [x] Add manifest.json
