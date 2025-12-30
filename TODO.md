@@ -31,7 +31,7 @@
 - [ ] Add service worker for offline support
 - [ ] Add install prompts
 - [ ] Implement background sync
-- [ ] Add manifest.json
+- [x] Add manifest.json
 
 ---
 
@@ -100,9 +100,9 @@
 ## 5. LOW: Documentation Updates
 
 ### 5.1 Update CLAUDE.md
-- [ ] Update gallery counts (currently says 93 galleries, should be 97)
-- [ ] Document worktree workflow
-- [ ] Add sections for new galleries
+- [x] Update gallery counts (already says 97 galleries, 1,530+ demos)
+- [x] Document worktree workflow (documented in existing workflow section)
+- [x] Add sections for new galleries (gallery list is current)
 
 ### 5.2 Update README.md
 - [ ] Update demo count
