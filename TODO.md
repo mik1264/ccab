@@ -49,7 +49,7 @@
 
 ### 2.3 Motion & Seizure Safety
 - [x] Add reduced motion support (@prefers-reduced-motion)
-- [ ] Add seizure warnings for strobing content
+- [x] Add seizure warnings for strobing content
 - [x] Add pause/stop buttons for all animations
 
 ### 2.4 Alternative Modalities
@@ -116,7 +116,6 @@
 - [ ] Add Terms of Service
 - [ ] Add Privacy Policy
 - [ ] Add DMCA compliance statement
-- [ ] Add seizure warnings for strobing content
 
 ---
 
