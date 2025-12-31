@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Equalizer - ISI Compensation</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 100%);
+            color: #00aaff; min-height: 100vh; padding: 20px;
+        }
+        .back-link {
+            position: fixed; top: 20px; left: 20px; color: #00aaff;
+            text-decoration: none; padding: 10px 20px;
+            background: rgba(0,170,255,0.1); border: 1px solid #00aaff;
+            border-radius: 5px; z-index: 100;
+        }
+        .container { max-width: 1100px; margin: 60px auto 0; }
+        h1 { font-size: 2rem; margin-bottom: 10px; text-align: center; }
+        .subtitle { color: #888; margin-bottom: 30px; text-align: center; }
+        .controls {
+            display: grid; grid-template-columns: repeat(3, 1fr);
+            gap: 20px; margin-bottom: 20px;
+            background: rgba(0,170,255,0.05); padding: 20px; border-radius: 15px;
+        }
+        .control-group label { display: block; color: #888; margin-bottom: 8px; }
+        select, input[type="range"] {
+            width: 100%; padding: 8px; font-family: inherit;
+            background: rgba(0,170,255,0.1); border: 1px solid #00aaff;
+            color: #00aaff; border-radius: 5px;
+        }
+        input[type="range"] { padding: 0; height: 8px; }
+        .value { color: #00ffff; font-size: 0.9rem; margin-top: 5px; }
+        .viz-grid { display: grid; gap: 15px; margin-bottom: 20px; }
+        .panel {
+            background: rgba(0,0,0,0.5); padding: 15px;
+            border-radius: 15px; border: 1px solid #00aaff;
+        }
+        .panel h3 { color: #00ccff; margin-bottom: 10px; text-align: center; font-size: 0.95rem; }
+        canvas { width: 100%; height: 130px; background: rgba(0,20,40,0.5); border-radius: 8px; }
+        .comparison {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+        }
+        .info { background: rgba(0,170,255,0.05); padding: 20px; border-radius: 10px; }
+        .info h3 { color: #00ccff; margin-bottom: 10px; }
+        .info p { color: #aaa; line-height: 1.6; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div class="container">
+        <h1>Equalizer</h1>
+        <p class="subtitle">Compensating for inter-symbol interference (ISI)</p>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>Channel Type</label>
+                <select id="channel">
+                    <option value="mild">Mild ISI</option>
+                    <option value="moderate" selected>Moderate ISI</option>
+                    <option value="severe">Severe ISI</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Equalizer Type</label>
+                <select id="eqType">
+                    <option value="zf">Zero-Forcing (ZF)</option>
+                    <option value="mmse" selected>MMSE</option>
+                    <option value="dfe">Decision Feedback (DFE)</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Equalizer Taps</label>
+                <input type="range" id="numTaps" min="3" max="15" value="7">
+                <div class="value" id="tapsVal">7 taps</div>
+            </div>
+        </div>
+
+        <div class="viz-grid">
+            <div class="panel">
+                <h3>Original Transmitted Signal</h3>
+                <canvas id="txCanvas"></canvas>
+            </div>
+            <div class="panel">
+                <h3>Channel Impulse Response h[n]</h3>
+                <canvas id="channelCanvas"></canvas>
+            </div>
+            <div class="panel">
+                <h3>Received Signal (with ISI)</h3>
+                <canvas id="rxCanvas"></canvas>
+            </div>
+            <div class="panel">
+                <h3>Equalizer Coefficients</h3>
+                <canvas id="eqCanvas"></canvas>
+            </div>
+            <div class="panel">
+                <h3>Equalized Output</h3>
+                <canvas id="outCanvas"></canvas>
+            </div>
+        </div>
+
+        <div class="comparison">
+            <div class="panel">
+                <h3>Eye Diagram: Before Equalization</h3>
+                <canvas id="eyeBefore"></canvas>
+            </div>
+            <div class="panel">
+                <h3>Eye Diagram: After Equalization</h3>
+                <canvas id="eyeAfter"></canvas>
+            </div>
+        </div>
+
+        <div class="info">
+            <h3>Equalization Methods</h3>
+            <p><strong>Zero-Forcing (ZF):</strong> Completely inverts channel: W(f) = 1/H(f). Eliminates ISI but amplifies noise at frequency nulls.</p>
+            <p><strong>MMSE:</strong> Minimizes mean squared error: W(f) = H*(f)/(|H(f)|² + N₀). Balances ISI removal with noise.</p>
+            <p><strong>Decision Feedback (DFE):</strong> Uses past decisions to subtract post-cursor ISI. Better for severe channels.</p>
+            <p><strong>Adaptive:</strong> LMS/RLS algorithms adjust taps in real-time using training sequence or decisions.</p>
+        </div>
+    </div>
+
+    <script>
+        const N = 128;
+        let channelType = 'moderate';
+        let eqType = 'mmse';
+        let numTaps = 7;
+
+        function resizeCanvas(canvas) {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            canvas.getContext('2d').scale(dpr, dpr);
+        }
+
+        function getChannel() {
+            switch (channelType) {
+                case 'mild':
+                    return [1, 0.3, 0.1];
+                case 'moderate':
+                    return [1, 0.5, 0.25, 0.1];
+                case 'severe':
+                    return [0.8, 1, 0.6, 0.3, 0.15];
+                default:
+                    return [1];
+            }
+        }
+
+        function convolve(signal, kernel) {
+            const result = new Array(signal.length).fill(0);
+            for (let n = 0; n < signal.length; n++) {
+                for (let k = 0; k < kernel.length; k++) {
+                    if (n - k >= 0) {
+                        result[n] += signal[n - k] * kernel[k];
+                    }
+                }
+            }
+            return result;
+        }
+
+        function computeEqualizer(channel, type, taps) {
+            // Simplified equalizer design
+            const eq = new Array(taps).fill(0);
+            const center = Math.floor(taps / 2);
+
+            if (type === 'zf') {
+                // Zero-forcing: inverse filter approximation
+                eq[center] = 1 / channel[0];
+                for (let i = 1; i < Math.min(channel.length, center + 1); i++) {
+                    eq[center + i] = -channel[i] / (channel[0] * channel[0]);
+                    if (center - i >= 0) {
+                        eq[center - i] = -channel[i] / (channel[0] * channel[0]) * 0.5;
+                    }
+                }
+            } else if (type === 'mmse') {
+                // MMSE: more conservative
+                const snr = 20;
+                eq[center] = channel[0] / (channel[0] * channel[0] + 1/snr);
+                for (let i = 1; i < Math.min(channel.length, center + 1); i++) {
+                    eq[center + i] = -channel[i] / (channel[0] * channel[0] + 1/snr) * 0.8;
+                }
+            } else if (type === 'dfe') {
+                // DFE: feedforward + feedback
+                eq[center] = 1 / channel[0];
+                for (let i = 1; i < Math.min(channel.length, taps - center); i++) {
+                    eq[center + i] = -channel[i] / channel[0];
+                }
+            }
+
+            return eq;
+        }
+
+        function generateSymbols(n) {
+            const symbols = [];
+            for (let i = 0; i < n; i++) {
+                symbols.push(Math.random() < 0.5 ? 1 : -1);
+            }
+            return symbols;
+        }
+
+        function drawSignal(canvas, data, color, isDiscrete = false) {
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width / (window.devicePixelRatio || 1);
+            const h = canvas.height / (window.devicePixelRatio || 1);
+
+            ctx.fillStyle = 'rgba(0,20,40,0.5)';
+            ctx.fillRect(0, 0, w, h);
+
+            ctx.strokeStyle = 'rgba(0,170,255,0.2)';
+            ctx.beginPath();
+            ctx.moveTo(0, h / 2);
+            ctx.lineTo(w, h / 2);
+            ctx.stroke();
+
+            const max = Math.max(...data.map(Math.abs), 0.01);
+
+            if (isDiscrete) {
+                const barWidth = w / data.length;
+                data.forEach((val, i) => {
+                    const x = i * barWidth + barWidth / 2;
+                    const barHeight = (val / max) * (h * 0.4);
+                    ctx.fillStyle = color;
+                    ctx.fillRect(x - 4, h / 2 - barHeight, 8, barHeight);
+                });
+            } else {
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                for (let i = 0; i < data.length; i++) {
+                    const x = (i / data.length) * w;
+                    const y = h / 2 - (data[i] / max) * (h * 0.4);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+        }
+
+        function drawEye(canvas, signal, label) {
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width / (window.devicePixelRatio || 1);
+            const h = canvas.height / (window.devicePixelRatio || 1);
+
+            ctx.fillStyle = 'rgba(0,20,40,0.5)';
+            ctx.fillRect(0, 0, w, h);
+
+            ctx.strokeStyle = 'rgba(0,170,255,0.2)';
+            ctx.beginPath();
+            ctx.moveTo(0, h / 2);
+            ctx.lineTo(w, h / 2);
+            ctx.stroke();
+
+            const samplesPerSymbol = 8;
+            const numTraces = 50;
+
+            for (let trace = 0; trace < numTraces; trace++) {
+                const startIdx = Math.floor(Math.random() * (signal.length - samplesPerSymbol * 2));
+
+                ctx.strokeStyle = 'rgba(0,255,136,0.15)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+
+                for (let i = 0; i < samplesPerSymbol * 2; i++) {
+                    const x = (i / (samplesPerSymbol * 2)) * w;
+                    const y = h / 2 - signal[startIdx + i] * (h * 0.35);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            ctx.strokeStyle = '#ffaa00';
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(w / 2, 0);
+            ctx.lineTo(w / 2, h);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function update() {
+            channelType = document.getElementById('channel').value;
+            eqType = document.getElementById('eqType').value;
+            numTaps = parseInt(document.getElementById('numTaps').value);
+
+            document.getElementById('tapsVal').textContent = numTaps + ' taps';
+
+            const channel = getChannel();
+            const symbols = generateSymbols(N);
+
+            // Upsample for visualization
+            const upsampled = [];
+            const samplesPerSymbol = 4;
+            symbols.forEach(s => {
+                for (let i = 0; i < samplesPerSymbol; i++) {
+                    upsampled.push(i === 0 ? s : s * 0.5);
+                }
+            });
+
+            const received = convolve(upsampled, channel);
+            const equalizer = computeEqualizer(channel, eqType, numTaps);
+            const equalized = convolve(received, equalizer);
+
+            // Normalize
+            const eqMax = Math.max(...equalized.map(Math.abs));
+            const normalized = equalized.map(v => v / eqMax);
+
+            drawSignal(document.getElementById('txCanvas'), upsampled, '#00ff88');
+            drawSignal(document.getElementById('channelCanvas'), channel, '#ffaa00', true);
+            drawSignal(document.getElementById('rxCanvas'), received, '#ff6688');
+            drawSignal(document.getElementById('eqCanvas'), equalizer, '#00aaff', true);
+            drawSignal(document.getElementById('outCanvas'), normalized, '#00ff88');
+            drawEye(document.getElementById('eyeBefore'), received);
+            drawEye(document.getElementById('eyeAfter'), normalized);
+        }
+
+        function init() {
+            ['txCanvas', 'channelCanvas', 'rxCanvas', 'eqCanvas', 'outCanvas', 'eyeBefore', 'eyeAfter'].forEach(id => {
+                resizeCanvas(document.getElementById(id));
+            });
+            update();
+        }
+
+        ['channel', 'eqType', 'numTaps'].forEach(id => {
+            document.getElementById(id).addEventListener('input', update);
+            document.getElementById(id).addEventListener('change', update);
+        });
+
+        window.addEventListener('resize', init);
+        init();
+    </script>
+</body>
+</html>

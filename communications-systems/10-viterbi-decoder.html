@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Viterbi Decoder - Trellis Diagram</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 100%);
+            color: #00aaff; min-height: 100vh; padding: 20px;
+        }
+        .back-link {
+            position: fixed; top: 20px; left: 20px; color: #00aaff;
+            text-decoration: none; padding: 10px 20px;
+            background: rgba(0,170,255,0.1); border: 1px solid #00aaff;
+            border-radius: 5px; z-index: 100;
+        }
+        .container { max-width: 1100px; margin: 60px auto 0; }
+        h1 { font-size: 2rem; margin-bottom: 10px; text-align: center; }
+        .subtitle { color: #888; margin-bottom: 30px; text-align: center; }
+        .controls {
+            display: flex; gap: 20px; flex-wrap: wrap; justify-content: center;
+            margin-bottom: 20px; background: rgba(0,170,255,0.05);
+            padding: 20px; border-radius: 15px;
+        }
+        button {
+            padding: 12px 25px; font-family: inherit;
+            background: rgba(0,170,255,0.1); border: 1px solid #00aaff;
+            color: #00aaff; border-radius: 5px; cursor: pointer;
+        }
+        button:hover { background: rgba(0,170,255,0.3); }
+        .bit-display {
+            font-size: 1rem; font-weight: bold;
+            padding: 10px 15px; background: rgba(0,0,0,0.3);
+            border-radius: 5px;
+        }
+        .trellis-panel {
+            background: rgba(0,0,0,0.5); padding: 25px;
+            border-radius: 15px; border: 1px solid #00aaff;
+            margin-bottom: 20px;
+        }
+        .trellis-panel h3 { color: #00ccff; margin-bottom: 15px; text-align: center; }
+        canvas { width: 100%; height: 350px; background: rgba(0,20,40,0.5); border-radius: 10px; }
+        .legend {
+            display: flex; gap: 30px; justify-content: center;
+            margin-top: 15px; flex-wrap: wrap;
+        }
+        .legend-item { display: flex; align-items: center; gap: 8px; }
+        .legend-color {
+            width: 30px; height: 4px; border-radius: 2px;
+        }
+        .info { background: rgba(0,170,255,0.05); padding: 20px; border-radius: 10px; }
+        .info h3 { color: #00ccff; margin-bottom: 10px; }
+        .info p { color: #aaa; line-height: 1.6; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div class="container">
+        <h1>Viterbi Decoder</h1>
+        <p class="subtitle">Maximum likelihood decoding through trellis search</p>
+
+        <div class="controls">
+            <button onclick="stepDecoder()">Step</button>
+            <button onclick="runAll()">Run All</button>
+            <button onclick="reset()">Reset</button>
+            <div class="bit-display">Received: <span id="receivedBits">11 10 00 01 01</span></div>
+            <div class="bit-display">Decoded: <span id="decodedBits">--</span></div>
+        </div>
+
+        <div class="trellis-panel">
+            <h3>Trellis Diagram (States 00, 01, 10, 11)</h3>
+            <canvas id="trellisCanvas"></canvas>
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #00ff88;"></div>
+                    <span>Input 0</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ff6688;"></div>
+                    <span>Input 1</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ffaa00;"></div>
+                    <span>Survivor Path</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="info">
+            <h3>How Viterbi Decoding Works</h3>
+            <p><strong>Trellis:</strong> Each state represents shift register contents. Branches show state transitions for input 0 or 1.</p>
+            <p><strong>Branch Metrics:</strong> Hamming distance between received bits and expected output for each branch.</p>
+            <p><strong>Path Metrics:</strong> Cumulative distance along each path. Lower = more likely path.</p>
+            <p><strong>Survivor Selection:</strong> At each state, keep only the path with minimum metric. Prune others.</p>
+            <p><strong>Traceback:</strong> After all symbols processed, trace back from minimum-metric state to find decoded bits.</p>
+            <p><strong>Complexity:</strong> O(n × 2^K) where n = message length, K = constraint length.</p>
+        </div>
+    </div>
+
+    <script>
+        // Rate 1/2, K=3 encoder: g1=[1,1,1], g2=[1,0,1]
+        const states = ['00', '01', '10', '11'];
+        const transitions = {
+            '00': { 0: { next: '00', out: '00' }, 1: { next: '10', out: '11' } },
+            '01': { 0: { next: '00', out: '11' }, 1: { next: '10', out: '00' } },
+            '10': { 0: { next: '01', out: '10' }, 1: { next: '11', out: '01' } },
+            '11': { 0: { next: '01', out: '01' }, 1: { next: '11', out: '10' } }
+        };
+
+        const receivedPairs = ['11', '10', '00', '01', '01'];
+        let currentStep = 0;
+        let pathMetrics = { '00': 0, '01': Infinity, '10': Infinity, '11': Infinity };
+        let survivorPaths = { '00': [], '01': [], '10': [], '11': [] };
+        let decodedBits = [];
+
+        function resizeCanvas(canvas) {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            canvas.getContext('2d').scale(dpr, dpr);
+        }
+
+        function hammingDistance(a, b) {
+            let d = 0;
+            for (let i = 0; i < a.length; i++) {
+                if (a[i] !== b[i]) d++;
+            }
+            return d;
+        }
+
+        function stepDecoder() {
+            if (currentStep >= receivedPairs.length) return;
+
+            const received = receivedPairs[currentStep];
+            const newMetrics = {};
+            const newPaths = {};
+
+            states.forEach(state => {
+                newMetrics[state] = Infinity;
+                newPaths[state] = [];
+            });
+
+            states.forEach(prevState => {
+                if (pathMetrics[prevState] === Infinity) return;
+
+                [0, 1].forEach(input => {
+                    const trans = transitions[prevState][input];
+                    const branchMetric = hammingDistance(received, trans.out);
+                    const totalMetric = pathMetrics[prevState] + branchMetric;
+
+                    if (totalMetric < newMetrics[trans.next]) {
+                        newMetrics[trans.next] = totalMetric;
+                        newPaths[trans.next] = [...survivorPaths[prevState], { from: prevState, input }];
+                    }
+                });
+            });
+
+            pathMetrics = newMetrics;
+            survivorPaths = newPaths;
+            currentStep++;
+
+            // Traceback
+            let minState = '00';
+            let minMetric = Infinity;
+            states.forEach(state => {
+                if (pathMetrics[state] < minMetric) {
+                    minMetric = pathMetrics[state];
+                    minState = state;
+                }
+            });
+            decodedBits = survivorPaths[minState].map(s => s.input);
+
+            updateDisplay();
+            draw();
+        }
+
+        function runAll() {
+            while (currentStep < receivedPairs.length) {
+                stepDecoder();
+            }
+        }
+
+        function reset() {
+            currentStep = 0;
+            pathMetrics = { '00': 0, '01': Infinity, '10': Infinity, '11': Infinity };
+            survivorPaths = { '00': [], '01': [], '10': [], '11': [] };
+            decodedBits = [];
+            updateDisplay();
+            draw();
+        }
+
+        function updateDisplay() {
+            const recStr = receivedPairs.map((p, i) =>
+                i < currentStep ? `[${p}]` : p
+            ).join(' ');
+            document.getElementById('receivedBits').textContent = recStr;
+            document.getElementById('decodedBits').textContent =
+                decodedBits.length > 0 ? decodedBits.join('') : '--';
+        }
+
+        function drawTrellis(canvas) {
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width / (window.devicePixelRatio || 1);
+            const h = canvas.height / (window.devicePixelRatio || 1);
+
+            ctx.fillStyle = 'rgba(0,20,40,0.5)';
+            ctx.fillRect(0, 0, w, h);
+
+            const numSteps = receivedPairs.length + 1;
+            const stepWidth = (w - 100) / numSteps;
+            const stateHeight = (h - 80) / 4;
+            const startX = 70;
+            const startY = 50;
+
+            // State labels
+            ctx.fillStyle = '#888';
+            ctx.font = '12px Courier New';
+            states.forEach((state, i) => {
+                const y = startY + i * stateHeight + stateHeight / 2;
+                ctx.fillText(state, 10, y + 4);
+            });
+
+            // Time labels
+            for (let t = 0; t <= receivedPairs.length; t++) {
+                const x = startX + t * stepWidth;
+                ctx.fillText(`t=${t}`, x - 10, h - 10);
+                if (t < receivedPairs.length) {
+                    ctx.fillStyle = t < currentStep ? '#00ffff' : '#555';
+                    ctx.fillText(receivedPairs[t], x + stepWidth / 2 - 8, 25);
+                    ctx.fillStyle = '#888';
+                }
+            }
+
+            // Draw all possible transitions (dimmed)
+            for (let t = 0; t < receivedPairs.length; t++) {
+                states.forEach(state => {
+                    [0, 1].forEach(input => {
+                        const trans = transitions[state][input];
+                        const x1 = startX + t * stepWidth;
+                        const y1 = startY + states.indexOf(state) * stateHeight + stateHeight / 2;
+                        const x2 = startX + (t + 1) * stepWidth;
+                        const y2 = startY + states.indexOf(trans.next) * stateHeight + stateHeight / 2;
+
+                        ctx.strokeStyle = input === 0 ? 'rgba(0,255,136,0.15)' : 'rgba(255,102,136,0.15)';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(x1, y1);
+                        ctx.lineTo(x2, y2);
+                        ctx.stroke();
+                    });
+                });
+            }
+
+            // Draw survivor paths
+            states.forEach(state => {
+                const path = survivorPaths[state];
+                if (path.length === 0) return;
+
+                let currentState = '00';
+                for (let i = 0; i < path.length; i++) {
+                    const step = path[i];
+                    const x1 = startX + i * stepWidth;
+                    const y1 = startY + states.indexOf(currentState) * stateHeight + stateHeight / 2;
+
+                    const trans = transitions[currentState][step.input];
+                    const x2 = startX + (i + 1) * stepWidth;
+                    const y2 = startY + states.indexOf(trans.next) * stateHeight + stateHeight / 2;
+
+                    ctx.strokeStyle = step.input === 0 ? '#00ff88' : '#ff6688';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(x1, y1);
+                    ctx.lineTo(x2, y2);
+                    ctx.stroke();
+
+                    currentState = trans.next;
+                }
+            });
+
+            // Highlight minimum metric path
+            let minState = '00';
+            let minMetric = Infinity;
+            states.forEach(state => {
+                if (pathMetrics[state] < minMetric) {
+                    minMetric = pathMetrics[state];
+                    minState = state;
+                }
+            });
+
+            const bestPath = survivorPaths[minState];
+            if (bestPath.length > 0) {
+                let currentState = '00';
+                ctx.strokeStyle = '#ffaa00';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+
+                let x = startX;
+                let y = startY + states.indexOf(currentState) * stateHeight + stateHeight / 2;
+                ctx.moveTo(x, y);
+
+                for (let i = 0; i < bestPath.length; i++) {
+                    const trans = transitions[currentState][bestPath[i].input];
+                    x = startX + (i + 1) * stepWidth;
+                    y = startY + states.indexOf(trans.next) * stateHeight + stateHeight / 2;
+                    ctx.lineTo(x, y);
+                    currentState = trans.next;
+                }
+                ctx.stroke();
+            }
+
+            // Draw state nodes with metrics
+            for (let t = 0; t <= currentStep; t++) {
+                states.forEach((state, i) => {
+                    const x = startX + t * stepWidth;
+                    const y = startY + i * stateHeight + stateHeight / 2;
+
+                    let metric = (t === 0 && state === '00') ? 0 : Infinity;
+                    if (t === currentStep) {
+                        metric = pathMetrics[state];
+                    }
+
+                    ctx.fillStyle = metric < Infinity ? '#00aaff' : '#333';
+                    ctx.beginPath();
+                    ctx.arc(x, y, 12, 0, 2 * Math.PI);
+                    ctx.fill();
+
+                    if (metric < Infinity) {
+                        ctx.fillStyle = '#000';
+                        ctx.font = 'bold 10px Courier New';
+                        ctx.fillText(metric.toString(), x - 4, y + 4);
+                    }
+                });
+            }
+        }
+
+        function draw() {
+            drawTrellis(document.getElementById('trellisCanvas'));
+        }
+
+        function init() {
+            resizeCanvas(document.getElementById('trellisCanvas'));
+            draw();
+        }
+
+        window.addEventListener('resize', init);
+        init();
+    </script>
+</body>
+</html>

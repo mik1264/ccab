@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phase Vocoder - Time Stretching</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 100%);
+            color: #00aaff; min-height: 100vh; padding: 20px;
+        }
+        .back-link {
+            position: fixed; top: 20px; left: 20px; color: #00aaff;
+            text-decoration: none; padding: 10px 20px;
+            background: rgba(0,170,255,0.1); border: 1px solid #00aaff;
+            border-radius: 5px; z-index: 100;
+        }
+        .container { max-width: 1100px; margin: 60px auto 0; }
+        h1 { font-size: 2rem; margin-bottom: 10px; text-align: center; }
+        .subtitle { color: #888; margin-bottom: 30px; text-align: center; }
+        .main-panel {
+            background: rgba(0,0,0,0.5); padding: 25px;
+            border-radius: 15px; border: 1px solid #00aaff; margin-bottom: 20px;
+        }
+        canvas { width: 100%; height: 180px; background: rgba(0,20,40,0.5); border-radius: 10px; margin-bottom: 15px; }
+        .controls {
+            display: grid; grid-template-columns: repeat(3, 1fr);
+            gap: 20px; margin-top: 20px;
+        }
+        .control-group label { display: block; color: #888; margin-bottom: 8px; }
+        input[type="range"] {
+            width: 100%; height: 8px; background: rgba(0,170,255,0.2); border-radius: 4px;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 18px; height: 18px;
+            background: #00aaff; border-radius: 50%; cursor: pointer;
+        }
+        .value { color: #00ffff; font-size: 1rem; margin-top: 5px; }
+        .comparison {
+            display: grid; grid-template-columns: 1fr 1fr;
+            gap: 20px; margin-bottom: 20px;
+        }
+        .panel {
+            background: rgba(0,0,0,0.5); padding: 15px;
+            border-radius: 15px; border: 1px solid #00aaff;
+        }
+        .panel h3 { color: #00ccff; margin-bottom: 10px; text-align: center; font-size: 0.95rem; }
+        .small-canvas { height: 150px; }
+        .info { background: rgba(0,170,255,0.05); padding: 20px; border-radius: 10px; }
+        .info h3 { color: #00ccff; margin-bottom: 10px; }
+        .info p { color: #aaa; line-height: 1.6; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div class="container">
+        <h1>Phase Vocoder</h1>
+        <p class="subtitle">Time stretching without pitch change - preserve harmonics!</p>
+
+        <div class="main-panel">
+            <h3 style="color:#00ccff; text-align:center; margin-bottom:15px;">Original Signal</h3>
+            <canvas id="originalCanvas"></canvas>
+            <h3 style="color:#00ccff; text-align:center; margin-bottom:15px;">Time-Stretched Result</h3>
+            <canvas id="stretchedCanvas"></canvas>
+            <div class="controls">
+                <div class="control-group">
+                    <label>Time Stretch Factor</label>
+                    <input type="range" id="stretch" min="0.5" max="2" value="1.5" step="0.1">
+                    <div class="value" id="stretchVal">1.5× (slower)</div>
+                </div>
+                <div class="control-group">
+                    <label>Window Size</label>
+                    <input type="range" id="windowSize" min="64" max="512" value="256" step="64">
+                    <div class="value" id="windowVal">256 samples</div>
+                </div>
+                <div class="control-group">
+                    <label>Signal Frequency</label>
+                    <input type="range" id="freq" min="5" max="30" value="15" step="1">
+                    <div class="value" id="freqVal">15 Hz</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="comparison">
+            <div class="panel">
+                <h3>Original Spectrogram</h3>
+                <canvas id="specOriginal" class="small-canvas"></canvas>
+            </div>
+            <div class="panel">
+                <h3>Stretched Spectrogram (same pitch!)</h3>
+                <canvas id="specStretched" class="small-canvas"></canvas>
+            </div>
+        </div>
+
+        <div class="info">
+            <h3>How Phase Vocoder Works</h3>
+            <p><strong>Problem:</strong> Simply resampling a signal changes both duration AND pitch. We want to change duration while preserving pitch.</p>
+            <p><strong>Solution:</strong> Work in the frequency domain! Analyze overlapping windows, modify the hop size for time stretching, then carefully adjust phases to maintain continuity.</p>
+            <p><strong>Steps:</strong></p>
+            <p>1. Window the signal into overlapping frames</p>
+            <p>2. FFT each frame to get magnitude and phase</p>
+            <p>3. Change the synthesis hop size (different from analysis hop)</p>
+            <p>4. Adjust phases to match the new hop size</p>
+            <p>5. Inverse FFT and overlap-add to reconstruct</p>
+            <p><strong>Applications:</strong> Music production, DJ software, audio books, video slow motion.</p>
+        </div>
+    </div>
+
+    <script>
+        const N = 512;
+        const sampleRate = 1000;
+
+        function resizeCanvas(canvas) {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            canvas.getContext('2d').scale(dpr, dpr);
+        }
+
+        function generateSignal(freq) {
+            const sig = [];
+            for (let i = 0; i < N; i++) {
+                const t = i / sampleRate;
+                // Multi-harmonic signal
+                sig.push(
+                    Math.sin(2 * Math.PI * freq * t) +
+                    0.5 * Math.sin(2 * Math.PI * freq * 2 * t) +
+                    0.25 * Math.sin(2 * Math.PI * freq * 3 * t)
+                );
+            }
+            return sig;
+        }
+
+        function getWindow(size) {
+            const w = [];
+            for (let n = 0; n < size; n++) {
+                w.push(0.5 * (1 - Math.cos(2 * Math.PI * n / (size - 1))));
+            }
+            return w;
+        }
+
+        function phaseVocoder(signal, stretchFactor, windowSize) {
+            const hopAnalysis = windowSize / 4;
+            const hopSynthesis = Math.round(hopAnalysis * stretchFactor);
+            const window = getWindow(windowSize);
+
+            const outputLength = Math.round(signal.length * stretchFactor);
+            const output = new Array(outputLength).fill(0);
+
+            let prevPhase = new Array(windowSize / 2).fill(0);
+            let synthPhase = new Array(windowSize / 2).fill(0);
+
+            for (let frame = 0; frame * hopAnalysis + windowSize <= signal.length; frame++) {
+                const startIn = frame * hopAnalysis;
+                const startOut = frame * hopSynthesis;
+
+                // Analysis
+                const segment = [];
+                for (let i = 0; i < windowSize; i++) {
+                    segment.push(signal[startIn + i] * window[i]);
+                }
+
+                // Simple DFT for magnitude and phase
+                const mag = [];
+                const phase = [];
+                for (let k = 0; k < windowSize / 2; k++) {
+                    let re = 0, im = 0;
+                    for (let n = 0; n < windowSize; n++) {
+                        const angle = -2 * Math.PI * k * n / windowSize;
+                        re += segment[n] * Math.cos(angle);
+                        im += segment[n] * Math.sin(angle);
+                    }
+                    mag.push(Math.sqrt(re * re + im * im));
+                    phase.push(Math.atan2(im, re));
+                }
+
+                // Phase advancement
+                for (let k = 0; k < windowSize / 2; k++) {
+                    const omega = 2 * Math.PI * k / windowSize;
+                    let dPhase = phase[k] - prevPhase[k] - omega * hopAnalysis;
+
+                    // Wrap to [-π, π]
+                    dPhase = ((dPhase + Math.PI) % (2 * Math.PI)) - Math.PI;
+                    if (dPhase < -Math.PI) dPhase += 2 * Math.PI;
+
+                    const trueFreq = omega + dPhase / hopAnalysis;
+                    synthPhase[k] += trueFreq * hopSynthesis;
+                    prevPhase[k] = phase[k];
+                }
+
+                // Synthesis
+                const synthSegment = new Array(windowSize).fill(0);
+                for (let n = 0; n < windowSize; n++) {
+                    for (let k = 0; k < windowSize / 2; k++) {
+                        const angle = synthPhase[k] + 2 * Math.PI * k * n / windowSize;
+                        synthSegment[n] += mag[k] * Math.cos(angle) * 2 / windowSize;
+                    }
+                    synthSegment[n] *= window[n];
+                }
+
+                // Overlap-add
+                for (let i = 0; i < windowSize && startOut + i < outputLength; i++) {
+                    output[startOut + i] += synthSegment[i];
+                }
+            }
+
+            return output;
+        }
+
+        function computeSpectrogram(signal, windowSize) {
+            const hopSize = windowSize / 4;
+            const window = getWindow(windowSize);
+            const spectrogram = [];
+
+            for (let start = 0; start + windowSize <= signal.length; start += hopSize) {
+                const mag = [];
+                for (let k = 0; k < windowSize / 4; k++) {
+                    let re = 0, im = 0;
+                    for (let n = 0; n < windowSize; n++) {
+                        const angle = -2 * Math.PI * k * n / windowSize;
+                        re += signal[start + n] * window[n] * Math.cos(angle);
+                        im += signal[start + n] * window[n] * Math.sin(angle);
+                    }
+                    mag.push(Math.sqrt(re * re + im * im));
+                }
+                spectrogram.push(mag);
+            }
+
+            return spectrogram;
+        }
+
+        function drawSignal(canvas, data, color) {
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width / (window.devicePixelRatio || 1);
+            const h = canvas.height / (window.devicePixelRatio || 1);
+
+            ctx.fillStyle = 'rgba(0,20,40,0.5)';
+            ctx.fillRect(0, 0, w, h);
+
+            ctx.strokeStyle = 'rgba(0,170,255,0.2)';
+            ctx.beginPath();
+            ctx.moveTo(0, h / 2);
+            ctx.lineTo(w, h / 2);
+            ctx.stroke();
+
+            const max = Math.max(...data.map(Math.abs), 0.01);
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            for (let i = 0; i < data.length; i++) {
+                const x = (i / data.length) * w;
+                const y = h / 2 - (data[i] / max) * (h * 0.45);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        function drawSpectrogram(canvas, spec) {
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width / (window.devicePixelRatio || 1);
+            const h = canvas.height / (window.devicePixelRatio || 1);
+
+            ctx.fillStyle = 'rgba(0,20,40,0.5)';
+            ctx.fillRect(0, 0, w, h);
+
+            if (spec.length === 0) return;
+
+            const allValues = spec.flat();
+            const maxVal = Math.max(...allValues);
+
+            const binWidth = w / spec.length;
+            const binHeight = h / spec[0].length;
+
+            for (let t = 0; t < spec.length; t++) {
+                for (let f = 0; f < spec[t].length; f++) {
+                    const intensity = spec[t][f] / maxVal;
+                    const hue = 240 - intensity * 240;
+                    ctx.fillStyle = `hsl(${hue}, 100%, ${20 + intensity * 50}%)`;
+                    ctx.fillRect(
+                        t * binWidth,
+                        h - (f + 1) * binHeight,
+                        binWidth + 1,
+                        binHeight + 1
+                    );
+                }
+            }
+        }
+
+        function update() {
+            const stretch = parseFloat(document.getElementById('stretch').value);
+            const windowSize = parseInt(document.getElementById('windowSize').value);
+            const freq = parseInt(document.getElementById('freq').value);
+
+            document.getElementById('stretchVal').textContent =
+                `${stretch}× (${stretch > 1 ? 'slower' : 'faster'})`;
+            document.getElementById('windowVal').textContent = windowSize + ' samples';
+            document.getElementById('freqVal').textContent = freq + ' Hz';
+
+            const original = generateSignal(freq);
+            const stretched = phaseVocoder(original, stretch, windowSize);
+
+            const specOriginal = computeSpectrogram(original, windowSize);
+            const specStretched = computeSpectrogram(stretched, windowSize);
+
+            drawSignal(document.getElementById('originalCanvas'), original, '#00aaff');
+            drawSignal(document.getElementById('stretchedCanvas'), stretched, '#00ffaa');
+            drawSpectrogram(document.getElementById('specOriginal'), specOriginal);
+            drawSpectrogram(document.getElementById('specStretched'), specStretched);
+        }
+
+        function init() {
+            ['originalCanvas', 'stretchedCanvas', 'specOriginal', 'specStretched'].forEach(id => {
+                resizeCanvas(document.getElementById(id));
+            });
+            update();
+        }
+
+        ['stretch', 'windowSize', 'freq'].forEach(id => {
+            document.getElementById(id).addEventListener('input', update);
+        });
+
+        window.addEventListener('resize', init);
+        init();
+    </script>
+</body>
+</html>

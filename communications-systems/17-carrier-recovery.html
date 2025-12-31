@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Carrier Recovery - Phase-Locked Loop</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 100%);
+            color: #00aaff; min-height: 100vh; padding: 20px;
+        }
+        .back-link {
+            position: fixed; top: 20px; left: 20px; color: #00aaff;
+            text-decoration: none; padding: 10px 20px;
+            background: rgba(0,170,255,0.1); border: 1px solid #00aaff;
+            border-radius: 5px; z-index: 100;
+        }
+        .container { max-width: 1100px; margin: 60px auto 0; }
+        h1 { font-size: 2rem; margin-bottom: 10px; text-align: center; }
+        .subtitle { color: #888; margin-bottom: 30px; text-align: center; }
+        .controls {
+            display: grid; grid-template-columns: repeat(3, 1fr);
+            gap: 20px; margin-bottom: 20px;
+            background: rgba(0,170,255,0.05); padding: 20px; border-radius: 15px;
+        }
+        .control-group label { display: block; color: #888; margin-bottom: 8px; }
+        input[type="range"] {
+            width: 100%; height: 8px; background: rgba(0,170,255,0.2); border-radius: 4px;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 16px; height: 16px;
+            background: #00aaff; border-radius: 50%; cursor: pointer;
+        }
+        .value { color: #00ffff; font-size: 0.9rem; margin-top: 5px; }
+        .viz-grid { display: grid; gap: 15px; margin-bottom: 20px; }
+        .panel {
+            background: rgba(0,0,0,0.5); padding: 15px;
+            border-radius: 15px; border: 1px solid #00aaff;
+        }
+        .panel h3 { color: #00ccff; margin-bottom: 10px; text-align: center; font-size: 0.95rem; }
+        canvas { width: 100%; height: 150px; background: rgba(0,20,40,0.5); border-radius: 8px; }
+        .pll-canvas { height: 180px; }
+        .lock-indicator {
+            text-align: center; padding: 15px;
+            background: rgba(0,255,136,0.1); border: 2px solid #00ff88;
+            border-radius: 10px; margin-bottom: 20px;
+        }
+        .lock-indicator.unlocked {
+            background: rgba(255,102,136,0.1); border-color: #ff6688;
+        }
+        .info { background: rgba(0,170,255,0.05); padding: 20px; border-radius: 10px; }
+        .info h3 { color: #00ccff; margin-bottom: 10px; }
+        .info p { color: #aaa; line-height: 1.6; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div class="container">
+        <h1>Carrier Recovery</h1>
+        <p class="subtitle">Phase-Locked Loop (PLL) for coherent demodulation</p>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>Initial Frequency Offset</label>
+                <input type="range" id="freqOffset" min="-5" max="5" value="2" step="0.5">
+                <div class="value" id="freqVal">+2 Hz</div>
+            </div>
+            <div class="control-group">
+                <label>Initial Phase Offset</label>
+                <input type="range" id="phaseOffset" min="0" max="180" value="45">
+                <div class="value" id="phaseVal">45°</div>
+            </div>
+            <div class="control-group">
+                <label>Loop Bandwidth</label>
+                <input type="range" id="loopBW" min="0.01" max="0.2" value="0.05" step="0.01">
+                <div class="value" id="loopVal">0.05</div>
+            </div>
+        </div>
+
+        <div class="lock-indicator" id="lockIndicator">
+            <h3 style="color:#00ff88;">🔒 PLL LOCKED</h3>
+            <span id="lockStatus">Phase error: 0.5°</span>
+        </div>
+
+        <div class="viz-grid">
+            <div class="panel">
+                <h3>Input Signal (with offset)</h3>
+                <canvas id="inputCanvas"></canvas>
+            </div>
+            <div class="panel">
+                <h3>VCO Output (recovered carrier)</h3>
+                <canvas id="vcoCanvas"></canvas>
+            </div>
+            <div class="panel">
+                <h3>Phase Error over Time</h3>
+                <canvas id="errorCanvas" class="pll-canvas"></canvas>
+            </div>
+        </div>
+
+        <div class="info">
+            <h3>How Carrier Recovery Works</h3>
+            <p><strong>Problem:</strong> Coherent demodulation requires local carrier synchronized to transmitted carrier in both frequency and phase.</p>
+            <p><strong>Phase Detector:</strong> Multiplies input with VCO output. DC component proportional to phase difference.</p>
+            <p><strong>Loop Filter:</strong> Averages phase error, removes high-frequency components.</p>
+            <p><strong>VCO:</strong> Voltage-Controlled Oscillator adjusts frequency based on filtered error.</p>
+            <p><strong>Lock:</strong> When phase error stays small, PLL is "locked" - carrier is recovered!</p>
+            <p><strong>Costas Loop:</strong> Special PLL that works with suppressed-carrier signals (BPSK, QPSK).</p>
+        </div>
+    </div>
+
+    <script>
+        const N = 512;
+        const sampleRate = 1000;
+        const carrierFreq = 50;
+
+        let freqOffset = 2;
+        let phaseOffset = 45;
+        let loopBW = 0.05;
+
+        let vcoPhase = 0;
+        let loopIntegrator = 0;
+        let phaseErrors = [];
+
+        function resizeCanvas(canvas) {
+            const dpr = window.devicePixelRatio || 1;
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            canvas.getContext('2d').scale(dpr, dpr);
+        }
+
+        function simulatePLL() {
+            const inputSignal = [];
+            const vcoSignal = [];
+            phaseErrors = [];
+
+            vcoPhase = 0;
+            loopIntegrator = 0;
+
+            const phaseOffsetRad = phaseOffset * Math.PI / 180;
+            const Kp = loopBW * 2;
+            const Ki = loopBW * loopBW;
+
+            for (let n = 0; n < N; n++) {
+                const t = n / sampleRate;
+
+                // Input signal with offset
+                const inputPhase = 2 * Math.PI * (carrierFreq + freqOffset) * t + phaseOffsetRad;
+                const input = Math.cos(inputPhase);
+                inputSignal.push(input);
+
+                // VCO output
+                const vcoOut = Math.cos(vcoPhase);
+                vcoSignal.push(vcoOut);
+
+                // Phase detector (multiply and lowpass)
+                const phaseError = input * Math.sin(vcoPhase);
+
+                // Loop filter (PI controller)
+                loopIntegrator += Ki * phaseError;
+                const controlSignal = Kp * phaseError + loopIntegrator;
+
+                // VCO update
+                const nominalFreq = 2 * Math.PI * carrierFreq / sampleRate;
+                vcoPhase += nominalFreq + controlSignal;
+
+                // Wrap phase
+                while (vcoPhase > Math.PI) vcoPhase -= 2 * Math.PI;
+                while (vcoPhase < -Math.PI) vcoPhase += 2 * Math.PI;
+
+                // Store phase error in degrees
+                const errorDeg = phaseError * 180 / Math.PI * 10; // Scale for visibility
+                phaseErrors.push(errorDeg);
+            }
+
+            return { inputSignal, vcoSignal };
+        }
+
+        function drawSignal(canvas, data, color) {
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width / (window.devicePixelRatio || 1);
+            const h = canvas.height / (window.devicePixelRatio || 1);
+
+            ctx.fillStyle = 'rgba(0,20,40,0.5)';
+            ctx.fillRect(0, 0, w, h);
+
+            ctx.strokeStyle = 'rgba(0,170,255,0.2)';
+            ctx.beginPath();
+            ctx.moveTo(0, h / 2);
+            ctx.lineTo(w, h / 2);
+            ctx.stroke();
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            for (let i = 0; i < data.length; i++) {
+                const x = (i / data.length) * w;
+                const y = h / 2 - data[i] * (h * 0.4);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        function drawPhaseError(canvas) {
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width / (window.devicePixelRatio || 1);
+            const h = canvas.height / (window.devicePixelRatio || 1);
+
+            ctx.fillStyle = 'rgba(0,20,40,0.5)';
+            ctx.fillRect(0, 0, w, h);
+
+            ctx.strokeStyle = 'rgba(0,170,255,0.2)';
+            ctx.beginPath();
+            ctx.moveTo(0, h / 2);
+            ctx.lineTo(w, h / 2);
+            ctx.stroke();
+
+            // Error threshold lines
+            ctx.strokeStyle = 'rgba(0,255,136,0.3)';
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(0, h * 0.3);
+            ctx.lineTo(w, h * 0.3);
+            ctx.moveTo(0, h * 0.7);
+            ctx.lineTo(w, h * 0.7);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            if (phaseErrors.length === 0) return;
+
+            const max = Math.max(...phaseErrors.map(Math.abs), 90);
+
+            ctx.strokeStyle = '#ffaa00';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i < phaseErrors.length; i++) {
+                const x = (i / phaseErrors.length) * w;
+                const y = h / 2 - (phaseErrors[i] / max) * (h * 0.45);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Labels
+            ctx.fillStyle = '#888';
+            ctx.font = '10px Courier New';
+            ctx.fillText('Lock threshold', 10, h * 0.3 - 5);
+            ctx.fillText('Time →', w - 60, h - 10);
+
+            // Final error
+            const finalError = Math.abs(phaseErrors[phaseErrors.length - 1]);
+            ctx.fillStyle = finalError < 10 ? '#00ff88' : '#ff6688';
+            ctx.fillText(`Final: ${finalError.toFixed(1)}°`, w - 80, 20);
+        }
+
+        function updateLockIndicator() {
+            const indicator = document.getElementById('lockIndicator');
+            const status = document.getElementById('lockStatus');
+
+            if (phaseErrors.length === 0) return;
+
+            const finalError = Math.abs(phaseErrors[phaseErrors.length - 1]);
+            const avgError = phaseErrors.slice(-100).reduce((a, b) => a + Math.abs(b), 0) / 100;
+
+            if (avgError < 15) {
+                indicator.className = 'lock-indicator';
+                indicator.querySelector('h3').textContent = '🔒 PLL LOCKED';
+                indicator.querySelector('h3').style.color = '#00ff88';
+                status.textContent = `Phase error: ${finalError.toFixed(1)}°`;
+            } else {
+                indicator.className = 'lock-indicator unlocked';
+                indicator.querySelector('h3').textContent = '🔓 PLL UNLOCKED';
+                indicator.querySelector('h3').style.color = '#ff6688';
+                status.textContent = `Acquiring... Error: ${finalError.toFixed(1)}°`;
+            }
+        }
+
+        function update() {
+            freqOffset = parseFloat(document.getElementById('freqOffset').value);
+            phaseOffset = parseFloat(document.getElementById('phaseOffset').value);
+            loopBW = parseFloat(document.getElementById('loopBW').value);
+
+            document.getElementById('freqVal').textContent =
+                (freqOffset >= 0 ? '+' : '') + freqOffset + ' Hz';
+            document.getElementById('phaseVal').textContent = phaseOffset + '°';
+            document.getElementById('loopVal').textContent = loopBW.toFixed(2);
+
+            const { inputSignal, vcoSignal } = simulatePLL();
+
+            drawSignal(document.getElementById('inputCanvas'), inputSignal, '#00aaff');
+            drawSignal(document.getElementById('vcoCanvas'), vcoSignal, '#00ff88');
+            drawPhaseError(document.getElementById('errorCanvas'));
+            updateLockIndicator();
+        }
+
+        function init() {
+            ['inputCanvas', 'vcoCanvas', 'errorCanvas'].forEach(id => {
+                resizeCanvas(document.getElementById(id));
+            });
+            update();
+        }
+
+        ['freqOffset', 'phaseOffset', 'loopBW'].forEach(id => {
+            document.getElementById(id).addEventListener('input', update);
+        });
+
+        window.addEventListener('resize', init);
+        init();
+    </script>
+</body>
+</html>
