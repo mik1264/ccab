@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RL Gridworld - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 15px; color: #06b6d4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        select { width: 100%; padding: 8px; background: #333; color: #fff; border: none; border-radius: 5px; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #06b6d4; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { opacity: 0.9; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-bottom: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #06b6d4; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .info { background: rgba(6,182,212,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; border-left: 3px solid #06b6d4; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>RL Gridworld</h1>
+            <div class="control-group">
+                <label>Algorithm:</label>
+                <select id="algorithm">
+                    <option value="value">Value Iteration</option>
+                    <option value="policy">Policy Iteration</option>
+                    <option value="qlearning">Q-Learning</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label>Discount (γ): <span id="gammaValue">0.9</span></label>
+                <input type="range" id="gamma" min="0.5" max="0.99" step="0.01" value="0.9">
+            </div>
+            <div class="control-group">
+                <label>Learning Rate (α): <span id="alphaValue">0.1</span></label>
+                <input type="range" id="alpha" min="0.01" max="0.5" step="0.01" value="0.1">
+            </div>
+            <button id="reset">Reset</button>
+            <button id="step">Iteration Step</button>
+            <button id="run">Run to Convergence</button>
+            <button id="episode">Run Episode (Q)</button>
+            <div class="stats">
+                <div>Iterations: <span id="iterations">0</span></div>
+                <div>Max ΔV: <span id="delta">-</span></div>
+                <div>Converged: <span id="converged">No</span></div>
+            </div>
+            <div class="info">
+                <strong>Reinforcement Learning</strong><br><br>
+                🟢 Goal (+10 reward)<br>
+                🔴 Pit (-10 reward)<br>
+                ⬛ Wall (blocked)<br><br>
+                Arrows show optimal policy.<br>
+                Colors show state values.
+            </div>
+        </div>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        let params = { gamma: 0.9, alpha: 0.1, algorithm: 'value' };
+        let grid = [];
+        let V = [];
+        let Q = [];
+        let policy = [];
+        let iterations = 0;
+        let converged = false;
+        
+        const ROWS = 5;
+        const COLS = 7;
+        const ACTIONS = [[0, -1], [0, 1], [-1, 0], [1, 0]]; // left, right, up, down
+        const ACTION_NAMES = ['←', '→', '↑', '↓'];
+        
+        // Grid types: 0=empty, 1=wall, 2=goal, 3=pit
+        const GRID_TEMPLATE = [
+            [0, 0, 0, 0, 0, 0, 0],
+            [0, 1, 1, 0, 1, 1, 0],
+            [0, 0, 0, 0, 0, 0, 2],
+            [0, 1, 0, 1, 1, 0, 0],
+            [0, 0, 0, 3, 0, 0, 0]
+        ];
+
+        function resize() {
+            canvas.width = document.getElementById('canvas-container').clientWidth;
+            canvas.height = document.getElementById('canvas-container').clientHeight;
+        }
+
+        function init() {
+            grid = GRID_TEMPLATE.map(row => [...row]);
+            V = Array(ROWS).fill(0).map(() => Array(COLS).fill(0));
+            Q = Array(ROWS).fill(0).map(() => 
+                Array(COLS).fill(0).map(() => Array(4).fill(0))
+            );
+            policy = Array(ROWS).fill(0).map(() => Array(COLS).fill(0));
+            iterations = 0;
+            converged = false;
+            
+            // Set terminal state values
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (grid[r][c] === 2) V[r][c] = 10;  // Goal
+                    if (grid[r][c] === 3) V[r][c] = -10; // Pit
+                }
+            }
+            
+            updateStats();
+        }
+
+        function getReward(r, c) {
+            if (grid[r][c] === 2) return 10;  // Goal
+            if (grid[r][c] === 3) return -10; // Pit
+            return -0.1; // Small cost for each step
+        }
+
+        function isTerminal(r, c) {
+            return grid[r][c] === 2 || grid[r][c] === 3;
+        }
+
+        function isValid(r, c) {
+            return r >= 0 && r < ROWS && c >= 0 && c < COLS && grid[r][c] !== 1;
+        }
+
+        function getNextState(r, c, action) {
+            const nr = r + ACTIONS[action][0];
+            const nc = c + ACTIONS[action][1];
+            if (isValid(nr, nc)) return [nr, nc];
+            return [r, c]; // Stay in place if hitting wall
+        }
+
+        function valueIterationStep() {
+            let maxDelta = 0;
+            const newV = V.map(row => [...row]);
+            
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (grid[r][c] === 1 || isTerminal(r, c)) continue;
+                    
+                    let maxQ = -Infinity;
+                    let bestAction = 0;
+                    
+                    for (let a = 0; a < 4; a++) {
+                        const [nr, nc] = getNextState(r, c, a);
+                        const reward = getReward(nr, nc);
+                        const q = reward + params.gamma * V[nr][nc];
+                        
+                        if (q > maxQ) {
+                            maxQ = q;
+                            bestAction = a;
+                        }
+                    }
+                    
+                    newV[r][c] = maxQ;
+                    policy[r][c] = bestAction;
+                    maxDelta = Math.max(maxDelta, Math.abs(newV[r][c] - V[r][c]));
+                }
+            }
+            
+            V = newV;
+            iterations++;
+            
+            if (maxDelta < 0.001) converged = true;
+            
+            document.getElementById('delta').textContent = maxDelta.toFixed(6);
+            updateStats();
+            
+            return maxDelta;
+        }
+
+        function policyIterationStep() {
+            // Policy evaluation (simplified - just one sweep)
+            const newV = V.map(row => [...row]);
+            
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (grid[r][c] === 1 || isTerminal(r, c)) continue;
+                    
+                    const a = policy[r][c];
+                    const [nr, nc] = getNextState(r, c, a);
+                    const reward = getReward(nr, nc);
+                    newV[r][c] = reward + params.gamma * V[nr][nc];
+                }
+            }
+            V = newV;
+            
+            // Policy improvement
+            let policyStable = true;
+            
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (grid[r][c] === 1 || isTerminal(r, c)) continue;
+                    
+                    const oldAction = policy[r][c];
+                    let maxQ = -Infinity;
+                    let bestAction = 0;
+                    
+                    for (let a = 0; a < 4; a++) {
+                        const [nr, nc] = getNextState(r, c, a);
+                        const reward = getReward(nr, nc);
+                        const q = reward + params.gamma * V[nr][nc];
+                        
+                        if (q > maxQ) {
+                            maxQ = q;
+                            bestAction = a;
+                        }
+                    }
+                    
+                    policy[r][c] = bestAction;
+                    if (oldAction !== bestAction) policyStable = false;
+                }
+            }
+            
+            iterations++;
+            if (policyStable) converged = true;
+            
+            updateStats();
+            return policyStable;
+        }
+
+        function qLearningEpisode() {
+            // Start at random non-terminal, non-wall cell
+            let validStarts = [];
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (grid[r][c] === 0) validStarts.push([r, c]);
+                }
+            }
+            
+            let [r, c] = validStarts[Math.floor(Math.random() * validStarts.length)];
+            let steps = 0;
+            const maxSteps = 100;
+            
+            while (!isTerminal(r, c) && steps < maxSteps) {
+                // Epsilon-greedy action selection
+                let action;
+                if (Math.random() < 0.1) {
+                    action = Math.floor(Math.random() * 4);
+                } else {
+                    action = Q[r][c].indexOf(Math.max(...Q[r][c]));
+                }
+                
+                const [nr, nc] = getNextState(r, c, action);
+                const reward = getReward(nr, nc);
+                
+                // Q-learning update
+                const maxNextQ = Math.max(...Q[nr][nc]);
+                Q[r][c][action] += params.alpha * (reward + params.gamma * maxNextQ - Q[r][c][action]);
+                
+                // Update V and policy from Q
+                V[r][c] = Math.max(...Q[r][c]);
+                policy[r][c] = Q[r][c].indexOf(V[r][c]);
+                
+                r = nr;
+                c = nc;
+                steps++;
+            }
+            
+            iterations++;
+            updateStats();
+        }
+
+        function runToConvergence() {
+            if (params.algorithm === 'qlearning') {
+                for (let i = 0; i < 1000; i++) {
+                    qLearningEpisode();
+                }
+            } else {
+                while (!converged && iterations < 1000) {
+                    if (params.algorithm === 'value') {
+                        valueIterationStep();
+                    } else {
+                        policyIterationStep();
+                    }
+                }
+            }
+        }
+
+        function step() {
+            if (params.algorithm === 'value') {
+                valueIterationStep();
+            } else if (params.algorithm === 'policy') {
+                policyIterationStep();
+            } else {
+                qLearningEpisode();
+            }
+        }
+
+        function updateStats() {
+            document.getElementById('iterations').textContent = iterations;
+            document.getElementById('converged').textContent = converged ? 'Yes!' : 'No';
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            const cellSize = Math.min(
+                (canvas.width - 400) / COLS,
+                (canvas.height - 100) / ROWS,
+                100
+            );
+            
+            const startX = 50;
+            const startY = 50;
+            
+            // Find value range for coloring
+            let minV = Infinity, maxV = -Infinity;
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (grid[r][c] !== 1) {
+                        minV = Math.min(minV, V[r][c]);
+                        maxV = Math.max(maxV, V[r][c]);
+                    }
+                }
+            }
+            
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    const x = startX + c * cellSize;
+                    const y = startY + r * cellSize;
+                    
+                    // Cell background
+                    if (grid[r][c] === 1) {
+                        ctx.fillStyle = '#333';
+                    } else if (grid[r][c] === 2) {
+                        ctx.fillStyle = '#10b981';
+                    } else if (grid[r][c] === 3) {
+                        ctx.fillStyle = '#ef4444';
+                    } else {
+                        // Color by value
+                        const t = maxV !== minV ? (V[r][c] - minV) / (maxV - minV) : 0.5;
+                        const red = Math.floor((1 - t) * 100);
+                        const green = Math.floor(t * 100);
+                        ctx.fillStyle = `rgb(${red + 50}, ${green + 50}, 100)`;
+                    }
+                    
+                    ctx.fillRect(x, y, cellSize - 2, cellSize - 2);
+                    
+                    // Draw value
+                    if (grid[r][c] !== 1) {
+                        ctx.fillStyle = '#fff';
+                        ctx.font = `${cellSize / 5}px sans-serif`;
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(V[r][c].toFixed(1), x + cellSize / 2, y + cellSize / 2 - cellSize / 5);
+                        
+                        // Draw policy arrow
+                        if (!isTerminal(r, c)) {
+                            ctx.font = `bold ${cellSize / 3}px sans-serif`;
+                            ctx.fillText(ACTION_NAMES[policy[r][c]], x + cellSize / 2, y + cellSize / 2 + cellSize / 5);
+                        }
+                    }
+                    
+                    // Cell border
+                    ctx.strokeStyle = '#444';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(x, y, cellSize - 2, cellSize - 2);
+                }
+            }
+            
+            // Legend
+            ctx.fillStyle = '#888';
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Value Iteration finds optimal state values', startX, startY + ROWS * cellSize + 30);
+            ctx.fillText('Policy shown by arrows (←→↑↓)', startX, startY + ROWS * cellSize + 50);
+        }
+
+        function animate() {
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('gamma').addEventListener('input', e => {
+            params.gamma = parseFloat(e.target.value);
+            document.getElementById('gammaValue').textContent = params.gamma;
+        });
+
+        document.getElementById('alpha').addEventListener('input', e => {
+            params.alpha = parseFloat(e.target.value);
+            document.getElementById('alphaValue').textContent = params.alpha;
+        });
+
+        document.getElementById('algorithm').addEventListener('change', e => {
+            params.algorithm = e.target.value;
+            init();
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('step').addEventListener('click', step);
+        document.getElementById('run').addEventListener('click', runToConvergence);
+        document.getElementById('episode').addEventListener('click', qLearningEpisode);
+
+        window.addEventListener('resize', resize);
+
+        resize();
+        init();
+        requestAnimationFrame(animate);
+    </script>
+</body>
+</html>

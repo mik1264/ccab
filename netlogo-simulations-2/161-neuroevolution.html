@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neuroevolution - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 15px; color: #a855f7; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #a855f7; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { opacity: 0.9; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-bottom: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #a855f7; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .info { background: rgba(168,85,247,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; border-left: 3px solid #a855f7; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Neuroevolution</h1>
+            <div class="control-group">
+                <label>Population: <span id="popValue">20</span></label>
+                <input type="range" id="pop" min="10" max="50" step="5" value="20">
+            </div>
+            <div class="control-group">
+                <label>Mutation Rate: <span id="mutValue">0.1</span></label>
+                <input type="range" id="mut" min="0.01" max="0.3" step="0.01" value="0.1">
+            </div>
+            <div class="control-group">
+                <label>Add Node Rate: <span id="nodeValue">0.03</span></label>
+                <input type="range" id="node" min="0.01" max="0.1" step="0.01" value="0.03">
+            </div>
+            <div class="control-group">
+                <label>Add Connection Rate: <span id="connValue">0.05</span></label>
+                <input type="range" id="conn" min="0.01" max="0.2" step="0.01" value="0.05">
+            </div>
+            <button id="reset">Reset Evolution</button>
+            <button id="step">Generation Step</button>
+            <button id="run">Run/Pause</button>
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Best Fitness: <span id="bestFitness">-</span></div>
+                <div>Nodes: <span id="nodes">-</span></div>
+                <div>Connections: <span id="connections">-</span></div>
+            </div>
+            <div class="info">
+                <strong>NEAT-style Neuroevolution</strong><br><br>
+                • Evolves neural network topology<br>
+                • Adds nodes and connections<br>
+                • Task: Balance pole on cart<br><br>
+                Purple = best network topology.<br>
+                Watch complexity emerge!
+            </div>
+        </div>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        let params = { popSize: 20, mutRate: 0.1, addNode: 0.03, addConn: 0.05 };
+        let population = [];
+        let generation = 0;
+        let running = false;
+        let best = null;
+        let innovationCounter = 0;
+        
+        // Simple cart-pole environment
+        const ENV = {
+            gravity: 9.8,
+            cartMass: 1.0,
+            poleMass: 0.1,
+            poleLength: 0.5,
+            forceMag: 10.0,
+            dt: 0.02
+        };
+
+        function resize() {
+            canvas.width = document.getElementById('canvas-container').clientWidth;
+            canvas.height = document.getElementById('canvas-container').clientHeight;
+        }
+
+        function createGenome() {
+            // Start with minimal topology: 4 inputs -> 1 output
+            // Inputs: cart position, cart velocity, pole angle, pole angular velocity
+            const nodes = [
+                { id: 0, type: 'input' },
+                { id: 1, type: 'input' },
+                { id: 2, type: 'input' },
+                { id: 3, type: 'input' },
+                { id: 4, type: 'output' }
+            ];
+            
+            const connections = [];
+            // Random initial connections
+            for (let i = 0; i < 4; i++) {
+                connections.push({
+                    from: i,
+                    to: 4,
+                    weight: (Math.random() - 0.5) * 2,
+                    enabled: true,
+                    innovation: innovationCounter++
+                });
+            }
+            
+            return { nodes, connections, fitness: 0, nodeCounter: 5 };
+        }
+
+        function sigmoid(x) {
+            return 1 / (1 + Math.exp(-x));
+        }
+
+        function feedForward(genome, inputs) {
+            const nodeValues = {};
+            
+            // Set input values
+            for (let i = 0; i < inputs.length; i++) {
+                nodeValues[i] = inputs[i];
+            }
+            
+            // Simple feed-forward (assumes acyclic)
+            // Sort connections by innovation (rough topological order)
+            const sortedConns = [...genome.connections].filter(c => c.enabled);
+            
+            // Process hidden/output nodes
+            const outputNode = genome.nodes.find(n => n.type === 'output');
+            
+            for (const conn of sortedConns) {
+                if (nodeValues[conn.from] !== undefined) {
+                    if (nodeValues[conn.to] === undefined) nodeValues[conn.to] = 0;
+                    nodeValues[conn.to] += nodeValues[conn.from] * conn.weight;
+                }
+            }
+            
+            // Apply activation to output
+            if (nodeValues[outputNode.id] !== undefined) {
+                return sigmoid(nodeValues[outputNode.id]) > 0.5 ? 1 : -1;
+            }
+            return Math.random() > 0.5 ? 1 : -1;
+        }
+
+        function simulateCartPole(genome) {
+            let x = 0;        // Cart position
+            let xDot = 0;     // Cart velocity
+            let theta = 0.1;  // Pole angle (small initial tilt)
+            let thetaDot = 0; // Pole angular velocity
+            
+            let fitness = 0;
+            const maxSteps = 500;
+            
+            for (let step = 0; step < maxSteps; step++) {
+                // Get action from network
+                const inputs = [x / 2.4, xDot / 2, theta / 0.2, thetaDot / 2];
+                const action = feedForward(genome, inputs);
+                const force = action * ENV.forceMag;
+                
+                // Physics update
+                const cosTheta = Math.cos(theta);
+                const sinTheta = Math.sin(theta);
+                
+                const temp = (force + ENV.poleMass * ENV.poleLength * thetaDot * thetaDot * sinTheta) / 
+                            (ENV.cartMass + ENV.poleMass);
+                
+                const thetaAcc = (ENV.gravity * sinTheta - cosTheta * temp) / 
+                                (ENV.poleLength * (4/3 - ENV.poleMass * cosTheta * cosTheta / (ENV.cartMass + ENV.poleMass)));
+                
+                const xAcc = temp - ENV.poleMass * ENV.poleLength * thetaAcc * cosTheta / (ENV.cartMass + ENV.poleMass);
+                
+                // Update state
+                x += ENV.dt * xDot;
+                xDot += ENV.dt * xAcc;
+                theta += ENV.dt * thetaDot;
+                thetaDot += ENV.dt * thetaAcc;
+                
+                // Check failure conditions
+                if (Math.abs(x) > 2.4 || Math.abs(theta) > 0.2) break;
+                
+                fitness++;
+            }
+            
+            return fitness;
+        }
+
+        function mutate(genome) {
+            const newGenome = JSON.parse(JSON.stringify(genome));
+            
+            // Mutate weights
+            for (const conn of newGenome.connections) {
+                if (Math.random() < params.mutRate) {
+                    if (Math.random() < 0.1) {
+                        conn.weight = (Math.random() - 0.5) * 2;
+                    } else {
+                        conn.weight += (Math.random() - 0.5) * 0.5;
+                    }
+                }
+            }
+            
+            // Add node
+            if (Math.random() < params.addNode && newGenome.connections.length > 0) {
+                const enabledConns = newGenome.connections.filter(c => c.enabled);
+                if (enabledConns.length > 0) {
+                    const conn = enabledConns[Math.floor(Math.random() * enabledConns.length)];
+                    conn.enabled = false;
+                    
+                    const newNodeId = newGenome.nodeCounter++;
+                    newGenome.nodes.push({ id: newNodeId, type: 'hidden' });
+                    
+                    newGenome.connections.push({
+                        from: conn.from,
+                        to: newNodeId,
+                        weight: 1,
+                        enabled: true,
+                        innovation: innovationCounter++
+                    });
+                    
+                    newGenome.connections.push({
+                        from: newNodeId,
+                        to: conn.to,
+                        weight: conn.weight,
+                        enabled: true,
+                        innovation: innovationCounter++
+                    });
+                }
+            }
+            
+            // Add connection
+            if (Math.random() < params.addConn) {
+                const inputHidden = newGenome.nodes.filter(n => n.type !== 'output');
+                const hiddenOutput = newGenome.nodes.filter(n => n.type !== 'input');
+                
+                const from = inputHidden[Math.floor(Math.random() * inputHidden.length)];
+                const to = hiddenOutput[Math.floor(Math.random() * hiddenOutput.length)];
+                
+                if (from.id !== to.id) {
+                    const exists = newGenome.connections.some(c => c.from === from.id && c.to === to.id);
+                    if (!exists) {
+                        newGenome.connections.push({
+                            from: from.id,
+                            to: to.id,
+                            weight: (Math.random() - 0.5) * 2,
+                            enabled: true,
+                            innovation: innovationCounter++
+                        });
+                    }
+                }
+            }
+            
+            return newGenome;
+        }
+
+        function initPopulation() {
+            population = [];
+            innovationCounter = 0;
+            
+            for (let i = 0; i < params.popSize; i++) {
+                const genome = createGenome();
+                genome.fitness = simulateCartPole(genome);
+                population.push(genome);
+            }
+            
+            generation = 0;
+            best = population.reduce((a, b) => a.fitness > b.fitness ? a : b);
+            updateStats();
+        }
+
+        function step() {
+            // Sort by fitness
+            population.sort((a, b) => b.fitness - a.fitness);
+            
+            // Keep top 20%
+            const survivors = population.slice(0, Math.ceil(params.popSize * 0.2));
+            
+            // Create new population
+            const newPop = [...survivors];
+            
+            while (newPop.length < params.popSize) {
+                const parent = survivors[Math.floor(Math.random() * survivors.length)];
+                const child = mutate(parent);
+                child.fitness = simulateCartPole(child);
+                newPop.push(child);
+            }
+            
+            population = newPop;
+            generation++;
+            
+            best = population.reduce((a, b) => a.fitness > b.fitness ? a : b);
+            updateStats();
+        }
+
+        function updateStats() {
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('bestFitness').textContent = best ? best.fitness : '-';
+            document.getElementById('nodes').textContent = best ? best.nodes.length : '-';
+            document.getElementById('connections').textContent = best ? best.connections.filter(c => c.enabled).length : '-';
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            if (!best) return;
+            
+            // Draw network topology
+            const netX = 50;
+            const netY = 50;
+            const netW = (canvas.width - 400) / 2;
+            const netH = canvas.height - 100;
+            
+            // Position nodes by layer
+            const inputNodes = best.nodes.filter(n => n.type === 'input');
+            const hiddenNodes = best.nodes.filter(n => n.type === 'hidden');
+            const outputNodes = best.nodes.filter(n => n.type === 'output');
+            
+            const nodePositions = {};
+            
+            // Input layer
+            inputNodes.forEach((n, i) => {
+                nodePositions[n.id] = {
+                    x: netX + 50,
+                    y: netY + (i + 1) * netH / (inputNodes.length + 1)
+                };
+            });
+            
+            // Hidden layer(s)
+            hiddenNodes.forEach((n, i) => {
+                nodePositions[n.id] = {
+                    x: netX + netW / 2,
+                    y: netY + (i + 1) * netH / (hiddenNodes.length + 1)
+                };
+            });
+            
+            // Output layer
+            outputNodes.forEach((n, i) => {
+                nodePositions[n.id] = {
+                    x: netX + netW - 50,
+                    y: netY + netH / 2
+                };
+            });
+            
+            // Draw connections
+            for (const conn of best.connections) {
+                if (!conn.enabled) continue;
+                
+                const from = nodePositions[conn.from];
+                const to = nodePositions[conn.to];
+                
+                if (from && to) {
+                    ctx.beginPath();
+                    ctx.moveTo(from.x, from.y);
+                    ctx.lineTo(to.x, to.y);
+                    
+                    ctx.strokeStyle = conn.weight > 0 ? '#10b981' : '#ef4444';
+                    ctx.lineWidth = Math.min(3, Math.abs(conn.weight) * 2);
+                    ctx.globalAlpha = 0.6;
+                    ctx.stroke();
+                    ctx.globalAlpha = 1;
+                }
+            }
+            
+            // Draw nodes
+            for (const [id, pos] of Object.entries(nodePositions)) {
+                const node = best.nodes.find(n => n.id === parseInt(id));
+                
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, 15, 0, Math.PI * 2);
+                
+                if (node.type === 'input') {
+                    ctx.fillStyle = '#3b82f6';
+                } else if (node.type === 'output') {
+                    ctx.fillStyle = '#f59e0b';
+                } else {
+                    ctx.fillStyle = '#a855f7';
+                }
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+            
+            // Labels
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Inputs', netX + 50, netY + netH + 20);
+            if (hiddenNodes.length > 0) ctx.fillText('Hidden', netX + netW / 2, netY + netH + 20);
+            ctx.fillText('Output', netX + netW - 50, netY + netH + 20);
+            
+            // Draw cart-pole simulation of best
+            const simX = netX + netW + 50;
+            const simY = netY;
+            const simW = netW;
+            const simH = netH;
+            
+            ctx.strokeStyle = '#444';
+            ctx.strokeRect(simX, simY, simW, simH);
+            
+            // Run a demo of best agent
+            let x = 0, theta = 0.1, xDot = 0, thetaDot = 0;
+            const demoSteps = 100;
+            
+            ctx.fillStyle = '#a855f7';
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Cart-Pole Demo (Best Agent)', simX + simW / 2, simY - 10);
+            
+            // Draw cart and pole at current state
+            const cartW = 40, cartH = 20;
+            const poleLen = 60;
+            
+            const cartX = simX + simW / 2 + x * 50;
+            const cartY = simY + simH / 2;
+            
+            // Cart
+            ctx.fillStyle = '#666';
+            ctx.fillRect(cartX - cartW / 2, cartY - cartH / 2, cartW, cartH);
+            
+            // Pole
+            const poleEndX = cartX + Math.sin(theta) * poleLen;
+            const poleEndY = cartY - Math.cos(theta) * poleLen;
+            
+            ctx.beginPath();
+            ctx.moveTo(cartX, cartY - cartH / 2);
+            ctx.lineTo(poleEndX, poleEndY);
+            ctx.strokeStyle = '#a855f7';
+            ctx.lineWidth = 4;
+            ctx.stroke();
+            
+            // Track
+            ctx.strokeStyle = '#444';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(simX + 20, cartY);
+            ctx.lineTo(simX + simW - 20, cartY);
+            ctx.stroke();
+            
+            // Fitness display
+            ctx.fillStyle = '#10b981';
+            ctx.font = 'bold 16px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`Fitness: ${best.fitness} / 500`, simX + simW / 2, simY + simH - 20);
+        }
+
+        let lastStep = 0;
+        function animate(timestamp) {
+            if (running && timestamp - lastStep > 200) {
+                step();
+                lastStep = timestamp;
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('pop').addEventListener('input', e => {
+            params.popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = params.popSize;
+        });
+
+        document.getElementById('mut').addEventListener('input', e => {
+            params.mutRate = parseFloat(e.target.value);
+            document.getElementById('mutValue').textContent = params.mutRate;
+        });
+
+        document.getElementById('node').addEventListener('input', e => {
+            params.addNode = parseFloat(e.target.value);
+            document.getElementById('nodeValue').textContent = params.addNode;
+        });
+
+        document.getElementById('conn').addEventListener('input', e => {
+            params.addConn = parseFloat(e.target.value);
+            document.getElementById('connValue').textContent = params.addConn;
+        });
+
+        document.getElementById('reset').addEventListener('click', () => {
+            running = false;
+            document.getElementById('run').textContent = 'Run';
+            initPopulation();
+        });
+
+        document.getElementById('step').addEventListener('click', step);
+
+        document.getElementById('run').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('run').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', resize);
+
+        resize();
+        initPopulation();
+        requestAnimationFrame(animate);
+    </script>
+</body>
+</html>
