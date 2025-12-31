@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CCAB (Claude Code and Algorithmic Beauty)** - A comprehensive showcase of 1,530+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
+**CCAB (Claude Code and Algorithmic Beauty)** - A comprehensive showcase of 3,000+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
 
 This is a **static HTML/CSS/JavaScript** project with no build system, no dependencies, and no package manager. All demos are self-contained HTML files that can be opened directly in a browser.
 
@@ -14,7 +14,7 @@ This is a **static HTML/CSS/JavaScript** project with no build system, no depend
 
 The project follows a two-tier navigation structure:
 
-1. **Main Index** (`index.html`): Landing page with 97 galleries organized into 8 sections
+1. **Main Index** (`index.html`): Landing page with 160 galleries organized into 8 sections
 2. **Gallery Indexes**: Each category has its own `index.html` linking to individual demos
 3. **Individual Demos**: Self-contained HTML files with inline CSS/JavaScript
 
@@ -24,7 +24,7 @@ The project follows a two-tier navigation structure:
 
 ```
 ccab/
-├── index.html                      # Main landing page (97 galleries, 1,530+ demos)
+├── index.html                      # Main landing page (160 galleries, 3,000+ demos)
 ├── threejs/                        # Multi-demo gallery example
 │   ├── index.html                  # Gallery index listing demos
 │   ├── 01-rotating-cube.html       # Individual demo
@@ -34,10 +34,10 @@ ccab/
 │   └── index.html                  # The demo IS the index
 ├── algorithmic-art/
 │   └── index.html                  # Single-page: multi-demo gallery in one file
-└── [80+ more gallery directories]
+└── [150+ more gallery directories]
 ```
 
-### 83 Gallery Categories (8 Sections)
+### 160 Gallery Categories (8 Sections)
 
 **Original (6):**
 - `algorithmic-art/` - Fractals, patterns, generative art (20+ demos)
@@ -375,11 +375,11 @@ When demos are added/removed, update the stats in `index.html` (organic-nature f
 ```html
 <div class="stats">
     <div class="stat">
-        <div class="stat-number">1,530+</div>
+        <div class="stat-number">3,000+</div>
         <div class="stat-label">Interactive Demos</div>
     </div>
     <div class="stat">
-        <div class="stat-number">93</div>
+        <div class="stat-number">160</div>
         <div class="stat-label">Galleries</div>
     </div>
     <!-- Add more stat blocks as needed -->
@@ -391,7 +391,7 @@ When demos are added/removed, update the stats in `index.html` (organic-nature f
 Add gallery cards inside the appropriate `<section class="category">` block. Each gallery is a card:
 ```html
 <a href="new-gallery/index.html" class="gallery-card">
-    <span class="card-number">94</span>
+    <span class="card-number">161</span>
     <h3>New Gallery</h3>
     <p>Description of gallery contents</p>
 </a>
@@ -471,6 +471,10 @@ This project evolved through:
    - New color palette: sage, moss, earth, cream, terracotta
    - Typography: Lora (headings) + Nunito (body)
    - Animated morphing blob backgrounds, glassmorphism cards
-8. **Current state**: 1,530+ demos across 97 galleries with consistent organic-nature design
+8. **Massive Expansion** (Dec 2025): Reddit Top 100 + NetLogo III implementation
+   - Added 56 new simulation galleries from Reddit Top 100
+   - NetLogo Simulations III: 1,056 agent-based models across 26 categories
+   - Total expansion: 1,500+ new demos
+9. **Current state**: 3,000+ demos across 160 galleries with consistent organic-nature design
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).
