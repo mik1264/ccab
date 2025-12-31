@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GasLab Gravity Box - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0e1a; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; display: flex; flex-direction: column; }
+        #sim-canvas { flex: 1; }
+        #profile-canvas { width: 100px; position: absolute; right: 0; top: 0; height: calc(100% - 180px); background: rgba(0,0,0,0.5); }
+        #hist-canvas { height: 180px; border-top: 1px solid #333; }
+        canvas { display: block; }
+        #controls { width: 280px; background: rgba(0,0,0,0.9); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 15px; color: #60a5fa; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #60a5fa; color: #0a0e1a; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #3b82f6; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-bottom: 15px; }
+        .stats div { margin-bottom: 4px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #60a5fa; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.5; }
+        .formula { font-family: monospace; background: rgba(255,255,255,0.1); padding: 5px 10px; border-radius: 4px; margin: 10px 0; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container">
+            <canvas id="sim-canvas"></canvas>
+            <canvas id="profile-canvas"></canvas>
+            <canvas id="hist-canvas"></canvas>
+        </div>
+        <div id="controls">
+            <h1>GasLab: Gravity Box</h1>
+            <p class="description">Gas particles under gravity demonstrate barometric pressure distribution. More particles accumulate at the bottom, creating atmospheric stratification - just like Earth's atmosphere.</p>
+
+            <div class="control-group">
+                <label>Particles: <span id="countVal">150</span></label>
+                <input type="range" id="count" min="50" max="300" value="150">
+            </div>
+            <div class="control-group">
+                <label>Gravity: <span id="gravityVal">0.1</span></label>
+                <input type="range" id="gravity" min="0" max="0.5" step="0.02" value="0.1">
+            </div>
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">8</span></label>
+                <input type="range" id="temp" min="1" max="15" value="8">
+            </div>
+            <div class="control-group">
+                <label>Particle Mass: <span id="massVal">1</span></label>
+                <input type="range" id="mass" min="0.5" max="3" step="0.1" value="1">
+            </div>
+
+            <button id="reset">Reset Simulation</button>
+            <button id="pause">Pause</button>
+            <button id="heat">Add Heat (+20%)</button>
+            <button id="cool">Remove Heat (-20%)</button>
+            <button id="toggleGravity">Toggle Gravity</button>
+
+            <div class="stats">
+                <div>Avg Speed: <span id="avgSpeed">0</span></div>
+                <div>Temperature: <span id="tempStat">0</span> K</div>
+                <div>Bottom Pressure: <span id="bottomP">0</span></div>
+                <div>Top Pressure: <span id="topP">0</span></div>
+                <div>Pressure Ratio: <span id="pRatio">0</span></div>
+                <div>Scale Height: <span id="scaleH">0</span> px</div>
+            </div>
+
+            <p class="description">Barometric Formula:</p>
+            <div class="formula">P(h) = P₀ × e^(-mgh/kT)</div>
+            <p class="description">The density profile on the right shows the exponential decrease in particle density with altitude - the atmospheric scale height.</p>
+        </div>
+    </div>
+    <script>
+        const simCanvas = document.getElementById('sim-canvas');
+        const simCtx = simCanvas.getContext('2d');
+        const histCanvas = document.getElementById('hist-canvas');
+        const histCtx = histCanvas.getContext('2d');
+        const profileCanvas = document.getElementById('profile-canvas');
+        const profileCtx = profileCanvas.getContext('2d');
+
+        let W, H, particles = [], paused = false;
+        let bottomHits = 0, topHits = 0, lastBottomHits = 0, lastTopHits = 0;
+        let bottomRate = 0, topRate = 0;
+        let params = { count: 150, gravity: 0.1, temp: 8, mass: 1 };
+        let gravityOn = true;
+
+        function resize() {
+            const c = document.getElementById('canvas-container');
+            simCanvas.width = c.clientWidth - 100;
+            simCanvas.height = c.clientHeight - 180;
+            histCanvas.width = c.clientWidth;
+            histCanvas.height = 180;
+            profileCanvas.width = 100;
+            profileCanvas.height = c.clientHeight - 180;
+            W = simCanvas.width;
+            H = simCanvas.height;
+        }
+
+        function init() {
+            resize();
+            particles = [];
+            bottomHits = topHits = lastBottomHits = lastTopHits = 0;
+
+            for (let i = 0; i < params.count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = params.temp * (0.5 + Math.random());
+                particles.push({
+                    x: 30 + Math.random() * (W - 60),
+                    y: 30 + Math.random() * (H - 60),
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed,
+                    r: 4,
+                    m: params.mass
+                });
+            }
+        }
+
+        function update() {
+            if (paused) return;
+
+            const g = gravityOn ? params.gravity : 0;
+
+            for (const p of particles) {
+                // Apply gravity
+                p.vy += g;
+
+                p.x += p.vx;
+                p.y += p.vy;
+
+                // Wall collisions
+                if (p.x < p.r) { p.x = p.r; p.vx = -p.vx; }
+                if (p.x > W - p.r) { p.x = W - p.r; p.vx = -p.vx; }
+                if (p.y < p.r) { p.y = p.r; p.vy = -p.vy; topHits++; }
+                if (p.y > H - p.r) { p.y = H - p.r; p.vy = -p.vy; bottomHits++; }
+            }
+
+            // Particle collisions
+            for (let i = 0; i < particles.length; i++) {
+                for (let j = i + 1; j < particles.length; j++) {
+                    const p1 = particles[i], p2 = particles[j];
+                    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const minDist = p1.r + p2.r;
+
+                    if (dist < minDist && dist > 0) {
+                        const nx = dx / dist, ny = dy / dist;
+                        const dvx = p1.vx - p2.vx, dvy = p1.vy - p2.vy;
+                        const dvn = dvx * nx + dvy * ny;
+
+                        if (dvn > 0) {
+                            const m1 = p1.m, m2 = p2.m;
+                            const factor = 2 * dvn / (m1 + m2);
+                            p1.vx -= factor * m2 * nx;
+                            p1.vy -= factor * m2 * ny;
+                            p2.vx += factor * m1 * nx;
+                            p2.vy += factor * m1 * ny;
+                        }
+
+                        const overlap = minDist - dist;
+                        p1.x -= overlap * nx * 0.5;
+                        p1.y -= overlap * ny * 0.5;
+                        p2.x += overlap * nx * 0.5;
+                        p2.y += overlap * ny * 0.5;
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            simCtx.fillStyle = '#0a0e1a';
+            simCtx.fillRect(0, 0, W, H);
+
+            // Draw box
+            simCtx.strokeStyle = '#60a5fa';
+            simCtx.lineWidth = 3;
+            simCtx.strokeRect(2, 2, W - 4, H - 4);
+
+            // Draw gravity arrow if on
+            if (gravityOn) {
+                simCtx.fillStyle = 'rgba(249, 115, 22, 0.5)';
+                simCtx.beginPath();
+                simCtx.moveTo(30, 30);
+                simCtx.lineTo(20, 30);
+                simCtx.lineTo(25, 60);
+                simCtx.closePath();
+                simCtx.fill();
+                simCtx.fillStyle = '#f97316';
+                simCtx.font = '12px sans-serif';
+                simCtx.fillText('g', 20, 75);
+            }
+
+            // Calculate and collect stats
+            let totalSpeed = 0, totalKE = 0;
+            const speeds = [];
+            const heightBins = new Array(20).fill(0);
+
+            for (const p of particles) {
+                const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+                speeds.push(speed);
+                totalSpeed += speed;
+                totalKE += 0.5 * p.m * speed * speed;
+
+                // Height distribution
+                const bin = Math.floor(p.y / H * 20);
+                if (bin >= 0 && bin < 20) heightBins[bin]++;
+
+                // Color by speed
+                const hue = Math.min(speed / 15, 1) * 60;
+                simCtx.fillStyle = `hsl(${240 - hue * 4}, 80%, 60%)`;
+                simCtx.beginPath();
+                simCtx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                simCtx.fill();
+            }
+
+            // Stats
+            const avgSpeed = totalSpeed / particles.length;
+            const temp = (totalKE / particles.length) * 100;
+            const pRatio = topRate > 0 ? bottomRate / topRate : 0;
+
+            // Calculate scale height (where density drops to 1/e)
+            const topCount = heightBins.slice(0, 5).reduce((a, b) => a + b, 0);
+            const botCount = heightBins.slice(15, 20).reduce((a, b) => a + b, 0);
+            const scaleH = botCount > 0 && topCount > 0 ? H / Math.log(botCount / topCount) : H;
+
+            document.getElementById('avgSpeed').textContent = avgSpeed.toFixed(2);
+            document.getElementById('tempStat').textContent = temp.toFixed(1);
+            document.getElementById('bottomP').textContent = bottomRate.toFixed(0);
+            document.getElementById('topP').textContent = topRate.toFixed(0);
+            document.getElementById('pRatio').textContent = pRatio.toFixed(2);
+            document.getElementById('scaleH').textContent = Math.abs(scaleH).toFixed(0);
+
+            // Draw histograms
+            drawHistogram(speeds);
+            drawHeightProfile(heightBins);
+        }
+
+        function drawHistogram(speeds) {
+            histCtx.fillStyle = '#0a0e1a';
+            histCtx.fillRect(0, 0, histCanvas.width, histCanvas.height);
+
+            const bins = 30;
+            const maxSpeed = 25;
+            const counts = new Array(bins).fill(0);
+
+            for (const s of speeds) {
+                const bin = Math.min(Math.floor(s / maxSpeed * bins), bins - 1);
+                counts[bin]++;
+            }
+
+            const maxCount = Math.max(...counts, 1);
+            const barW = histCanvas.width / bins;
+
+            histCtx.fillStyle = '#60a5fa';
+            for (let i = 0; i < bins; i++) {
+                const h = (counts[i] / maxCount) * (histCanvas.height - 40);
+                histCtx.fillRect(i * barW + 1, histCanvas.height - h - 25, barW - 2, h);
+            }
+
+            histCtx.fillStyle = '#888';
+            histCtx.font = '11px sans-serif';
+            histCtx.fillText('Speed Distribution', 10, 15);
+            histCtx.fillText('0', 5, histCanvas.height - 8);
+            histCtx.fillText(maxSpeed.toString(), histCanvas.width - 20, histCanvas.height - 8);
+        }
+
+        function drawHeightProfile(heightBins) {
+            profileCtx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            profileCtx.fillRect(0, 0, 100, profileCanvas.height);
+
+            const maxCount = Math.max(...heightBins, 1);
+
+            // Draw density bars
+            profileCtx.fillStyle = '#22d3ee';
+            const binH = profileCanvas.height / heightBins.length;
+            for (let i = 0; i < heightBins.length; i++) {
+                const w = (heightBins[i] / maxCount) * 80;
+                profileCtx.fillRect(10, i * binH + 2, w, binH - 4);
+            }
+
+            // Theoretical exponential curve (if gravity is on)
+            if (gravityOn && params.gravity > 0) {
+                profileCtx.strokeStyle = '#f97316';
+                profileCtx.lineWidth = 2;
+                profileCtx.beginPath();
+                const n0 = heightBins[heightBins.length - 1] || maxCount;
+                const scaleH = params.temp * params.temp / (params.gravity * params.mass * 50);
+                for (let i = 0; i <= heightBins.length; i++) {
+                    const h = (heightBins.length - i) * binH / profileCanvas.height * H;
+                    const expected = n0 * Math.exp(-h / (scaleH * H));
+                    const x = 10 + (expected / maxCount) * 80;
+                    if (i === 0) profileCtx.moveTo(x, i * binH);
+                    else profileCtx.lineTo(x, i * binH);
+                }
+                profileCtx.stroke();
+            }
+
+            // Labels
+            profileCtx.fillStyle = '#888';
+            profileCtx.font = '10px sans-serif';
+            profileCtx.fillText('Density', 30, 15);
+            profileCtx.fillText('Top', 5, 30);
+            profileCtx.fillText('Bot', 5, profileCanvas.height - 10);
+        }
+
+        let lastTime = performance.now();
+        function animate() {
+            const now = performance.now();
+            if (now - lastTime > 1000) {
+                bottomRate = bottomHits - lastBottomHits;
+                topRate = topHits - lastTopHits;
+                lastBottomHits = bottomHits;
+                lastTopHits = topHits;
+                lastTime = now;
+            }
+            update();
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        // Controls
+        document.getElementById('count').addEventListener('input', e => {
+            params.count = +e.target.value;
+            document.getElementById('countVal').textContent = params.count;
+        });
+        document.getElementById('gravity').addEventListener('input', e => {
+            params.gravity = +e.target.value;
+            document.getElementById('gravityVal').textContent = params.gravity.toFixed(2);
+        });
+        document.getElementById('temp').addEventListener('input', e => {
+            params.temp = +e.target.value;
+            document.getElementById('tempVal').textContent = params.temp;
+        });
+        document.getElementById('mass').addEventListener('input', e => {
+            params.mass = +e.target.value;
+            document.getElementById('massVal').textContent = params.mass.toFixed(1);
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('pause').addEventListener('click', () => {
+            paused = !paused;
+            document.getElementById('pause').textContent = paused ? 'Resume' : 'Pause';
+        });
+        document.getElementById('heat').addEventListener('click', () => {
+            for (const p of particles) { p.vx *= 1.2; p.vy *= 1.2; }
+        });
+        document.getElementById('cool').addEventListener('click', () => {
+            for (const p of particles) { p.vx *= 0.8; p.vy *= 0.8; }
+        });
+        document.getElementById('toggleGravity').addEventListener('click', () => {
+            gravityOn = !gravityOn;
+            document.getElementById('toggleGravity').textContent = gravityOn ? 'Turn Off Gravity' : 'Turn On Gravity';
+        });
+
+        window.addEventListener('resize', resize);
+        init();
+        animate();
+    </script>
+</body>
+</html>

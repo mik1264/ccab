@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rope Physics - Wave Transmission - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 280px; background: rgba(0,0,0,0.9); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.1rem; margin-bottom: 15px; color: #a78bfa; }
+        .control-group { margin-bottom: 12px; }
+        label { display: block; font-size: 0.75rem; margin-bottom: 3px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 8px; margin-bottom: 8px; background: #7c3aed; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 0.85rem; }
+        button:hover { background: #6d28d9; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-bottom: 15px; }
+        .stats div { margin-bottom: 3px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #a78bfa; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .description { font-size: 0.7rem; color: #888; margin-bottom: 12px; line-height: 1.4; }
+        .mode-btn { width: 48%; display: inline-block; }
+        .mode-btn.active { background: #4c1d95; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div id="container">
+        <div id="canvas-container">
+            <canvas id="canvas"></canvas>
+        </div>
+        <div id="controls">
+            <h1>Rope Physics Simulation</h1>
+            <p class="description">A rope modeled as connected mass points with spring constraints. Drag points to create disturbances and watch waves propagate!</p>
+            
+            <div class="control-group">
+                <label>Segments: <span id="segmentsVal">50</span></label>
+                <input type="range" id="segments" min="20" max="100" value="50">
+            </div>
+            <div class="control-group">
+                <label>Tension (Spring Constant): <span id="tensionVal">500</span></label>
+                <input type="range" id="tension" min="100" max="1000" value="500">
+            </div>
+            <div class="control-group">
+                <label>Damping: <span id="dampVal">0.98</span></label>
+                <input type="range" id="damp" min="0.9" max="1" step="0.005" value="0.98">
+            </div>
+            <div class="control-group">
+                <label>Mass per Point: <span id="massVal">1.0</span></label>
+                <input type="range" id="mass" min="0.5" max="3" step="0.1" value="1">
+            </div>
+            <div class="control-group">
+                <label>Gravity: <span id="gravityVal">0.5</span></label>
+                <input type="range" id="gravity" min="0" max="2" step="0.1" value="0.5">
+            </div>
+            
+            <button id="reset">Reset</button>
+            <button id="pause">Pause</button>
+            
+            <div style="margin-bottom: 10px;">
+                <button id="modeFixed" class="mode-btn active">Fixed Ends</button>
+                <button id="modeFree" class="mode-btn">Free End</button>
+            </div>
+            
+            <button id="pulse">Send Pulse</button>
+            <button id="shake">Oscillate Left</button>
+            
+            <div class="stats">
+                <div>Wave Speed: <span id="waveSpeed">0</span> px/s</div>
+                <div>Max Tension: <span id="maxTension">0</span></div>
+                <div>Total Energy: <span id="energy">0</span></div>
+            </div>
+            
+            <p class="description"><strong>Physics:</strong> Each point is connected by springs. Tension creates restoring forces. Wave speed v = √(T/μ) where T is tension and μ is linear mass density.</p>
+            
+            <p class="description"><strong>Interact:</strong> Click and drag any point on the rope to create waves!</p>
+        </div>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        let W, H, points = [], paused = false;
+        let dragging = null, dragOffsetY = 0;
+        let fixedEnds = true, oscillating = false, oscillatePhase = 0;
+        
+        let params = {
+            segments: 50,
+            tension: 500,
+            damping: 0.98,
+            mass: 1.0,
+            gravity: 0.5
+        };
+        
+        function resize() {
+            const c = document.getElementById('canvas-container');
+            canvas.width = c.clientWidth;
+            canvas.height = c.clientHeight;
+            W = canvas.width;
+            H = canvas.height;
+        }
+        
+        class Point {
+            constructor(x, y, fixed = false) {
+                this.x = x;
+                this.y = y;
+                this.prevY = y;
+                this.vy = 0;
+                this.fixed = fixed;
+                this.restY = y;
+            }
+        }
+        
+        function init() {
+            resize();
+            points = [];
+            oscillating = false;
+            
+            const margin = 100;
+            const spacing = (W - 2 * margin) / params.segments;
+            const ropeY = H * 0.4;
+            
+            for (let i = 0; i <= params.segments; i++) {
+                const x = margin + i * spacing;
+                const isFixed = fixedEnds ? (i === 0 || i === params.segments) : (i === 0);
+                points.push(new Point(x, ropeY, isFixed));
+            }
+            
+            updateStats();
+        }
+        
+        function step(dt) {
+            const k = params.tension; // Spring constant
+            const segmentLength = (W - 200) / params.segments;
+            
+            // Oscillate left point if enabled
+            if (oscillating && points.length > 0) {
+                oscillatePhase += dt * 5;
+                points[0].y = points[0].restY + Math.sin(oscillatePhase) * 50;
+            }
+            
+            // Calculate forces and update velocities
+            for (let i = 0; i < points.length; i++) {
+                const p = points[i];
+                if (p.fixed) continue;
+                
+                let forceY = 0;
+                
+                // Spring force from left neighbor
+                if (i > 0) {
+                    const left = points[i - 1];
+                    const dx = p.x - left.x;
+                    const dy = p.y - left.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const stretch = dist - segmentLength;
+                    
+                    // Spring force in y direction
+                    forceY -= k * (dy / dist) * stretch / params.mass;
+                }
+                
+                // Spring force from right neighbor
+                if (i < points.length - 1) {
+                    const right = points[i + 1];
+                    const dx = right.x - p.x;
+                    const dy = right.y - p.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const stretch = dist - segmentLength;
+                    
+                    forceY += k * (dy / dist) * stretch / params.mass;
+                }
+                
+                // Gravity
+                forceY += params.gravity * 100;
+                
+                // Update velocity (Verlet-like integration)
+                p.vy += forceY * dt;
+                p.vy *= params.damping;
+            }
+            
+            // Update positions
+            for (const p of points) {
+                if (p.fixed) continue;
+                p.y += p.vy * dt;
+            }
+            
+            // Handle dragging
+            if (dragging !== null && points[dragging]) {
+                points[dragging].y = dragOffsetY;
+                points[dragging].vy = 0;
+            }
+            
+            updateStats();
+        }
+        
+        function updateStats() {
+            // Calculate wave speed (theoretical)
+            const segmentLength = (W - 200) / params.segments;
+            const linearDensity = params.mass / segmentLength;
+            const waveSpeed = Math.sqrt(params.tension / linearDensity);
+            
+            // Calculate max tension
+            let maxTension = 0;
+            for (let i = 0; i < points.length - 1; i++) {
+                const dx = points[i + 1].x - points[i].x;
+                const dy = points[i + 1].y - points[i].y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const tension = Math.abs(dist - (W - 200) / params.segments) * params.tension;
+                maxTension = Math.max(maxTension, tension);
+            }
+            
+            // Calculate energy
+            let ke = 0, pe = 0;
+            for (const p of points) {
+                ke += 0.5 * params.mass * p.vy * p.vy;
+            }
+            for (let i = 0; i < points.length - 1; i++) {
+                const dx = points[i + 1].x - points[i].x;
+                const dy = points[i + 1].y - points[i].y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const stretch = dist - (W - 200) / params.segments;
+                pe += 0.5 * params.tension * stretch * stretch;
+            }
+            
+            document.getElementById('waveSpeed').textContent = waveSpeed.toFixed(1);
+            document.getElementById('maxTension').textContent = maxTension.toFixed(1);
+            document.getElementById('energy').textContent = (ke + pe).toFixed(1);
+        }
+        
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+            
+            // Draw support posts
+            ctx.fillStyle = '#4a4a6a';
+            ctx.fillRect(points[0].x - 10, points[0].restY - 20, 20, H * 0.4);
+            if (fixedEnds) {
+                ctx.fillRect(points[points.length - 1].x - 10, points[points.length - 1].restY - 20, 20, H * 0.4);
+            }
+            
+            // Draw rope shadow
+            ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+            ctx.lineWidth = 8;
+            ctx.beginPath();
+            ctx.moveTo(points[0].x + 5, points[0].y + 5);
+            for (let i = 1; i < points.length; i++) {
+                ctx.lineTo(points[i].x + 5, points[i].y + 5);
+            }
+            ctx.stroke();
+            
+            // Draw rope
+            ctx.strokeStyle = '#a78bfa';
+            ctx.lineWidth = 6;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < points.length; i++) {
+                ctx.lineTo(points[i].x, points[i].y);
+            }
+            ctx.stroke();
+            
+            // Draw tension coloring
+            for (let i = 0; i < points.length - 1; i++) {
+                const dx = points[i + 1].x - points[i].x;
+                const dy = points[i + 1].y - points[i].y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const segmentLength = (W - 200) / params.segments;
+                const stretch = Math.abs(dist - segmentLength) / segmentLength;
+                
+                if (stretch > 0.1) {
+                    const intensity = Math.min(1, stretch * 2);
+                    ctx.strokeStyle = `rgba(239, 68, 68, ${intensity})`;
+                    ctx.lineWidth = 4;
+                    ctx.beginPath();
+                    ctx.moveTo(points[i].x, points[i].y);
+                    ctx.lineTo(points[i + 1].x, points[i + 1].y);
+                    ctx.stroke();
+                }
+            }
+            
+            // Draw points
+            for (let i = 0; i < points.length; i++) {
+                const p = points[i];
+                
+                // Point glow
+                ctx.fillStyle = p.fixed ? 'rgba(239, 68, 68, 0.3)' : 'rgba(167, 139, 250, 0.3)';
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Point
+                ctx.fillStyle = p.fixed ? '#ef4444' : '#a78bfa';
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            // Instructions
+            ctx.fillStyle = '#666';
+            ctx.font = '14px sans-serif';
+            ctx.fillText('Drag any point to create waves', 20, H - 20);
+            
+            requestAnimationFrame(draw);
+        }
+        
+        let intervalId = null;
+        function startSim() {
+            if (intervalId) clearInterval(intervalId);
+            const dt = 0.016;
+            intervalId = setInterval(() => {
+                if (!paused) {
+                    for (let i = 0; i < 3; i++) step(dt / 3);
+                }
+            }, 16);
+        }
+        
+        // Mouse interaction
+        canvas.addEventListener('mousedown', e => {
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            
+            // Find closest point
+            let closest = -1, closestDist = Infinity;
+            for (let i = 0; i < points.length; i++) {
+                const p = points[i];
+                const dist = Math.sqrt((p.x - mx) ** 2 + (p.y - my) ** 2);
+                if (dist < closestDist && dist < 30 && !p.fixed) {
+                    closest = i;
+                    closestDist = dist;
+                }
+            }
+            
+            if (closest >= 0) {
+                dragging = closest;
+                dragOffsetY = my;
+            }
+        });
+        
+        canvas.addEventListener('mousemove', e => {
+            if (dragging !== null) {
+                const rect = canvas.getBoundingClientRect();
+                dragOffsetY = e.clientY - rect.top;
+            }
+        });
+        
+        canvas.addEventListener('mouseup', () => {
+            dragging = null;
+        });
+        
+        canvas.addEventListener('mouseleave', () => {
+            dragging = null;
+        });
+        
+        // Event listeners
+        document.getElementById('segments').addEventListener('input', e => {
+            params.segments = +e.target.value;
+            document.getElementById('segmentsVal').textContent = params.segments;
+        });
+        document.getElementById('tension').addEventListener('input', e => {
+            params.tension = +e.target.value;
+            document.getElementById('tensionVal').textContent = params.tension;
+        });
+        document.getElementById('damp').addEventListener('input', e => {
+            params.damping = +e.target.value;
+            document.getElementById('dampVal').textContent = params.damping.toFixed(3);
+        });
+        document.getElementById('mass').addEventListener('input', e => {
+            params.mass = +e.target.value;
+            document.getElementById('massVal').textContent = params.mass.toFixed(1);
+        });
+        document.getElementById('gravity').addEventListener('input', e => {
+            params.gravity = +e.target.value;
+            document.getElementById('gravityVal').textContent = params.gravity.toFixed(1);
+        });
+        
+        document.getElementById('reset').addEventListener('click', () => { init(); startSim(); });
+        document.getElementById('pause').addEventListener('click', () => {
+            paused = !paused;
+            document.getElementById('pause').textContent = paused ? 'Resume' : 'Pause';
+        });
+        
+        document.getElementById('modeFixed').addEventListener('click', () => {
+            fixedEnds = true;
+            document.getElementById('modeFixed').classList.add('active');
+            document.getElementById('modeFree').classList.remove('active');
+            init();
+        });
+        document.getElementById('modeFree').addEventListener('click', () => {
+            fixedEnds = false;
+            document.getElementById('modeFree').classList.add('active');
+            document.getElementById('modeFixed').classList.remove('active');
+            init();
+        });
+        
+        document.getElementById('pulse').addEventListener('click', () => {
+            if (points.length > 10) {
+                // Send a pulse from the left
+                for (let i = 1; i < 5 && i < points.length; i++) {
+                    points[i].vy = -200;
+                }
+            }
+        });
+        
+        document.getElementById('shake').addEventListener('click', () => {
+            oscillating = !oscillating;
+            document.getElementById('shake').textContent = oscillating ? 'Stop Oscillation' : 'Oscillate Left';
+        });
+        
+        window.addEventListener('resize', resize);
+        init();
+        draw();
+        startSim();
+    </script>
+</body>
+</html>

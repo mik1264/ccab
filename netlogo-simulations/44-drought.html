@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drought Simulation - Agricultural Model - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0c1222; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; display: flex; flex-direction: column; }
+        #simCanvas { flex: 2; }
+        #graphCanvas { flex: 1; border-top: 1px solid #333; }
+        #controls { width: 280px; background: rgba(0,0,0,0.9); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.1rem; margin-bottom: 15px; color: #d97706; }
+        .control-group { margin-bottom: 12px; }
+        label { display: block; font-size: 0.75rem; margin-bottom: 3px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 8px; margin-bottom: 8px; background: #b45309; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 0.85rem; }
+        button:hover { background: #92400e; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-bottom: 15px; }
+        .stats div { margin-bottom: 3px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #d97706; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .description { font-size: 0.7rem; color: #888; margin-bottom: 12px; line-height: 1.4; }
+        .weather-display { font-size: 1.2rem; text-align: center; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 5px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div id="container">
+        <div id="canvas-container">
+            <canvas id="simCanvas"></canvas>
+            <canvas id="graphCanvas"></canvas>
+        </div>
+        <div id="controls">
+            <h1>Drought Simulation</h1>
+            <p class="description">Agricultural drought model with soil moisture, rainfall, and crop stress. Watch how prolonged dry periods affect farmland.</p>
+            
+            <div class="weather-display" id="weatherDisplay">
+                ☀️ Clear - No Rain
+            </div>
+            
+            <div class="control-group">
+                <label>Base Rainfall (mm/week): <span id="rainVal">20</span></label>
+                <input type="range" id="rain" min="0" max="50" value="20">
+            </div>
+            <div class="control-group">
+                <label>Evaporation Rate: <span id="evapVal">0.3</span></label>
+                <input type="range" id="evap" min="0.1" max="0.8" step="0.05" value="0.3">
+            </div>
+            <div class="control-group">
+                <label>Drought Probability: <span id="droughtVal">0.1</span></label>
+                <input type="range" id="drought" min="0" max="0.5" step="0.02" value="0.1">
+            </div>
+            <div class="control-group">
+                <label>Irrigation Access: <span id="irrigVal">30</span>%</label>
+                <input type="range" id="irrig" min="0" max="100" value="30">
+            </div>
+            
+            <button id="reset">Reset</button>
+            <button id="pause">Pause</button>
+            <button id="triggerDrought">Trigger Drought</button>
+            <button id="heavyRain">Heavy Rain Event</button>
+            
+            <div class="stats">
+                <div>Week: <span id="week">0</span></div>
+                <div>Avg Soil Moisture: <span id="moisture">100</span>%</div>
+                <div>Healthy Crops: <span id="healthy">100</span>%</div>
+                <div>Stressed Crops: <span id="stressed">0</span>%</div>
+                <div>Dead Crops: <span id="dead">0</span>%</div>
+                <div>Yield Forecast: <span id="yield">100</span>%</div>
+            </div>
+            
+            <p class="description"><strong>Crop States:</strong> Green = healthy, Yellow = stressed, Brown = dead. Irrigated fields (blue border) resist drought better.</p>
+        </div>
+    </div>
+    <script>
+        const simCanvas = document.getElementById('simCanvas');
+        const graphCanvas = document.getElementById('graphCanvas');
+        const sctx = simCanvas.getContext('2d');
+        const gctx = graphCanvas.getContext('2d');
+        
+        let W, H, GW, GH;
+        let grid = [], paused = false;
+        let week = 0;
+        let inDrought = false;
+        let droughtDuration = 0;
+        let history = [];
+        
+        const gridSize = 30;
+        
+        let params = {
+            baseRain: 20,
+            evaporation: 0.3,
+            droughtProb: 0.1,
+            irrigationCoverage: 0.3
+        };
+        
+        function resize() {
+            const c = document.getElementById('canvas-container');
+            simCanvas.width = c.clientWidth;
+            simCanvas.height = c.clientHeight * 0.65;
+            graphCanvas.width = c.clientWidth;
+            graphCanvas.height = c.clientHeight * 0.35;
+            W = simCanvas.width;
+            H = simCanvas.height;
+            GW = graphCanvas.width;
+            GH = graphCanvas.height;
+        }
+        
+        function init() {
+            resize();
+            grid = [];
+            week = 0;
+            inDrought = false;
+            droughtDuration = 0;
+            history = [];
+            
+            const cellW = W / gridSize;
+            const cellH = (H - 40) / gridSize;
+            
+            for (let y = 0; y < gridSize; y++) {
+                const row = [];
+                for (let x = 0; x < gridSize; x++) {
+                    const hasIrrigation = Math.random() < params.irrigationCoverage;
+                    row.push({
+                        moisture: 80 + Math.random() * 20,
+                        cropHealth: 100,
+                        hasIrrigation: hasIrrigation,
+                        state: 'healthy' // healthy, stressed, dead
+                    });
+                }
+                grid.push(row);
+            }
+            
+            updateStats();
+        }
+        
+        function step() {
+            week++;
+            
+            // Determine weather
+            let rain = params.baseRain;
+            
+            // Drought logic
+            if (inDrought) {
+                rain *= 0.1;
+                droughtDuration++;
+                if (droughtDuration > 4 + Math.random() * 8) {
+                    if (Math.random() < 0.3) {
+                        inDrought = false;
+                        droughtDuration = 0;
+                    }
+                }
+            } else {
+                if (Math.random() < params.droughtProb) {
+                    inDrought = true;
+                    droughtDuration = 0;
+                }
+            }
+            
+            // Random variation
+            rain *= (0.5 + Math.random());
+            
+            // Update weather display
+            updateWeatherDisplay(rain);
+            
+            // Update each cell
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    const cell = grid[y][x];
+                    
+                    if (cell.state === 'dead') continue;
+                    
+                    // Moisture dynamics
+                    const localRain = rain * (0.8 + Math.random() * 0.4);
+                    cell.moisture += localRain * 0.5; // Rainfall adds moisture
+                    
+                    // Irrigation effect
+                    if (cell.hasIrrigation && cell.moisture < 50) {
+                        cell.moisture += 15;
+                    }
+                    
+                    // Evaporation
+                    const evapLoss = params.evaporation * 10 * (1 + (inDrought ? 0.5 : 0));
+                    cell.moisture -= evapLoss;
+                    
+                    // Plant water uptake
+                    if (cell.state === 'healthy') {
+                        cell.moisture -= 5;
+                    } else if (cell.state === 'stressed') {
+                        cell.moisture -= 3;
+                    }
+                    
+                    // Clamp moisture
+                    cell.moisture = Math.max(0, Math.min(100, cell.moisture));
+                    
+                    // Crop health effects
+                    if (cell.moisture < 20) {
+                        cell.cropHealth -= (20 - cell.moisture) * 0.3;
+                    } else if (cell.moisture > 30) {
+                        cell.cropHealth += 2;
+                    }
+                    
+                    cell.cropHealth = Math.max(0, Math.min(100, cell.cropHealth));
+                    
+                    // Update state
+                    if (cell.cropHealth <= 0) {
+                        cell.state = 'dead';
+                    } else if (cell.cropHealth < 50) {
+                        cell.state = 'stressed';
+                    } else {
+                        cell.state = 'healthy';
+                    }
+                }
+            }
+            
+            // Record history
+            const stats = calculateStats();
+            history.push({
+                week: week,
+                moisture: stats.avgMoisture,
+                healthy: stats.healthy,
+                stressed: stats.stressed,
+                dead: stats.dead
+            });
+            if (history.length > 100) history.shift();
+            
+            updateStats();
+        }
+        
+        function updateWeatherDisplay(rain) {
+            const display = document.getElementById('weatherDisplay');
+            if (inDrought) {
+                display.innerHTML = '🏜️ <span style="color:#d97706">DROUGHT</span> - Minimal Rain';
+            } else if (rain < 5) {
+                display.innerHTML = '☀️ Clear - No Rain';
+            } else if (rain < 15) {
+                display.innerHTML = '🌤️ Light Showers';
+            } else if (rain < 30) {
+                display.innerHTML = '🌧️ Moderate Rain';
+            } else {
+                display.innerHTML = '⛈️ Heavy Rain';
+            }
+        }
+        
+        function calculateStats() {
+            let totalMoisture = 0;
+            let healthy = 0, stressed = 0, dead = 0;
+            const total = gridSize * gridSize;
+            
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    const cell = grid[y][x];
+                    totalMoisture += cell.moisture;
+                    if (cell.state === 'healthy') healthy++;
+                    else if (cell.state === 'stressed') stressed++;
+                    else dead++;
+                }
+            }
+            
+            return {
+                avgMoisture: totalMoisture / total,
+                healthy: healthy / total * 100,
+                stressed: stressed / total * 100,
+                dead: dead / total * 100
+            };
+        }
+        
+        function updateStats() {
+            const stats = calculateStats();
+            const yieldForecast = stats.healthy + stats.stressed * 0.5;
+            
+            document.getElementById('week').textContent = week;
+            document.getElementById('moisture').textContent = stats.avgMoisture.toFixed(1);
+            document.getElementById('healthy').textContent = stats.healthy.toFixed(1);
+            document.getElementById('stressed').textContent = stats.stressed.toFixed(1);
+            document.getElementById('dead').textContent = stats.dead.toFixed(1);
+            document.getElementById('yield').textContent = yieldForecast.toFixed(1);
+        }
+        
+        function drawSim() {
+            // Sky
+            const skyColor = inDrought ? '#e5c185' : '#87ceeb';
+            sctx.fillStyle = skyColor;
+            sctx.fillRect(0, 0, W, 40);
+            
+            // Sun
+            if (!inDrought) {
+                sctx.fillStyle = '#ffdd00';
+                sctx.beginPath();
+                sctx.arc(W - 50, 20, 15, 0, Math.PI * 2);
+                sctx.fill();
+            } else {
+                // Hot sun
+                sctx.fillStyle = '#ff8c00';
+                sctx.beginPath();
+                sctx.arc(W - 50, 20, 20, 0, Math.PI * 2);
+                sctx.fill();
+                // Heat waves
+                sctx.strokeStyle = 'rgba(255, 140, 0, 0.5)';
+                sctx.lineWidth = 2;
+                for (let i = 0; i < 3; i++) {
+                    sctx.beginPath();
+                    for (let x = 0; x < W; x += 5) {
+                        const y = 35 + Math.sin(x * 0.05 + week * 0.5 + i) * 3;
+                        if (x === 0) sctx.moveTo(x, y);
+                        else sctx.lineTo(x, y);
+                    }
+                    sctx.stroke();
+                }
+            }
+            
+            // Draw grid
+            const cellW = W / gridSize;
+            const cellH = (H - 40) / gridSize;
+            
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    const cell = grid[y][x];
+                    const px = x * cellW;
+                    const py = 40 + y * cellH;
+                    
+                    // Soil color based on moisture
+                    const soilBrightness = Math.floor(40 + cell.moisture * 0.4);
+                    sctx.fillStyle = `rgb(${soilBrightness + 30}, ${soilBrightness + 10}, ${soilBrightness - 20})`;
+                    sctx.fillRect(px, py, cellW, cellH);
+                    
+                    // Crop
+                    let cropColor;
+                    if (cell.state === 'healthy') {
+                        const green = 150 + Math.floor(cell.cropHealth * 0.5);
+                        cropColor = `rgb(50, ${green}, 50)`;
+                    } else if (cell.state === 'stressed') {
+                        const stress = 100 - cell.cropHealth;
+                        cropColor = `rgb(${180 + stress}, ${150 - stress}, 50)`;
+                    } else {
+                        cropColor = '#8b6914';
+                    }
+                    
+                    sctx.fillStyle = cropColor;
+                    const cropSize = cellW * 0.6;
+                    sctx.fillRect(px + (cellW - cropSize) / 2, py + (cellH - cropSize) / 2, cropSize, cropSize);
+                    
+                    // Irrigation marker
+                    if (cell.hasIrrigation) {
+                        sctx.strokeStyle = 'rgba(100, 180, 255, 0.8)';
+                        sctx.lineWidth = 2;
+                        sctx.strokeRect(px + 2, py + 2, cellW - 4, cellH - 4);
+                    }
+                }
+            }
+            
+            // Drought warning
+            if (inDrought) {
+                sctx.fillStyle = 'rgba(180, 83, 9, 0.2)';
+                sctx.fillRect(0, 40, W, H - 40);
+                
+                sctx.fillStyle = '#b45309';
+                sctx.font = 'bold 18px sans-serif';
+                sctx.fillText(`⚠️ DROUGHT WEEK ${droughtDuration}`, 20, 70);
+            }
+            
+            // Info
+            sctx.fillStyle = inDrought ? '#333' : '#333';
+            sctx.font = '12px sans-serif';
+            sctx.fillText(`Week ${week}`, 20, 25);
+        }
+        
+        function drawGraph() {
+            gctx.fillStyle = '#0a0f1a';
+            gctx.fillRect(0, 0, GW, GH);
+            
+            if (history.length < 2) return;
+            
+            const margin = { left: 50, right: 20, top: 30, bottom: 30 };
+            const graphW = GW - margin.left - margin.right;
+            const graphH = GH - margin.top - margin.bottom;
+            
+            // Axes
+            gctx.strokeStyle = '#333';
+            gctx.lineWidth = 1;
+            gctx.beginPath();
+            gctx.moveTo(margin.left, margin.top);
+            gctx.lineTo(margin.left, GH - margin.bottom);
+            gctx.lineTo(GW - margin.right, GH - margin.bottom);
+            gctx.stroke();
+            
+            gctx.fillStyle = '#666';
+            gctx.font = '11px sans-serif';
+            gctx.fillText('Crop Status Over Time', margin.left, margin.top - 10);
+            
+            // Stacked area chart
+            const minWeek = history[0].week;
+            const maxWeek = history[history.length - 1].week;
+            
+            // Draw stacked areas: dead (bottom), stressed (middle), healthy (top)
+            const colors = {
+                dead: '#8b6914',
+                stressed: '#d97706',
+                healthy: '#22c55e'
+            };
+            
+            for (const key of ['dead', 'stressed', 'healthy']) {
+                gctx.fillStyle = colors[key];
+                gctx.beginPath();
+                
+                let baseline = [];
+                if (key === 'dead') {
+                    baseline = history.map(() => 0);
+                } else if (key === 'stressed') {
+                    baseline = history.map(h => h.dead);
+                } else {
+                    baseline = history.map(h => h.dead + h.stressed);
+                }
+                
+                // Top line
+                for (let i = 0; i < history.length; i++) {
+                    const x = margin.left + ((history[i].week - minWeek) / (maxWeek - minWeek)) * graphW;
+                    const y = GH - margin.bottom - ((baseline[i] + history[i][key]) / 100) * graphH;
+                    if (i === 0) gctx.moveTo(x, y);
+                    else gctx.lineTo(x, y);
+                }
+                
+                // Bottom line (reverse)
+                for (let i = history.length - 1; i >= 0; i--) {
+                    const x = margin.left + ((history[i].week - minWeek) / (maxWeek - minWeek)) * graphW;
+                    const y = GH - margin.bottom - (baseline[i] / 100) * graphH;
+                    gctx.lineTo(x, y);
+                }
+                
+                gctx.closePath();
+                gctx.fill();
+            }
+            
+            // Moisture line
+            gctx.strokeStyle = '#3b82f6';
+            gctx.lineWidth = 2;
+            gctx.beginPath();
+            for (let i = 0; i < history.length; i++) {
+                const x = margin.left + ((history[i].week - minWeek) / (maxWeek - minWeek)) * graphW;
+                const y = GH - margin.bottom - (history[i].moisture / 100) * graphH;
+                if (i === 0) gctx.moveTo(x, y);
+                else gctx.lineTo(x, y);
+            }
+            gctx.stroke();
+            
+            // Legend
+            gctx.font = '10px sans-serif';
+            let legendX = GW - margin.right - 100;
+            for (const [key, color] of [['healthy', '#22c55e'], ['stressed', '#d97706'], ['dead', '#8b6914'], ['moisture', '#3b82f6']]) {
+                gctx.fillStyle = color;
+                gctx.fillRect(legendX, margin.top, 12, 12);
+                gctx.fillStyle = '#888';
+                gctx.fillText(key, legendX + 16, margin.top + 10);
+                legendX -= 70;
+            }
+        }
+        
+        function draw() {
+            drawSim();
+            drawGraph();
+            requestAnimationFrame(draw);
+        }
+        
+        let intervalId = null;
+        function startSim() {
+            if (intervalId) clearInterval(intervalId);
+            intervalId = setInterval(() => {
+                if (!paused) {
+                    step();
+                }
+            }, 200);
+        }
+        
+        // Event listeners
+        document.getElementById('rain').addEventListener('input', e => {
+            params.baseRain = +e.target.value;
+            document.getElementById('rainVal').textContent = params.baseRain;
+        });
+        document.getElementById('evap').addEventListener('input', e => {
+            params.evaporation = +e.target.value;
+            document.getElementById('evapVal').textContent = params.evaporation.toFixed(2);
+        });
+        document.getElementById('drought').addEventListener('input', e => {
+            params.droughtProb = +e.target.value;
+            document.getElementById('droughtVal').textContent = params.droughtProb.toFixed(2);
+        });
+        document.getElementById('irrig').addEventListener('input', e => {
+            params.irrigationCoverage = +e.target.value / 100;
+            document.getElementById('irrigVal').textContent = e.target.value;
+        });
+        
+        document.getElementById('reset').addEventListener('click', () => { init(); startSim(); });
+        document.getElementById('pause').addEventListener('click', () => {
+            paused = !paused;
+            document.getElementById('pause').textContent = paused ? 'Resume' : 'Pause';
+        });
+        document.getElementById('triggerDrought').addEventListener('click', () => {
+            inDrought = true;
+            droughtDuration = 0;
+        });
+        document.getElementById('heavyRain').addEventListener('click', () => {
+            inDrought = false;
+            for (let y = 0; y < gridSize; y++) {
+                for (let x = 0; x < gridSize; x++) {
+                    grid[y][x].moisture = Math.min(100, grid[y][x].moisture + 40);
+                }
+            }
+        });
+        
+        window.addEventListener('resize', resize);
+        init();
+        draw();
+        startSim();
+    </script>
+</body>
+</html>

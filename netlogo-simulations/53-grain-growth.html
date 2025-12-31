@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grain Growth Simulation - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #e8e6e1;
+            overflow: hidden;
+        }
+        #container { display: flex; height: 100vh; }
+        canvas { display: block; flex: 1; }
+        #controls { width: 280px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 15px; color: #f97316; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #f97316; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #ea580c; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; }
+        .stats div { margin-bottom: 5px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #f97316; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <canvas id="canvas"></canvas>
+        <div id="controls">
+            <h1>Grain Growth</h1>
+            <p class="description">Monte Carlo Potts model simulation of metallurgical grain growth. Small grains shrink while large grains grow during annealing, minimizing grain boundary energy.</p>
+            <div class="control-group">
+                <label>Initial Grain Count: <span id="grainValue">500</span></label>
+                <input type="range" id="grains" min="100" max="2000" value="500">
+            </div>
+            <div class="control-group">
+                <label>Temperature: <span id="tempValue">0.5</span></label>
+                <input type="range" id="temp" min="0.1" max="2.0" step="0.1" value="0.5">
+            </div>
+            <div class="control-group">
+                <label>Simulation Speed: <span id="speedValue">100</span></label>
+                <input type="range" id="speed" min="10" max="500" value="100">
+            </div>
+            <button id="reset">Reset / Recrystallize</button>
+            <button id="anneal">High-Temp Anneal</button>
+            <button id="quench">Quench</button>
+            <div class="stats">
+                <div>Time Steps: <span id="steps">0</span></div>
+                <div>Unique Grains: <span id="uniqueGrains">0</span></div>
+                <div>Avg Grain Size: <span id="avgSize">0</span> px²</div>
+                <div>Largest Grain: <span id="largest">0</span> px²</div>
+                <div>Boundary Energy: <span id="energy">0</span></div>
+            </div>
+        </div>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width, height, cellSize = 3;
+        let cols, rows, grid = [];
+        let grainColors = {};
+        let steps = 0;
+
+        let params = { grains: 500, temp: 0.5, speed: 100 };
+
+        function resize() {
+            canvas.width = canvas.clientWidth;
+            canvas.height = canvas.clientHeight;
+            width = canvas.width;
+            height = canvas.height;
+            cols = Math.floor(width / cellSize);
+            rows = Math.floor(height / cellSize);
+        }
+
+        function hslToRgb(h, s, l) {
+            h /= 360;
+            s /= 100;
+            l /= 100;
+            let r, g, b;
+            if (s === 0) {
+                r = g = b = l;
+            } else {
+                const hue2rgb = (p, q, t) => {
+                    if (t < 0) t += 1;
+                    if (t > 1) t -= 1;
+                    if (t < 1/6) return p + (q - p) * 6 * t;
+                    if (t < 1/2) return q;
+                    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                    return p;
+                };
+                const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+                const p = 2 * l - q;
+                r = hue2rgb(p, q, h + 1/3);
+                g = hue2rgb(p, q, h);
+                b = hue2rgb(p, q, h - 1/3);
+            }
+            return `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`;
+        }
+
+        function getGrainColor(id) {
+            if (!grainColors[id]) {
+                // Generate distinct colors using golden ratio
+                const hue = (id * 137.508) % 360;
+                const sat = 50 + (id * 47) % 30;
+                const lit = 40 + (id * 31) % 30;
+                grainColors[id] = hslToRgb(hue, sat, lit);
+            }
+            return grainColors[id];
+        }
+
+        function init() {
+            resize();
+            grid = [];
+            grainColors = {};
+            steps = 0;
+
+            // Initialize with Voronoi-like seeds
+            const seeds = [];
+            for (let i = 0; i < params.grains; i++) {
+                seeds.push({
+                    x: Math.random() * cols,
+                    y: Math.random() * rows,
+                    id: i + 1
+                });
+            }
+
+            // Assign each cell to nearest seed
+            for (let y = 0; y < rows; y++) {
+                grid[y] = [];
+                for (let x = 0; x < cols; x++) {
+                    let minDist = Infinity;
+                    let nearestId = 1;
+                    for (let seed of seeds) {
+                        const dx = x - seed.x;
+                        const dy = y - seed.y;
+                        const dist = dx * dx + dy * dy;
+                        if (dist < minDist) {
+                            minDist = dist;
+                            nearestId = seed.id;
+                        }
+                    }
+                    grid[y][x] = nearestId;
+                }
+            }
+        }
+
+        function getNeighbors(x, y) {
+            const neighbors = [];
+            const dirs = [[-1,0], [1,0], [0,-1], [0,1], [-1,-1], [1,-1], [-1,1], [1,1]];
+            for (let [dx, dy] of dirs) {
+                const nx = x + dx, ny = y + dy;
+                if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                    neighbors.push(grid[ny][nx]);
+                }
+            }
+            return neighbors;
+        }
+
+        function calculateEnergy(x, y, grainId) {
+            // Energy = number of unlike neighbors
+            const neighbors = getNeighbors(x, y);
+            let energy = 0;
+            for (let n of neighbors) {
+                if (n !== grainId) energy++;
+            }
+            return energy;
+        }
+
+        function update() {
+            // Monte Carlo Potts model updates
+            for (let i = 0; i < params.speed; i++) {
+                // Pick random cell
+                const x = Math.floor(Math.random() * cols);
+                const y = Math.floor(Math.random() * rows);
+                const currentGrain = grid[y][x];
+
+                // Get neighbor grain IDs
+                const neighbors = getNeighbors(x, y);
+                if (neighbors.length === 0) continue;
+
+                // Pick a random neighbor's grain
+                const newGrain = neighbors[Math.floor(Math.random() * neighbors.length)];
+                if (newGrain === currentGrain) continue;
+
+                // Calculate energy change
+                const currentEnergy = calculateEnergy(x, y, currentGrain);
+                const newEnergy = calculateEnergy(x, y, newGrain);
+                const deltaE = newEnergy - currentEnergy;
+
+                // Metropolis criterion
+                if (deltaE <= 0 || Math.random() < Math.exp(-deltaE / params.temp)) {
+                    grid[y][x] = newGrain;
+                }
+            }
+            steps++;
+        }
+
+        function draw() {
+            // Create image data
+            const imageData = ctx.createImageData(width, height);
+            const data = imageData.data;
+
+            // Count grains
+            const grainSizes = {};
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const grainId = grid[y][x];
+                    grainSizes[grainId] = (grainSizes[grainId] || 0) + 1;
+
+                    const color = getGrainColor(grainId);
+                    // Parse RGB
+                    const match = color.match(/rgb\((\d+),(\d+),(\d+)\)/);
+                    let r = 100, g = 100, b = 100;
+                    if (match) {
+                        r = parseInt(match[1]);
+                        g = parseInt(match[2]);
+                        b = parseInt(match[3]);
+                    }
+
+                    // Check if on grain boundary
+                    const neighbors = getNeighbors(x, y);
+                    const isBoundary = neighbors.some(n => n !== grainId);
+                    if (isBoundary) {
+                        r = Math.max(0, r - 60);
+                        g = Math.max(0, g - 60);
+                        b = Math.max(0, b - 60);
+                    }
+
+                    // Fill cell
+                    for (let py = 0; py < cellSize; py++) {
+                        for (let px = 0; px < cellSize; px++) {
+                            const idx = ((y * cellSize + py) * width + (x * cellSize + px)) * 4;
+                            if (idx >= 0 && idx < data.length - 3) {
+                                data[idx] = r;
+                                data[idx + 1] = g;
+                                data[idx + 2] = b;
+                                data[idx + 3] = 255;
+                            }
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+
+            // Calculate stats
+            const uniqueGrains = Object.keys(grainSizes).length;
+            const sizes = Object.values(grainSizes);
+            const avgSize = sizes.reduce((a, b) => a + b, 0) / sizes.length * cellSize * cellSize;
+            const largest = Math.max(...sizes) * cellSize * cellSize;
+
+            // Calculate total boundary energy
+            let totalEnergy = 0;
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    totalEnergy += calculateEnergy(x, y, grid[y][x]);
+                }
+            }
+            totalEnergy /= 2; // Each boundary counted twice
+
+            document.getElementById('steps').textContent = steps;
+            document.getElementById('uniqueGrains').textContent = uniqueGrains;
+            document.getElementById('avgSize').textContent = avgSize.toFixed(0);
+            document.getElementById('largest').textContent = largest.toFixed(0);
+            document.getElementById('energy').textContent = totalEnergy.toFixed(0);
+        }
+
+        function animate() {
+            update();
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        // Event listeners
+        document.getElementById('grains').addEventListener('input', e => {
+            params.grains = parseInt(e.target.value);
+            document.getElementById('grainValue').textContent = params.grains;
+        });
+        document.getElementById('temp').addEventListener('input', e => {
+            params.temp = parseFloat(e.target.value);
+            document.getElementById('tempValue').textContent = params.temp.toFixed(1);
+        });
+        document.getElementById('speed').addEventListener('input', e => {
+            params.speed = parseInt(e.target.value);
+            document.getElementById('speedValue').textContent = params.speed;
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('anneal').addEventListener('click', () => {
+            params.temp = 1.5;
+            document.getElementById('temp').value = 1.5;
+            document.getElementById('tempValue').textContent = '1.5';
+        });
+        document.getElementById('quench').addEventListener('click', () => {
+            params.temp = 0.1;
+            document.getElementById('temp').value = 0.1;
+            document.getElementById('tempValue').textContent = '0.1';
+        });
+
+        window.addEventListener('resize', () => { resize(); init(); });
+        init();
+        animate();
+    </script>
+</body>
+</html>

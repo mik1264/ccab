@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Protein Folding - Lattice Model - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0c1222; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; display: flex; flex-direction: column; }
+        #simCanvas { flex: 2; }
+        #graphCanvas { flex: 1; border-top: 1px solid #333; }
+        #controls { width: 280px; background: rgba(0,0,0,0.9); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.1rem; margin-bottom: 15px; color: #14b8a6; }
+        .control-group { margin-bottom: 12px; }
+        label { display: block; font-size: 0.75rem; margin-bottom: 3px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 8px; margin-bottom: 8px; background: #0d9488; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 0.85rem; }
+        button:hover { background: #0f766e; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-bottom: 15px; }
+        .stats div { margin-bottom: 3px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #14b8a6; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .description { font-size: 0.7rem; color: #888; margin-bottom: 12px; line-height: 1.4; }
+        .sequence-display { font-family: monospace; font-size: 0.8rem; background: rgba(20, 184, 166, 0.2); padding: 8px; border-radius: 5px; margin-bottom: 10px; word-break: break-all; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div id="container">
+        <div id="canvas-container">
+            <canvas id="simCanvas"></canvas>
+            <canvas id="graphCanvas"></canvas>
+        </div>
+        <div id="controls">
+            <h1>Protein Folding</h1>
+            <p class="description">HP lattice model of protein folding. Hydrophobic (H) residues attract each other, driving collapse into compact structures.</p>
+            
+            <div class="sequence-display" id="sequence">HHPHPPHHPH</div>
+            
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">1.0</span></label>
+                <input type="range" id="temp" min="0.1" max="3" step="0.1" value="1">
+            </div>
+            <div class="control-group">
+                <label>H-H Contact Energy: <span id="hhVal">-1.0</span></label>
+                <input type="range" id="hh" min="-3" max="0" step="0.1" value="-1">
+            </div>
+            <div class="control-group">
+                <label>Chain Length: <span id="lengthVal">15</span></label>
+                <input type="range" id="length" min="8" max="25" value="15">
+            </div>
+            <div class="control-group">
+                <label>H Fraction: <span id="hfracVal">0.5</span></label>
+                <input type="range" id="hfrac" min="0.2" max="0.8" step="0.1" value="0.5">
+            </div>
+            
+            <button id="reset">New Sequence</button>
+            <button id="pause">Pause</button>
+            <button id="anneal">Simulated Annealing</button>
+            <button id="quench">Quench (Low T)</button>
+            
+            <div class="stats">
+                <div>Monte Carlo Steps: <span id="steps">0</span></div>
+                <div>Energy: <span id="energy">0</span></div>
+                <div>H-H Contacts: <span id="contacts">0</span></div>
+                <div>Radius of Gyration: <span id="rg">0</span></div>
+                <div>Native Contacts: <span id="native">0</span>%</div>
+            </div>
+            
+            <p class="description"><strong>H (blue):</strong> Hydrophobic - prefer to be buried. <strong>P (yellow):</strong> Polar - happy at surface.</p>
+            
+            <p class="description"><strong>Goal:</strong> Minimize energy by maximizing H-H contacts (non-bonded neighbors on lattice).</p>
+        </div>
+    </div>
+    <script>
+        const simCanvas = document.getElementById('simCanvas');
+        const graphCanvas = document.getElementById('graphCanvas');
+        const sctx = simCanvas.getContext('2d');
+        const gctx = graphCanvas.getContext('2d');
+        
+        let W, H, GW, GH;
+        let chain = [], sequence = '', paused = false;
+        let steps = 0;
+        let history = [];
+        let annealing = false;
+        let annealStep = 0;
+        
+        let params = {
+            temperature: 1.0,
+            hhEnergy: -1.0,
+            chainLength: 15,
+            hFraction: 0.5
+        };
+        
+        const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+        
+        function resize() {
+            const c = document.getElementById('canvas-container');
+            simCanvas.width = c.clientWidth;
+            simCanvas.height = c.clientHeight * 0.65;
+            graphCanvas.width = c.clientWidth;
+            graphCanvas.height = c.clientHeight * 0.35;
+            W = simCanvas.width;
+            H = simCanvas.height;
+            GW = graphCanvas.width;
+            GH = graphCanvas.height;
+        }
+        
+        function generateSequence() {
+            sequence = '';
+            for (let i = 0; i < params.chainLength; i++) {
+                sequence += Math.random() < params.hFraction ? 'H' : 'P';
+            }
+            document.getElementById('sequence').textContent = sequence;
+        }
+        
+        function initChain() {
+            chain = [];
+            // Start with straight chain
+            const startX = Math.floor(W / 40);
+            const startY = Math.floor(H / 40);
+            
+            for (let i = 0; i < sequence.length; i++) {
+                chain.push({
+                    x: startX + i,
+                    y: startY,
+                    type: sequence[i]
+                });
+            }
+        }
+        
+        function init() {
+            resize();
+            steps = 0;
+            history = [];
+            annealing = false;
+            generateSequence();
+            initChain();
+            updateStats();
+        }
+        
+        function isOccupied(x, y, excludeIdx = -1) {
+            for (let i = 0; i < chain.length; i++) {
+                if (i === excludeIdx) continue;
+                if (chain[i].x === x && chain[i].y === y) return true;
+            }
+            return false;
+        }
+        
+        function countHHContacts() {
+            let contacts = 0;
+            for (let i = 0; i < chain.length; i++) {
+                if (chain[i].type !== 'H') continue;
+                
+                for (let j = i + 2; j < chain.length; j++) { // Skip bonded neighbor
+                    if (chain[j].type !== 'H') continue;
+                    
+                    const dx = Math.abs(chain[i].x - chain[j].x);
+                    const dy = Math.abs(chain[i].y - chain[j].y);
+                    
+                    if (dx + dy === 1) { // Adjacent on lattice
+                        contacts++;
+                    }
+                }
+            }
+            return contacts;
+        }
+        
+        function calculateEnergy() {
+            return countHHContacts() * params.hhEnergy;
+        }
+        
+        function radiusOfGyration() {
+            let cx = 0, cy = 0;
+            for (const residue of chain) {
+                cx += residue.x;
+                cy += residue.y;
+            }
+            cx /= chain.length;
+            cy /= chain.length;
+            
+            let rg2 = 0;
+            for (const residue of chain) {
+                rg2 += (residue.x - cx) ** 2 + (residue.y - cy) ** 2;
+            }
+            return Math.sqrt(rg2 / chain.length);
+        }
+        
+        function tryMove() {
+            // Pick random residue (not first or last for corner moves)
+            const idx = Math.floor(Math.random() * chain.length);
+            
+            if (idx === 0 || idx === chain.length - 1) {
+                // End move: try new position adjacent to neighbor
+                const neighborIdx = idx === 0 ? 1 : chain.length - 2;
+                const neighbor = chain[neighborIdx];
+                
+                // Try each direction
+                const shuffledDirs = [...dirs].sort(() => Math.random() - 0.5);
+                for (const [dx, dy] of shuffledDirs) {
+                    const newX = neighbor.x + dx;
+                    const newY = neighbor.y + dy;
+                    
+                    if (!isOccupied(newX, newY, idx)) {
+                        return { idx, newX, newY };
+                    }
+                }
+            } else {
+                // Corner move: check if residue can pivot
+                const prev = chain[idx - 1];
+                const next = chain[idx + 1];
+                const current = chain[idx];
+                
+                // Check if prev and next are diagonal (corner situation)
+                const dx = next.x - prev.x;
+                const dy = next.y - prev.y;
+                
+                if (Math.abs(dx) === 1 && Math.abs(dy) === 1) {
+                    // Can do corner move - two possible new positions
+                    const positions = [
+                        { x: prev.x + dx, y: prev.y },
+                        { x: prev.x, y: prev.y + dy }
+                    ];
+                    
+                    for (const pos of positions) {
+                        if (pos.x !== current.x || pos.y !== current.y) {
+                            if (!isOccupied(pos.x, pos.y, idx)) {
+                                return { idx, newX: pos.x, newY: pos.y };
+                            }
+                        }
+                    }
+                }
+                
+                // Try crankshaft move for middle residues
+                if (idx >= 1 && idx < chain.length - 1) {
+                    const shuffledDirs = [...dirs].sort(() => Math.random() - 0.5);
+                    for (const [ddx, ddy] of shuffledDirs) {
+                        const newX = current.x + ddx;
+                        const newY = current.y + ddy;
+                        
+                        // Check if valid (adjacent to both neighbors)
+                        const adjToPrev = Math.abs(newX - prev.x) + Math.abs(newY - prev.y) === 1;
+                        const adjToNext = Math.abs(newX - next.x) + Math.abs(newY - next.y) === 1;
+                        
+                        if (adjToPrev && adjToNext && !isOccupied(newX, newY, idx)) {
+                            return { idx, newX, newY };
+                        }
+                    }
+                }
+            }
+            
+            return null;
+        }
+        
+        function step() {
+            const movesPerStep = chain.length * 10;
+            
+            // Annealing schedule
+            let temp = params.temperature;
+            if (annealing) {
+                annealStep++;
+                temp = params.temperature * Math.exp(-annealStep * 0.001);
+                if (temp < 0.1) {
+                    annealing = false;
+                    temp = 0.1;
+                }
+            }
+            
+            for (let i = 0; i < movesPerStep; i++) {
+                const move = tryMove();
+                if (!move) continue;
+                
+                const { idx, newX, newY } = move;
+                const oldX = chain[idx].x;
+                const oldY = chain[idx].y;
+                
+                const oldEnergy = calculateEnergy();
+                chain[idx].x = newX;
+                chain[idx].y = newY;
+                const newEnergy = calculateEnergy();
+                
+                const deltaE = newEnergy - oldEnergy;
+                
+                // Metropolis criterion
+                if (deltaE > 0 && Math.random() > Math.exp(-deltaE / temp)) {
+                    // Reject move
+                    chain[idx].x = oldX;
+                    chain[idx].y = oldY;
+                }
+            }
+            
+            steps++;
+            
+            // Record history
+            if (steps % 5 === 0) {
+                history.push({
+                    step: steps,
+                    energy: calculateEnergy(),
+                    rg: radiusOfGyration()
+                });
+                if (history.length > 100) history.shift();
+            }
+            
+            updateStats();
+        }
+        
+        function updateStats() {
+            const energy = calculateEnergy();
+            const contacts = countHHContacts();
+            const rg = radiusOfGyration();
+            
+            // Estimate max possible contacts
+            const hCount = sequence.split('').filter(c => c === 'H').length;
+            const maxContacts = Math.floor(hCount * (hCount - 1) / 4); // Rough estimate
+            const nativePercent = maxContacts > 0 ? (contacts / maxContacts * 100) : 0;
+            
+            document.getElementById('steps').textContent = steps;
+            document.getElementById('energy').textContent = energy.toFixed(1);
+            document.getElementById('contacts').textContent = contacts;
+            document.getElementById('rg').textContent = rg.toFixed(2);
+            document.getElementById('native').textContent = Math.min(100, nativePercent).toFixed(0);
+        }
+        
+        function drawSim() {
+            sctx.fillStyle = '#0f1729';
+            sctx.fillRect(0, 0, W, H);
+            
+            // Calculate bounds
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            for (const r of chain) {
+                minX = Math.min(minX, r.x);
+                maxX = Math.max(maxX, r.x);
+                minY = Math.min(minY, r.y);
+                maxY = Math.max(maxY, r.y);
+            }
+            
+            const padding = 3;
+            const rangeX = maxX - minX + padding * 2;
+            const rangeY = maxY - minY + padding * 2;
+            const scale = Math.min(W / rangeX, H / rangeY) * 0.8;
+            const offsetX = (W - rangeX * scale) / 2 - (minX - padding) * scale;
+            const offsetY = (H - rangeY * scale) / 2 - (minY - padding) * scale;
+            
+            // Draw grid
+            sctx.strokeStyle = 'rgba(50, 50, 50, 0.3)';
+            sctx.lineWidth = 1;
+            for (let x = minX - padding; x <= maxX + padding; x++) {
+                sctx.beginPath();
+                sctx.moveTo(x * scale + offsetX, (minY - padding) * scale + offsetY);
+                sctx.lineTo(x * scale + offsetX, (maxY + padding) * scale + offsetY);
+                sctx.stroke();
+            }
+            for (let y = minY - padding; y <= maxY + padding; y++) {
+                sctx.beginPath();
+                sctx.moveTo((minX - padding) * scale + offsetX, y * scale + offsetY);
+                sctx.lineTo((maxX + padding) * scale + offsetX, y * scale + offsetY);
+                sctx.stroke();
+            }
+            
+            // Draw backbone
+            sctx.strokeStyle = '#666';
+            sctx.lineWidth = 4;
+            sctx.beginPath();
+            for (let i = 0; i < chain.length; i++) {
+                const x = chain[i].x * scale + offsetX;
+                const y = chain[i].y * scale + offsetY;
+                if (i === 0) sctx.moveTo(x, y);
+                else sctx.lineTo(x, y);
+            }
+            sctx.stroke();
+            
+            // Draw H-H contacts
+            sctx.strokeStyle = 'rgba(20, 184, 166, 0.5)';
+            sctx.lineWidth = 2;
+            sctx.setLineDash([4, 4]);
+            for (let i = 0; i < chain.length; i++) {
+                if (chain[i].type !== 'H') continue;
+                for (let j = i + 2; j < chain.length; j++) {
+                    if (chain[j].type !== 'H') continue;
+                    const dx = Math.abs(chain[i].x - chain[j].x);
+                    const dy = Math.abs(chain[i].y - chain[j].y);
+                    if (dx + dy === 1) {
+                        sctx.beginPath();
+                        sctx.moveTo(chain[i].x * scale + offsetX, chain[i].y * scale + offsetY);
+                        sctx.lineTo(chain[j].x * scale + offsetX, chain[j].y * scale + offsetY);
+                        sctx.stroke();
+                    }
+                }
+            }
+            sctx.setLineDash([]);
+            
+            // Draw residues
+            const radius = Math.min(scale * 0.35, 20);
+            for (let i = 0; i < chain.length; i++) {
+                const r = chain[i];
+                const x = r.x * scale + offsetX;
+                const y = r.y * scale + offsetY;
+                
+                sctx.fillStyle = r.type === 'H' ? '#3b82f6' : '#fbbf24';
+                sctx.beginPath();
+                sctx.arc(x, y, radius, 0, Math.PI * 2);
+                sctx.fill();
+                
+                sctx.strokeStyle = '#fff';
+                sctx.lineWidth = 2;
+                sctx.stroke();
+                
+                // Label
+                sctx.fillStyle = '#fff';
+                sctx.font = `${Math.min(radius, 12)}px sans-serif`;
+                sctx.textAlign = 'center';
+                sctx.textBaseline = 'middle';
+                sctx.fillText(r.type, x, y);
+            }
+            
+            // Info
+            sctx.fillStyle = '#14b8a6';
+            sctx.font = 'bold 14px sans-serif';
+            sctx.textAlign = 'left';
+            sctx.fillText(`Protein Folding - Step ${steps}`, 10, 20);
+            if (annealing) {
+                sctx.fillStyle = '#f59e0b';
+                sctx.fillText('ANNEALING...', 10, 40);
+            }
+        }
+        
+        function drawGraph() {
+            gctx.fillStyle = '#0a0f1a';
+            gctx.fillRect(0, 0, GW, GH);
+            
+            if (history.length < 2) return;
+            
+            const margin = { left: 60, right: 20, top: 30, bottom: 30 };
+            const graphW = GW - margin.left - margin.right;
+            const graphH = GH - margin.top - margin.bottom;
+            
+            gctx.strokeStyle = '#333';
+            gctx.beginPath();
+            gctx.moveTo(margin.left, margin.top);
+            gctx.lineTo(margin.left, GH - margin.bottom);
+            gctx.lineTo(GW - margin.right, GH - margin.bottom);
+            gctx.stroke();
+            
+            gctx.fillStyle = '#666';
+            gctx.font = '11px sans-serif';
+            gctx.fillText('Energy Over Time', margin.left, margin.top - 10);
+            
+            const minStep = history[0].step;
+            const maxStep = history[history.length - 1].step;
+            const minE = Math.min(...history.map(h => h.energy));
+            const maxE = Math.max(...history.map(h => h.energy), 0);
+            const rangeE = maxE - minE || 1;
+            
+            gctx.strokeStyle = '#14b8a6';
+            gctx.lineWidth = 2;
+            gctx.beginPath();
+            for (let i = 0; i < history.length; i++) {
+                const x = margin.left + ((history[i].step - minStep) / (maxStep - minStep)) * graphW;
+                const y = GH - margin.bottom - ((history[i].energy - minE) / rangeE) * graphH;
+                if (i === 0) gctx.moveTo(x, y);
+                else gctx.lineTo(x, y);
+            }
+            gctx.stroke();
+        }
+        
+        function draw() {
+            drawSim();
+            drawGraph();
+            requestAnimationFrame(draw);
+        }
+        
+        let intervalId = null;
+        function startSim() {
+            if (intervalId) clearInterval(intervalId);
+            intervalId = setInterval(() => {
+                if (!paused) {
+                    step();
+                }
+            }, 30);
+        }
+        
+        // Event listeners
+        document.getElementById('temp').addEventListener('input', e => {
+            params.temperature = +e.target.value;
+            document.getElementById('tempVal').textContent = params.temperature.toFixed(1);
+        });
+        document.getElementById('hh').addEventListener('input', e => {
+            params.hhEnergy = +e.target.value;
+            document.getElementById('hhVal').textContent = params.hhEnergy.toFixed(1);
+        });
+        document.getElementById('length').addEventListener('input', e => {
+            params.chainLength = +e.target.value;
+            document.getElementById('lengthVal').textContent = params.chainLength;
+        });
+        document.getElementById('hfrac').addEventListener('input', e => {
+            params.hFraction = +e.target.value;
+            document.getElementById('hfracVal').textContent = params.hFraction.toFixed(1);
+        });
+        
+        document.getElementById('reset').addEventListener('click', () => { init(); startSim(); });
+        document.getElementById('pause').addEventListener('click', () => {
+            paused = !paused;
+            document.getElementById('pause').textContent = paused ? 'Resume' : 'Pause';
+        });
+        document.getElementById('anneal').addEventListener('click', () => {
+            annealing = true;
+            annealStep = 0;
+            params.temperature = 2.0;
+        });
+        document.getElementById('quench').addEventListener('click', () => {
+            params.temperature = 0.2;
+            document.getElementById('temp').value = 0.2;
+            document.getElementById('tempVal').textContent = '0.2';
+        });
+        
+        window.addEventListener('resize', resize);
+        init();
+        draw();
+        startSim();
+    </script>
+</body>
+</html>

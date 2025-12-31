@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GasLab Isothermal Piston - Pressure-Volume - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #e2e8f0; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 300px; background: rgba(15,23,42,0.95); padding: 20px; overflow-y: auto; border-left: 1px solid #334155; }
+        h1 { font-size: 1.1rem; margin-bottom: 10px; color: #60a5fa; }
+        .description { font-size: 0.75rem; color: #94a3b8; margin-bottom: 15px; line-height: 1.5; }
+        .control-group { margin-bottom: 12px; }
+        label { display: block; font-size: 0.75rem; margin-bottom: 3px; color: #94a3b8; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #3b82f6; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #2563eb; }
+        .stats { background: rgba(59,130,246,0.1); padding: 12px; border-radius: 5px; font-size: 0.75rem; margin-bottom: 15px; border: 1px solid #334155; }
+        .stats div { margin-bottom: 4px; display: flex; justify-content: space-between; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(15,23,42,0.9); color: #60a5fa; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .pv-graph { background: #1e293b; border-radius: 5px; padding: 10px; margin-bottom: 15px; }
+        .law { background: rgba(34,197,94,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; border: 1px solid #22c55e; margin-bottom: 15px; }
+        .law-title { color: #22c55e; font-weight: bold; margin-bottom: 5px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div id="container">
+        <div id="canvas-container">
+            <canvas id="canvas"></canvas>
+        </div>
+        <div id="controls">
+            <h1>GasLab Isothermal Piston</h1>
+            <p class="description">Simulate a gas with a movable piston. Demonstrates Boyle's Law: at constant temperature, PV = constant. Drag the piston to compress or expand the gas.</p>
+
+            <div class="law">
+                <div class="law-title">Boyle's Law (Isothermal)</div>
+                P₁V₁ = P₂V₂ (at constant T)<br>
+                PV = nRT = constant
+            </div>
+
+            <div class="stats">
+                <div><span>Pressure:</span> <span id="pressure">0</span> Pa</div>
+                <div><span>Volume:</span> <span id="volume">0</span> m³</div>
+                <div><span>Temperature:</span> <span id="temperature">300</span> K</div>
+                <div><span>PV Product:</span> <span id="pvProduct">0</span></div>
+                <div><span>Particles:</span> <span id="particleCount">0</span></div>
+                <div><span>Avg Speed:</span> <span id="avgSpeed">0</span> m/s</div>
+            </div>
+
+            <div class="pv-graph">
+                <canvas id="pvCanvas" width="260" height="150"></canvas>
+            </div>
+
+            <div class="control-group">
+                <label>Number of Particles: <span id="numParticlesVal">100</span></label>
+                <input type="range" id="numParticles" min="20" max="300" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Temperature (K): <span id="tempVal">300</span></label>
+                <input type="range" id="temp" min="100" max="600" value="300">
+            </div>
+
+            <div class="control-group">
+                <label>Particle Mass: <span id="massVal">1.0</span></label>
+                <input type="range" id="mass" min="0.5" max="3.0" step="0.1" value="1.0">
+            </div>
+
+            <button onclick="reset()">Reset Simulation</button>
+            <button onclick="togglePause()">Pause / Resume</button>
+            <button onclick="addParticles()">Add 20 Particles</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const pvCanvas = document.getElementById('pvCanvas');
+        const pvCtx = pvCanvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth;
+            canvas.height = canvas.parentElement.clientHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Physics constants
+        const BOLTZMANN = 1.38e-23;
+        const SCALE = 1e-9; // nm to m conversion for display
+
+        // Simulation state
+        let particles = [];
+        let pistonX = 0;
+        let pistonVelocity = 0;
+        let paused = false;
+        let pvHistory = [];
+        let draggingPiston = false;
+
+        // Parameters
+        let numParticles = 100;
+        let temperature = 300;
+        let particleMass = 1.0;
+
+        // Container dimensions
+        const WALL_THICKNESS = 10;
+        const PISTON_WIDTH = 20;
+
+        class Particle {
+            constructor() {
+                const containerLeft = 50;
+                const containerRight = pistonX - PISTON_WIDTH / 2;
+                const containerTop = 100;
+                const containerBottom = canvas.height - 100;
+
+                this.x = containerLeft + 20 + Math.random() * (containerRight - containerLeft - 40);
+                this.y = containerTop + 20 + Math.random() * (containerBottom - containerTop - 40);
+
+                // Maxwell-Boltzmann speed distribution
+                const avgSpeed = Math.sqrt(2 * BOLTZMANN * temperature / (particleMass * 1e-26));
+                const speedScale = 200; // visual scale
+                const speed = avgSpeed * speedScale * (0.5 + Math.random());
+                const angle = Math.random() * Math.PI * 2;
+
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                this.radius = 4;
+            }
+
+            update(dt) {
+                this.x += this.vx * dt;
+                this.y += this.vy * dt;
+
+                const containerLeft = 50 + WALL_THICKNESS;
+                const containerRight = pistonX - PISTON_WIDTH / 2;
+                const containerTop = 100 + WALL_THICKNESS;
+                const containerBottom = canvas.height - 100 - WALL_THICKNESS;
+
+                // Wall collisions
+                if (this.x - this.radius < containerLeft) {
+                    this.x = containerLeft + this.radius;
+                    this.vx = Math.abs(this.vx);
+                }
+                if (this.x + this.radius > containerRight) {
+                    // Piston collision - transfer momentum
+                    this.x = containerRight - this.radius;
+                    const relVel = this.vx - pistonVelocity * 100;
+                    this.vx = -relVel + pistonVelocity * 100;
+                }
+                if (this.y - this.radius < containerTop) {
+                    this.y = containerTop + this.radius;
+                    this.vy = Math.abs(this.vy);
+                }
+                if (this.y + this.radius > containerBottom) {
+                    this.y = containerBottom - this.radius;
+                    this.vy = -Math.abs(this.vy);
+                }
+            }
+
+            draw() {
+                const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+                const maxSpeed = 500;
+                const hue = 240 - (speed / maxSpeed) * 180; // Blue to red
+
+                ctx.fillStyle = `hsl(${Math.max(0, hue)}, 80%, 60%)`;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function calculatePressure() {
+            // Pressure from momentum transfer to walls
+            let momentumTransfer = 0;
+            const containerRight = pistonX - PISTON_WIDTH / 2;
+
+            particles.forEach(p => {
+                // Approximate pressure from kinetic energy
+                momentumTransfer += particleMass * (p.vx * p.vx + p.vy * p.vy);
+            });
+
+            const containerHeight = canvas.height - 200 - 2 * WALL_THICKNESS;
+            const wallArea = containerHeight * 2; // simplified
+            return momentumTransfer / (wallArea * 100);
+        }
+
+        function calculateVolume() {
+            const containerLeft = 50 + WALL_THICKNESS;
+            const containerRight = pistonX - PISTON_WIDTH / 2;
+            const containerHeight = canvas.height - 200 - 2 * WALL_THICKNESS;
+            return (containerRight - containerLeft) * containerHeight * 1e-6; // arbitrary units
+        }
+
+        function init() {
+            pistonX = canvas.width * 0.7;
+            pistonVelocity = 0;
+            particles = [];
+            pvHistory = [];
+
+            for (let i = 0; i < numParticles; i++) {
+                particles.push(new Particle());
+            }
+        }
+
+        function updatePiston() {
+            if (!draggingPiston) {
+                // Natural pressure equilibrium
+                const pressure = calculatePressure();
+                const targetPressure = numParticles * temperature * 0.1; // simplified ideal gas
+                const forceDiff = (pressure - targetPressure) * 0.0001;
+                pistonVelocity += forceDiff;
+                pistonVelocity *= 0.98; // damping
+                pistonX += pistonVelocity;
+
+                // Piston limits
+                pistonX = Math.max(200, Math.min(canvas.width - 50, pistonX));
+            }
+        }
+
+        function update() {
+            if (paused) return;
+
+            const dt = 0.016;
+
+            particles.forEach(p => p.update(dt));
+            updatePiston();
+
+            // Record PV data
+            const P = calculatePressure();
+            const V = calculateVolume();
+            pvHistory.push({ P, V });
+            if (pvHistory.length > 200) pvHistory.shift();
+
+            updateStats();
+        }
+
+        function drawContainer() {
+            const containerLeft = 50;
+            const containerTop = 100;
+            const containerBottom = canvas.height - 100;
+
+            // Container walls
+            ctx.fillStyle = '#475569';
+
+            // Left wall
+            ctx.fillRect(containerLeft, containerTop, WALL_THICKNESS, containerBottom - containerTop);
+            // Top wall
+            ctx.fillRect(containerLeft, containerTop, pistonX - containerLeft, WALL_THICKNESS);
+            // Bottom wall
+            ctx.fillRect(containerLeft, containerBottom - WALL_THICKNESS, pistonX - containerLeft, WALL_THICKNESS);
+
+            // Piston
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(pistonX - PISTON_WIDTH / 2, containerTop, PISTON_WIDTH, containerBottom - containerTop);
+
+            // Piston handle
+            ctx.fillStyle = '#64748b';
+            ctx.fillRect(pistonX + PISTON_WIDTH / 2, (containerTop + containerBottom) / 2 - 30, 40, 60);
+
+            // Arrows indicating movable
+            ctx.fillStyle = '#22c55e';
+            ctx.font = '20px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('⟷', pistonX + PISTON_WIDTH / 2 + 20, (containerTop + containerBottom) / 2 + 5);
+
+            // Labels
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Gas Chamber', (containerLeft + pistonX) / 2, containerTop - 20);
+            ctx.fillText('Drag Piston →', pistonX + 50, containerBottom + 30);
+        }
+
+        function drawPVGraph() {
+            pvCtx.fillStyle = '#1e293b';
+            pvCtx.fillRect(0, 0, pvCanvas.width, pvCanvas.height);
+
+            // Axes
+            pvCtx.strokeStyle = '#475569';
+            pvCtx.lineWidth = 1;
+            pvCtx.beginPath();
+            pvCtx.moveTo(40, 10);
+            pvCtx.lineTo(40, 130);
+            pvCtx.lineTo(250, 130);
+            pvCtx.stroke();
+
+            // Labels
+            pvCtx.fillStyle = '#94a3b8';
+            pvCtx.font = '10px sans-serif';
+            pvCtx.textAlign = 'center';
+            pvCtx.fillText('P', 20, 70);
+            pvCtx.fillText('V', 145, 145);
+
+            if (pvHistory.length < 2) return;
+
+            // Find ranges
+            const pressures = pvHistory.map(d => d.P);
+            const volumes = pvHistory.map(d => d.V);
+            const minP = Math.min(...pressures) * 0.9;
+            const maxP = Math.max(...pressures) * 1.1;
+            const minV = Math.min(...volumes) * 0.9;
+            const maxV = Math.max(...volumes) * 1.1;
+
+            // Plot PV curve
+            pvCtx.strokeStyle = '#60a5fa';
+            pvCtx.lineWidth = 2;
+            pvCtx.beginPath();
+
+            pvHistory.forEach((d, i) => {
+                const x = 40 + ((d.V - minV) / (maxV - minV)) * 200;
+                const y = 130 - ((d.P - minP) / (maxP - minP)) * 110;
+
+                if (i === 0) pvCtx.moveTo(x, y);
+                else pvCtx.lineTo(x, y);
+            });
+            pvCtx.stroke();
+
+            // Current point
+            const last = pvHistory[pvHistory.length - 1];
+            const cx = 40 + ((last.V - minV) / (maxV - minV)) * 200;
+            const cy = 130 - ((last.P - minP) / (maxP - minP)) * 110;
+            pvCtx.fillStyle = '#f59e0b';
+            pvCtx.beginPath();
+            pvCtx.arc(cx, cy, 5, 0, Math.PI * 2);
+            pvCtx.fill();
+
+            // Ideal isothermal curve (PV = const)
+            if (pvHistory.length > 10) {
+                const avgPV = pvHistory.slice(-50).reduce((s, d) => s + d.P * d.V, 0) / Math.min(50, pvHistory.length);
+                pvCtx.strokeStyle = 'rgba(34, 197, 94, 0.5)';
+                pvCtx.lineWidth = 1;
+                pvCtx.setLineDash([5, 5]);
+                pvCtx.beginPath();
+
+                for (let v = minV; v <= maxV; v += (maxV - minV) / 50) {
+                    const p = avgPV / v;
+                    if (p >= minP && p <= maxP) {
+                        const x = 40 + ((v - minV) / (maxV - minV)) * 200;
+                        const y = 130 - ((p - minP) / (maxP - minP)) * 110;
+                        if (v === minV) pvCtx.moveTo(x, y);
+                        else pvCtx.lineTo(x, y);
+                    }
+                }
+                pvCtx.stroke();
+                pvCtx.setLineDash([]);
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            drawContainer();
+            particles.forEach(p => p.draw());
+            drawPVGraph();
+        }
+
+        function updateStats() {
+            const P = calculatePressure();
+            const V = calculateVolume();
+
+            document.getElementById('pressure').textContent = P.toFixed(2);
+            document.getElementById('volume').textContent = V.toFixed(4);
+            document.getElementById('temperature').textContent = temperature;
+            document.getElementById('pvProduct').textContent = (P * V).toFixed(4);
+            document.getElementById('particleCount').textContent = particles.length;
+
+            const avgSpeed = particles.reduce((s, p) => s + Math.sqrt(p.vx * p.vx + p.vy * p.vy), 0) / particles.length;
+            document.getElementById('avgSpeed').textContent = avgSpeed.toFixed(1);
+        }
+
+        function reset() { init(); }
+        function togglePause() { paused = !paused; }
+
+        function addParticles() {
+            for (let i = 0; i < 20; i++) {
+                particles.push(new Particle());
+            }
+            numParticles = particles.length;
+            document.getElementById('numParticlesVal').textContent = numParticles;
+        }
+
+        // Mouse interaction for piston
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (Math.abs(x - pistonX) < 30 && y > 100 && y < canvas.height - 100) {
+                draggingPiston = true;
+            }
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (draggingPiston) {
+                const rect = canvas.getBoundingClientRect();
+                const newX = e.clientX - rect.left;
+                pistonVelocity = (newX - pistonX) * 0.1;
+                pistonX = Math.max(200, Math.min(canvas.width - 50, newX));
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => { draggingPiston = false; });
+        canvas.addEventListener('mouseleave', () => { draggingPiston = false; });
+
+        // Parameter controls
+        document.getElementById('numParticles').addEventListener('input', function() {
+            numParticles = parseInt(this.value);
+            document.getElementById('numParticlesVal').textContent = this.value;
+            init();
+        });
+
+        document.getElementById('temp').addEventListener('input', function() {
+            temperature = parseInt(this.value);
+            document.getElementById('tempVal').textContent = this.value;
+            // Update particle speeds for new temperature
+            particles.forEach(p => {
+                const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+                const newSpeed = speed * Math.sqrt(temperature / 300);
+                const angle = Math.atan2(p.vy, p.vx);
+                p.vx = Math.cos(angle) * newSpeed;
+                p.vy = Math.sin(angle) * newSpeed;
+            });
+        });
+
+        document.getElementById('mass').addEventListener('input', function() {
+            particleMass = parseFloat(this.value);
+            document.getElementById('massVal').textContent = this.value;
+        });
+
+        function animate() {
+            update();
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Opinion Dynamics - Deffuant-Weisbuch Model - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; display: flex; flex-direction: column; }
+        #main-canvas { flex: 1; }
+        #dist-canvas { height: 120px; border-top: 1px solid #333; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 280px; background: rgba(0,0,0,0.9); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.1rem; margin-bottom: 15px; color: #a78bfa; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #a78bfa; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #8b5cf6; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-bottom: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #a78bfa; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container">
+            <canvas id="main-canvas"></canvas>
+            <canvas id="dist-canvas"></canvas>
+        </div>
+        <div id="controls">
+            <h1>Opinion Dynamics</h1>
+            <p class="description">Deffuant-Weisbuch bounded confidence model. Agents only interact if their opinions are close enough (within threshold). This leads to opinion clustering and polarization.</p>
+            
+            <div class="control-group">
+                <label>Agents: <span id="agentCountVal">200</span></label>
+                <input type="range" id="agentCount" min="50" max="500" value="200">
+            </div>
+            <div class="control-group">
+                <label>Confidence Threshold (ε): <span id="epsilonVal">0.25</span></label>
+                <input type="range" id="epsilon" min="0.05" max="0.5" step="0.01" value="0.25">
+            </div>
+            <div class="control-group">
+                <label>Convergence Rate (μ): <span id="muVal">0.5</span></label>
+                <input type="range" id="mu" min="0.1" max="0.5" step="0.05" value="0.5">
+            </div>
+            <div class="control-group">
+                <label>Interactions per Step: <span id="interactionsVal">50</span></label>
+                <input type="range" id="interactions" min="10" max="200" value="50">
+            </div>
+            
+            <button id="reset">Reset (Uniform)</button>
+            <button id="resetBimodal">Reset (Bimodal)</button>
+            <button id="pause">Pause</button>
+            <button id="step">Step Once</button>
+            
+            <div class="stats">
+                <div>Step: <span id="stepCount">0</span></div>
+                <div>Opinion Clusters: <span id="clusters">1</span></div>
+                <div>Polarization: <span id="polarization">0</span></div>
+                <div>Std Deviation: <span id="stdDev">0</span></div>
+            </div>
+            
+            <p class="description"><strong>Key insight:</strong> When ε < 0.5, opinions fragment into clusters. When ε ≥ 0.5, consensus emerges. The critical threshold is around ε = 0.25.</p>
+            
+            <p class="description"><strong>Colors:</strong> Opinions range from red (0) to blue (1). Agents are positioned by their opinion value.</p>
+        </div>
+    </div>
+    <script>
+        const mainCanvas = document.getElementById('main-canvas');
+        const mainCtx = mainCanvas.getContext('2d');
+        const distCanvas = document.getElementById('dist-canvas');
+        const distCtx = distCanvas.getContext('2d');
+        
+        let W, H, agents = [], paused = false, stepCount = 0;
+        let intervalId = null;
+        
+        let params = {
+            agentCount: 200,
+            epsilon: 0.25,  // Confidence threshold
+            mu: 0.5,        // Convergence parameter
+            interactions: 50
+        };
+        
+        function resize() {
+            const c = document.getElementById('canvas-container');
+            mainCanvas.width = c.clientWidth;
+            mainCanvas.height = c.clientHeight - 120;
+            distCanvas.width = c.clientWidth;
+            distCanvas.height = 120;
+            W = mainCanvas.width;
+            H = mainCanvas.height;
+        }
+        
+        function opinionToColor(opinion) {
+            // Red (0) to Purple (0.5) to Blue (1)
+            const r = Math.floor(255 * (1 - opinion));
+            const b = Math.floor(255 * opinion);
+            const g = Math.floor(100 * (1 - Math.abs(opinion - 0.5) * 2));
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+        
+        function initUniform() {
+            resize();
+            agents = [];
+            stepCount = 0;
+            
+            for (let i = 0; i < params.agentCount; i++) {
+                agents.push({
+                    opinion: Math.random(),
+                    y: Math.random() * (H - 40) + 20
+                });
+            }
+            updateStats();
+        }
+        
+        function initBimodal() {
+            resize();
+            agents = [];
+            stepCount = 0;
+            
+            for (let i = 0; i < params.agentCount; i++) {
+                // Create bimodal distribution (two peaks at 0.2 and 0.8)
+                const peak = Math.random() < 0.5 ? 0.2 : 0.8;
+                const spread = 0.1;
+                let opinion = peak + (Math.random() - 0.5) * spread * 2;
+                opinion = Math.max(0, Math.min(1, opinion));
+                
+                agents.push({
+                    opinion: opinion,
+                    y: Math.random() * (H - 40) + 20
+                });
+            }
+            updateStats();
+        }
+        
+        function step() {
+            stepCount++;
+            
+            // Perform multiple random pairwise interactions
+            for (let i = 0; i < params.interactions; i++) {
+                // Pick two random agents
+                const idx1 = Math.floor(Math.random() * agents.length);
+                let idx2 = Math.floor(Math.random() * agents.length);
+                while (idx2 === idx1) {
+                    idx2 = Math.floor(Math.random() * agents.length);
+                }
+                
+                const agent1 = agents[idx1];
+                const agent2 = agents[idx2];
+                
+                // Check if opinions are within confidence threshold
+                const diff = Math.abs(agent1.opinion - agent2.opinion);
+                if (diff < params.epsilon) {
+                    // Update opinions - they move toward each other
+                    const delta = params.mu * (agent2.opinion - agent1.opinion);
+                    agent1.opinion += delta;
+                    agent2.opinion -= delta;
+                    
+                    // Clamp to [0, 1]
+                    agent1.opinion = Math.max(0, Math.min(1, agent1.opinion));
+                    agent2.opinion = Math.max(0, Math.min(1, agent2.opinion));
+                }
+            }
+            
+            updateStats();
+        }
+        
+        function countClusters() {
+            // Count opinion clusters using a simple threshold-based approach
+            const sorted = agents.map(a => a.opinion).sort((a, b) => a - b);
+            let clusters = 1;
+            const clusterThreshold = 0.05;
+            
+            for (let i = 1; i < sorted.length; i++) {
+                if (sorted[i] - sorted[i-1] > clusterThreshold) {
+                    clusters++;
+                }
+            }
+            return clusters;
+        }
+        
+        function calculatePolarization() {
+            // Polarization: variance of opinions
+            const mean = agents.reduce((sum, a) => sum + a.opinion, 0) / agents.length;
+            const variance = agents.reduce((sum, a) => sum + Math.pow(a.opinion - mean, 2), 0) / agents.length;
+            return Math.sqrt(variance);
+        }
+        
+        function updateStats() {
+            document.getElementById('stepCount').textContent = stepCount;
+            document.getElementById('clusters').textContent = countClusters();
+            
+            const polarization = calculatePolarization();
+            document.getElementById('polarization').textContent = polarization.toFixed(3);
+            document.getElementById('stdDev').textContent = polarization.toFixed(3);
+        }
+        
+        function draw() {
+            // Main visualization
+            mainCtx.fillStyle = '#1a1a2e';
+            mainCtx.fillRect(0, 0, W, H);
+            
+            // Draw opinion scale at bottom
+            const gradientH = 20;
+            const gradient = mainCtx.createLinearGradient(50, 0, W - 50, 0);
+            gradient.addColorStop(0, opinionToColor(0));
+            gradient.addColorStop(0.5, opinionToColor(0.5));
+            gradient.addColorStop(1, opinionToColor(1));
+            mainCtx.fillStyle = gradient;
+            mainCtx.fillRect(50, H - 30, W - 100, gradientH);
+            
+            // Scale labels
+            mainCtx.fillStyle = '#888';
+            mainCtx.font = '12px sans-serif';
+            mainCtx.fillText('0 (extreme)', 50, H - 5);
+            mainCtx.fillText('1 (extreme)', W - 100, H - 5);
+            mainCtx.fillText('0.5 (moderate)', W/2 - 30, H - 5);
+            
+            // Draw agents positioned by opinion
+            for (const agent of agents) {
+                const x = 50 + agent.opinion * (W - 100);
+                
+                mainCtx.fillStyle = opinionToColor(agent.opinion);
+                mainCtx.beginPath();
+                mainCtx.arc(x, agent.y, 4, 0, Math.PI * 2);
+                mainCtx.fill();
+            }
+            
+            // Draw epsilon range indicator
+            mainCtx.strokeStyle = 'rgba(167, 139, 250, 0.5)';
+            mainCtx.setLineDash([5, 5]);
+            const epsilonPx = params.epsilon * (W - 100);
+            mainCtx.beginPath();
+            mainCtx.moveTo(W/2 - epsilonPx, 10);
+            mainCtx.lineTo(W/2 - epsilonPx, H - 40);
+            mainCtx.moveTo(W/2 + epsilonPx, 10);
+            mainCtx.lineTo(W/2 + epsilonPx, H - 40);
+            mainCtx.stroke();
+            mainCtx.setLineDash([]);
+            
+            mainCtx.fillStyle = '#a78bfa';
+            mainCtx.font = '11px sans-serif';
+            mainCtx.fillText(`← ε = ${params.epsilon} →`, W/2 - 30, 25);
+            
+            // Draw distribution histogram
+            distCtx.fillStyle = '#0a0a15';
+            distCtx.fillRect(0, 0, distCanvas.width, distCanvas.height);
+            
+            const bins = 50;
+            const counts = new Array(bins).fill(0);
+            for (const agent of agents) {
+                const bin = Math.min(bins - 1, Math.floor(agent.opinion * bins));
+                counts[bin]++;
+            }
+            const maxCount = Math.max(...counts, 1);
+            
+            const barW = distCanvas.width / bins;
+            for (let i = 0; i < bins; i++) {
+                const h = (counts[i] / maxCount) * (distCanvas.height - 25);
+                const opinion = (i + 0.5) / bins;
+                distCtx.fillStyle = opinionToColor(opinion);
+                distCtx.fillRect(i * barW, distCanvas.height - h - 15, barW - 1, h);
+            }
+            
+            distCtx.fillStyle = '#888';
+            distCtx.font = '10px sans-serif';
+            distCtx.fillText('Opinion Distribution', 10, 12);
+            
+            requestAnimationFrame(draw);
+        }
+        
+        function startSimulation() {
+            if (intervalId) clearInterval(intervalId);
+            intervalId = setInterval(() => {
+                if (!paused) step();
+            }, 50);
+        }
+        
+        // Event listeners
+        document.getElementById('agentCount').addEventListener('input', e => {
+            params.agentCount = +e.target.value;
+            document.getElementById('agentCountVal').textContent = params.agentCount;
+        });
+        
+        document.getElementById('epsilon').addEventListener('input', e => {
+            params.epsilon = +e.target.value;
+            document.getElementById('epsilonVal').textContent = params.epsilon.toFixed(2);
+        });
+        
+        document.getElementById('mu').addEventListener('input', e => {
+            params.mu = +e.target.value;
+            document.getElementById('muVal').textContent = params.mu.toFixed(2);
+        });
+        
+        document.getElementById('interactions').addEventListener('input', e => {
+            params.interactions = +e.target.value;
+            document.getElementById('interactionsVal').textContent = params.interactions;
+        });
+        
+        document.getElementById('reset').addEventListener('click', () => {
+            initUniform();
+            startSimulation();
+        });
+        
+        document.getElementById('resetBimodal').addEventListener('click', () => {
+            initBimodal();
+            startSimulation();
+        });
+        
+        document.getElementById('pause').addEventListener('click', () => {
+            paused = !paused;
+            document.getElementById('pause').textContent = paused ? 'Resume' : 'Pause';
+        });
+        
+        document.getElementById('step').addEventListener('click', step);
+        
+        window.addEventListener('resize', resize);
+        
+        initUniform();
+        draw();
+        startSimulation();
+    </script>
+</body>
+</html>

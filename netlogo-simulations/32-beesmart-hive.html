@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BeeSmart Hive Finding - Swarm Decision Making - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #fef3c7; color: #451a03; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 300px; background: rgba(120,53,15,0.95); padding: 20px; overflow-y: auto; color: #fef3c7; }
+        h1 { font-size: 1.1rem; margin-bottom: 10px; color: #fcd34d; }
+        .description { font-size: 0.75rem; color: #d4a55c; margin-bottom: 15px; line-height: 1.5; }
+        .control-group { margin-bottom: 12px; }
+        label { display: block; font-size: 0.75rem; margin-bottom: 3px; color: #fcd34d; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #fcd34d; color: #451a03; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #fbbf24; }
+        .stats { background: rgba(0,0,0,0.2); padding: 12px; border-radius: 5px; font-size: 0.75rem; margin-bottom: 15px; }
+        .stats div { margin-bottom: 4px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(120,53,15,0.9); color: #fcd34d; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .site-info { padding: 8px; background: rgba(0,0,0,0.2); border-radius: 5px; margin-bottom: 8px; font-size: 0.7rem; }
+        .site-info .bar { height: 8px; background: rgba(255,255,255,0.2); border-radius: 4px; margin-top: 4px; }
+        .site-info .bar-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div id="container">
+        <div id="canvas-container">
+            <canvas id="canvas"></canvas>
+        </div>
+        <div id="controls">
+            <h1>BeeSmart Hive Finding</h1>
+            <p class="description">Simulates bee swarm house-hunting decision-making. Scout bees explore potential nest sites and perform waggle dances to recruit others. The swarm reaches consensus through quorum sensing.</p>
+
+            <div class="stats">
+                <div>Scout Bees: <span id="scoutCount">0</span></div>
+                <div>At Swarm: <span id="swarmCount">0</span></div>
+                <div>Exploring: <span id="exploringCount">0</span></div>
+                <div>Decision Progress: <span id="quorumProgress">0%</span></div>
+                <div>Time: <span id="timeStep">0</span></div>
+            </div>
+
+            <h3 style="font-size: 0.9rem; margin-bottom: 8px; color: #fcd34d;">Nest Site Votes:</h3>
+            <div id="siteVotes"></div>
+
+            <div class="control-group">
+                <label>Scout Population: <span id="scoutPopVal">50</span></label>
+                <input type="range" id="scoutPop" min="20" max="100" step="5" value="50">
+            </div>
+
+            <div class="control-group">
+                <label>Dance Threshold: <span id="danceThreshVal">0.6</span></label>
+                <input type="range" id="danceThresh" min="0.3" max="0.9" step="0.1" value="0.6">
+            </div>
+
+            <div class="control-group">
+                <label>Quorum Size: <span id="quorumSizeVal">0.7</span></label>
+                <input type="range" id="quorumSize" min="0.5" max="0.95" step="0.05" value="0.7">
+            </div>
+
+            <div class="control-group">
+                <label>Site Quality Variance: <span id="qualityVarVal">0.3</span></label>
+                <input type="range" id="qualityVar" min="0.1" max="0.5" step="0.05" value="0.3">
+            </div>
+
+            <button onclick="reset()">New Swarm</button>
+            <button onclick="togglePause()">Pause / Resume</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth;
+            canvas.height = canvas.parentElement.clientHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // States
+        const AT_SWARM = 0, EXPLORING = 1, AT_SITE = 2, RETURNING = 3, DANCING = 4, RECRUITED = 5;
+        const STATE_COLORS = {
+            [AT_SWARM]: '#fcd34d',
+            [EXPLORING]: '#60a5fa',
+            [AT_SITE]: '#22c55e',
+            [RETURNING]: '#f472b6',
+            [DANCING]: '#f59e0b',
+            [RECRUITED]: '#a855f7'
+        };
+
+        let bees = [];
+        let sites = [];
+        let swarmPos = { x: 0, y: 0 };
+        let timeStep = 0;
+        let paused = false;
+        let decisionMade = false;
+        let chosenSite = null;
+
+        // Parameters
+        let scoutPop = 50;
+        let danceThresh = 0.6;
+        let quorumSize = 0.7;
+        let qualityVar = 0.3;
+
+        class NestSite {
+            constructor(x, y, quality) {
+                this.x = x;
+                this.y = y;
+                this.quality = quality; // 0-1
+                this.votes = 0;
+                this.color = `hsl(${Math.random() * 60 + 20}, 70%, 50%)`;
+            }
+
+            draw() {
+                // Site
+                const size = 15 + this.quality * 20;
+                ctx.fillStyle = this.color;
+                ctx.strokeStyle = '#451a03';
+                ctx.lineWidth = 2;
+
+                // Draw as tree hollow
+                ctx.beginPath();
+                ctx.ellipse(this.x, this.y, size, size * 1.3, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+
+                // Hole
+                ctx.fillStyle = '#1a0a00';
+                ctx.beginPath();
+                ctx.ellipse(this.x, this.y, size * 0.4, size * 0.6, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Quality indicator
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText((this.quality * 100).toFixed(0) + '%', this.x, this.y + size + 15);
+            }
+        }
+
+        class Bee {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.state = AT_SWARM;
+                this.targetSite = null;
+                this.knownQuality = 0;
+                this.danceDuration = 0;
+                this.waitTime = Math.random() * 100;
+            }
+
+            update() {
+                this.waitTime--;
+
+                switch (this.state) {
+                    case AT_SWARM:
+                        // Random movement near swarm
+                        this.x += (Math.random() - 0.5) * 3;
+                        this.y += (Math.random() - 0.5) * 3;
+
+                        // Stay near swarm
+                        const dxs = swarmPos.x - this.x;
+                        const dys = swarmPos.y - this.y;
+                        const ds = Math.sqrt(dxs * dxs + dys * dys);
+                        if (ds > 50) {
+                            this.x += dxs * 0.05;
+                            this.y += dys * 0.05;
+                        }
+
+                        // Check if recruited by dancers
+                        if (this.waitTime < 0 && !this.targetSite) {
+                            // Chance to become scout
+                            if (Math.random() < 0.01) {
+                                this.state = EXPLORING;
+                                this.targetSite = sites[Math.floor(Math.random() * sites.length)];
+                            }
+
+                            // Check for nearby dancers
+                            bees.forEach(other => {
+                                if (other.state === DANCING && other.targetSite) {
+                                    const dx = other.x - this.x;
+                                    const dy = other.y - this.y;
+                                    if (Math.sqrt(dx * dx + dy * dy) < 30) {
+                                        // Recruitment probability based on dance quality
+                                        if (Math.random() < other.knownQuality * 0.3) {
+                                            this.targetSite = other.targetSite;
+                                            this.state = RECRUITED;
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        break;
+
+                    case EXPLORING:
+                    case RECRUITED:
+                        if (this.targetSite) {
+                            // Move toward site
+                            const dx = this.targetSite.x - this.x;
+                            const dy = this.targetSite.y - this.y;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+
+                            if (dist > 20) {
+                                this.vx = dx / dist * 5 + (Math.random() - 0.5) * 2;
+                                this.vy = dy / dist * 5 + (Math.random() - 0.5) * 2;
+                                this.x += this.vx;
+                                this.y += this.vy;
+                            } else {
+                                this.state = AT_SITE;
+                                this.waitTime = 50 + Math.random() * 50;
+                            }
+                        }
+                        break;
+
+                    case AT_SITE:
+                        // Inspect site
+                        if (this.waitTime < 0) {
+                            this.knownQuality = this.targetSite.quality * (0.8 + Math.random() * 0.4);
+                            this.state = RETURNING;
+                        }
+                        // Random movement at site
+                        this.x += (Math.random() - 0.5) * 2;
+                        this.y += (Math.random() - 0.5) * 2;
+                        break;
+
+                    case RETURNING:
+                        // Return to swarm
+                        const dxr = swarmPos.x - this.x;
+                        const dyr = swarmPos.y - this.y;
+                        const distr = Math.sqrt(dxr * dxr + dyr * dyr);
+
+                        if (distr > 30) {
+                            this.x += dxr / distr * 5;
+                            this.y += dyr / distr * 5;
+                        } else {
+                            // Decide whether to dance based on quality
+                            if (this.knownQuality > danceThresh) {
+                                this.state = DANCING;
+                                this.danceDuration = this.knownQuality * 200;
+                                this.targetSite.votes++;
+                            } else {
+                                this.state = AT_SWARM;
+                                this.targetSite = null;
+                                this.waitTime = 100 + Math.random() * 100;
+                            }
+                        }
+                        break;
+
+                    case DANCING:
+                        // Waggle dance
+                        this.danceDuration--;
+
+                        // Waggle pattern
+                        const waggle = Math.sin(timeStep * 0.5) * 5;
+                        this.x = swarmPos.x + (Math.random() - 0.5) * 20 + waggle;
+                        this.y = swarmPos.y + (Math.random() - 0.5) * 20;
+
+                        if (this.danceDuration <= 0) {
+                            this.targetSite.votes--;
+                            // Might go back to check site or rest
+                            if (Math.random() < 0.5) {
+                                this.state = EXPLORING;
+                            } else {
+                                this.state = AT_SWARM;
+                                this.waitTime = 100;
+                            }
+                        }
+                        break;
+                }
+
+                // Boundary
+                this.x = Math.max(20, Math.min(canvas.width - 20, this.x));
+                this.y = Math.max(20, Math.min(canvas.height - 20, this.y));
+            }
+
+            draw() {
+                ctx.fillStyle = STATE_COLORS[this.state];
+
+                // Body
+                ctx.beginPath();
+                ctx.ellipse(this.x, this.y, 5, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Stripes for dancing bees
+                if (this.state === DANCING) {
+                    ctx.strokeStyle = '#000';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(this.x - 3, this.y);
+                    ctx.lineTo(this.x + 3, this.y);
+                    ctx.stroke();
+                }
+
+                // Wings
+                ctx.fillStyle = 'rgba(255,255,255,0.5)';
+                const wingPhase = Math.sin(timeStep * 0.3 + this.x) * 0.5;
+                ctx.beginPath();
+                ctx.ellipse(this.x - 2, this.y - 3 + wingPhase, 3, 2, -0.3, 0, Math.PI * 2);
+                ctx.ellipse(this.x + 2, this.y - 3 - wingPhase, 3, 2, 0.3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function init() {
+            swarmPos = { x: canvas.width * 0.15, y: canvas.height / 2 };
+
+            // Create nest sites
+            sites = [];
+            const numSites = 4 + Math.floor(Math.random() * 3);
+            for (let i = 0; i < numSites; i++) {
+                const baseQuality = 0.4 + Math.random() * 0.5;
+                const quality = Math.max(0.2, Math.min(1, baseQuality + (Math.random() - 0.5) * qualityVar * 2));
+                sites.push(new NestSite(
+                    canvas.width * 0.4 + Math.random() * canvas.width * 0.5,
+                    100 + Math.random() * (canvas.height - 200),
+                    quality
+                ));
+            }
+
+            // Create bees
+            bees = [];
+            for (let i = 0; i < scoutPop; i++) {
+                bees.push(new Bee(
+                    swarmPos.x + (Math.random() - 0.5) * 60,
+                    swarmPos.y + (Math.random() - 0.5) * 60
+                ));
+            }
+
+            timeStep = 0;
+            decisionMade = false;
+            chosenSite = null;
+
+            updateSiteVotesUI();
+        }
+
+        function checkQuorum() {
+            if (decisionMade) return;
+
+            sites.forEach(site => {
+                const proportion = site.votes / scoutPop;
+                if (proportion >= quorumSize) {
+                    decisionMade = true;
+                    chosenSite = site;
+                }
+            });
+        }
+
+        function updateSiteVotesUI() {
+            const container = document.getElementById('siteVotes');
+            container.innerHTML = '';
+
+            sites.forEach((site, i) => {
+                const div = document.createElement('div');
+                div.className = 'site-info';
+                const pct = ((site.votes / scoutPop) * 100).toFixed(1);
+                div.innerHTML = `
+                    Site ${i + 1} (Q: ${(site.quality * 100).toFixed(0)}%): ${site.votes} bees (${pct}%)
+                    <div class="bar">
+                        <div class="bar-fill" style="width: ${pct}%; background: ${site.color}"></div>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        function update() {
+            if (paused || decisionMade) return;
+
+            timeStep++;
+            bees.forEach(bee => bee.update());
+            checkQuorum();
+
+            if (timeStep % 10 === 0) {
+                updateSiteVotesUI();
+                updateStats();
+            }
+        }
+
+        function draw() {
+            // Sky background
+            const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            grad.addColorStop(0, '#93c5fd');
+            grad.addColorStop(1, '#bfdbfe');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Ground
+            ctx.fillStyle = '#84cc16';
+            ctx.fillRect(0, canvas.height - 50, canvas.width, 50);
+
+            // Trees in background
+            for (let i = 0; i < 5; i++) {
+                ctx.fillStyle = '#166534';
+                ctx.beginPath();
+                ctx.moveTo(100 + i * 200, canvas.height - 50);
+                ctx.lineTo(130 + i * 200, canvas.height - 150);
+                ctx.lineTo(160 + i * 200, canvas.height - 50);
+                ctx.fill();
+            }
+
+            // Draw sites
+            sites.forEach(site => site.draw());
+
+            // Draw swarm cluster
+            ctx.fillStyle = 'rgba(120, 53, 15, 0.6)';
+            ctx.beginPath();
+            ctx.ellipse(swarmPos.x, swarmPos.y, 50, 40, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Draw bees
+            bees.forEach(bee => bee.draw());
+
+            // Decision indicator
+            if (decisionMade && chosenSite) {
+                ctx.strokeStyle = '#22c55e';
+                ctx.lineWidth = 4;
+                ctx.setLineDash([10, 5]);
+                ctx.beginPath();
+                ctx.moveTo(swarmPos.x, swarmPos.y);
+                ctx.lineTo(chosenSite.x, chosenSite.y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                ctx.fillStyle = '#22c55e';
+                ctx.font = 'bold 24px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('CONSENSUS REACHED!', canvas.width / 2, 50);
+                ctx.font = '16px sans-serif';
+                ctx.fillText(`Site chosen: Quality ${(chosenSite.quality * 100).toFixed(0)}%`, canvas.width / 2, 75);
+            }
+        }
+
+        function updateStats() {
+            const counts = { swarm: 0, exploring: 0 };
+            bees.forEach(b => {
+                if (b.state === AT_SWARM || b.state === DANCING) counts.swarm++;
+                else counts.exploring++;
+            });
+
+            document.getElementById('scoutCount').textContent = bees.length;
+            document.getElementById('swarmCount').textContent = counts.swarm;
+            document.getElementById('exploringCount').textContent = counts.exploring;
+            document.getElementById('timeStep').textContent = timeStep;
+
+            const maxVotes = Math.max(...sites.map(s => s.votes));
+            const progress = (maxVotes / (scoutPop * quorumSize) * 100).toFixed(0);
+            document.getElementById('quorumProgress').textContent = Math.min(100, progress) + '%';
+        }
+
+        function reset() { init(); }
+        function togglePause() { paused = !paused; }
+
+        // Event listeners
+        document.getElementById('scoutPop').addEventListener('input', function() {
+            scoutPop = parseInt(this.value);
+            document.getElementById('scoutPopVal').textContent = this.value;
+        });
+
+        document.getElementById('danceThresh').addEventListener('input', function() {
+            danceThresh = parseFloat(this.value);
+            document.getElementById('danceThreshVal').textContent = this.value;
+        });
+
+        document.getElementById('quorumSize').addEventListener('input', function() {
+            quorumSize = parseFloat(this.value);
+            document.getElementById('quorumSizeVal').textContent = this.value;
+        });
+
+        document.getElementById('qualityVar').addEventListener('input', function() {
+            qualityVar = parseFloat(this.value);
+            document.getElementById('qualityVarVal').textContent = this.value;
+        });
+
+        function animate() {
+            update();
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

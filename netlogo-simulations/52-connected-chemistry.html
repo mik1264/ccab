@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connected Chemistry - Polymer Formation - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #e8e6e1;
+            overflow: hidden;
+        }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; display: flex; flex-direction: column; }
+        #main-canvas { flex: 1; }
+        #graph-canvas { height: 120px; border-top: 1px solid #333; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 280px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 15px; color: #f472b6; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #f472b6; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #ec4899; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; }
+        .stats div { margin-bottom: 5px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #f472b6; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.5; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container">
+            <canvas id="main-canvas"></canvas>
+            <canvas id="graph-canvas"></canvas>
+        </div>
+        <div id="controls">
+            <h1>Connected Chemistry</h1>
+            <p class="description">Molecules form polymers through collision bonding. Watch as monomers connect into longer chains, tracking molecular weight distribution.</p>
+            <div class="control-group">
+                <label>Monomer Count: <span id="monomerValue">100</span></label>
+                <input type="range" id="monomers" min="50" max="300" value="100">
+            </div>
+            <div class="control-group">
+                <label>Temperature: <span id="tempValue">1.0</span></label>
+                <input type="range" id="temp" min="0.5" max="2.0" step="0.1" value="1.0">
+            </div>
+            <div class="control-group">
+                <label>Bond Probability: <span id="bondValue">0.3</span></label>
+                <input type="range" id="bond" min="0.1" max="0.9" step="0.1" value="0.3">
+            </div>
+            <div class="control-group">
+                <label>Bond Strength: <span id="strengthValue">0.95</span></label>
+                <input type="range" id="strength" min="0.8" max="0.99" step="0.01" value="0.95">
+            </div>
+            <button id="reset">Reset</button>
+            <button id="heat">Add Heat</button>
+            <button id="catalyst">Add Catalyst</button>
+            <div class="stats">
+                <div>Total Particles: <span id="particles">0</span></div>
+                <div>Free Monomers: <span id="free">0</span></div>
+                <div>Polymers: <span id="polymers">0</span></div>
+                <div>Longest Chain: <span id="longest">0</span></div>
+                <div>Avg Chain Length: <span id="avgLength">0</span></div>
+                <div>Bonds Formed: <span id="bonds">0</span></div>
+            </div>
+        </div>
+    </div>
+    <script>
+        const mainCanvas = document.getElementById('main-canvas');
+        const mainCtx = mainCanvas.getContext('2d');
+        const graphCanvas = document.getElementById('graph-canvas');
+        const graphCtx = graphCanvas.getContext('2d');
+
+        let width, height;
+        let molecules = [], bonds = [];
+        let bondsFormed = 0;
+        let chainLengthHistory = [];
+        const maxHistory = 200;
+
+        let params = { monomers: 100, temp: 1.0, bond: 0.3, strength: 0.95 };
+
+        function resize() {
+            mainCanvas.width = mainCanvas.clientWidth;
+            mainCanvas.height = mainCanvas.clientHeight;
+            graphCanvas.width = graphCanvas.clientWidth;
+            graphCanvas.height = graphCanvas.clientHeight;
+            width = mainCanvas.width;
+            height = mainCanvas.height;
+        }
+
+        function createMolecule(x, y) {
+            return {
+                x: x !== undefined ? x : Math.random() * width,
+                y: y !== undefined ? y : Math.random() * height,
+                vx: (Math.random() - 0.5) * 4 * params.temp,
+                vy: (Math.random() - 0.5) * 4 * params.temp,
+                radius: 6,
+                bondSites: 2, // Each monomer can bond with up to 2 others
+                bonded: [],   // Array of bonded molecule indices
+                chainId: -1,  // Which polymer chain this belongs to
+                hue: Math.random() * 60 + 300 // Purple-pink range
+            };
+        }
+
+        function init() {
+            resize();
+            molecules = [];
+            bonds = [];
+            bondsFormed = 0;
+            chainLengthHistory = [];
+
+            for (let i = 0; i < params.monomers; i++) {
+                molecules.push(createMolecule());
+            }
+        }
+
+        function findChainLength(startIdx, visited = new Set()) {
+            if (visited.has(startIdx)) return 0;
+            visited.add(startIdx);
+
+            let length = 1;
+            for (let bondedIdx of molecules[startIdx].bonded) {
+                length += findChainLength(bondedIdx, visited);
+            }
+            return length;
+        }
+
+        function getChainColor(length) {
+            // Color based on chain length
+            if (length === 1) return '#888888';
+            if (length < 5) return '#60a5fa';
+            if (length < 10) return '#34d399';
+            if (length < 20) return '#fbbf24';
+            return '#f472b6';
+        }
+
+        function update() {
+            // Update velocities based on temperature
+            for (let mol of molecules) {
+                // Random thermal motion
+                mol.vx += (Math.random() - 0.5) * 0.5 * params.temp;
+                mol.vy += (Math.random() - 0.5) * 0.5 * params.temp;
+
+                // Speed limit
+                const speed = Math.sqrt(mol.vx * mol.vx + mol.vy * mol.vy);
+                const maxSpeed = 5 * params.temp;
+                if (speed > maxSpeed) {
+                    mol.vx = (mol.vx / speed) * maxSpeed;
+                    mol.vy = (mol.vy / speed) * maxSpeed;
+                }
+            }
+
+            // Apply bond forces
+            for (let i = 0; i < molecules.length; i++) {
+                const mol = molecules[i];
+                for (let bondedIdx of mol.bonded) {
+                    const other = molecules[bondedIdx];
+                    const dx = other.x - mol.x;
+                    const dy = other.y - mol.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const targetDist = mol.radius + other.radius + 5;
+
+                    if (dist > 0) {
+                        const force = (dist - targetDist) * 0.1;
+                        mol.vx += (dx / dist) * force;
+                        mol.vy += (dy / dist) * force;
+                    }
+                }
+            }
+
+            // Update positions
+            for (let mol of molecules) {
+                mol.x += mol.vx;
+                mol.y += mol.vy;
+
+                // Boundary collisions
+                if (mol.x < mol.radius) { mol.x = mol.radius; mol.vx *= -0.8; }
+                if (mol.x > width - mol.radius) { mol.x = width - mol.radius; mol.vx *= -0.8; }
+                if (mol.y < mol.radius) { mol.y = mol.radius; mol.vy *= -0.8; }
+                if (mol.y > height - mol.radius) { mol.y = height - mol.radius; mol.vy *= -0.8; }
+            }
+
+            // Check for collisions and potential bonding
+            for (let i = 0; i < molecules.length; i++) {
+                for (let j = i + 1; j < molecules.length; j++) {
+                    const a = molecules[i], b = molecules[j];
+                    const dx = b.x - a.x, dy = b.y - a.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const minDist = a.radius + b.radius;
+
+                    if (dist < minDist * 2) {
+                        // Already bonded?
+                        if (a.bonded.includes(j)) continue;
+
+                        // Can they bond?
+                        if (a.bonded.length < a.bondSites && b.bonded.length < b.bondSites) {
+                            // Bond probability check
+                            if (Math.random() < params.bond * (1 / params.temp)) {
+                                a.bonded.push(j);
+                                b.bonded.push(i);
+                                bondsFormed++;
+                            }
+                        }
+
+                        // Collision response
+                        if (dist < minDist && dist > 0) {
+                            const overlap = minDist - dist;
+                            const nx = dx / dist, ny = dy / dist;
+                            a.x -= nx * overlap * 0.5;
+                            a.y -= ny * overlap * 0.5;
+                            b.x += nx * overlap * 0.5;
+                            b.y += ny * overlap * 0.5;
+
+                            // Elastic collision
+                            const dvx = b.vx - a.vx, dvy = b.vy - a.vy;
+                            const dvn = dvx * nx + dvy * ny;
+                            if (dvn < 0) {
+                                a.vx += nx * dvn;
+                                a.vy += ny * dvn;
+                                b.vx -= nx * dvn;
+                                b.vy -= ny * dvn;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Random bond breaking (temperature dependent)
+            for (let i = 0; i < molecules.length; i++) {
+                const mol = molecules[i];
+                for (let k = mol.bonded.length - 1; k >= 0; k--) {
+                    if (Math.random() > params.strength / params.temp) {
+                        const j = mol.bonded[k];
+                        mol.bonded.splice(k, 1);
+                        const other = molecules[j];
+                        const idx = other.bonded.indexOf(i);
+                        if (idx > -1) other.bonded.splice(idx, 1);
+                    }
+                }
+            }
+
+            // Record average chain length
+            let totalChains = 0, chainCount = 0;
+            const visited = new Set();
+            for (let i = 0; i < molecules.length; i++) {
+                if (!visited.has(i) && molecules[i].bonded.length > 0) {
+                    const len = findChainLength(i, visited);
+                    totalChains += len;
+                    chainCount++;
+                }
+            }
+            const avgLen = chainCount > 0 ? totalChains / chainCount : 1;
+            chainLengthHistory.push(avgLen);
+            if (chainLengthHistory.length > maxHistory) chainLengthHistory.shift();
+        }
+
+        function draw() {
+            mainCtx.fillStyle = '#0f0f1a';
+            mainCtx.fillRect(0, 0, width, height);
+
+            // Calculate chain lengths for coloring
+            const chainLengths = new Array(molecules.length).fill(1);
+            const visited = new Set();
+            for (let i = 0; i < molecules.length; i++) {
+                if (!visited.has(i)) {
+                    const chainVisited = new Set();
+                    const len = findChainLength(i, chainVisited);
+                    for (let idx of chainVisited) {
+                        chainLengths[idx] = len;
+                        visited.add(idx);
+                    }
+                }
+            }
+
+            // Draw bonds
+            mainCtx.lineWidth = 3;
+            for (let i = 0; i < molecules.length; i++) {
+                const mol = molecules[i];
+                for (let j of mol.bonded) {
+                    if (j > i) { // Draw each bond once
+                        const other = molecules[j];
+                        mainCtx.strokeStyle = getChainColor(chainLengths[i]);
+                        mainCtx.beginPath();
+                        mainCtx.moveTo(mol.x, mol.y);
+                        mainCtx.lineTo(other.x, other.y);
+                        mainCtx.stroke();
+                    }
+                }
+            }
+
+            // Draw molecules
+            for (let i = 0; i < molecules.length; i++) {
+                const mol = molecules[i];
+                const color = getChainColor(chainLengths[i]);
+
+                // Glow effect for longer chains
+                if (chainLengths[i] > 5) {
+                    mainCtx.beginPath();
+                    mainCtx.arc(mol.x, mol.y, mol.radius + 5, 0, Math.PI * 2);
+                    mainCtx.fillStyle = color.replace(')', ', 0.2)').replace('rgb', 'rgba');
+                    mainCtx.fill();
+                }
+
+                mainCtx.beginPath();
+                mainCtx.arc(mol.x, mol.y, mol.radius, 0, Math.PI * 2);
+                mainCtx.fillStyle = color;
+                mainCtx.fill();
+
+                // Show bond sites
+                mainCtx.fillStyle = '#fff';
+                mainCtx.font = '8px sans-serif';
+                mainCtx.textAlign = 'center';
+                mainCtx.textBaseline = 'middle';
+                mainCtx.fillText(mol.bondSites - mol.bonded.length, mol.x, mol.y);
+            }
+
+            // Draw graph - chain length distribution
+            graphCtx.fillStyle = '#0f0f1a';
+            graphCtx.fillRect(0, 0, graphCanvas.width, graphCanvas.height);
+
+            // Draw histogram of chain lengths
+            const distribution = {};
+            visited.clear();
+            for (let i = 0; i < molecules.length; i++) {
+                if (!visited.has(i)) {
+                    const chainVisited = new Set();
+                    const len = findChainLength(i, chainVisited);
+                    distribution[len] = (distribution[len] || 0) + 1;
+                    for (let idx of chainVisited) visited.add(idx);
+                }
+            }
+
+            const maxLen = Math.max(...Object.keys(distribution).map(Number), 1);
+            const maxCount = Math.max(...Object.values(distribution), 1);
+            const barWidth = graphCanvas.width / (maxLen + 1);
+
+            for (let len in distribution) {
+                const x = (parseInt(len) - 1) * barWidth;
+                const h = (distribution[len] / maxCount) * graphCanvas.height * 0.8;
+                graphCtx.fillStyle = getChainColor(parseInt(len));
+                graphCtx.fillRect(x, graphCanvas.height - h, barWidth - 2, h);
+            }
+
+            graphCtx.fillStyle = '#aaa';
+            graphCtx.font = '10px sans-serif';
+            graphCtx.fillText('Chain Length Distribution', 10, 15);
+
+            // Update stats
+            const freeMonomers = molecules.filter(m => m.bonded.length === 0).length;
+            const polymerCount = Object.keys(distribution).filter(k => parseInt(k) > 1).reduce((sum, k) => sum + distribution[k], 0);
+            const longestChain = maxLen;
+            const avgLength = chainLengthHistory.length > 0 ?
+                chainLengthHistory[chainLengthHistory.length - 1] : 1;
+
+            document.getElementById('particles').textContent = molecules.length;
+            document.getElementById('free').textContent = freeMonomers;
+            document.getElementById('polymers').textContent = polymerCount;
+            document.getElementById('longest').textContent = longestChain;
+            document.getElementById('avgLength').textContent = avgLength.toFixed(1);
+            document.getElementById('bonds').textContent = bondsFormed;
+        }
+
+        function animate() {
+            update();
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        // Event listeners
+        document.getElementById('monomers').addEventListener('input', e => {
+            params.monomers = parseInt(e.target.value);
+            document.getElementById('monomerValue').textContent = params.monomers;
+        });
+        document.getElementById('temp').addEventListener('input', e => {
+            params.temp = parseFloat(e.target.value);
+            document.getElementById('tempValue').textContent = params.temp.toFixed(1);
+        });
+        document.getElementById('bond').addEventListener('input', e => {
+            params.bond = parseFloat(e.target.value);
+            document.getElementById('bondValue').textContent = params.bond.toFixed(1);
+        });
+        document.getElementById('strength').addEventListener('input', e => {
+            params.strength = parseFloat(e.target.value);
+            document.getElementById('strengthValue').textContent = params.strength.toFixed(2);
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('heat').addEventListener('click', () => {
+            params.temp = Math.min(2.0, params.temp + 0.3);
+            document.getElementById('temp').value = params.temp;
+            document.getElementById('tempValue').textContent = params.temp.toFixed(1);
+            for (let mol of molecules) {
+                mol.vx *= 1.5;
+                mol.vy *= 1.5;
+            }
+        });
+        document.getElementById('catalyst').addEventListener('click', () => {
+            params.bond = Math.min(0.9, params.bond + 0.2);
+            document.getElementById('bond').value = params.bond;
+            document.getElementById('bondValue').textContent = params.bond.toFixed(1);
+        });
+
+        window.addEventListener('resize', resize);
+        init();
+        animate();
+    </script>
+</body>
+</html>

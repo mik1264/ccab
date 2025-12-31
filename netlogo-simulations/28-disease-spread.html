@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Disease Spread - SIR Model - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; display: flex; flex-direction: column; }
+        #simCanvas { flex: 2; }
+        #graphCanvas { flex: 1; border-top: 1px solid #333; }
+        #controls { width: 280px; background: rgba(0,0,0,0.9); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.1rem; margin-bottom: 15px; color: #ef4444; }
+        .control-group { margin-bottom: 12px; }
+        label { display: block; font-size: 0.75rem; margin-bottom: 3px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 8px; margin-bottom: 8px; background: #dc2626; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; font-size: 0.85rem; }
+        button:hover { background: #b91c1c; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-bottom: 15px; }
+        .stats div { margin-bottom: 3px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #ef4444; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .description { font-size: 0.7rem; color: #888; margin-bottom: 12px; line-height: 1.4; }
+        .legend { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+        .legend-item { display: flex; align-items: center; gap: 5px; font-size: 0.75rem; }
+        .legend-dot { width: 12px; height: 12px; border-radius: 50%; }
+        .susceptible { background: #3b82f6; }
+        .infected { background: #ef4444; }
+        .recovered { background: #22c55e; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <div id="container">
+        <div id="canvas-container">
+            <canvas id="simCanvas"></canvas>
+            <canvas id="graphCanvas"></canvas>
+        </div>
+        <div id="controls">
+            <h1>Disease Spread (SIR)</h1>
+            <p class="description">Classic Susceptible-Infected-Recovered model. Watch how disease spreads through a population and eventually dies out as herd immunity develops.</p>
+            
+            <div class="legend">
+                <div class="legend-item"><div class="legend-dot susceptible"></div>Susceptible</div>
+                <div class="legend-item"><div class="legend-dot infected"></div>Infected</div>
+                <div class="legend-item"><div class="legend-dot recovered"></div>Recovered</div>
+            </div>
+            
+            <div class="control-group">
+                <label>Population: <span id="popVal">200</span></label>
+                <input type="range" id="population" min="50" max="400" value="200">
+            </div>
+            <div class="control-group">
+                <label>Transmission Rate (β): <span id="betaVal">0.4</span></label>
+                <input type="range" id="beta" min="0.1" max="1.0" step="0.05" value="0.4">
+            </div>
+            <div class="control-group">
+                <label>Recovery Rate (γ): <span id="gammaVal">0.1</span></label>
+                <input type="range" id="gamma" min="0.01" max="0.3" step="0.01" value="0.1">
+            </div>
+            <div class="control-group">
+                <label>Infection Radius: <span id="radiusVal">30</span>px</label>
+                <input type="range" id="radius" min="10" max="60" value="30">
+            </div>
+            <div class="control-group">
+                <label>Initial Infected: <span id="initialVal">3</span></label>
+                <input type="range" id="initial" min="1" max="10" value="3">
+            </div>
+            
+            <button id="reset">Reset Epidemic</button>
+            <button id="pause">Pause</button>
+            <button id="infect">Add Infected</button>
+            <button id="vaccinate">Vaccinate 20%</button>
+            
+            <div class="stats">
+                <div>Day: <span id="day">0</span></div>
+                <div>Susceptible: <span id="sCount" style="color:#3b82f6">0</span></div>
+                <div>Infected: <span id="iCount" style="color:#ef4444">0</span></div>
+                <div>Recovered: <span id="rCount" style="color:#22c55e">0</span></div>
+                <div>R₀ (basic reproduction): <span id="r0">0</span></div>
+                <div>Peak Infected: <span id="peak">0</span></div>
+            </div>
+            
+            <p class="description"><strong>R₀ = β/γ</strong>: If R₀ > 1, disease spreads. Higher transmission or slower recovery = larger outbreak.</p>
+            
+            <p class="description"><strong>Herd Immunity:</strong> When enough recover, disease can't find new hosts and dies out.</p>
+        </div>
+    </div>
+    <script>
+        const simCanvas = document.getElementById('simCanvas');
+        const graphCanvas = document.getElementById('graphCanvas');
+        const sctx = simCanvas.getContext('2d');
+        const gctx = graphCanvas.getContext('2d');
+        
+        let W, H, GW, GH, people = [], paused = false;
+        let day = 0, history = [], peakInfected = 0;
+        
+        let params = {
+            population: 200,
+            beta: 0.4,
+            gamma: 0.1,
+            radius: 30,
+            initial: 3
+        };
+        
+        const STATE = { SUSCEPTIBLE: 0, INFECTED: 1, RECOVERED: 2 };
+        const COLORS = ['#3b82f6', '#ef4444', '#22c55e'];
+        
+        function resize() {
+            const c = document.getElementById('canvas-container');
+            simCanvas.width = c.clientWidth;
+            simCanvas.height = c.clientHeight * 0.65;
+            graphCanvas.width = c.clientWidth;
+            graphCanvas.height = c.clientHeight * 0.35;
+            W = simCanvas.width;
+            H = simCanvas.height;
+            GW = graphCanvas.width;
+            GH = graphCanvas.height;
+        }
+        
+        class Person {
+            constructor(x, y, state = STATE.SUSCEPTIBLE) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 2;
+                this.vy = (Math.random() - 0.5) * 2;
+                this.state = state;
+                this.infectionDay = 0;
+            }
+            
+            update() {
+                // Random walk
+                this.vx += (Math.random() - 0.5) * 0.3;
+                this.vy += (Math.random() - 0.5) * 0.3;
+                
+                // Speed limit
+                const speed = Math.sqrt(this.vx ** 2 + this.vy ** 2);
+                if (speed > 2) {
+                    this.vx *= 2 / speed;
+                    this.vy *= 2 / speed;
+                }
+                
+                this.x += this.vx;
+                this.y += this.vy;
+                
+                // Boundaries
+                if (this.x < 10) { this.x = 10; this.vx *= -1; }
+                if (this.x > W - 10) { this.x = W - 10; this.vx *= -1; }
+                if (this.y < 10) { this.y = 10; this.vy *= -1; }
+                if (this.y > H - 10) { this.y = H - 10; this.vy *= -1; }
+                
+                // Recovery
+                if (this.state === STATE.INFECTED) {
+                    if (Math.random() < params.gamma) {
+                        this.state = STATE.RECOVERED;
+                    }
+                }
+            }
+            
+            draw() {
+                // Infection radius glow for infected
+                if (this.state === STATE.INFECTED) {
+                    sctx.fillStyle = 'rgba(239, 68, 68, 0.1)';
+                    sctx.beginPath();
+                    sctx.arc(this.x, this.y, params.radius, 0, Math.PI * 2);
+                    sctx.fill();
+                }
+                
+                sctx.fillStyle = COLORS[this.state];
+                sctx.beginPath();
+                sctx.arc(this.x, this.y, 5, 0, Math.PI * 2);
+                sctx.fill();
+            }
+        }
+        
+        function init() {
+            resize();
+            people = [];
+            history = [];
+            day = 0;
+            peakInfected = 0;
+            
+            // Create population
+            for (let i = 0; i < params.population; i++) {
+                const state = i < params.initial ? STATE.INFECTED : STATE.SUSCEPTIBLE;
+                people.push(new Person(
+                    50 + Math.random() * (W - 100),
+                    50 + Math.random() * (H - 100),
+                    state
+                ));
+            }
+            
+            updateStats();
+        }
+        
+        function step() {
+            day += 0.1;
+            
+            // Update positions
+            for (const p of people) {
+                p.update();
+            }
+            
+            // Transmission
+            const infected = people.filter(p => p.state === STATE.INFECTED);
+            const susceptible = people.filter(p => p.state === STATE.SUSCEPTIBLE);
+            
+            for (const inf of infected) {
+                for (const sus of susceptible) {
+                    const dist = Math.sqrt((inf.x - sus.x) ** 2 + (inf.y - sus.y) ** 2);
+                    if (dist < params.radius && Math.random() < params.beta * 0.1) {
+                        sus.state = STATE.INFECTED;
+                        sus.infectionDay = Math.floor(day);
+                    }
+                }
+            }
+            
+            // Record history
+            if (Math.floor(day * 10) % 10 === 0) {
+                const counts = getCounts();
+                history.push(counts);
+                if (history.length > 500) history.shift();
+                
+                peakInfected = Math.max(peakInfected, counts.infected);
+            }
+            
+            updateStats();
+        }
+        
+        function getCounts() {
+            return {
+                susceptible: people.filter(p => p.state === STATE.SUSCEPTIBLE).length,
+                infected: people.filter(p => p.state === STATE.INFECTED).length,
+                recovered: people.filter(p => p.state === STATE.RECOVERED).length
+            };
+        }
+        
+        function updateStats() {
+            const counts = getCounts();
+            
+            document.getElementById('day').textContent = Math.floor(day);
+            document.getElementById('sCount').textContent = counts.susceptible;
+            document.getElementById('iCount').textContent = counts.infected;
+            document.getElementById('rCount').textContent = counts.recovered;
+            document.getElementById('r0').textContent = (params.beta / params.gamma).toFixed(2);
+            document.getElementById('peak').textContent = peakInfected;
+        }
+        
+        function drawSim() {
+            sctx.fillStyle = '#1a1a2e';
+            sctx.fillRect(0, 0, W, H);
+            
+            // Border
+            sctx.strokeStyle = '#333';
+            sctx.lineWidth = 2;
+            sctx.strokeRect(5, 5, W - 10, H - 10);
+            
+            // Draw people
+            for (const p of people) {
+                p.draw();
+            }
+            
+            // Day counter
+            sctx.fillStyle = '#666';
+            sctx.font = '14px sans-serif';
+            sctx.fillText('Day ' + Math.floor(day), 15, 25);
+        }
+        
+        function drawGraph() {
+            gctx.fillStyle = '#0f0f1a';
+            gctx.fillRect(0, 0, GW, GH);
+            
+            if (history.length < 2) return;
+            
+            const margin = 40;
+            const graphW = GW - 2 * margin;
+            const graphH = GH - 2 * margin;
+            
+            // Axes
+            gctx.strokeStyle = '#333';
+            gctx.lineWidth = 1;
+            gctx.beginPath();
+            gctx.moveTo(margin, margin);
+            gctx.lineTo(margin, GH - margin);
+            gctx.lineTo(GW - margin, GH - margin);
+            gctx.stroke();
+            
+            // Y-axis label
+            gctx.fillStyle = '#666';
+            gctx.font = '11px sans-serif';
+            gctx.fillText('Population', margin, margin - 10);
+            gctx.fillText('Time →', GW - margin - 30, GH - margin + 20);
+            
+            // Scale
+            const maxY = params.population;
+            const scaleX = graphW / Math.max(history.length - 1, 1);
+            const scaleY = graphH / maxY;
+            
+            // Draw lines for each state
+            const states = ['susceptible', 'infected', 'recovered'];
+            
+            for (let s = 0; s < 3; s++) {
+                gctx.strokeStyle = COLORS[s];
+                gctx.lineWidth = 2;
+                gctx.beginPath();
+                
+                for (let i = 0; i < history.length; i++) {
+                    const x = margin + i * scaleX;
+                    const y = GH - margin - history[i][states[s]] * scaleY;
+                    
+                    if (i === 0) gctx.moveTo(x, y);
+                    else gctx.lineTo(x, y);
+                }
+                gctx.stroke();
+            }
+            
+            // Legend in graph
+            gctx.font = '11px sans-serif';
+            gctx.fillStyle = COLORS[0]; gctx.fillText('S', GW - margin - 60, margin + 15);
+            gctx.fillStyle = COLORS[1]; gctx.fillText('I', GW - margin - 40, margin + 15);
+            gctx.fillStyle = COLORS[2]; gctx.fillText('R', GW - margin - 20, margin + 15);
+        }
+        
+        function draw() {
+            drawSim();
+            drawGraph();
+            requestAnimationFrame(draw);
+        }
+        
+        let intervalId = null;
+        function startSim() {
+            if (intervalId) clearInterval(intervalId);
+            intervalId = setInterval(() => {
+                if (!paused) {
+                    for (let i = 0; i < 2; i++) step();
+                }
+            }, 30);
+        }
+        
+        // Event listeners
+        document.getElementById('population').addEventListener('input', e => {
+            params.population = +e.target.value;
+            document.getElementById('popVal').textContent = params.population;
+        });
+        document.getElementById('beta').addEventListener('input', e => {
+            params.beta = +e.target.value;
+            document.getElementById('betaVal').textContent = params.beta.toFixed(2);
+        });
+        document.getElementById('gamma').addEventListener('input', e => {
+            params.gamma = +e.target.value;
+            document.getElementById('gammaVal').textContent = params.gamma.toFixed(2);
+        });
+        document.getElementById('radius').addEventListener('input', e => {
+            params.radius = +e.target.value;
+            document.getElementById('radiusVal').textContent = params.radius;
+        });
+        document.getElementById('initial').addEventListener('input', e => {
+            params.initial = +e.target.value;
+            document.getElementById('initialVal').textContent = params.initial;
+        });
+        
+        document.getElementById('reset').addEventListener('click', () => { init(); startSim(); });
+        document.getElementById('pause').addEventListener('click', () => {
+            paused = !paused;
+            document.getElementById('pause').textContent = paused ? 'Resume' : 'Pause';
+        });
+        document.getElementById('infect').addEventListener('click', () => {
+            const susceptible = people.filter(p => p.state === STATE.SUSCEPTIBLE);
+            if (susceptible.length > 0) {
+                susceptible[Math.floor(Math.random() * susceptible.length)].state = STATE.INFECTED;
+            }
+        });
+        document.getElementById('vaccinate').addEventListener('click', () => {
+            const susceptible = people.filter(p => p.state === STATE.SUSCEPTIBLE);
+            const toVaccinate = Math.floor(susceptible.length * 0.2);
+            for (let i = 0; i < toVaccinate; i++) {
+                const idx = Math.floor(Math.random() * susceptible.length);
+                susceptible[idx].state = STATE.RECOVERED;
+                susceptible.splice(idx, 1);
+            }
+        });
+        
+        window.addEventListener('resize', () => { resize(); });
+        init();
+        draw();
+        startSim();
+    </script>
+</body>
+</html>
