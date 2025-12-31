@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PFR - Plug Flow Reactor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #66bb6a; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #66bb6a; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #66bb6a; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Plug Flow Reactor</h1>
+            <p class="description">Tubular reactor with no axial mixing. Concentration varies along length. Higher conversion than CSTR for same volume (positive order). Design equation: dFA/dV = rA.</p>
+
+            <div class="control-group">
+                <label>Feed Concentration: <span id="feedVal">1.0</span> M</label>
+                <input type="range" id="feedConc" min="0.1" max="2.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>Flow Rate: <span id="flowVal">10</span> L/min</label>
+                <input type="range" id="flowRate" min="1" max="50" value="10">
+            </div>
+
+            <div class="control-group">
+                <label>Reactor Length: <span id="lenVal">5</span> m</label>
+                <input type="range" id="length" min="1" max="20" value="5">
+            </div>
+
+            <div class="control-group">
+                <label>Rate Constant k: <span id="kVal">0.5</span> min⁻¹</label>
+                <input type="range" id="rateConst" min="0.1" max="2" step="0.1" value="0.5">
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="start">Start Reactor</button>
+
+            <div class="stats">
+                <div>Residence Time (τ): <span id="tau">5</span> min</div>
+                <div>Conversion (X): <span id="conversion">0</span>%</div>
+                <div>Outlet Conc: <span id="outletConc">0</span> M</div>
+                <div>Damköhler (Da): <span id="damkohler">2.5</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let time = 0;
+
+        let feedConc = 1.0;
+        let flowRate = 10;
+        let reactorLength = 5;
+        let rateConstant = 0.5;
+
+        let running = false;
+        let particles = [];
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            running = false;
+            particles = [];
+            updateStats();
+        }
+
+        function calculateConversion() {
+            // For first-order reaction in PFR: CA = CA0 * exp(-kτ)
+            const volume = reactorLength * 10; // Assume 10 L per meter
+            const tau = volume / flowRate;
+            const Da = rateConstant * tau;
+            const outletConc = feedConc * Math.exp(-Da);
+            const conversion = 1 - outletConc / feedConc;
+            return { tau, Da, outletConc, conversion };
+        }
+
+        function getConcentrationAtPosition(x) {
+            // Concentration profile along reactor
+            const pipeStart = 100;
+            const pipeEnd = width - 380;
+            const position = (x - pipeStart) / (pipeEnd - pipeStart);
+
+            if (position < 0) return feedConc;
+            if (position > 1) return calculateConversion().outletConc;
+
+            const tau_x = (reactorLength * 10 / flowRate) * position;
+            return feedConc * Math.exp(-rateConstant * tau_x);
+        }
+
+        function step() {
+            if (!running) return;
+
+            time += 0.016;
+
+            const pipeStart = 100;
+            const pipeEnd = width - 380;
+            const pipeY = height / 2;
+            const pipeH = 40;
+
+            // Add new particles at inlet
+            if (Math.random() < flowRate / 50) {
+                particles.push({
+                    x: pipeStart,
+                    y: pipeY - pipeH / 2 + Math.random() * pipeH,
+                    reacted: false,
+                    reactionProgress: 0
+                });
+            }
+
+            // Update particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+
+                // Flow velocity (plug flow)
+                const velocity = (pipeEnd - pipeStart) / (reactorLength * 10 / flowRate * 60);
+                p.x += velocity;
+
+                // Reaction probability increases with position (first order)
+                const localConc = getConcentrationAtPosition(p.x);
+                const reactionProb = rateConstant * 0.01 * (1 - p.reactionProgress);
+
+                if (!p.reacted && Math.random() < reactionProb) {
+                    p.reactionProgress += 0.1;
+                    if (p.reactionProgress >= 1) {
+                        p.reacted = true;
+                    }
+                }
+
+                // Remove if exited
+                if (p.x > pipeEnd + 50) {
+                    particles.splice(i, 1);
+                }
+            }
+
+            updateStats();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            drawReactor();
+            drawConcentrationProfile();
+            drawParticles();
+            drawDesignEquation();
+            drawComparisonPlot();
+        }
+
+        function drawReactor() {
+            const pipeStart = 100;
+            const pipeEnd = width - 380;
+            const pipeY = height / 2;
+            const pipeH = 40;
+
+            // Title
+            ctx.fillStyle = '#66bb6a';
+            ctx.font = '14px sans-serif';
+            ctx.fillText('Plug Flow Reactor (PFR)', 100, 40);
+
+            // Tube with concentration gradient
+            for (let x = pipeStart; x < pipeEnd; x += 2) {
+                const conc = getConcentrationAtPosition(x);
+                const concRatio = conc / feedConc;
+
+                // Color gradient from green (unreacted) to red (reacted)
+                const r = Math.floor(102 + (1 - concRatio) * 150);
+                const g = Math.floor(187 * concRatio + 50);
+                const b = Math.floor(106 * concRatio + 50);
+
+                ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.7)`;
+                ctx.fillRect(x, pipeY - pipeH / 2, 3, pipeH);
+            }
+
+            // Pipe outline
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(pipeStart, pipeY - pipeH / 2, pipeEnd - pipeStart, pipeH);
+
+            // Inlet
+            ctx.strokeStyle = '#42a5f5';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(pipeStart - 50, pipeY);
+            ctx.lineTo(pipeStart, pipeY);
+            ctx.stroke();
+
+            ctx.fillStyle = '#aaa';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Feed', pipeStart - 45, pipeY - 30);
+            ctx.fillText('CA0 = ' + feedConc.toFixed(1) + ' M', pipeStart - 55, pipeY - 15);
+
+            // Outlet
+            ctx.strokeStyle = '#ef5350';
+            ctx.beginPath();
+            ctx.moveTo(pipeEnd, pipeY);
+            ctx.lineTo(pipeEnd + 50, pipeY);
+            ctx.stroke();
+
+            const ss = calculateConversion();
+            ctx.fillText('Product', pipeEnd + 10, pipeY - 30);
+            ctx.fillText('CA = ' + ss.outletConc.toFixed(3) + ' M', pipeEnd + 5, pipeY - 15);
+
+            // Length annotation
+            ctx.strokeStyle = '#888';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(pipeStart, pipeY + pipeH / 2 + 20);
+            ctx.lineTo(pipeEnd, pipeY + pipeH / 2 + 20);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#66bb6a';
+            ctx.fillText('L = ' + reactorLength + ' m', (pipeStart + pipeEnd) / 2 - 20, pipeY + pipeH / 2 + 40);
+
+            // Flow direction arrows
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            for (let x = pipeStart + 50; x < pipeEnd - 30; x += 80) {
+                ctx.beginPath();
+                ctx.moveTo(x, pipeY);
+                ctx.lineTo(x + 20, pipeY);
+                ctx.moveTo(x + 15, pipeY - 5);
+                ctx.lineTo(x + 20, pipeY);
+                ctx.lineTo(x + 15, pipeY + 5);
+                ctx.stroke();
+            }
+        }
+
+        function drawConcentrationProfile() {
+            const plotX = 100;
+            const plotY = height / 2 + 100;
+            const plotW = width - 500;
+            const plotH = 100;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(plotX - 10, plotY - 10, plotW + 20, plotH + 40);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Concentration Profile Along Reactor', plotX, plotY - 15);
+
+            // Axes
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(plotX, plotY);
+            ctx.lineTo(plotX, plotY + plotH);
+            ctx.lineTo(plotX + plotW, plotY + plotH);
+            ctx.stroke();
+
+            // Concentration curve
+            ctx.strokeStyle = '#66bb6a';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            for (let z = 0; z <= 1; z += 0.02) {
+                const x_pos = 100 + z * (width - 480);
+                const conc = getConcentrationAtPosition(x_pos);
+                const concNorm = conc / feedConc;
+
+                const x = plotX + z * plotW;
+                const y = plotY + plotH - concNorm * plotH;
+
+                if (z === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Labels
+            ctx.fillStyle = '#888';
+            ctx.font = '9px sans-serif';
+            ctx.fillText('Position (z/L)', plotX + plotW / 2 - 30, plotY + plotH + 15);
+            ctx.fillText('CA/CA0', plotX - 35, plotY + plotH / 2);
+            ctx.fillText('1.0', plotX - 20, plotY + 5);
+            ctx.fillText('0', plotX - 10, plotY + plotH + 5);
+        }
+
+        function drawParticles() {
+            for (const p of particles) {
+                // Color based on reaction progress
+                const r = Math.floor(102 + p.reactionProgress * 150);
+                const g = Math.floor(187 * (1 - p.reactionProgress));
+                const b = Math.floor(106 * (1 - p.reactionProgress));
+
+                ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function drawDesignEquation() {
+            const diagX = width - 280;
+            const diagY = 80;
+            const diagW = 180;
+            const diagH = 140;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(diagX - 10, diagY - 20, diagW + 20, diagH + 40);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('PFR Design Equations', diagX, diagY - 5);
+
+            ctx.fillStyle = '#aaa';
+            ctx.font = '10px sans-serif';
+
+            // Differential balance
+            ctx.fillText('Mole Balance:', diagX + 10, diagY + 20);
+            ctx.fillText('dFA/dV = rA', diagX + 10, diagY + 38);
+
+            // For first order
+            ctx.fillText('First Order (rA = -kCA):', diagX + 10, diagY + 60);
+            ctx.fillText('CA = CA0 · exp(-kτ)', diagX + 10, diagY + 78);
+
+            // Conversion
+            ctx.fillText('Conversion:', diagX + 10, diagY + 100);
+            ctx.fillText('X = 1 - exp(-kτ)', diagX + 10, diagY + 118);
+
+            const ss = calculateConversion();
+            ctx.fillStyle = '#66bb6a';
+            ctx.fillText('Da = kτ = ' + ss.Da.toFixed(2), diagX + 10, diagY + 140);
+        }
+
+        function drawComparisonPlot() {
+            const plotX = width - 280;
+            const plotY = height / 2 + 20;
+            const plotW = 150;
+            const plotH = 100;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(plotX - 10, plotY - 20, plotW + 40, plotH + 40);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('PFR vs CSTR', plotX, plotY - 5);
+
+            // PFR curve: X = 1 - exp(-Da)
+            ctx.strokeStyle = '#66bb6a';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let Da = 0; Da <= 5; Da += 0.1) {
+                const X = 1 - Math.exp(-Da);
+                const x = plotX + (Da / 5) * plotW;
+                const y = plotY + plotH - X * plotH;
+                if (Da === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // CSTR curve: X = Da/(1+Da)
+            ctx.strokeStyle = '#26c6da';
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            for (let Da = 0; Da <= 5; Da += 0.1) {
+                const X = Da / (1 + Da);
+                const x = plotX + (Da / 5) * plotW;
+                const y = plotY + plotH - X * plotH;
+                if (Da === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Current point
+            const ss = calculateConversion();
+            const currentX = plotX + (Math.min(ss.Da, 5) / 5) * plotW;
+            const currentY = plotY + plotH - ss.conversion * plotH;
+
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(currentX, currentY, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Legend
+            ctx.fillStyle = '#66bb6a';
+            ctx.font = '8px sans-serif';
+            ctx.fillText('PFR', plotX + plotW + 5, plotY + 15);
+            ctx.fillStyle = '#26c6da';
+            ctx.fillText('CSTR', plotX + plotW + 5, plotY + 28);
+
+            ctx.fillStyle = '#888';
+            ctx.fillText('Da', plotX + plotW / 2, plotY + plotH + 12);
+        }
+
+        function updateStats() {
+            const ss = calculateConversion();
+
+            document.getElementById('tau').textContent = ss.tau.toFixed(1);
+            document.getElementById('conversion').textContent = (ss.conversion * 100).toFixed(1);
+            document.getElementById('outletConc').textContent = ss.outletConc.toFixed(3);
+            document.getElementById('damkohler').textContent = ss.Da.toFixed(2);
+        }
+
+        function animate() {
+            step();
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('feedConc').addEventListener('input', e => {
+            feedConc = parseFloat(e.target.value);
+            document.getElementById('feedVal').textContent = feedConc.toFixed(1);
+            updateStats();
+        });
+
+        document.getElementById('flowRate').addEventListener('input', e => {
+            flowRate = parseInt(e.target.value);
+            document.getElementById('flowVal').textContent = flowRate;
+            updateStats();
+        });
+
+        document.getElementById('length').addEventListener('input', e => {
+            reactorLength = parseInt(e.target.value);
+            document.getElementById('lenVal').textContent = reactorLength;
+            updateStats();
+        });
+
+        document.getElementById('rateConst').addEventListener('input', e => {
+            rateConstant = parseFloat(e.target.value);
+            document.getElementById('kVal').textContent = rateConstant.toFixed(1);
+            updateStats();
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('start').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('start').textContent = running ? 'Pause' : 'Start Reactor';
+        });
+
+        window.addEventListener('resize', init);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

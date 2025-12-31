@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thin Film Growth - MBE</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #80cbc4; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #80cbc4; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #80cbc4; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        select { width: 100%; padding: 5px; margin-top: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Thin Film Growth - MBE</h1>
+            <p class="description">Molecular Beam Epitaxy grows crystalline films one atomic layer at a time. Growth modes: layer-by-layer (Frank-van der Merwe), island (Volmer-Weber), or layer+island (Stranski-Krastanov).</p>
+
+            <div class="control-group">
+                <label>Deposition Rate: <span id="depVal">1.0</span> ML/s</label>
+                <input type="range" id="deposition" min="0.1" max="3.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">500</span> K</label>
+                <input type="range" id="temperature" min="200" max="800" value="500">
+            </div>
+
+            <div class="control-group">
+                <label>Diffusion Barrier: <span id="barrierVal">0.5</span> eV</label>
+                <input type="range" id="barrier" min="0.1" max="1.5" step="0.1" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Growth Mode:</label>
+                <select id="growthMode">
+                    <option value="FM">Frank-van der Merwe (layer)</option>
+                    <option value="VW">Volmer-Weber (island)</option>
+                    <option value="SK">Stranski-Krastanov (layer+island)</option>
+                </select>
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Coverage: <span id="coverage">0</span>%</div>
+                <div>Layers: <span id="layers">0</span></div>
+                <div>Islands: <span id="islands">0</span></div>
+                <div>Roughness: <span id="roughness">0</span> ML</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let depositionRate = 1.0;
+        let temperature = 500;
+        let diffusionBarrier = 0.5;
+        let growthMode = 'FM';
+
+        // Lattice
+        let lattice = [];
+        let atoms = [];
+        const CELL_SIZE = 8;
+        let cols, rows;
+        const SUBSTRATE_LAYERS = 3;
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+            cols = Math.floor(width / CELL_SIZE);
+            rows = Math.floor(height / CELL_SIZE);
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            atoms = [];
+
+            // Initialize lattice (heights at each x position)
+            lattice = new Array(cols).fill(0);
+
+            updateStats();
+        }
+
+        function getDiffusionRate() {
+            // Arrhenius diffusion rate
+            const kB = 8.617e-5; // eV/K
+            const prefactor = 1e12; // attempt frequency
+            return prefactor * Math.exp(-diffusionBarrier / (kB * temperature));
+        }
+
+        function step() {
+            time += 0.01;
+
+            // Deposit new atoms
+            if (Math.random() < depositionRate * 0.05) {
+                const x = Math.floor(Math.random() * cols);
+                depositAtom(x);
+            }
+
+            // Diffusion
+            const diffRate = getDiffusionRate();
+            const numDiffusionAttempts = Math.min(100, Math.floor(diffRate * 0.00001));
+
+            for (let i = 0; i < numDiffusionAttempts; i++) {
+                // Pick random surface atom
+                const x = Math.floor(Math.random() * cols);
+                const h = lattice[x];
+
+                if (h > 0) {
+                    diffuseAtom(x, h);
+                }
+            }
+
+            updateStats();
+        }
+
+        function depositAtom(x) {
+            // Drop atom at position x
+            const h = lattice[x];
+
+            // Growth mode affects sticking probability
+            let stick = true;
+
+            if (growthMode === 'FM') {
+                // Layer-by-layer: prefers to complete layers
+                // Higher sticking at step edges
+                stick = true;
+            } else if (growthMode === 'VW') {
+                // Island growth: atoms stick to other deposited atoms
+                // Not to bare substrate
+                if (h === 0) {
+                    // Check if near existing atoms
+                    const leftH = x > 0 ? lattice[x - 1] : 0;
+                    const rightH = x < cols - 1 ? lattice[x + 1] : 0;
+                    if (leftH === 0 && rightH === 0) {
+                        stick = Math.random() < 0.3; // Low sticking on substrate
+                    }
+                }
+            } else if (growthMode === 'SK') {
+                // Stranski-Krastanov: layer then islands
+                if (h >= 2) {
+                    // After wetting layer, island formation
+                    // Prefers growth on existing islands
+                    const leftH = x > 0 ? lattice[x - 1] : 0;
+                    const rightH = x < cols - 1 ? lattice[x + 1] : 0;
+                    if (h <= leftH || h <= rightH) {
+                        stick = Math.random() < 0.8;
+                    }
+                }
+            }
+
+            if (stick) {
+                lattice[x]++;
+                atoms.push({
+                    x: x * CELL_SIZE + CELL_SIZE / 2,
+                    y: height - (SUBSTRATE_LAYERS + lattice[x]) * CELL_SIZE,
+                    col: x,
+                    layer: lattice[x]
+                });
+            }
+        }
+
+        function diffuseAtom(x, h) {
+            // Surface diffusion: atom hops to adjacent sites
+            const leftH = x > 0 ? lattice[x - 1] : Infinity;
+            const rightH = x < cols - 1 ? lattice[x + 1] : Infinity;
+
+            // Downhill diffusion is preferred
+            let options = [];
+
+            if (x > 0 && leftH < h) {
+                options.push({ dx: -1, prob: 0.5 });
+            }
+            if (x < cols - 1 && rightH < h) {
+                options.push({ dx: 1, prob: 0.5 });
+            }
+
+            // Ehrlich-Schwoebel barrier: harder to go down steps
+            if (options.length > 0) {
+                const move = options[Math.floor(Math.random() * options.length)];
+                const newX = x + move.dx;
+
+                // Move atom
+                lattice[x]--;
+                lattice[newX]++;
+
+                // Update atom position
+                for (const atom of atoms) {
+                    if (atom.col === x && atom.layer === h) {
+                        atom.col = newX;
+                        atom.layer = lattice[newX];
+                        atom.x = newX * CELL_SIZE + CELL_SIZE / 2;
+                        atom.y = height - (SUBSTRATE_LAYERS + lattice[newX]) * CELL_SIZE;
+                        break;
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            // Vacuum chamber effect
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.fillRect(0, 0, width, height - (SUBSTRATE_LAYERS + 10) * CELL_SIZE);
+
+            // Molecular beam
+            ctx.fillStyle = 'rgba(128, 203, 196, 0.1)';
+            const beamWidth = width * 0.6;
+            ctx.beginPath();
+            ctx.moveTo(width / 2, 0);
+            ctx.lineTo(width / 2 - beamWidth / 2, height - SUBSTRATE_LAYERS * CELL_SIZE);
+            ctx.lineTo(width / 2 + beamWidth / 2, height - SUBSTRATE_LAYERS * CELL_SIZE);
+            ctx.closePath();
+            ctx.fill();
+
+            // Substrate
+            ctx.fillStyle = '#37474f';
+            ctx.fillRect(0, height - SUBSTRATE_LAYERS * CELL_SIZE, width, SUBSTRATE_LAYERS * CELL_SIZE);
+
+            // Substrate grid
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+            ctx.lineWidth = 1;
+            for (let x = 0; x < width; x += CELL_SIZE) {
+                ctx.beginPath();
+                ctx.moveTo(x, height - SUBSTRATE_LAYERS * CELL_SIZE);
+                ctx.lineTo(x, height);
+                ctx.stroke();
+            }
+
+            // Draw deposited atoms
+            for (const atom of atoms) {
+                // Color by layer
+                const hue = (atom.layer * 30) % 360;
+                ctx.fillStyle = `hsl(${hue}, 60%, 60%)`;
+
+                ctx.beginPath();
+                ctx.arc(atom.x, atom.y + CELL_SIZE / 2, CELL_SIZE / 2 - 1, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw surface profile
+            ctx.strokeStyle = '#80cbc4';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let x = 0; x < cols; x++) {
+                const surfaceY = height - (SUBSTRATE_LAYERS + lattice[x]) * CELL_SIZE;
+                if (x === 0) {
+                    ctx.moveTo(x * CELL_SIZE, surfaceY);
+                } else {
+                    ctx.lineTo(x * CELL_SIZE, surfaceY);
+                }
+            }
+            ctx.stroke();
+
+            // RHEED oscillations (inset)
+            drawRHEED();
+
+            // Labels
+            ctx.fillStyle = '#80cbc4';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('MBE Chamber', 10, 30);
+            ctx.fillText(`Mode: ${growthMode}`, 10, 50);
+        }
+
+        function drawRHEED() {
+            // RHEED intensity oscillations
+            const insetX = width - 220;
+            const insetY = 20;
+            const insetW = 200;
+            const insetH = 100;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(insetX, insetY, insetW, insetH);
+
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(insetX, insetY, insetW, insetH);
+
+            // Calculate coverage of top layer
+            const maxH = Math.max(...lattice);
+            let topLayerCoverage = 0;
+            let partialCount = 0;
+
+            for (let x = 0; x < cols; x++) {
+                if (lattice[x] === maxH) {
+                    topLayerCoverage++;
+                } else if (lattice[x] === maxH - 1) {
+                    partialCount++;
+                }
+            }
+            topLayerCoverage /= cols;
+
+            // RHEED oscillation (intensity vs coverage)
+            // Intensity dips at half coverage, peaks at 0 and 1
+            const intensity = Math.cos(Math.PI * topLayerCoverage) * 0.5 + 0.5;
+
+            ctx.fillStyle = '#80cbc4';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('RHEED Intensity', insetX + 5, insetY + 15);
+
+            // Draw oscillation wave
+            ctx.strokeStyle = '#4db6ac';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            const historyLength = 100;
+            for (let i = 0; i < historyLength; i++) {
+                const t = (time * 50 + i) / 10;
+                const osc = Math.cos(t * Math.PI) * 0.3 + 0.5;
+                const x = insetX + 10 + i * (insetW - 20) / historyLength;
+                const y = insetY + insetH - 20 - osc * (insetH - 40);
+
+                if (i === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            }
+            ctx.stroke();
+
+            // Current intensity marker
+            const markerY = insetY + insetH - 20 - intensity * (insetH - 40);
+            ctx.fillStyle = '#ff5722';
+            ctx.beginPath();
+            ctx.arc(insetX + insetW - 15, markerY, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function updateStats() {
+            // Calculate statistics
+            const totalAtoms = atoms.length;
+            const coverage = (totalAtoms / cols) * 100;
+
+            const avgHeight = lattice.reduce((a, b) => a + b, 0) / cols;
+            const variance = lattice.reduce((sum, h) => sum + Math.pow(h - avgHeight, 2), 0) / cols;
+            const roughness = Math.sqrt(variance);
+
+            // Count islands
+            let islands = 0;
+            let inIsland = false;
+            for (let x = 0; x < cols; x++) {
+                if (lattice[x] > avgHeight + 0.5) {
+                    if (!inIsland) {
+                        islands++;
+                        inIsland = true;
+                    }
+                } else {
+                    inIsland = false;
+                }
+            }
+
+            document.getElementById('coverage').textContent = coverage.toFixed(1);
+            document.getElementById('layers').textContent = Math.floor(avgHeight);
+            document.getElementById('islands').textContent = islands;
+            document.getElementById('roughness').textContent = roughness.toFixed(2);
+        }
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < 3; i++) step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('deposition').addEventListener('input', e => {
+            depositionRate = parseFloat(e.target.value);
+            document.getElementById('depVal').textContent = depositionRate;
+        });
+
+        document.getElementById('temperature').addEventListener('input', e => {
+            temperature = parseInt(e.target.value);
+            document.getElementById('tempVal').textContent = temperature;
+        });
+
+        document.getElementById('barrier').addEventListener('input', e => {
+            diffusionBarrier = parseFloat(e.target.value);
+            document.getElementById('barrierVal').textContent = diffusionBarrier;
+        });
+
+        document.getElementById('growthMode').addEventListener('change', e => {
+            growthMode = e.target.value;
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', init);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

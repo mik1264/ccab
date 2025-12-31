@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Regulatory Evolution - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #f59e0b; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #f59e0b; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #f59e0b; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #d97706; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #f59e0b; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #f59e0b; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(245,158,11,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #f59e0b; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🎛️ Regulatory Evolution</h1>
+            <p class="description">
+                Morphological diversity evolves through changes in gene regulatory networks (GRNs).
+                Cis-regulatory elements (enhancers) control when/where genes are expressed.
+                Most evolution is regulatory, not protein-coding changes.
+            </p>
+
+            <div class="control-group">
+                <label>Population Size: <span class="value-display" id="popValue">80</span></label>
+                <input type="range" id="popSlider" min="30" max="150" value="80">
+            </div>
+
+            <div class="control-group">
+                <label>CRE Mutation Rate: <span class="value-display" id="creValue">0.05</span></label>
+                <input type="range" id="creSlider" min="0.01" max="0.2" step="0.01" value="0.05">
+            </div>
+
+            <div class="control-group">
+                <label>Network Rewiring: <span class="value-display" id="rewireValue">0.02</span></label>
+                <input type="range" id="rewireSlider" min="0" max="0.1" step="0.01" value="0.02">
+            </div>
+
+            <div class="control-group">
+                <label>Environmental Shift: <span class="value-display" id="envValue">0</span></label>
+                <input type="range" id="envSlider" min="0" max="1" step="0.1" value="0">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Mean Fitness: <span id="meanFitness">1.00</span></div>
+                <div>Network Edges: <span id="edges">0</span></div>
+                <div>Expression Diversity: <span id="diversity">0.00</span></div>
+                <div>Phenotype Distance: <span id="phenoDist">0.00</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Evo-Devo:</strong> Animals share conserved "toolkit" genes (Hox, Pax, etc.).
+                Morphological diversity arises from rewiring regulatory connections.
+                CREs are modular - changes in one tissue don't affect others.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let population = [];
+        let fitnessHistory = [];
+        let diversityHistory = [];
+
+        let popSize = 80;
+        let creMutRate = 0.05;
+        let rewireRate = 0.02;
+        let envShift = 0;
+
+        const NUM_GENES = 8;
+        const NUM_TISSUES = 4;
+
+        // Target expression patterns for optimal fitness
+        let targetExpression = [];
+        function initTarget() {
+            targetExpression = [];
+            for (let t = 0; t < NUM_TISSUES; t++) {
+                const pattern = [];
+                for (let g = 0; g < NUM_GENES; g++) {
+                    pattern.push(Math.random() > 0.5 ? 1 : 0);
+                }
+                targetExpression.push(pattern);
+            }
+        }
+
+        class GRN {
+            constructor() {
+                // Regulatory connections: TF -> target gene weights per tissue
+                this.connections = []; // [tissue][source][target]
+                this.creStrengths = []; // [tissue][gene] - CRE activity
+
+                for (let t = 0; t < NUM_TISSUES; t++) {
+                    this.connections[t] = [];
+                    this.creStrengths[t] = [];
+
+                    for (let i = 0; i < NUM_GENES; i++) {
+                        this.connections[t][i] = [];
+                        for (let j = 0; j < NUM_GENES; j++) {
+                            // Sparse initial connections
+                            this.connections[t][i][j] = Math.random() < 0.2 ? (Math.random() - 0.5) : 0;
+                        }
+                        this.creStrengths[t][i] = 0.5 + Math.random() * 0.5;
+                    }
+                }
+            }
+
+            getExpression() {
+                // Compute steady-state expression for each tissue
+                const expression = [];
+
+                for (let t = 0; t < NUM_TISSUES; t++) {
+                    let state = new Array(NUM_GENES).fill(0.5);
+
+                    // Iterate to steady state
+                    for (let iter = 0; iter < 10; iter++) {
+                        const newState = [];
+                        for (let g = 0; g < NUM_GENES; g++) {
+                            let input = 0;
+                            for (let s = 0; s < NUM_GENES; s++) {
+                                input += this.connections[t][s][g] * state[s];
+                            }
+                            // Sigmoid activation with CRE modulation
+                            newState[g] = this.creStrengths[t][g] * (1 / (1 + Math.exp(-input * 2)));
+                        }
+                        state = newState;
+                    }
+
+                    expression.push(state);
+                }
+
+                return expression;
+            }
+
+            get fitness() {
+                const expr = this.getExpression();
+                let fit = 1;
+
+                for (let t = 0; t < NUM_TISSUES; t++) {
+                    for (let g = 0; g < NUM_GENES; g++) {
+                        const target = targetExpression[t][g];
+                        const actual = expr[t][g];
+                        const diff = Math.abs(target - actual);
+                        fit *= (1 - diff * 0.1);
+                    }
+                }
+
+                return Math.max(0.01, fit);
+            }
+
+            get edgeCount() {
+                let count = 0;
+                for (let t = 0; t < NUM_TISSUES; t++) {
+                    for (let i = 0; i < NUM_GENES; i++) {
+                        for (let j = 0; j < NUM_GENES; j++) {
+                            if (Math.abs(this.connections[t][i][j]) > 0.1) count++;
+                        }
+                    }
+                }
+                return count;
+            }
+
+            replicate() {
+                const child = new GRN();
+
+                for (let t = 0; t < NUM_TISSUES; t++) {
+                    for (let i = 0; i < NUM_GENES; i++) {
+                        // CRE mutations
+                        child.creStrengths[t][i] = this.creStrengths[t][i];
+                        if (Math.random() < creMutRate) {
+                            child.creStrengths[t][i] += (Math.random() - 0.5) * 0.2;
+                            child.creStrengths[t][i] = Math.max(0, Math.min(1, child.creStrengths[t][i]));
+                        }
+
+                        for (let j = 0; j < NUM_GENES; j++) {
+                            child.connections[t][i][j] = this.connections[t][i][j];
+
+                            // Weight mutations
+                            if (Math.random() < creMutRate * 0.5) {
+                                child.connections[t][i][j] += (Math.random() - 0.5) * 0.1;
+                            }
+
+                            // Network rewiring
+                            if (Math.random() < rewireRate) {
+                                if (Math.abs(child.connections[t][i][j]) < 0.1) {
+                                    // Create new edge
+                                    child.connections[t][i][j] = (Math.random() - 0.5);
+                                } else {
+                                    // Remove edge
+                                    child.connections[t][i][j] = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return child;
+            }
+        }
+
+        function initPopulation() {
+            initTarget();
+            population = [];
+            fitnessHistory = [];
+            diversityHistory = [];
+
+            for (let i = 0; i < popSize; i++) {
+                population.push(new GRN());
+            }
+        }
+
+        function shiftEnvironment() {
+            if (envShift > 0 && Math.random() < envShift * 0.01) {
+                // Randomly flip some target expression values
+                const tissue = Math.floor(Math.random() * NUM_TISSUES);
+                const gene = Math.floor(Math.random() * NUM_GENES);
+                targetExpression[tissue][gene] = 1 - targetExpression[tissue][gene];
+            }
+        }
+
+        function reproduce() {
+            const totalFit = population.reduce((sum, g) => sum + g.fitness, 0);
+            const newPop = [];
+
+            const selectParent = () => {
+                let r = Math.random() * totalFit;
+                for (const g of population) {
+                    r -= g.fitness;
+                    if (r <= 0) return g;
+                }
+                return population[population.length - 1];
+            };
+
+            while (newPop.length < popSize) {
+                const parent = selectParent();
+                newPop.push(parent.replicate());
+            }
+
+            population = newPop;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+            shiftEnvironment();
+            reproduce();
+
+            const meanFit = population.reduce((sum, g) => sum + g.fitness, 0) / popSize;
+
+            // Calculate expression diversity
+            const expressions = population.map(g => g.getExpression());
+            let diversity = 0;
+            for (let i = 0; i < Math.min(20, popSize); i++) {
+                for (let j = i + 1; j < Math.min(20, popSize); j++) {
+                    for (let t = 0; t < NUM_TISSUES; t++) {
+                        for (let g = 0; g < NUM_GENES; g++) {
+                            diversity += Math.abs(expressions[i][t][g] - expressions[j][t][g]);
+                        }
+                    }
+                }
+            }
+            diversity /= (20 * 19 / 2 * NUM_TISSUES * NUM_GENES);
+
+            fitnessHistory.push(meanFit);
+            diversityHistory.push(diversity);
+
+            if (fitnessHistory.length > 400) {
+                fitnessHistory.shift();
+                diversityHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2;
+
+            // Gene regulatory network visualization
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Gene Regulatory Network (Best Individual)', padding, 25);
+
+            const best = population.reduce((a, b) => a.fitness > b.fitness ? a : b);
+            const expr = best.getExpression();
+
+            // Draw genes as nodes arranged in circle per tissue
+            const tissueLabels = ['Head', 'Thorax', 'Abdomen', 'Limb'];
+            const tissueWidth = width / NUM_TISSUES;
+
+            for (let t = 0; t < NUM_TISSUES; t++) {
+                const centerX = padding + t * tissueWidth + tissueWidth / 2;
+                const centerY = padding + height / 2;
+                const radius = Math.min(tissueWidth / 3, height / 3);
+
+                ctx.fillStyle = '#555';
+                ctx.fillText(tissueLabels[t], centerX - 20, padding + 10);
+
+                // Draw connections
+                for (let i = 0; i < NUM_GENES; i++) {
+                    const angle1 = (i / NUM_GENES) * Math.PI * 2;
+                    const x1 = centerX + Math.cos(angle1) * radius;
+                    const y1 = centerY + Math.sin(angle1) * radius;
+
+                    for (let j = 0; j < NUM_GENES; j++) {
+                        const weight = best.connections[t][i][j];
+                        if (Math.abs(weight) > 0.1) {
+                            const angle2 = (j / NUM_GENES) * Math.PI * 2;
+                            const x2 = centerX + Math.cos(angle2) * radius;
+                            const y2 = centerY + Math.sin(angle2) * radius;
+
+                            ctx.strokeStyle = weight > 0 ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)';
+                            ctx.lineWidth = Math.abs(weight) * 2;
+                            ctx.beginPath();
+                            ctx.moveTo(x1, y1);
+                            ctx.lineTo(x2, y2);
+                            ctx.stroke();
+                        }
+                    }
+                }
+
+                // Draw gene nodes
+                for (let g = 0; g < NUM_GENES; g++) {
+                    const angle = (g / NUM_GENES) * Math.PI * 2;
+                    const x = centerX + Math.cos(angle) * radius;
+                    const y = centerY + Math.sin(angle) * radius;
+
+                    const exprLevel = expr[t][g];
+                    const targetLevel = targetExpression[t][g];
+
+                    // Node color based on expression
+                    ctx.fillStyle = `hsl(${40 + exprLevel * 30}, 80%, ${30 + exprLevel * 40}%)`;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 8, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // Target indicator
+                    ctx.strokeStyle = targetLevel > 0.5 ? '#22c55e' : '#ef4444';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Fitness over time
+            const chartY = padding * 2 + height;
+            ctx.fillStyle = '#888';
+            ctx.fillText('Fitness & Expression Diversity Over Time', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            if (fitnessHistory.length > 1) {
+                ctx.strokeStyle = '#f59e0b';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < fitnessHistory.length; i++) {
+                    const x = padding + (i / fitnessHistory.length) * width;
+                    const y = chartY + height - fitnessHistory[i] * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Diversity
+                const maxDiv = Math.max(...diversityHistory) * 1.1 || 1;
+                ctx.strokeStyle = '#a855f7';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                for (let i = 0; i < diversityHistory.length; i++) {
+                    const x = padding + (i / diversityHistory.length) * width;
+                    const y = chartY + height - (diversityHistory[i] / maxDiv) * height * 0.8;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Legend
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(padding + width - 100, chartY + 10, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Fitness', padding + width - 80, chartY + 18);
+            ctx.fillStyle = '#a855f7';
+            ctx.fillRect(padding + width - 100, chartY + 25, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Diversity', padding + width - 80, chartY + 33);
+        }
+
+        function updateStats() {
+            const meanFit = population.reduce((sum, g) => sum + g.fitness, 0) / popSize;
+            const best = population.reduce((a, b) => a.fitness > b.fitness ? a : b);
+            const expr = best.getExpression();
+
+            let phenoDist = 0;
+            for (let t = 0; t < NUM_TISSUES; t++) {
+                for (let g = 0; g < NUM_GENES; g++) {
+                    phenoDist += Math.abs(targetExpression[t][g] - expr[t][g]);
+                }
+            }
+            phenoDist /= (NUM_TISSUES * NUM_GENES);
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('meanFitness').textContent = meanFit.toFixed(4);
+            document.getElementById('edges').textContent = best.edgeCount;
+            document.getElementById('diversity').textContent = (diversityHistory[diversityHistory.length - 1] || 0).toFixed(3);
+            document.getElementById('phenoDist').textContent = phenoDist.toFixed(3);
+        }
+
+        document.getElementById('popSlider').addEventListener('input', (e) => {
+            popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = popSize;
+        });
+
+        document.getElementById('creSlider').addEventListener('input', (e) => {
+            creMutRate = parseFloat(e.target.value);
+            document.getElementById('creValue').textContent = creMutRate.toFixed(2);
+        });
+
+        document.getElementById('rewireSlider').addEventListener('input', (e) => {
+            rewireRate = parseFloat(e.target.value);
+            document.getElementById('rewireValue').textContent = rewireRate.toFixed(2);
+        });
+
+        document.getElementById('envSlider').addEventListener('input', (e) => {
+            envShift = parseFloat(e.target.value);
+            document.getElementById('envValue').textContent = envShift.toFixed(1);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recrystallization - Static and Dynamic</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #e57373; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        select { width: 100%; padding: 8px; background: #2a2a3e; color: #e8e6e1; border: 1px solid #444; border-radius: 4px; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #e57373; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { opacity: 0.9; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #e57373; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Recrystallization</h1>
+            <p class="description">Static recrystallization occurs during annealing of cold-worked metal. New strain-free grains nucleate and grow, consuming the deformed matrix. Dynamic recrystallization occurs during hot deformation.</p>
+
+            <div class="control-group">
+                <label>Mode:</label>
+                <select id="mode">
+                    <option value="static">Static Recrystallization (Annealing)</option>
+                    <option value="dynamic">Dynamic Recrystallization (Hot Working)</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">700</span>°C</label>
+                <input type="range" id="temperature" min="400" max="1000" value="700">
+            </div>
+
+            <div class="control-group">
+                <label>Initial Strain: <span id="strainVal">0.5</span></label>
+                <input type="range" id="strain" min="0.1" max="1.0" step="0.1" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Nucleation Sites: <span id="nucleationVal">30</span></label>
+                <input type="range" id="nucleation" min="5" max="100" value="30">
+            </div>
+
+            <button id="deform">Apply Deformation</button>
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Recrystallized: <span id="rxFraction">0</span>%</div>
+                <div>New Grains: <span id="newGrains">0</span></div>
+                <div>Avg Stored Energy: <span id="avgEnergy">0</span></div>
+                <div>Time: <span id="simTime">0</span> s</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let mode = 'static';
+        let temperature = 700;
+        let initialStrain = 0.5;
+        let nucleationSites = 30;
+
+        const CELL_SIZE = 3;
+        let cols, rows;
+        let grainIds = [];
+        let storedEnergy = [];
+        let isRecrystallized = [];
+        let grainColors = {};
+        let nextGrainId = 1;
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+            cols = Math.floor(width / CELL_SIZE);
+            rows = Math.floor(height / CELL_SIZE);
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            nextGrainId = 1;
+            grainIds = new Array(cols * rows).fill(0);
+            storedEnergy = new Array(cols * rows).fill(0);
+            isRecrystallized = new Array(cols * rows).fill(false);
+            grainColors = {};
+
+            // Create initial deformed microstructure (elongated grains)
+            const numGrains = 20;
+            for (let i = 0; i < numGrains; i++) {
+                const cx = Math.random() * cols;
+                const cy = Math.random() * rows;
+                grainColors[nextGrainId] = `hsl(${Math.random() * 60 + 20}, 50%, 40%)`; // Brownish deformed
+                nextGrainId++;
+            }
+
+            // Voronoi-like assignment with elongation
+            const seeds = [];
+            for (let i = 1; i < nextGrainId; i++) {
+                seeds.push({ x: Math.random() * cols, y: Math.random() * rows, id: i });
+            }
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    let minDist = Infinity;
+                    let nearestId = 1;
+                    for (const seed of seeds) {
+                        // Elongated distance metric (simulate rolling texture)
+                        const dx = (x - seed.x) * 0.5; // Elongated in x
+                        const dy = y - seed.y;
+                        const dist = dx * dx + dy * dy;
+                        if (dist < minDist) {
+                            minDist = dist;
+                            nearestId = seed.id;
+                        }
+                    }
+                    grainIds[y * cols + x] = nearestId;
+                    storedEnergy[y * cols + x] = initialStrain * (0.8 + Math.random() * 0.4);
+                }
+            }
+
+            updateStats();
+        }
+
+        function applyDeformation() {
+            // Add more stored energy (simulate additional cold work or hot deformation)
+            for (let i = 0; i < cols * rows; i++) {
+                if (!isRecrystallized[i]) {
+                    storedEnergy[i] = Math.min(1, storedEnergy[i] + 0.3);
+                }
+            }
+            updateStats();
+        }
+
+        function nucleateRecrystallizedGrain(x, y) {
+            const id = nextGrainId++;
+            grainColors[id] = `hsl(${Math.random() * 360}, 70%, 60%)`; // Bright new grain
+
+            const radius = 2;
+            for (let dy = -radius; dy <= radius; dy++) {
+                for (let dx = -radius; dx <= radius; dx++) {
+                    if (dx * dx + dy * dy <= radius * radius) {
+                        const nx = x + dx, ny = y + dy;
+                        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                            const idx = ny * cols + nx;
+                            grainIds[idx] = id;
+                            storedEnergy[idx] = 0;
+                            isRecrystallized[idx] = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        function step() {
+            time += 0.01;
+
+            const tempFactor = Math.exp((temperature - 500) / 200);
+
+            // Nucleation of new recrystallized grains
+            const nucleationProb = 0.001 * tempFactor * initialStrain;
+            for (let i = 0; i < nucleationSites; i++) {
+                const x = Math.floor(Math.random() * cols);
+                const y = Math.floor(Math.random() * rows);
+                const idx = y * cols + x;
+
+                if (!isRecrystallized[idx] && storedEnergy[idx] > 0.3) {
+                    // Prefer high-energy sites (grain boundaries, triple junctions)
+                    const neighbors = getNeighborIds(x, y);
+                    const uniqueNeighbors = new Set(neighbors);
+                    const gbFactor = uniqueNeighbors.size > 2 ? 3 : 1;
+
+                    if (Math.random() < nucleationProb * gbFactor * storedEnergy[idx]) {
+                        nucleateRecrystallizedGrain(x, y);
+                    }
+                }
+            }
+
+            // Growth of recrystallized grains
+            const changes = [];
+            for (let y = 1; y < rows - 1; y++) {
+                for (let x = 1; x < cols - 1; x++) {
+                    const idx = y * cols + x;
+                    if (isRecrystallized[idx]) continue;
+
+                    const neighbors = getNeighborIds(x, y);
+                    const rxNeighbors = [];
+                    for (let i = 0; i < 8; i++) {
+                        const ny = y + [[-1,0,1,-1,1,-1,0,1][i]];
+                        const nx = x + [[-1,-1,-1,0,0,1,1,1][i]];
+                        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                            if (isRecrystallized[ny * cols + nx]) {
+                                rxNeighbors.push(grainIds[ny * cols + nx]);
+                            }
+                        }
+                    }
+
+                    if (rxNeighbors.length > 0) {
+                        // Growth driven by stored energy difference
+                        const drivingForce = storedEnergy[idx] * tempFactor * 0.1;
+                        if (Math.random() < drivingForce) {
+                            const newId = rxNeighbors[Math.floor(Math.random() * rxNeighbors.length)];
+                            changes.push({ idx, newId });
+                        }
+                    }
+                }
+            }
+
+            for (const c of changes) {
+                grainIds[c.idx] = c.newId;
+                storedEnergy[c.idx] = 0;
+                isRecrystallized[c.idx] = true;
+            }
+
+            // Dynamic recrystallization: continuous deformation
+            if (mode === 'dynamic' && running) {
+                for (let i = 0; i < cols * rows; i++) {
+                    if (!isRecrystallized[i]) {
+                        storedEnergy[i] = Math.min(1, storedEnergy[i] + 0.001);
+                    }
+                }
+            }
+
+            updateStats();
+        }
+
+        function getNeighborIds(x, y) {
+            const neighbors = [];
+            const offsets = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+            for (const [dx, dy] of offsets) {
+                const nx = x + dx, ny = y + dy;
+                if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                    neighbors.push(grainIds[ny * cols + nx]);
+                }
+            }
+            return neighbors;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const idx = y * cols + x;
+                    const id = grainIds[idx];
+                    let color = grainColors[id] || '#333';
+
+                    // Modulate by stored energy for deformed grains
+                    if (!isRecrystallized[idx]) {
+                        const energy = storedEnergy[idx];
+                        // Darker = more stored energy
+                        const darkness = 1 - energy * 0.3;
+                        ctx.fillStyle = color;
+                        ctx.globalAlpha = darkness;
+                    } else {
+                        ctx.fillStyle = color;
+                        ctx.globalAlpha = 1;
+                    }
+
+                    ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                }
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        function updateStats() {
+            const rxCount = isRecrystallized.filter(v => v).length;
+            const total = cols * rows;
+            const rxFraction = (rxCount / total * 100).toFixed(1);
+
+            const rxGrains = new Set(grainIds.filter((id, i) => isRecrystallized[i]));
+            const avgEnergy = storedEnergy.reduce((a, b) => a + b, 0) / total;
+
+            document.getElementById('rxFraction').textContent = rxFraction;
+            document.getElementById('newGrains').textContent = rxGrains.size;
+            document.getElementById('avgEnergy').textContent = avgEnergy.toFixed(3);
+            document.getElementById('simTime').textContent = time.toFixed(2);
+        }
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < 5; i++) step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('mode').addEventListener('change', e => {
+            mode = e.target.value;
+        });
+
+        document.getElementById('temperature').addEventListener('input', e => {
+            temperature = parseInt(e.target.value);
+            document.getElementById('tempVal').textContent = temperature;
+        });
+
+        document.getElementById('strain').addEventListener('input', e => {
+            initialStrain = parseFloat(e.target.value);
+            document.getElementById('strainVal').textContent = initialStrain;
+        });
+
+        document.getElementById('nucleation').addEventListener('input', e => {
+            nucleationSites = parseInt(e.target.value);
+            document.getElementById('nucleationVal').textContent = nucleationSites;
+        });
+
+        document.getElementById('deform').addEventListener('click', applyDeformation);
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', () => { resize(); init(); });
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

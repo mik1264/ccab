@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Precipitation Hardening</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #f06292; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        select { width: 100%; padding: 8px; background: #2a2a3e; color: #e8e6e1; border: 1px solid #444; border-radius: 4px; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #f06292; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #f06292; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .chart { background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Precipitation Hardening</h1>
+            <p class="description">Age hardening in aluminum alloys. Precipitates nucleate, grow, and eventually coarsen (Ostwald ripening). Strength peaks at optimal precipitate size and spacing.</p>
+
+            <div class="control-group">
+                <label>Aging Stage:</label>
+                <select id="stage">
+                    <option value="solutionized">Solution Treated (Supersaturated)</option>
+                    <option value="gp">GP Zones (Early Aging)</option>
+                    <option value="theta_prime">θ' Phase (Peak Aged)</option>
+                    <option value="theta">θ Phase (Overaged)</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">170</span>°C</label>
+                <input type="range" id="temperature" min="100" max="250" value="170">
+            </div>
+
+            <div class="control-group">
+                <label>Supersaturation: <span id="supersatVal">0.8</span></label>
+                <input type="range" id="supersat" min="0.1" max="1.0" step="0.1" value="0.8">
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Time: <span id="simTime">0</span> hr</div>
+                <div>Precipitates: <span id="precipCount">0</span></div>
+                <div>Avg Radius: <span id="avgRadius">0</span> nm</div>
+                <div>Volume Fraction: <span id="volFrac">0</span>%</div>
+                <div>Hardness: <span id="hardness">0</span> HV</div>
+            </div>
+
+            <div class="chart">
+                <canvas id="hardnessChart" width="280" height="100"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const chartCanvas = document.getElementById('hardnessChart');
+        const chartCtx = chartCanvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let stage = 'solutionized';
+        let temperature = 170;
+        let supersaturation = 0.8;
+
+        let precipitates = [];
+        let soluteConcentration = [];
+        const CELL_SIZE = 3;
+        let cols, rows;
+
+        let hardnessHistory = [];
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+            cols = Math.floor(width / CELL_SIZE);
+            rows = Math.floor(height / CELL_SIZE);
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            precipitates = [];
+            hardnessHistory = [];
+            soluteConcentration = new Array(cols * rows).fill(supersaturation);
+
+            if (stage !== 'solutionized') {
+                // Pre-seed precipitates based on stage
+                const numPrecip = stage === 'gp' ? 200 : stage === 'theta_prime' ? 80 : 30;
+                const avgSize = stage === 'gp' ? 2 : stage === 'theta_prime' ? 8 : 20;
+
+                for (let i = 0; i < numPrecip; i++) {
+                    precipitates.push({
+                        x: Math.random() * cols,
+                        y: Math.random() * rows,
+                        radius: avgSize * (0.5 + Math.random()),
+                        type: stage
+                    });
+                }
+            }
+
+            updateStats();
+        }
+
+        function nucleationRate() {
+            // Higher temperature and supersaturation increase nucleation
+            const tempFactor = Math.exp(-(temperature - 150) / 50);
+            const satFactor = supersaturation * supersaturation;
+            return 0.01 * tempFactor * satFactor;
+        }
+
+        function growthRate(precip) {
+            // Diffusion-controlled growth
+            const tempFactor = Math.exp((temperature - 100) / 100);
+            const localSat = getLocalConcentration(precip.x, precip.y);
+            return 0.01 * tempFactor * Math.max(0, localSat - 0.1);
+        }
+
+        function getLocalConcentration(x, y) {
+            const xi = Math.floor(x);
+            const yi = Math.floor(y);
+            if (xi >= 0 && xi < cols && yi >= 0 && yi < rows) {
+                return soluteConcentration[yi * cols + xi];
+            }
+            return supersaturation;
+        }
+
+        function depleteConcentration(precip) {
+            const r = Math.ceil(precip.radius);
+            for (let dy = -r; dy <= r; dy++) {
+                for (let dx = -r; dx <= r; dx++) {
+                    const nx = Math.floor(precip.x) + dx;
+                    const ny = Math.floor(precip.y) + dy;
+                    if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist <= r * 1.5) {
+                            const idx = ny * cols + nx;
+                            soluteConcentration[idx] *= 0.99;
+                        }
+                    }
+                }
+            }
+        }
+
+        function step() {
+            time += 0.1;
+
+            // Nucleation of new precipitates
+            const nucRate = nucleationRate();
+            if (Math.random() < nucRate && precipitates.length < 500) {
+                const x = Math.random() * cols;
+                const y = Math.random() * rows;
+                if (getLocalConcentration(x, y) > 0.3) {
+                    precipitates.push({
+                        x, y,
+                        radius: 1,
+                        type: 'gp'
+                    });
+                }
+            }
+
+            // Growth and coarsening
+            const criticalRadius = 3 + time * 0.01;
+
+            for (let i = precipitates.length - 1; i >= 0; i--) {
+                const p = precipitates[i];
+
+                if (p.radius < criticalRadius) {
+                    // Small precipitates dissolve (Ostwald ripening)
+                    const dissolutionRate = 0.01 * (criticalRadius - p.radius) / criticalRadius;
+                    p.radius -= dissolutionRate;
+
+                    if (p.radius < 0.5) {
+                        precipitates.splice(i, 1);
+                        continue;
+                    }
+                } else {
+                    // Larger precipitates grow
+                    const rate = growthRate(p);
+                    p.radius += rate;
+                    depleteConcentration(p);
+
+                    // Phase transformation with size
+                    if (p.radius > 5 && p.type === 'gp') {
+                        p.type = 'theta_prime';
+                    } else if (p.radius > 15 && p.type === 'theta_prime') {
+                        p.type = 'theta';
+                    }
+                }
+            }
+
+            // Diffusion of solute
+            const newConc = [...soluteConcentration];
+            for (let y = 1; y < rows - 1; y++) {
+                for (let x = 1; x < cols - 1; x++) {
+                    const idx = y * cols + x;
+                    const lap = soluteConcentration[idx - 1] + soluteConcentration[idx + 1] +
+                                soluteConcentration[idx - cols] + soluteConcentration[idx + cols] -
+                                4 * soluteConcentration[idx];
+                    newConc[idx] += 0.1 * lap;
+                }
+            }
+            soluteConcentration = newConc;
+
+            updateStats();
+        }
+
+        function calculateHardness() {
+            // Orowan hardening: hardness peaks at optimal precipitate size/spacing
+            if (precipitates.length === 0) return 50; // Base hardness
+
+            const avgRadius = precipitates.reduce((s, p) => s + p.radius, 0) / precipitates.length;
+            const volFrac = precipitates.reduce((s, p) => s + p.radius * p.radius, 0) / (cols * rows) * Math.PI;
+
+            // Orowan stress: τ ∝ √(f)/r for cutting, τ ∝ √(f)·r for looping
+            // Peak at transition radius
+            const transitionRadius = 8;
+            let hardening;
+
+            if (avgRadius < transitionRadius) {
+                // Cutting mechanism
+                hardening = Math.sqrt(volFrac) * avgRadius * 10;
+            } else {
+                // Looping mechanism (Orowan)
+                hardening = Math.sqrt(volFrac) / avgRadius * 500;
+            }
+
+            return Math.min(200, 50 + hardening);
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw concentration field
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const idx = y * cols + x;
+                    const conc = soluteConcentration[idx];
+                    const brightness = 30 + conc * 30;
+                    ctx.fillStyle = `rgb(${brightness}, ${brightness + 10}, ${brightness + 20})`;
+                    ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                }
+            }
+
+            // Draw precipitates
+            for (const p of precipitates) {
+                const colors = {
+                    gp: '#ff9800',
+                    theta_prime: '#f06292',
+                    theta: '#9c27b0'
+                };
+                ctx.fillStyle = colors[p.type] || '#fff';
+                ctx.beginPath();
+                ctx.arc(p.x * CELL_SIZE, p.y * CELL_SIZE, p.radius * CELL_SIZE / 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function drawChart() {
+            chartCtx.fillStyle = '#1a1a2e';
+            chartCtx.fillRect(0, 0, 280, 100);
+
+            // Draw axes
+            chartCtx.strokeStyle = '#444';
+            chartCtx.beginPath();
+            chartCtx.moveTo(30, 10);
+            chartCtx.lineTo(30, 85);
+            chartCtx.lineTo(270, 85);
+            chartCtx.stroke();
+
+            // Labels
+            chartCtx.fillStyle = '#888';
+            chartCtx.font = '10px sans-serif';
+            chartCtx.fillText('HV', 5, 50);
+            chartCtx.fillText('Time', 140, 98);
+
+            // Draw hardness curve
+            if (hardnessHistory.length > 1) {
+                chartCtx.strokeStyle = '#f06292';
+                chartCtx.lineWidth = 2;
+                chartCtx.beginPath();
+
+                const maxH = 200;
+                const w = 240 / hardnessHistory.length;
+
+                for (let i = 0; i < hardnessHistory.length; i++) {
+                    const x = 30 + i * w;
+                    const y = 85 - (hardnessHistory[i] / maxH) * 70;
+                    if (i === 0) chartCtx.moveTo(x, y);
+                    else chartCtx.lineTo(x, y);
+                }
+                chartCtx.stroke();
+            }
+        }
+
+        function updateStats() {
+            const hardness = calculateHardness();
+            hardnessHistory.push(hardness);
+            if (hardnessHistory.length > 100) hardnessHistory.shift();
+
+            const avgRadius = precipitates.length > 0 ?
+                (precipitates.reduce((s, p) => s + p.radius, 0) / precipitates.length).toFixed(1) : 0;
+
+            const volFrac = (precipitates.reduce((s, p) => s + p.radius * p.radius, 0) /
+                           (cols * rows) * Math.PI * 100).toFixed(2);
+
+            document.getElementById('simTime').textContent = time.toFixed(1);
+            document.getElementById('precipCount').textContent = precipitates.length;
+            document.getElementById('avgRadius').textContent = avgRadius;
+            document.getElementById('volFrac').textContent = volFrac;
+            document.getElementById('hardness').textContent = hardness.toFixed(0);
+
+            drawChart();
+        }
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < 3; i++) step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('stage').addEventListener('change', e => {
+            stage = e.target.value;
+            init();
+        });
+
+        document.getElementById('temperature').addEventListener('input', e => {
+            temperature = parseInt(e.target.value);
+            document.getElementById('tempVal').textContent = temperature;
+        });
+
+        document.getElementById('supersat').addEventListener('input', e => {
+            supersaturation = parseFloat(e.target.value);
+            document.getElementById('supersatVal').textContent = supersaturation;
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', () => { resize(); init(); });
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cerebellar Learning - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #84cc16; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #84cc16; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #84cc16; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #65a30d; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #84cc16; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #84cc16; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(132,204,22,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #84cc16; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🧠 Cerebellar Learning</h1>
+            <p class="description">
+                The cerebellum learns to predict and correct motor errors through
+                climbing fiber signals. Parallel fiber-Purkinje cell synapses are
+                weakened when coincident with climbing fiber error signals.
+            </p>
+
+            <div class="control-group">
+                <label>Learning Rate: <span class="value-display" id="lrValue">0.1</span></label>
+                <input type="range" id="lrSlider" min="0.01" max="0.3" step="0.01" value="0.1">
+            </div>
+
+            <div class="control-group">
+                <label>Target Delay (ms): <span class="value-display" id="delayValue">200</span></label>
+                <input type="range" id="delaySlider" min="50" max="500" step="25" value="200">
+            </div>
+
+            <div class="control-group">
+                <label>CS Duration: <span class="value-display" id="csValue">150</span></label>
+                <input type="range" id="csSlider" min="50" max="300" step="25" value="150">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+            <button id="trialBtn">Run Trial</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Trial: <span id="trial">0</span></div>
+                <div>Error: <span id="error">0</span></div>
+                <div>Timing Accuracy: <span id="timing">-</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Marr-Albus Model:</strong><br>
+                • PF-PC: Adjustable weights<br>
+                • CF: Error signal (LTD)<br>
+                • DCN: Output timing<br>
+                • Eye-blink conditioning
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+
+        let learningRate = 0.1;
+        let targetDelay = 200;
+        let csDuration = 150;
+
+        // Cerebellar circuit
+        const N_GRANULE = 50;
+        const N_PURKINJE = 5;
+
+        let granuleCells = [];
+        let pfWeights = [];  // Parallel fiber to Purkinje weights
+        let purkinjeCells = [];
+        let dcnActivity = 0;
+
+        // Conditioning state
+        let trialCount = 0;
+        let csActive = false;
+        let usActive = false;
+        let csOnset = 0;
+        let crAmplitude = 0;
+        let errorSignal = 0;
+
+        // Timing
+        let timeInTrial = 0;
+        let trialRunning = false;
+
+        let activityHistory = [];
+        let learningHistory = [];
+
+        function initSimulation() {
+            granuleCells = [];
+            pfWeights = [];
+            purkinjeCells = [];
+
+            // Initialize granule cells with different timing preferences
+            for (let i = 0; i < N_GRANULE; i++) {
+                granuleCells.push({
+                    id: i,
+                    preferredDelay: (i / N_GRANULE) * 500, // 0-500ms delay preference
+                    activity: 0
+                });
+            }
+
+            // Initialize PF-PC weights
+            for (let p = 0; p < N_PURKINJE; p++) {
+                pfWeights[p] = [];
+                for (let g = 0; g < N_GRANULE; g++) {
+                    pfWeights[p][g] = 0.5 + Math.random() * 0.2;
+                }
+                purkinjeCells.push({
+                    activity: 0,
+                    pauseSignal: 0
+                });
+            }
+
+            trialCount = 0;
+            dcnActivity = 0;
+            activityHistory = [];
+            learningHistory = [];
+        }
+
+        function runTrial() {
+            trialCount++;
+            timeInTrial = 0;
+            trialRunning = true;
+            csActive = true;
+            usActive = false;
+            csOnset = generation;
+            crAmplitude = 0;
+            activityHistory = [];
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+
+            if (trialRunning) {
+                timeInTrial++;
+
+                // CS activates granule cells with delay-specific responses
+                if (csActive) {
+                    granuleCells.forEach(gc => {
+                        // Bell-shaped response centered at preferred delay
+                        const timeSinceCS = timeInTrial;
+                        const dist = Math.abs(timeSinceCS - gc.preferredDelay / 10);
+                        gc.activity = Math.exp(-dist * dist / 50);
+                    });
+                }
+
+                // CS ends
+                if (timeInTrial > csDuration / 10) {
+                    csActive = false;
+                    granuleCells.forEach(gc => gc.activity *= 0.9);
+                }
+
+                // US occurs at target delay
+                if (timeInTrial === Math.floor(targetDelay / 10)) {
+                    usActive = true;
+                    errorSignal = 1;
+                }
+
+                if (timeInTrial > Math.floor(targetDelay / 10) + 5) {
+                    usActive = false;
+                }
+
+                // Calculate Purkinje cell activity
+                purkinjeCells.forEach((pc, p) => {
+                    let input = 0;
+                    granuleCells.forEach((gc, g) => {
+                        input += gc.activity * pfWeights[p][g];
+                    });
+
+                    // Climbing fiber causes complex spike and pause
+                    if (usActive && errorSignal > 0) {
+                        pc.pauseSignal = 1;
+
+                        // LTD: weaken active PF synapses
+                        granuleCells.forEach((gc, g) => {
+                            if (gc.activity > 0.3) {
+                                pfWeights[p][g] -= learningRate * gc.activity * 0.1;
+                                pfWeights[p][g] = Math.max(0.1, pfWeights[p][g]);
+                            }
+                        });
+                    }
+
+                    pc.pauseSignal *= 0.9;
+                    pc.activity = Math.max(0, input - pc.pauseSignal * 2);
+                });
+
+                // DCN activity (disinhibited when Purkinje pauses)
+                const avgPurkinje = purkinjeCells.reduce((s, pc) => s + pc.activity, 0) / N_PURKINJE;
+                dcnActivity = 1 - avgPurkinje * 0.5;
+
+                // CR (conditioned response) = DCN output
+                crAmplitude = dcnActivity;
+
+                // Error decay
+                errorSignal *= 0.9;
+
+                // Track activity
+                activityHistory.push({
+                    time: timeInTrial,
+                    granule: granuleCells.map(g => g.activity),
+                    purkinje: purkinjeCells.map(p => p.activity),
+                    dcn: dcnActivity,
+                    cr: crAmplitude,
+                    cs: csActive,
+                    us: usActive
+                });
+
+                // End trial
+                if (timeInTrial > Math.floor(targetDelay / 10) + 30) {
+                    trialRunning = false;
+
+                    // Calculate timing accuracy
+                    let peakCRTime = 0;
+                    let peakCR = 0;
+                    activityHistory.forEach((record, i) => {
+                        if (record.cr > peakCR) {
+                            peakCR = record.cr;
+                            peakCRTime = i;
+                        }
+                    });
+
+                    learningHistory.push({
+                        trial: trialCount,
+                        peakTime: peakCRTime * 10,
+                        peakAmplitude: peakCR,
+                        targetTime: targetDelay
+                    });
+                }
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Cerebellar Motor Learning: Eye-Blink Conditioning', 20, 25);
+
+            // Trial indicator
+            ctx.fillStyle = trialRunning ? '#84cc16' : '#666';
+            ctx.font = 'bold 14px sans-serif';
+            ctx.fillText(trialRunning ? 'TRIAL IN PROGRESS' : 'Ready', 20, 50);
+
+            drawCircuit();
+            drawTimingDiagram();
+            drawWeightMatrix();
+            drawLearningCurve();
+        }
+
+        function drawCircuit() {
+            const cx = 150;
+            const cy = 200;
+
+            // Granule cells (mossy fiber layer)
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Granule Cells (timing)', cx - 60, cy - 80);
+
+            for (let i = 0; i < 10; i++) {
+                const x = cx - 50 + i * 12;
+                const y = cy - 60;
+                const gc = granuleCells[i * 5];
+                const activity = gc ? gc.activity : 0;
+
+                ctx.fillStyle = `rgba(132, 204, 22, ${0.3 + activity * 0.7})`;
+                ctx.beginPath();
+                ctx.arc(x, y, 5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Purkinje cells
+            ctx.fillStyle = '#888';
+            ctx.fillText('Purkinje Cells', cx - 40, cy - 10);
+
+            purkinjeCells.forEach((pc, i) => {
+                const x = cx - 30 + i * 15;
+                const y = cy + 10;
+
+                ctx.fillStyle = `rgba(251, 191, 36, ${0.3 + pc.activity * 0.7})`;
+                ctx.beginPath();
+                ctx.arc(x, y, 8, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Dendrite tree
+                ctx.strokeStyle = `rgba(251, 191, 36, ${0.3 + pc.activity * 0.5})`;
+                ctx.lineWidth = 1;
+                for (let d = 0; d < 3; d++) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, y - 8);
+                    ctx.lineTo(x + (d - 1) * 10, y - 30);
+                    ctx.stroke();
+                }
+            });
+
+            // DCN
+            ctx.fillStyle = `rgba(96, 165, 250, ${0.3 + dcnActivity * 0.7})`;
+            ctx.beginPath();
+            ctx.arc(cx, cy + 70, 15, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#60a5fa';
+            ctx.lineWidth = dcnActivity > 0.5 ? 3 : 1;
+            ctx.stroke();
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('DCN', cx, cy + 73);
+            ctx.textAlign = 'left';
+
+            // Climbing fiber (error signal)
+            if (errorSignal > 0.3) {
+                ctx.strokeStyle = `rgba(248, 113, 113, ${errorSignal})`;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(cx + 80, cy + 50);
+                ctx.lineTo(cx, cy + 10);
+                ctx.stroke();
+
+                ctx.fillStyle = '#f87171';
+                ctx.font = '10px sans-serif';
+                ctx.fillText('CF Error!', cx + 60, cy + 60);
+            }
+
+            // Arrows
+            // GC → PC (parallel fibers)
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - 50);
+            ctx.lineTo(cx, cy - 15);
+            ctx.stroke();
+
+            // PC → DCN (inhibition)
+            ctx.strokeStyle = '#fbbf24';
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(cx, cy + 20);
+            ctx.lineTo(cx, cy + 55);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '8px sans-serif';
+            ctx.fillText('inhibition', cx + 5, cy + 40);
+        }
+
+        function drawTimingDiagram() {
+            const graphX = 300;
+            const graphY = 80;
+            const graphW = canvas.width - graphX - 50;
+            const graphH = 150;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(graphX, graphY, graphW, graphH);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Trial Timing', graphX + 5, graphY - 5);
+
+            if (activityHistory.length < 2) return;
+
+            const traces = [
+                { label: 'CS', color: '#84cc16', getData: r => r.cs ? 0.9 : 0.1 },
+                { label: 'US', color: '#f87171', getData: r => r.us ? 0.9 : 0.1 },
+                { label: 'CR', color: '#60a5fa', getData: r => r.cr },
+                { label: 'PC', color: '#fbbf24', getData: r => r.purkinje.reduce((s, p) => s + p, 0) / N_PURKINJE }
+            ];
+
+            const traceHeight = graphH / traces.length;
+
+            traces.forEach((trace, ti) => {
+                const baseY = graphY + ti * traceHeight + traceHeight / 2;
+
+                ctx.strokeStyle = trace.color;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+
+                activityHistory.forEach((record, i) => {
+                    const x = graphX + (i / activityHistory.length) * graphW;
+                    const y = baseY - trace.getData(record) * (traceHeight * 0.4);
+
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+
+                // Label
+                ctx.fillStyle = trace.color;
+                ctx.font = '9px sans-serif';
+                ctx.fillText(trace.label, graphX + graphW + 5, baseY + 3);
+            });
+
+            // Target time marker
+            const targetX = graphX + (targetDelay / 10 / activityHistory.length) * graphW;
+            if (targetX > graphX && targetX < graphX + graphW) {
+                ctx.strokeStyle = '#f87171';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath();
+                ctx.moveTo(targetX, graphY);
+                ctx.lineTo(targetX, graphY + graphH);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }
+
+        function drawWeightMatrix() {
+            const mx = 300;
+            const my = 260;
+            const mw = 200;
+            const mh = 80;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(mx, my, mw, mh);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('PF-PC Weights', mx + 5, my - 5);
+
+            const cellW = mw / N_GRANULE;
+            const cellH = mh / N_PURKINJE;
+
+            for (let p = 0; p < N_PURKINJE; p++) {
+                for (let g = 0; g < N_GRANULE; g++) {
+                    const w = pfWeights[p][g];
+                    ctx.fillStyle = `hsl(${80 + w * 40}, ${50 + w * 30}%, ${20 + w * 40}%)`;
+                    ctx.fillRect(mx + g * cellW, my + p * cellH, cellW - 0.5, cellH - 0.5);
+                }
+            }
+
+            // Axis labels
+            ctx.fillStyle = '#888';
+            ctx.font = '8px sans-serif';
+            ctx.fillText('Early timing →', mx, my + mh + 12);
+            ctx.fillText('Late', mx + mw - 20, my + mh + 12);
+        }
+
+        function drawLearningCurve() {
+            const graphX = 300;
+            const graphY = 380;
+            const graphW = canvas.width - graphX - 50;
+            const graphH = 100;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(graphX, graphY, graphW, graphH);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Learning Progress', graphX + 5, graphY - 5);
+
+            if (learningHistory.length < 2) {
+                ctx.fillStyle = '#666';
+                ctx.fillText('Run trials to see learning...', graphX + 50, graphY + 50);
+                return;
+            }
+
+            // Plot timing accuracy
+            ctx.strokeStyle = '#84cc16';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            learningHistory.forEach((record, i) => {
+                const x = graphX + (i / Math.max(learningHistory.length, 10)) * graphW;
+                const timingError = Math.abs(record.peakTime - record.targetTime);
+                const accuracy = 1 - Math.min(timingError / 200, 1);
+                const y = graphY + graphH - accuracy * graphH * 0.8 - 10;
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Target line
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(graphX, graphY + 20);
+            ctx.lineTo(graphX + graphW, graphY + 20);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '8px sans-serif';
+            ctx.fillText('Perfect timing', graphX + graphW - 70, graphY + 18);
+        }
+
+        function updateStats() {
+            const lastLearning = learningHistory[learningHistory.length - 1];
+            const timingError = lastLearning ?
+                Math.abs(lastLearning.peakTime - lastLearning.targetTime) : 0;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('trial').textContent = trialCount;
+            document.getElementById('error').textContent = timingError.toFixed(0) + 'ms';
+            document.getElementById('timing').textContent = lastLearning ?
+                (100 - Math.min(timingError / 2, 100)).toFixed(0) + '%' : '-';
+        }
+
+        document.getElementById('lrSlider').addEventListener('input', (e) => {
+            learningRate = parseFloat(e.target.value);
+            document.getElementById('lrValue').textContent = learningRate.toFixed(2);
+        });
+
+        document.getElementById('delaySlider').addEventListener('input', (e) => {
+            targetDelay = parseInt(e.target.value);
+            document.getElementById('delayValue').textContent = targetDelay;
+        });
+
+        document.getElementById('csSlider').addEventListener('input', (e) => {
+            csDuration = parseInt(e.target.value);
+            document.getElementById('csValue').textContent = csDuration;
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initSimulation();
+            render();
+            updateStats();
+        });
+
+        document.getElementById('trialBtn').addEventListener('click', () => {
+            if (!trialRunning) {
+                runTrial();
+            }
+        });
+
+        initSimulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

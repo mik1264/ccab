@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dobzhansky-Muller Incompatibilities - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.1rem; margin-bottom: 10px; color: #fb7185; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #fb7185; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #fb7185; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #f43f5e; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #fb7185; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fb7185; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(251,113,133,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #fb7185; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🧬 Dobzhansky-Muller Incompatibilities</h1>
+            <p class="description">
+                Hybrid sterility/inviability arises from epistatic incompatibilities
+                between alleles that evolved separately. A and a are compatible, B and b
+                are compatible, but A-b and a-B combinations may be lethal.
+            </p>
+
+            <div class="control-group">
+                <label>Population Size: <span class="value-display" id="popValue">100</span></label>
+                <input type="range" id="popSlider" min="50" max="200" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Number of DMI Loci: <span class="value-display" id="lociValue">5</span></label>
+                <input type="range" id="lociSlider" min="2" max="10" value="5">
+            </div>
+
+            <div class="control-group">
+                <label>Incompatibility Strength: <span class="value-display" id="incompValue">0.3</span></label>
+                <input type="range" id="incompSlider" min="0" max="1" step="0.1" value="0.3">
+            </div>
+
+            <div class="control-group">
+                <label>Divergence Time: <span class="value-display" id="divValue">0</span></label>
+                <input type="range" id="divSlider" min="0" max="100" value="0" disabled>
+                <div style="font-size: 0.65rem; color: #666;">Generations since split</div>
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+            <button id="splitBtn">Split Populations</button>
+            <button id="contactBtn">Secondary Contact</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Pop A Fixed Alleles: <span id="fixedA">0</span></div>
+                <div>Pop B Fixed Alleles: <span id="fixedB">0</span></div>
+                <div>Expected DMIs: <span id="expectedDMI">0</span></div>
+                <div>Hybrid Fitness: <span id="hybridFitness">1.00</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Orr's Snowball:</strong> DMIs accumulate faster than linearly
+                with divergence time (n² rate). Each new substitution can be incompatible
+                with all previous ones. This "snowball effect" explains rapid
+                buildup of reproductive isolation.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let popA = [];
+        let popB = [];
+        let split = false;
+        let splitGeneration = 0;
+        let contact = false;
+        let dmiHistory = [];
+        let hybridFitnessHistory = [];
+
+        let popSize = 100;
+        let numLoci = 5;
+        let incompStrength = 0.3;
+
+        // Each locus has ancestral (0) or derived (1) allele
+        // DMI occurs when one lineage has derived at locus i
+        // and the other has derived at locus j (for certain pairs)
+
+        function createGenotype() {
+            return new Array(numLoci).fill(0);
+        }
+
+        function initPopulations() {
+            popA = [];
+            popB = [];
+            dmiHistory = [];
+            hybridFitnessHistory = [];
+            split = false;
+            contact = false;
+            splitGeneration = 0;
+
+            for (let i = 0; i < popSize; i++) {
+                popA.push({ genotype: createGenotype() });
+            }
+            // Pop B starts as copy of A
+            popB = popA.map(ind => ({ genotype: [...ind.genotype] }));
+        }
+
+        function countDMIs(genoA, genoB) {
+            // Count incompatible combinations
+            // DMI occurs when A has derived at i, B has derived at j (for i < j)
+            let count = 0;
+            for (let i = 0; i < numLoci; i++) {
+                for (let j = i + 1; j < numLoci; j++) {
+                    // If lineages have diverged at different loci
+                    if ((genoA[i] === 1 && genoB[j] === 1) ||
+                        (genoA[j] === 1 && genoB[i] === 1)) {
+                        count++;
+                    }
+                }
+            }
+            return count;
+        }
+
+        function getHybridFitness(genoA, genoB) {
+            // Hybrid has mix of alleles from both parents
+            const hybridGeno = genoA.map((a, i) => Math.random() < 0.5 ? a : genoB[i]);
+
+            // Check for within-genome incompatibilities
+            let penalty = 0;
+            for (let i = 0; i < numLoci; i++) {
+                for (let j = i + 1; j < numLoci; j++) {
+                    // If hybrid has derived from different lineages at interacting loci
+                    if (hybridGeno[i] !== hybridGeno[j]) {
+                        // Possible incompatibility
+                        penalty += incompStrength * 0.2;
+                    }
+                }
+            }
+
+            return Math.max(0, 1 - penalty);
+        }
+
+        function calculatePopulationStats(pop) {
+            // Calculate allele frequencies and fixation
+            const freqs = new Array(numLoci).fill(0);
+            for (const ind of pop) {
+                for (let i = 0; i < numLoci; i++) {
+                    freqs[i] += ind.genotype[i];
+                }
+            }
+            return freqs.map(f => f / pop.length);
+        }
+
+        function mutate(genotype) {
+            const newGeno = [...genotype];
+            for (let i = 0; i < numLoci; i++) {
+                // Low mutation rate, but can go to derived
+                if (Math.random() < 0.01 && newGeno[i] === 0) {
+                    newGeno[i] = 1;
+                }
+            }
+            return newGeno;
+        }
+
+        function reproduce(pop) {
+            const newPop = [];
+
+            while (newPop.length < popSize) {
+                // Random mating within population
+                const p1 = pop[Math.floor(Math.random() * pop.length)];
+                const p2 = pop[Math.floor(Math.random() * pop.length)];
+
+                // Offspring inherits random allele from each parent at each locus
+                const offspring = [];
+                for (let i = 0; i < numLoci; i++) {
+                    offspring[i] = Math.random() < 0.5 ? p1.genotype[i] : p2.genotype[i];
+                }
+
+                newPop.push({ genotype: mutate(offspring) });
+            }
+
+            return newPop;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+
+            if (split && !contact) {
+                // Populations evolve independently
+                popA = reproduce(popA);
+                popB = reproduce(popB);
+
+                document.getElementById('divValue').textContent = generation - splitGeneration;
+            } else if (contact) {
+                // Secondary contact - mixing with fitness effects
+                // ... hybrid fitness matters
+                popA = reproduce(popA);
+                popB = reproduce(popB);
+            } else {
+                // Single population
+                popA = reproduce(popA);
+                popB = popA.map(ind => ({ genotype: [...ind.genotype] }));
+            }
+
+            // Calculate DMI statistics
+            const freqsA = calculatePopulationStats(popA);
+            const freqsB = calculatePopulationStats(popB);
+
+            // Count fixed differences
+            let fixedA = freqsA.filter(f => f > 0.95).length;
+            let fixedB = freqsB.filter(f => f > 0.95).length;
+
+            // Expected number of DMIs based on fixed differences
+            const expectedDMI = (fixedA * fixedB) / 2;
+
+            // Sample hybrid fitness
+            let avgHybridFitness = 0;
+            for (let i = 0; i < 20; i++) {
+                const indA = popA[Math.floor(Math.random() * popA.length)];
+                const indB = popB[Math.floor(Math.random() * popB.length)];
+                avgHybridFitness += getHybridFitness(indA.genotype, indB.genotype);
+            }
+            avgHybridFitness /= 20;
+
+            dmiHistory.push(expectedDMI);
+            hybridFitnessHistory.push(avgHybridFitness);
+
+            if (dmiHistory.length > 300) {
+                dmiHistory.shift();
+                hybridFitnessHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2;
+
+            // Allele frequencies visualization
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Allele Frequencies at DMI Loci', padding, 25);
+
+            const freqsA = calculatePopulationStats(popA);
+            const freqsB = calculatePopulationStats(popB);
+
+            const barWidth = (width - 50) / numLoci;
+
+            for (let i = 0; i < numLoci; i++) {
+                const x = padding + i * barWidth + barWidth / 4;
+
+                // Pop A bar
+                const heightA = freqsA[i] * (height - 40);
+                ctx.fillStyle = '#3b82f6';
+                ctx.fillRect(x, padding + height - 40 - heightA, barWidth / 3, heightA);
+
+                // Pop B bar
+                const heightB = freqsB[i] * (height - 40);
+                ctx.fillStyle = '#ef4444';
+                ctx.fillRect(x + barWidth / 3 + 2, padding + height - 40 - heightB, barWidth / 3, heightB);
+
+                // Label
+                ctx.fillStyle = '#888';
+                ctx.fillText(`L${i + 1}`, x + barWidth / 6, padding + height - 20);
+            }
+
+            // Legend
+            ctx.fillStyle = '#3b82f6';
+            ctx.fillRect(padding + width - 100, padding + 10, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Pop A', padding + width - 80, padding + 18);
+            ctx.fillStyle = '#ef4444';
+            ctx.fillRect(padding + width - 100, padding + 25, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Pop B', padding + width - 80, padding + 33);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, padding + height - 40);
+            ctx.lineTo(padding + width, padding + height - 40);
+            ctx.stroke();
+
+            // DMI accumulation over time
+            const chartY = padding * 2 + height;
+            ctx.fillStyle = '#888';
+            ctx.fillText('DMI Accumulation & Hybrid Fitness', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            if (dmiHistory.length > 1) {
+                const maxDMI = Math.max(...dmiHistory) * 1.2 || 1;
+
+                // DMI count
+                ctx.strokeStyle = '#fb7185';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < dmiHistory.length; i++) {
+                    const x = padding + (i / dmiHistory.length) * width;
+                    const y = chartY + height - (dmiHistory[i] / maxDMI) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Hybrid fitness
+                ctx.strokeStyle = '#22c55e';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < hybridFitnessHistory.length; i++) {
+                    const x = padding + (i / hybridFitnessHistory.length) * width;
+                    const y = chartY + height - hybridFitnessHistory[i] * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Quadratic expectation (Orr's snowball)
+                if (split) {
+                    ctx.strokeStyle = '#888';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([5, 5]);
+                    ctx.beginPath();
+                    for (let i = 0; i < dmiHistory.length; i++) {
+                        const t = i / dmiHistory.length;
+                        const expected = t * t * maxDMI; // Quadratic growth
+                        const x = padding + (i / dmiHistory.length) * width;
+                        const y = chartY + height - (expected / maxDMI) * height;
+                        if (i === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    }
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+            }
+
+            // Legend
+            ctx.fillStyle = '#fb7185';
+            ctx.fillRect(padding + width - 120, chartY + 10, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('DMIs', padding + width - 100, chartY + 18);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(padding + width - 120, chartY + 25, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Hybrid Fit.', padding + width - 100, chartY + 33);
+        }
+
+        function updateStats() {
+            const freqsA = calculatePopulationStats(popA);
+            const freqsB = calculatePopulationStats(popB);
+
+            const fixedA = freqsA.filter(f => f > 0.95).length;
+            const fixedB = freqsB.filter(f => f > 0.95).length;
+            const expectedDMI = (fixedA * fixedB) / 2;
+
+            // Sample hybrid fitness
+            let avgHybridFitness = 0;
+            for (let i = 0; i < 10; i++) {
+                const indA = popA[Math.floor(Math.random() * popA.length)];
+                const indB = popB[Math.floor(Math.random() * popB.length)];
+                avgHybridFitness += getHybridFitness(indA.genotype, indB.genotype);
+            }
+            avgHybridFitness /= 10;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('fixedA').textContent = fixedA;
+            document.getElementById('fixedB').textContent = fixedB;
+            document.getElementById('expectedDMI').textContent = expectedDMI.toFixed(1);
+            document.getElementById('hybridFitness').textContent = avgHybridFitness.toFixed(3);
+        }
+
+        document.getElementById('popSlider').addEventListener('input', (e) => {
+            popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = popSize;
+        });
+
+        document.getElementById('lociSlider').addEventListener('input', (e) => {
+            numLoci = parseInt(e.target.value);
+            document.getElementById('lociValue').textContent = numLoci;
+        });
+
+        document.getElementById('incompSlider').addEventListener('input', (e) => {
+            incompStrength = parseFloat(e.target.value);
+            document.getElementById('incompValue').textContent = incompStrength.toFixed(1);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            document.getElementById('divValue').textContent = '0';
+            initPopulations();
+            render();
+            updateStats();
+        });
+
+        document.getElementById('splitBtn').addEventListener('click', () => {
+            if (!split) {
+                split = true;
+                splitGeneration = generation;
+                // Reset Pop B to be independent
+                popB = popA.map(ind => ({ genotype: [...ind.genotype] }));
+            }
+        });
+
+        document.getElementById('contactBtn').addEventListener('click', () => {
+            if (split) {
+                contact = true;
+            }
+        });
+
+        initPopulations();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

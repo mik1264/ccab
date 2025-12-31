@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Surface Roughening</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #a1887f; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #a1887f; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #a1887f; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        select { width: 100%; padding: 5px; margin-top: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Surface Roughening</h1>
+            <p class="description">Surface roughness evolves through growth and etching. Models include random deposition, ballistic deposition (KPZ), and diffusion-limited growth. Roughness scales as W ~ t^β.</p>
+
+            <div class="control-group">
+                <label>Deposition Rate: <span id="depVal">1.0</span></label>
+                <input type="range" id="deposition" min="0" max="3.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>Etching Rate: <span id="etchVal">0</span></label>
+                <input type="range" id="etching" min="0" max="3.0" step="0.1" value="0">
+            </div>
+
+            <div class="control-group">
+                <label>Diffusion: <span id="diffVal">0.5</span></label>
+                <input type="range" id="diffusion" min="0" max="2.0" step="0.1" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Model:</label>
+                <select id="model">
+                    <option value="random">Random Deposition</option>
+                    <option value="ballistic">Ballistic Deposition</option>
+                    <option value="kpz">KPZ (with relaxation)</option>
+                    <option value="edwards">Edwards-Wilkinson</option>
+                </select>
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Time: <span id="simTime">0</span></div>
+                <div>Avg Height: <span id="avgHeight">0</span></div>
+                <div>Roughness W: <span id="roughness">0</span></div>
+                <div>Growth Exponent β: <span id="exponent">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let depositionRate = 1.0;
+        let etchingRate = 0;
+        let diffusionRate = 0.5;
+        let model = 'random';
+
+        let surface = [];
+        let roughnessHistory = [];
+        let cols;
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+            cols = Math.floor(width / 2);
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            surface = new Array(cols).fill(0);
+            roughnessHistory = [];
+            updateStats();
+        }
+
+        function step() {
+            time += 1;
+
+            // Deposition events
+            const numDeposits = Math.floor(depositionRate * cols * 0.01);
+            for (let i = 0; i < numDeposits; i++) {
+                const x = Math.floor(Math.random() * cols);
+                depositAtom(x);
+            }
+
+            // Etching events
+            const numEtches = Math.floor(etchingRate * cols * 0.01);
+            for (let i = 0; i < numEtches; i++) {
+                const x = Math.floor(Math.random() * cols);
+                if (surface[x] > 0) {
+                    surface[x]--;
+                }
+            }
+
+            // Diffusion (surface smoothing)
+            if (diffusionRate > 0) {
+                const numDiff = Math.floor(diffusionRate * cols * 0.05);
+                for (let i = 0; i < numDiff; i++) {
+                    const x = Math.floor(Math.random() * cols);
+                    diffuse(x);
+                }
+            }
+
+            // Track roughness
+            if (time % 10 === 0) {
+                const W = calculateRoughness();
+                roughnessHistory.push({ t: time, W: W });
+                if (roughnessHistory.length > 500) {
+                    roughnessHistory.shift();
+                }
+            }
+
+            updateStats();
+        }
+
+        function depositAtom(x) {
+            if (model === 'random') {
+                // Random deposition: column grows independently
+                surface[x]++;
+            } else if (model === 'ballistic') {
+                // Ballistic deposition: stick at first contact
+                const left = x > 0 ? surface[x - 1] : surface[x];
+                const right = x < cols - 1 ? surface[x + 1] : surface[x];
+                const maxNeighbor = Math.max(left, right, surface[x]);
+                surface[x] = maxNeighbor + 1;
+            } else if (model === 'kpz' || model === 'edwards') {
+                // KPZ/EW: deposit with lateral growth
+                const left = x > 0 ? surface[x - 1] : surface[x];
+                const right = x < cols - 1 ? surface[x + 1] : surface[x];
+                const avgNeighbor = (left + right) / 2;
+
+                if (model === 'kpz') {
+                    // KPZ: nonlinear term (slope-dependent growth)
+                    const slope = (right - left) / 2;
+                    surface[x] = Math.max(surface[x], avgNeighbor) + 1 + 0.1 * slope * slope;
+                } else {
+                    // Edwards-Wilkinson: linear (Laplacian smoothing)
+                    surface[x] = (surface[x] + avgNeighbor) / 2 + 1;
+                }
+            }
+        }
+
+        function diffuse(x) {
+            // Atom hops down gradient (surface smoothing)
+            const h = surface[x];
+            const left = x > 0 ? surface[x - 1] : h;
+            const right = x < cols - 1 ? surface[x + 1] : h;
+
+            if (h > left && h > right) {
+                // Local maximum: can diffuse either way
+                if (Math.random() < 0.5 && x > 0) {
+                    surface[x]--;
+                    surface[x - 1]++;
+                } else if (x < cols - 1) {
+                    surface[x]--;
+                    surface[x + 1]++;
+                }
+            } else if (h > left && x > 0) {
+                surface[x]--;
+                surface[x - 1]++;
+            } else if (h > right && x < cols - 1) {
+                surface[x]--;
+                surface[x + 1]++;
+            }
+        }
+
+        function calculateRoughness() {
+            const avgH = surface.reduce((a, b) => a + b, 0) / cols;
+            const variance = surface.reduce((sum, h) => sum + Math.pow(h - avgH, 2), 0) / cols;
+            return Math.sqrt(variance);
+        }
+
+        function calculateExponent() {
+            // Fit W ~ t^β using log-log regression
+            if (roughnessHistory.length < 20) return 0;
+
+            const validPoints = roughnessHistory.filter(p => p.W > 0 && p.t > 0);
+            if (validPoints.length < 10) return 0;
+
+            const logT = validPoints.map(p => Math.log(p.t));
+            const logW = validPoints.map(p => Math.log(p.W));
+
+            const n = logT.length;
+            const sumX = logT.reduce((a, b) => a + b, 0);
+            const sumY = logW.reduce((a, b) => a + b, 0);
+            const sumXY = logT.reduce((sum, x, i) => sum + x * logW[i], 0);
+            const sumXX = logT.reduce((sum, x) => sum + x * x, 0);
+
+            const beta = (n * sumXY - sumX * sumY) / (n * sumXX - sumX * sumX);
+            return beta;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            const baseY = height - 50;
+            const scale = 2; // pixels per height unit
+            const cellWidth = width / cols;
+
+            // Draw surface
+            const avgH = surface.reduce((a, b) => a + b, 0) / cols;
+
+            for (let x = 0; x < cols; x++) {
+                const h = surface[x];
+                const pixelH = h * scale;
+                const y = baseY - pixelH;
+
+                // Color based on height relative to average
+                const deviation = (h - avgH) / (calculateRoughness() + 1);
+                let hue;
+                if (deviation > 0) {
+                    hue = 30; // Brown/orange for peaks
+                } else {
+                    hue = 200; // Blue for valleys
+                }
+                const lightness = 40 + Math.abs(deviation) * 20;
+
+                ctx.fillStyle = `hsl(${hue}, 50%, ${lightness}%)`;
+                ctx.fillRect(x * cellWidth, y, cellWidth + 1, pixelH);
+            }
+
+            // Draw surface line
+            ctx.strokeStyle = '#a1887f';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let x = 0; x < cols; x++) {
+                const y = baseY - surface[x] * scale;
+                if (x === 0) {
+                    ctx.moveTo(x * cellWidth, y);
+                } else {
+                    ctx.lineTo(x * cellWidth, y);
+                }
+            }
+            ctx.stroke();
+
+            // Substrate
+            ctx.fillStyle = '#37474f';
+            ctx.fillRect(0, baseY, width, 50);
+
+            // Roughness history plot
+            drawRoughnessPlot();
+
+            // Model info
+            ctx.fillStyle = '#a1887f';
+            ctx.font = '12px sans-serif';
+            const modelNames = {
+                'random': 'Random Deposition (β = 0.5)',
+                'ballistic': 'Ballistic Deposition (β ≈ 0.33)',
+                'kpz': 'KPZ Model (β ≈ 0.33)',
+                'edwards': 'Edwards-Wilkinson (β = 0.25)'
+            };
+            ctx.fillText(modelNames[model], 10, 30);
+        }
+
+        function drawRoughnessPlot() {
+            const plotX = width - 220;
+            const plotY = 20;
+            const plotW = 200;
+            const plotH = 120;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(plotX, plotY, plotW, plotH);
+
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(plotX, plotY, plotW, plotH);
+
+            ctx.fillStyle = '#aaa';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('log(W) vs log(t)', plotX + 5, plotY + 15);
+
+            if (roughnessHistory.length < 2) return;
+
+            // Plot log-log
+            const validPoints = roughnessHistory.filter(p => p.W > 0 && p.t > 0);
+            if (validPoints.length < 2) return;
+
+            const logT = validPoints.map(p => Math.log(p.t));
+            const logW = validPoints.map(p => Math.log(p.W));
+
+            const minLogT = Math.min(...logT);
+            const maxLogT = Math.max(...logT);
+            const minLogW = Math.min(...logW);
+            const maxLogW = Math.max(...logW);
+
+            const scaleX = (plotW - 30) / (maxLogT - minLogT || 1);
+            const scaleY = (plotH - 40) / (maxLogW - minLogW || 1);
+
+            // Data points
+            ctx.fillStyle = '#4fc3f7';
+            for (let i = 0; i < validPoints.length; i++) {
+                const x = plotX + 20 + (logT[i] - minLogT) * scaleX;
+                const y = plotY + plotH - 20 - (logW[i] - minLogW) * scaleY;
+                ctx.beginPath();
+                ctx.arc(x, y, 2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Fit line
+            const beta = calculateExponent();
+            if (Math.abs(beta) < 10) {
+                ctx.strokeStyle = '#ff9800';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                const x1 = plotX + 20;
+                const x2 = plotX + plotW - 10;
+                const y1 = plotY + plotH - 20 - (beta * (minLogT - minLogT) + (logW[0] - minLogW)) * scaleY;
+                const y2 = plotY + plotH - 20 - (beta * (maxLogT - minLogT) + (logW[0] - minLogW)) * scaleY;
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+
+                ctx.fillStyle = '#ff9800';
+                ctx.fillText(`β = ${beta.toFixed(3)}`, plotX + plotW - 70, plotY + plotH - 5);
+            }
+        }
+
+        function updateStats() {
+            const avgH = surface.reduce((a, b) => a + b, 0) / cols;
+            const W = calculateRoughness();
+            const beta = calculateExponent();
+
+            document.getElementById('simTime').textContent = time;
+            document.getElementById('avgHeight').textContent = avgH.toFixed(1);
+            document.getElementById('roughness').textContent = W.toFixed(3);
+            document.getElementById('exponent').textContent = beta.toFixed(3);
+        }
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < 5; i++) step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('deposition').addEventListener('input', e => {
+            depositionRate = parseFloat(e.target.value);
+            document.getElementById('depVal').textContent = depositionRate;
+        });
+
+        document.getElementById('etching').addEventListener('input', e => {
+            etchingRate = parseFloat(e.target.value);
+            document.getElementById('etchVal').textContent = etchingRate;
+        });
+
+        document.getElementById('diffusion').addEventListener('input', e => {
+            diffusionRate = parseFloat(e.target.value);
+            document.getElementById('diffVal').textContent = diffusionRate;
+        });
+
+        document.getElementById('model').addEventListener('change', e => {
+            model = e.target.value;
+            init();
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', init);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

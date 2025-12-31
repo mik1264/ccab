@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloth Simulation - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input { width: 120px; }
+        .controls button { margin-top: 10px; padding: 8px 16px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; }
+        .info { font-size: 10px; color: #888; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="controls">
+        <label>Gravity: <span id="gravVal">1.0</span></label>
+        <input type="range" id="gravity" min="0" max="3" step="0.1" value="1.0">
+        <label>Stiffness: <span id="stiffVal">50</span></label>
+        <input type="range" id="stiffness" min="10" max="100" step="5" value="50">
+        <label>Damping: <span id="dampVal">0.98</span></label>
+        <input type="range" id="damping" min="0.9" max="1" step="0.01" value="0.98">
+        <label>Wind: <span id="windVal">0.5</span></label>
+        <input type="range" id="wind" min="0" max="2" step="0.1" value="0.5">
+        <button onclick="resetCloth()">Reset</button>
+        <div class="info">Click and drag to interact</div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Particles: <span id="particles">0</span>
+    </div>
+
+    <div id="error">WebGPU not supported</div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let gravityStrength = 1.0;
+        let stiffness = 50;
+        let dampingFactor = 0.98;
+        let windStrength = 0.5;
+        let mousePos = { x: -1000, y: -1000 };
+        let mouseDown = false;
+
+        const CLOTH_WIDTH = 50;
+        const CLOTH_HEIGHT = 40;
+        const PARTICLE_COUNT = CLOTH_WIDTH * CLOTH_HEIGHT;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+
+        context.configure({ device, format, alphaMode: 'premultiplied' });
+
+        const computeShader = `
+            struct Particle {
+                pos: vec3f,
+                prevPos: vec3f,
+                pinned: f32,
+                _pad: f32,
+            }
+
+            struct Uniforms {
+                deltaTime: f32,
+                gravity: f32,
+                stiffness: f32,
+                damping: f32,
+                wind: f32,
+                time: f32,
+                mouseX: f32,
+                mouseY: f32,
+                mouseActive: f32,
+                clothWidth: u32,
+                clothHeight: u32,
+                restLength: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+            @group(0) @binding(1) var<uniform> uniforms: Uniforms;
+
+            fn getIndex(x: u32, y: u32) -> u32 {
+                return y * uniforms.clothWidth + x;
+            }
+
+            fn applyConstraint(idx1: u32, idx2: u32, restLen: f32) {
+                var p1 = particles[idx1];
+                var p2 = particles[idx2];
+
+                let diff = p2.pos - p1.pos;
+                let dist = length(diff);
+                if (dist < 0.001) { return; }
+
+                let correction = diff * (1.0 - restLen / dist) * 0.5;
+
+                if (p1.pinned < 0.5) {
+                    p1.pos += correction;
+                }
+                if (p2.pinned < 0.5) {
+                    p2.pos -= correction;
+                }
+
+                particles[idx1] = p1;
+                particles[idx2] = p2;
+            }
+
+            @compute @workgroup_size(256)
+            fn integrate(@builtin(global_invocation_id) id: vec3u) {
+                let idx = id.x;
+                if (idx >= uniforms.clothWidth * uniforms.clothHeight) { return; }
+
+                var p = particles[idx];
+                if (p.pinned > 0.5) { return; }
+
+                let dt = uniforms.deltaTime;
+                let velocity = (p.pos - p.prevPos) * uniforms.damping;
+
+                // Gravity
+                let gravity = vec3f(0.0, -uniforms.gravity * 100.0, 0.0);
+
+                // Wind
+                let x = f32(idx % uniforms.clothWidth);
+                let y = f32(idx / uniforms.clothWidth);
+                let wind = vec3f(
+                    sin(uniforms.time * 2.0 + y * 0.3) * uniforms.wind * 30.0,
+                    cos(uniforms.time * 1.5 + x * 0.2) * uniforms.wind * 10.0,
+                    sin(uniforms.time * 1.8 + x * 0.25 + y * 0.15) * uniforms.wind * 20.0
+                );
+
+                // Mouse interaction
+                if (uniforms.mouseActive > 0.5) {
+                    let mouseWorld = vec3f(
+                        (uniforms.mouseX / 400.0 - 1.0) * 200.0,
+                        -(uniforms.mouseY / 300.0 - 1.0) * 200.0,
+                        0.0
+                    );
+                    let toMouse = mouseWorld - p.pos;
+                    let dist = length(toMouse);
+                    if (dist < 50.0 && dist > 0.1) {
+                        let force = normalize(toMouse) * (50.0 - dist) * 5.0;
+                        p.pos += force * dt;
+                    }
+                }
+
+                p.prevPos = p.pos;
+                p.pos += velocity + (gravity + wind) * dt * dt;
+
+                particles[idx] = p;
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn constraints(@builtin(global_invocation_id) id: vec3u) {
+                let x = id.x;
+                let y = id.y;
+                if (x >= uniforms.clothWidth || y >= uniforms.clothHeight) { return; }
+
+                let idx = getIndex(x, y);
+                let restLen = uniforms.restLength;
+
+                // Structural constraints
+                if (x + 1u < uniforms.clothWidth) {
+                    applyConstraint(idx, getIndex(x + 1u, y), restLen);
+                }
+                if (y + 1u < uniforms.clothHeight) {
+                    applyConstraint(idx, getIndex(x, y + 1u), restLen);
+                }
+
+                // Shear constraints
+                if (x + 1u < uniforms.clothWidth && y + 1u < uniforms.clothHeight) {
+                    applyConstraint(idx, getIndex(x + 1u, y + 1u), restLen * 1.414);
+                }
+                if (x > 0u && y + 1u < uniforms.clothHeight) {
+                    applyConstraint(idx, getIndex(x - 1u, y + 1u), restLen * 1.414);
+                }
+            }
+        `;
+
+        const renderShader = `
+            struct Particle {
+                pos: vec3f,
+                prevPos: vec3f,
+                pinned: f32,
+                _pad: f32,
+            }
+
+            struct Uniforms {
+                viewProj: mat4x4f,
+                clothWidth: u32,
+                clothHeight: u32,
+            }
+
+            struct VertexOutput {
+                @builtin(position) position: vec4f,
+                @location(0) color: vec4f,
+            }
+
+            @group(0) @binding(0) var<storage, read> particles: array<Particle>;
+            @group(0) @binding(1) var<uniform> uniforms: Uniforms;
+
+            @vertex
+            fn vertexMain(@builtin(vertex_index) idx: u32) -> VertexOutput {
+                let triIdx = idx / 6u;
+                let vertIdx = idx % 6u;
+
+                let triX = triIdx % (uniforms.clothWidth - 1u);
+                let triY = triIdx / (uniforms.clothWidth - 1u);
+
+                if (triY >= uniforms.clothHeight - 1u) {
+                    var output: VertexOutput;
+                    output.position = vec4f(0.0, 0.0, -10.0, 1.0);
+                    output.color = vec4f(0.0);
+                    return output;
+                }
+
+                var pIdx: u32;
+                // Two triangles per quad
+                switch vertIdx {
+                    case 0u: { pIdx = triY * uniforms.clothWidth + triX; }
+                    case 1u: { pIdx = triY * uniforms.clothWidth + triX + 1u; }
+                    case 2u: { pIdx = (triY + 1u) * uniforms.clothWidth + triX; }
+                    case 3u: { pIdx = triY * uniforms.clothWidth + triX + 1u; }
+                    case 4u: { pIdx = (triY + 1u) * uniforms.clothWidth + triX + 1u; }
+                    case 5u: { pIdx = (triY + 1u) * uniforms.clothWidth + triX; }
+                    default: { pIdx = 0u; }
+                }
+
+                let p = particles[pIdx];
+
+                var output: VertexOutput;
+                output.position = uniforms.viewProj * vec4f(p.pos, 1.0);
+
+                // Color based on stretch
+                let velocity = length(p.pos - p.prevPos);
+                let t = clamp(velocity * 0.5, 0.0, 1.0);
+                let baseColor = vec3f(0.9, 0.7, 0.5);
+                let stretchColor = vec3f(0.2, 0.5, 0.9);
+                output.color = vec4f(mix(baseColor, stretchColor, t), 0.9);
+
+                return output;
+            }
+
+            @fragment
+            fn fragmentMain(@location(0) color: vec4f) -> @location(0) vec4f {
+                return color;
+            }
+        `;
+
+        // Create compute pipelines
+        const integratePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'integrate' }
+        });
+
+        const constraintsPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'constraints' }
+        });
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vertexMain' },
+            fragment: {
+                module: device.createShaderModule({ code: renderShader }),
+                entryPoint: 'fragmentMain',
+                targets: [{
+                    format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }
+                    }
+                }]
+            },
+            primitive: { topology: 'triangle-list' }
+        });
+
+        let particleBuffer, computeUniformBuffer, renderUniformBuffer;
+        let integrateBindGroup, constraintsBindGroup, renderBindGroup;
+
+        const REST_LENGTH = 8;
+
+        function initCloth() {
+            const particles = new Float32Array(PARTICLE_COUNT * 8);
+
+            for (let y = 0; y < CLOTH_HEIGHT; y++) {
+                for (let x = 0; x < CLOTH_WIDTH; x++) {
+                    const i = (y * CLOTH_WIDTH + x) * 8;
+                    const px = (x - CLOTH_WIDTH / 2) * REST_LENGTH;
+                    const py = -(y - CLOTH_HEIGHT / 4) * REST_LENGTH + 100;
+                    const pz = 0;
+
+                    // pos
+                    particles[i] = px;
+                    particles[i + 1] = py;
+                    particles[i + 2] = pz;
+                    // prevPos
+                    particles[i + 3] = px;
+                    particles[i + 4] = py;
+                    particles[i + 5] = pz;
+                    // pinned (top row)
+                    particles[i + 6] = y === 0 && x % 5 === 0 ? 1.0 : 0.0;
+                    particles[i + 7] = 0;
+                }
+            }
+
+            particleBuffer = device.createBuffer({
+                size: particles.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                mappedAtCreation: true
+            });
+            new Float32Array(particleBuffer.getMappedRange()).set(particles);
+            particleBuffer.unmap();
+
+            computeUniformBuffer = device.createBuffer({
+                size: 64,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+
+            renderUniformBuffer = device.createBuffer({
+                size: 80,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+            });
+
+            integrateBindGroup = device.createBindGroup({
+                layout: integratePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: particleBuffer } },
+                    { binding: 1, resource: { buffer: computeUniformBuffer } }
+                ]
+            });
+
+            constraintsBindGroup = device.createBindGroup({
+                layout: constraintsPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: particleBuffer } },
+                    { binding: 1, resource: { buffer: computeUniformBuffer } }
+                ]
+            });
+
+            renderBindGroup = device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: particleBuffer } },
+                    { binding: 1, resource: { buffer: renderUniformBuffer } }
+                ]
+            });
+
+            document.getElementById('particles').textContent = PARTICLE_COUNT.toLocaleString();
+        }
+
+        initCloth();
+
+        // Matrix helpers
+        function ortho(left, right, bottom, top, near, far) {
+            return new Float32Array([
+                2 / (right - left), 0, 0, 0,
+                0, 2 / (top - bottom), 0, 0,
+                0, 0, -2 / (far - near), 0,
+                -(right + left) / (right - left), -(top + bottom) / (top - bottom), -(far + near) / (far - near), 1
+            ]);
+        }
+
+        let time = 0;
+        let lastTime = performance.now();
+
+        function render() {
+            const now = performance.now();
+            const dt = Math.min((now - lastTime) / 1000, 0.033);
+            lastTime = now;
+            time += dt;
+
+            // Compute uniforms
+            const computeUniforms = new ArrayBuffer(64);
+            const f32 = new Float32Array(computeUniforms);
+            const u32 = new Uint32Array(computeUniforms);
+
+            f32[0] = dt;
+            f32[1] = gravityStrength;
+            f32[2] = stiffness;
+            f32[3] = dampingFactor;
+            f32[4] = windStrength;
+            f32[5] = time;
+            f32[6] = mousePos.x;
+            f32[7] = mousePos.y;
+            f32[8] = mouseDown ? 1.0 : 0.0;
+            u32[9] = CLOTH_WIDTH;
+            u32[10] = CLOTH_HEIGHT;
+            f32[11] = REST_LENGTH;
+
+            device.queue.writeBuffer(computeUniformBuffer, 0, computeUniforms);
+
+            // Render uniforms
+            const aspect = canvas.width / canvas.height;
+            const scale = 200;
+            const viewProj = ortho(-scale * aspect, scale * aspect, -scale, scale, -1000, 1000);
+
+            const renderUniforms = new ArrayBuffer(80);
+            new Float32Array(renderUniforms, 0, 16).set(viewProj);
+            new Uint32Array(renderUniforms, 64, 2).set([CLOTH_WIDTH, CLOTH_HEIGHT]);
+            device.queue.writeBuffer(renderUniformBuffer, 0, renderUniforms);
+
+            const commandEncoder = device.createCommandEncoder();
+
+            // Integration pass
+            const integratePass = commandEncoder.beginComputePass();
+            integratePass.setPipeline(integratePipeline);
+            integratePass.setBindGroup(0, integrateBindGroup);
+            integratePass.dispatchWorkgroups(Math.ceil(PARTICLE_COUNT / 256));
+            integratePass.end();
+
+            // Constraint passes (multiple iterations for stability)
+            for (let i = 0; i < 5; i++) {
+                const constraintsPass = commandEncoder.beginComputePass();
+                constraintsPass.setPipeline(constraintsPipeline);
+                constraintsPass.setBindGroup(0, constraintsBindGroup);
+                constraintsPass.dispatchWorkgroups(Math.ceil(CLOTH_WIDTH / 16), Math.ceil(CLOTH_HEIGHT / 16));
+                constraintsPass.end();
+            }
+
+            // Render pass
+            const renderPass = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    clearValue: { r: 0.02, g: 0.02, b: 0.05, a: 1 },
+                    storeOp: 'store'
+                }]
+            });
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBindGroup);
+            renderPass.draw((CLOTH_WIDTH - 1) * (CLOTH_HEIGHT - 1) * 6);
+            renderPass.end();
+
+            device.queue.submit([commandEncoder.finish()]);
+
+            document.getElementById('fps').textContent = Math.round(1 / dt);
+            requestAnimationFrame(render);
+        }
+
+        window.resetCloth = initCloth;
+
+        // Controls
+        document.getElementById('gravity').addEventListener('input', (e) => {
+            gravityStrength = parseFloat(e.target.value);
+            document.getElementById('gravVal').textContent = gravityStrength.toFixed(1);
+        });
+
+        document.getElementById('stiffness').addEventListener('input', (e) => {
+            stiffness = parseFloat(e.target.value);
+            document.getElementById('stiffVal').textContent = stiffness;
+        });
+
+        document.getElementById('damping').addEventListener('input', (e) => {
+            dampingFactor = parseFloat(e.target.value);
+            document.getElementById('dampVal').textContent = dampingFactor.toFixed(2);
+        });
+
+        document.getElementById('wind').addEventListener('input', (e) => {
+            windStrength = parseFloat(e.target.value);
+            document.getElementById('windVal').textContent = windStrength.toFixed(1);
+        });
+
+        canvas.addEventListener('mousedown', () => mouseDown = true);
+        canvas.addEventListener('mouseup', () => mouseDown = false);
+        canvas.addEventListener('mouseleave', () => mouseDown = false);
+        canvas.addEventListener('mousemove', (e) => {
+            mousePos.x = e.clientX;
+            mousePos.y = e.clientY;
+        });
+
+        render();
+    </script>
+</body>
+</html>

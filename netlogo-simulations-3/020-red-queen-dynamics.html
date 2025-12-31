@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Red Queen Dynamics - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; padding: 20px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; width: 100%; height: 100%; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #dc2626; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #dc2626; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #dc2626; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #b91c1c; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #dc2626; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #dc2626; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(220,38,38,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #dc2626; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>👑 Red Queen Dynamics</h1>
+            <p class="description">
+                "It takes all the running you can do to keep in the same place."
+                Hosts and parasites coevolve in an endless arms race. Frequency-dependent
+                selection maintains genetic diversity in both populations.
+            </p>
+
+            <div class="control-group">
+                <label>Host Population: <span class="value-display" id="hostPopValue">100</span></label>
+                <input type="range" id="hostPopSlider" min="50" max="300" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Parasite Population: <span class="value-display" id="parasitePopValue">100</span></label>
+                <input type="range" id="parasitePopSlider" min="50" max="300" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Num Alleles: <span class="value-display" id="allelesValue">5</span></label>
+                <input type="range" id="allelesSlider" min="2" max="10" value="5">
+            </div>
+
+            <div class="control-group">
+                <label>Infection Cost: <span class="value-display" id="costValue">0.5</span></label>
+                <input type="range" id="costSlider" min="0.1" max="0.9" step="0.1" value="0.5">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Host Diversity: <span id="hostDiversity">0.00</span></div>
+                <div>Parasite Diversity: <span id="parasiteDiversity">0.00</span></div>
+                <div>Infection Rate: <span id="infectionRate">0.00</span></div>
+                <div>Coevolution Cycles: <span id="cycles">0</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Van Valen (1973):</strong> Species must continually evolve to
+                maintain fitness relative to coevolving species. This explains the
+                maintenance of sex: rare genotypes escape parasite adaptation.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let hosts = [];
+        let parasites = [];
+        let hostFreqHistory = [];
+        let parasiteFreqHistory = [];
+        let cycles = 0;
+        let lastDominant = -1;
+
+        let hostPopSize = 100;
+        let parasitePopSize = 100;
+        let numAlleles = 5;
+        let infectionCost = 0.5;
+
+        const alleleColors = [
+            '#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#a855f7',
+            '#ec4899', '#14b8a6', '#f97316', '#6366f1', '#84cc16'
+        ];
+
+        class Host {
+            constructor(allele = null) {
+                this.allele = allele !== null ? allele : Math.floor(Math.random() * numAlleles);
+                this.infected = false;
+            }
+
+            get fitness() {
+                return this.infected ? (1 - infectionCost) : 1;
+            }
+        }
+
+        class Parasite {
+            constructor(allele = null) {
+                this.allele = allele !== null ? allele : Math.floor(Math.random() * numAlleles);
+                this.success = false;
+            }
+
+            canInfect(host) {
+                // Matching-alleles model: parasite infects if alleles match
+                return this.allele === host.allele;
+            }
+
+            get fitness() {
+                return this.success ? 1.5 : 0.5;
+            }
+        }
+
+        function initPopulations() {
+            hosts = [];
+            parasites = [];
+            hostFreqHistory = [];
+            parasiteFreqHistory = [];
+            cycles = 0;
+            lastDominant = -1;
+
+            for (let i = 0; i < hostPopSize; i++) {
+                hosts.push(new Host());
+            }
+            for (let i = 0; i < parasitePopSize; i++) {
+                parasites.push(new Parasite());
+            }
+        }
+
+        function infection() {
+            // Reset status
+            for (const h of hosts) h.infected = false;
+            for (const p of parasites) p.success = false;
+
+            // Each parasite tries to infect a random host
+            for (const p of parasites) {
+                const host = hosts[Math.floor(Math.random() * hosts.length)];
+                if (p.canInfect(host)) {
+                    host.infected = true;
+                    p.success = true;
+                }
+            }
+        }
+
+        function getAlleleFreqs(pop) {
+            const freqs = new Array(numAlleles).fill(0);
+            for (const ind of pop) {
+                freqs[ind.allele]++;
+            }
+            return freqs.map(f => f / pop.length);
+        }
+
+        function calculateDiversity(freqs) {
+            // Simpson's diversity index
+            let sum = 0;
+            for (const f of freqs) {
+                sum += f * f;
+            }
+            return 1 - sum;
+        }
+
+        function reproduce() {
+            // Host reproduction
+            const hostTotalFit = hosts.reduce((sum, h) => sum + h.fitness, 0);
+            const newHosts = [];
+
+            while (newHosts.length < hostPopSize) {
+                let r = Math.random() * hostTotalFit;
+                for (const h of hosts) {
+                    r -= h.fitness;
+                    if (r <= 0) {
+                        // Mutation
+                        let allele = h.allele;
+                        if (Math.random() < 0.02) {
+                            allele = Math.floor(Math.random() * numAlleles);
+                        }
+                        newHosts.push(new Host(allele));
+                        break;
+                    }
+                }
+            }
+
+            // Parasite reproduction
+            const parasiteTotalFit = parasites.reduce((sum, p) => sum + p.fitness, 0);
+            const newParasites = [];
+
+            while (newParasites.length < parasitePopSize) {
+                let r = Math.random() * parasiteTotalFit;
+                for (const p of parasites) {
+                    r -= p.fitness;
+                    if (r <= 0) {
+                        // Mutation
+                        let allele = p.allele;
+                        if (Math.random() < 0.02) {
+                            allele = Math.floor(Math.random() * numAlleles);
+                        }
+                        newParasites.push(new Parasite(allele));
+                        break;
+                    }
+                }
+            }
+
+            hosts = newHosts;
+            parasites = newParasites;
+        }
+
+        function trackCycles() {
+            const hostFreqs = getAlleleFreqs(hosts);
+            const dominant = hostFreqs.indexOf(Math.max(...hostFreqs));
+
+            if (dominant !== lastDominant && lastDominant !== -1) {
+                cycles++;
+            }
+            lastDominant = dominant;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+
+            infection();
+            reproduce();
+            trackCycles();
+
+            const hostFreqs = getAlleleFreqs(hosts);
+            const parasiteFreqs = getAlleleFreqs(parasites);
+
+            hostFreqHistory.push([...hostFreqs]);
+            parasiteFreqHistory.push([...parasiteFreqs]);
+
+            if (hostFreqHistory.length > 200) {
+                hostFreqHistory.shift();
+                parasiteFreqHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const chartHeight = (canvas.height - padding * 4) / 3;
+
+            // Host allele frequencies
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Host Allele Frequencies', padding, 25);
+
+            drawFrequencyChart(padding, padding, width, chartHeight, hostFreqHistory);
+
+            // Parasite allele frequencies
+            const chart2Y = padding * 2 + chartHeight;
+            ctx.fillText('Parasite Allele Frequencies', padding, chart2Y - 10);
+
+            drawFrequencyChart(padding, chart2Y, width, chartHeight, parasiteFreqHistory);
+
+            // Current populations (pie charts)
+            const chart3Y = padding * 3 + chartHeight * 2;
+            ctx.fillText('Current Population Composition', padding, chart3Y - 10);
+
+            const pieRadius = Math.min(chartHeight / 2 - 10, 80);
+
+            // Host pie
+            drawPieChart(padding + width / 4, chart3Y + chartHeight / 2, pieRadius, getAlleleFreqs(hosts));
+            ctx.fillStyle = '#888';
+            ctx.fillText('Hosts', padding + width / 4 - 20, chart3Y + chartHeight - 10);
+
+            // Parasite pie
+            drawPieChart(padding + 3 * width / 4, chart3Y + chartHeight / 2, pieRadius, getAlleleFreqs(parasites));
+            ctx.fillText('Parasites', padding + 3 * width / 4 - 30, chart3Y + chartHeight - 10);
+
+            // Allele legend
+            for (let i = 0; i < numAlleles; i++) {
+                ctx.fillStyle = alleleColors[i];
+                ctx.fillRect(padding + width / 2 - 40 + (i % 5) * 20, chart3Y + 10 + Math.floor(i / 5) * 15, 15, 10);
+            }
+        }
+
+        function drawFrequencyChart(x, y, width, height, history) {
+            // Stacked area chart
+            if (history.length < 2) return;
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x, y + height);
+            ctx.lineTo(x + width, y + height);
+            ctx.stroke();
+
+            // Draw stacked areas
+            for (let a = numAlleles - 1; a >= 0; a--) {
+                ctx.fillStyle = alleleColors[a] + '80';
+                ctx.beginPath();
+
+                // Top of stack
+                for (let i = 0; i < history.length; i++) {
+                    const px = x + (i / history.length) * width;
+                    let cumFreq = 0;
+                    for (let j = 0; j <= a; j++) {
+                        cumFreq += history[i][j];
+                    }
+                    const py = y + height - cumFreq * height;
+
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+
+                // Bottom of stack (or axis)
+                for (let i = history.length - 1; i >= 0; i--) {
+                    const px = x + (i / history.length) * width;
+                    let cumFreq = 0;
+                    for (let j = 0; j < a; j++) {
+                        cumFreq += history[i][j];
+                    }
+                    const py = y + height - cumFreq * height;
+                    ctx.lineTo(px, py);
+                }
+
+                ctx.closePath();
+                ctx.fill();
+            }
+        }
+
+        function drawPieChart(cx, cy, radius, freqs) {
+            let startAngle = -Math.PI / 2;
+
+            for (let i = 0; i < numAlleles; i++) {
+                if (freqs[i] === 0) continue;
+
+                const endAngle = startAngle + freqs[i] * Math.PI * 2;
+
+                ctx.fillStyle = alleleColors[i];
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.arc(cx, cy, radius, startAngle, endAngle);
+                ctx.closePath();
+                ctx.fill();
+
+                startAngle = endAngle;
+            }
+
+            ctx.strokeStyle = '#444';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+
+        function updateStats() {
+            const hostFreqs = getAlleleFreqs(hosts);
+            const parasiteFreqs = getAlleleFreqs(parasites);
+
+            const infectedCount = hosts.filter(h => h.infected).length;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('hostDiversity').textContent = calculateDiversity(hostFreqs).toFixed(3);
+            document.getElementById('parasiteDiversity').textContent = calculateDiversity(parasiteFreqs).toFixed(3);
+            document.getElementById('infectionRate').textContent = (infectedCount / hostPopSize).toFixed(3);
+            document.getElementById('cycles').textContent = cycles;
+        }
+
+        document.getElementById('hostPopSlider').addEventListener('input', (e) => {
+            hostPopSize = parseInt(e.target.value);
+            document.getElementById('hostPopValue').textContent = hostPopSize;
+        });
+
+        document.getElementById('parasitePopSlider').addEventListener('input', (e) => {
+            parasitePopSize = parseInt(e.target.value);
+            document.getElementById('parasitePopValue').textContent = parasitePopSize;
+        });
+
+        document.getElementById('allelesSlider').addEventListener('input', (e) => {
+            numAlleles = parseInt(e.target.value);
+            document.getElementById('allelesValue').textContent = numAlleles;
+        });
+
+        document.getElementById('costSlider').addEventListener('input', (e) => {
+            infectionCost = parseFloat(e.target.value);
+            document.getElementById('costValue').textContent = infectionCost.toFixed(1);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulations();
+            render();
+            updateStats();
+        });
+
+        initPopulations();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

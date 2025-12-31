@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dislocation Dynamics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #7986cb; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #7986cb; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #7986cb; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Dislocation Dynamics</h1>
+            <p class="description">2D discrete dislocation plasticity simulation. Edge dislocations interact through their stress fields and move under applied shear stress. Watch pile-ups form at obstacles!</p>
+
+            <div class="control-group">
+                <label>Applied Stress τ: <span id="stressVal">0.5</span></label>
+                <input type="range" id="stress" min="0" max="2.0" step="0.1" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Dislocation Mobility: <span id="mobilityVal">1.0</span></label>
+                <input type="range" id="mobility" min="0.1" max="3.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>Frank-Read Sources: <span id="sourceVal">3</span></label>
+                <input type="range" id="sources" min="0" max="10" value="3">
+            </div>
+
+            <div class="control-group">
+                <label>Obstacles: <span id="obstacleVal">5</span></label>
+                <input type="range" id="obstacles" min="0" max="20" value="5">
+            </div>
+
+            <button id="addPositive">Add + Dislocation</button>
+            <button id="addNegative">Add - Dislocation</button>
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Dislocations: <span id="dislocationCount">0</span></div>
+                <div>Density ρ: <span id="density">0</span> m⁻²</div>
+                <div>Plastic Strain: <span id="strain">0</span>%</div>
+                <div>Time: <span id="simTime">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let appliedStress = 0.5;
+        let mobility = 1.0;
+        let numSources = 3;
+        let numObstacles = 5;
+
+        let dislocations = [];
+        let sources = [];
+        let obstacles = [];
+        let plasticStrain = 0;
+
+        // Physical constants (normalized)
+        const mu = 1;  // Shear modulus
+        const b = 1;   // Burgers vector magnitude
+        const nu = 0.3; // Poisson's ratio
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            plasticStrain = 0;
+            dislocations = [];
+            sources = [];
+            obstacles = [];
+
+            // Create Frank-Read sources
+            for (let i = 0; i < numSources; i++) {
+                sources.push({
+                    x: 100 + Math.random() * (width - 200),
+                    y: 100 + Math.random() * (height - 200),
+                    timer: 0,
+                    criticalStress: 0.3 + Math.random() * 0.2
+                });
+            }
+
+            // Create obstacles (grain boundaries, precipitates)
+            for (let i = 0; i < numObstacles; i++) {
+                obstacles.push({
+                    x: 50 + Math.random() * (width - 100),
+                    y: 50 + Math.random() * (height - 100),
+                    strength: 1 + Math.random() * 2
+                });
+            }
+
+            // Initial dislocations
+            for (let i = 0; i < 5; i++) {
+                addDislocation(
+                    100 + Math.random() * (width - 200),
+                    100 + Math.random() * (height - 200),
+                    Math.random() > 0.5 ? 1 : -1
+                );
+            }
+
+            updateStats();
+        }
+
+        function addDislocation(x, y, sign) {
+            dislocations.push({
+                x, y,
+                sign, // +1 for positive, -1 for negative edge dislocation
+                vx: 0, vy: 0,
+                pinned: false
+            });
+        }
+
+        // Stress field of an edge dislocation
+        function dislocationStress(d, x, y) {
+            const dx = x - d.x;
+            const dy = y - d.y;
+            const r2 = dx * dx + dy * dy;
+
+            if (r2 < 25) return { sxy: 0 }; // Cutoff at core
+
+            const r4 = r2 * r2;
+            const D = mu * b / (2 * Math.PI * (1 - nu));
+
+            // Shear stress component
+            const sxy = D * d.sign * dx * (dx * dx - dy * dy) / r4;
+
+            return { sxy };
+        }
+
+        // Force on dislocation from stress
+        function peachKoehlerForce(d, stress) {
+            // F = (τ × b) for edge dislocation
+            return stress * b * d.sign;
+        }
+
+        function step() {
+            time += 0.01;
+            const dt = 0.1;
+
+            // Calculate stress on each dislocation and move
+            for (let i = 0; i < dislocations.length; i++) {
+                const d = dislocations[i];
+                if (d.pinned) continue;
+
+                // Total stress = applied + interaction stresses
+                let totalStress = appliedStress;
+
+                // Interaction with other dislocations
+                for (let j = 0; j < dislocations.length; j++) {
+                    if (i === j) continue;
+                    const stress = dislocationStress(dislocations[j], d.x, d.y);
+                    totalStress += stress.sxy;
+                }
+
+                // Resistance from obstacles
+                let obstacleForce = 0;
+                for (const obs of obstacles) {
+                    const dx = d.x - obs.x;
+                    const dy = d.y - obs.y;
+                    const r = Math.sqrt(dx * dx + dy * dy);
+                    if (r < 30) {
+                        obstacleForce -= obs.strength * Math.sign(dx) / (r + 1);
+                    }
+                }
+
+                // Peach-Koehler force
+                const force = peachKoehlerForce(d, totalStress) + obstacleForce;
+
+                // Overdamped dynamics: v = M * F
+                d.vx = mobility * force;
+                d.vy = 0; // Edge dislocations glide on slip plane (horizontal)
+
+                // Update position
+                d.x += d.vx * dt;
+
+                // Track plastic strain (Orowan equation)
+                plasticStrain += Math.abs(d.vx * dt) * b / (width * height) * 1000;
+
+                // Boundary conditions - remove if exit
+                if (d.x < 0 || d.x > width) {
+                    dislocations.splice(i, 1);
+                    i--;
+                }
+            }
+
+            // Annihilation of opposite-sign dislocations
+            for (let i = 0; i < dislocations.length; i++) {
+                for (let j = i + 1; j < dislocations.length; j++) {
+                    const d1 = dislocations[i];
+                    const d2 = dislocations[j];
+
+                    if (d1.sign !== d2.sign) {
+                        const dx = d1.x - d2.x;
+                        const dy = d1.y - d2.y;
+                        const r = Math.sqrt(dx * dx + dy * dy);
+
+                        if (r < 10) {
+                            // Annihilate
+                            dislocations.splice(j, 1);
+                            dislocations.splice(i, 1);
+                            i--;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Frank-Read source activation
+            for (const source of sources) {
+                let localStress = appliedStress;
+                for (const d of dislocations) {
+                    const stress = dislocationStress(d, source.x, source.y);
+                    localStress += stress.sxy;
+                }
+
+                if (Math.abs(localStress) > source.criticalStress) {
+                    source.timer += dt;
+                    if (source.timer > 5 && dislocations.length < 200) {
+                        // Emit dislocation dipole
+                        addDislocation(source.x - 20, source.y, 1);
+                        addDislocation(source.x + 20, source.y, -1);
+                        source.timer = 0;
+                    }
+                } else {
+                    source.timer = 0;
+                }
+            }
+
+            updateStats();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw stress field (optional background)
+            // Simplified: just show gradient based on applied stress
+
+            // Draw obstacles
+            ctx.fillStyle = '#555';
+            for (const obs of obstacles) {
+                ctx.beginPath();
+                ctx.arc(obs.x, obs.y, 15, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw Frank-Read sources
+            ctx.fillStyle = '#4caf50';
+            for (const source of sources) {
+                ctx.beginPath();
+                ctx.arc(source.x, source.y, 8, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Activation indicator
+                if (source.timer > 0) {
+                    ctx.strokeStyle = '#8bc34a';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(source.x, source.y, 12, 0, Math.PI * 2 * (source.timer / 5));
+                    ctx.stroke();
+                }
+            }
+
+            // Draw dislocations
+            for (const d of dislocations) {
+                // Draw dislocation symbol ⊥ or ⊤
+                ctx.fillStyle = d.sign > 0 ? '#f44336' : '#2196f3';
+                ctx.strokeStyle = d.sign > 0 ? '#f44336' : '#2196f3';
+                ctx.lineWidth = 3;
+
+                ctx.beginPath();
+                if (d.sign > 0) {
+                    // ⊥ symbol
+                    ctx.moveTo(d.x - 8, d.y);
+                    ctx.lineTo(d.x + 8, d.y);
+                    ctx.moveTo(d.x, d.y);
+                    ctx.lineTo(d.x, d.y + 10);
+                } else {
+                    // ⊤ symbol
+                    ctx.moveTo(d.x - 8, d.y);
+                    ctx.lineTo(d.x + 8, d.y);
+                    ctx.moveTo(d.x, d.y);
+                    ctx.lineTo(d.x, d.y - 10);
+                }
+                ctx.stroke();
+
+                // Show velocity vector
+                if (Math.abs(d.vx) > 0.1) {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(d.x, d.y);
+                    ctx.lineTo(d.x + d.vx * 20, d.y);
+                    ctx.stroke();
+                }
+            }
+
+            // Draw slip planes (horizontal lines)
+            ctx.strokeStyle = 'rgba(100,100,100,0.2)';
+            ctx.lineWidth = 1;
+            for (let y = 50; y < height; y += 50) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            // Legend
+            ctx.fillStyle = '#aaa';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Red: + dislocation  Blue: - dislocation  Green: F-R source', 10, height - 10);
+        }
+
+        function updateStats() {
+            const density = dislocations.length / (width * height) * 1e12;
+
+            document.getElementById('dislocationCount').textContent = dislocations.length;
+            document.getElementById('density').textContent = density.toExponential(2);
+            document.getElementById('strain').textContent = plasticStrain.toFixed(4);
+            document.getElementById('simTime').textContent = time.toFixed(2);
+        }
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < 5; i++) step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        // Event listeners
+        document.getElementById('stress').addEventListener('input', e => {
+            appliedStress = parseFloat(e.target.value);
+            document.getElementById('stressVal').textContent = appliedStress;
+        });
+
+        document.getElementById('mobility').addEventListener('input', e => {
+            mobility = parseFloat(e.target.value);
+            document.getElementById('mobilityVal').textContent = mobility;
+        });
+
+        document.getElementById('sources').addEventListener('input', e => {
+            numSources = parseInt(e.target.value);
+            document.getElementById('sourceVal').textContent = numSources;
+        });
+
+        document.getElementById('obstacles').addEventListener('input', e => {
+            numObstacles = parseInt(e.target.value);
+            document.getElementById('obstacleVal').textContent = numObstacles;
+        });
+
+        document.getElementById('addPositive').addEventListener('click', () => {
+            addDislocation(width / 2, height / 2, 1);
+        });
+
+        document.getElementById('addNegative').addEventListener('click', () => {
+            addDislocation(width / 2, height / 2, -1);
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', () => { resize(); });
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mutational Robustness - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #8b5cf6; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #8b5cf6; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #8b5cf6; color: white; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #7c3aed; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #8b5cf6; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #8b5cf6; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(139,92,246,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #8b5cf6; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🛡️ Mutational Robustness</h1>
+            <p class="description">
+                Robust systems maintain phenotype despite mutations (canalization).
+                Robustness arises from redundancy, neutral networks, and distributed
+                function. High robustness enables cryptic genetic variation.
+            </p>
+
+            <div class="control-group">
+                <label>Population Size: <span class="value-display" id="popValue">100</span></label>
+                <input type="range" id="popSlider" min="50" max="300" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Mutation Rate: <span class="value-display" id="mutValue">0.1</span></label>
+                <input type="range" id="mutSlider" min="0.01" max="0.3" step="0.01" value="0.1">
+            </div>
+
+            <div class="control-group">
+                <label>Redundancy Level: <span class="value-display" id="redValue">2</span></label>
+                <input type="range" id="redSlider" min="1" max="5" value="2">
+                <div style="font-size: 0.65rem; color: #666;">Gene copies per function</div>
+            </div>
+
+            <div class="control-group">
+                <label>Selection Strength: <span class="value-display" id="selValue">0.5</span></label>
+                <input type="range" id="selSlider" min="0.1" max="1" step="0.1" value="0.5">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Mean Robustness: <span id="robustness">0.00</span></div>
+                <div>Mean Fitness: <span id="meanFitness">1.00</span></div>
+                <div>Genetic Diversity: <span id="diversity">0.00</span></div>
+                <div>Cryptic Variation: <span id="cryptic">0</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Waddington's Canalization:</strong> Development buffers against
+                perturbations. Robustness allows cryptic variation to accumulate,
+                which can be released under stress, enabling rapid adaptation.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let population = [];
+        let robustnessHistory = [];
+        let diversityHistory = [];
+
+        let popSize = 100;
+        let mutRate = 0.1;
+        let redundancy = 2;
+        let selStrength = 0.5;
+
+        const NUM_FUNCTIONS = 5; // Essential functions
+
+        class Genome {
+            constructor(genes = null) {
+                // genes[function][copy] = activity level (0-1)
+                this.genes = genes || [];
+                if (this.genes.length === 0) {
+                    for (let f = 0; f < NUM_FUNCTIONS; f++) {
+                        this.genes[f] = [];
+                        for (let c = 0; c < redundancy; c++) {
+                            this.genes[f][c] = 0.8 + Math.random() * 0.2;
+                        }
+                    }
+                }
+            }
+
+            // Function output with redundancy
+            getFunctionOutput(f) {
+                // Any active copy can perform the function
+                let output = 0;
+                for (let c = 0; c < this.genes[f].length; c++) {
+                    output = Math.max(output, this.genes[f][c]);
+                }
+                return output;
+            }
+
+            get phenotype() {
+                // Phenotype is product of all function outputs
+                let pheno = 1;
+                for (let f = 0; f < NUM_FUNCTIONS; f++) {
+                    pheno *= this.getFunctionOutput(f);
+                }
+                return pheno;
+            }
+
+            get fitness() {
+                return Math.pow(this.phenotype, selStrength);
+            }
+
+            // Robustness = fraction of mutations that don't change phenotype
+            get robustness() {
+                const originalPheno = this.phenotype;
+                let neutralCount = 0;
+                const testMuts = 50;
+
+                for (let i = 0; i < testMuts; i++) {
+                    const mutant = this.testMutate();
+                    if (Math.abs(mutant.phenotype - originalPheno) < 0.01) {
+                        neutralCount++;
+                    }
+                }
+
+                return neutralCount / testMuts;
+            }
+
+            // Count mutations that are hidden by redundancy
+            get crypticVariation() {
+                let count = 0;
+                for (let f = 0; f < NUM_FUNCTIONS; f++) {
+                    const maxActivity = Math.max(...this.genes[f]);
+                    for (let c = 0; c < this.genes[f].length; c++) {
+                        if (this.genes[f][c] < maxActivity * 0.9) {
+                            count++;
+                        }
+                    }
+                }
+                return count;
+            }
+
+            testMutate() {
+                const newGenes = this.genes.map(f => [...f]);
+                const func = Math.floor(Math.random() * NUM_FUNCTIONS);
+                const copy = Math.floor(Math.random() * newGenes[func].length);
+                newGenes[func][copy] += (Math.random() - 0.5) * 0.3;
+                newGenes[func][copy] = Math.max(0, Math.min(1, newGenes[func][copy]));
+                return new Genome(newGenes);
+            }
+
+            replicate() {
+                const newGenes = this.genes.map(f => [...f]);
+
+                for (let f = 0; f < NUM_FUNCTIONS; f++) {
+                    for (let c = 0; c < newGenes[f].length; c++) {
+                        if (Math.random() < mutRate) {
+                            newGenes[f][c] += (Math.random() - 0.5) * 0.3;
+                            newGenes[f][c] = Math.max(0, Math.min(1, newGenes[f][c]));
+                        }
+                    }
+                }
+
+                return new Genome(newGenes);
+            }
+        }
+
+        function initPopulation() {
+            population = [];
+            robustnessHistory = [];
+            diversityHistory = [];
+
+            for (let i = 0; i < popSize; i++) {
+                population.push(new Genome());
+            }
+        }
+
+        function calculateDiversity() {
+            // Genetic diversity across population
+            let totalVar = 0;
+            for (let f = 0; f < NUM_FUNCTIONS; f++) {
+                for (let c = 0; c < redundancy; c++) {
+                    const values = population.map(g => g.genes[f]?.[c] || 0);
+                    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+                    const variance = values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length;
+                    totalVar += variance;
+                }
+            }
+            return totalVar / (NUM_FUNCTIONS * redundancy);
+        }
+
+        function reproduce() {
+            const totalFit = population.reduce((sum, g) => sum + g.fitness, 0);
+            const newPop = [];
+
+            const selectParent = () => {
+                let r = Math.random() * totalFit;
+                for (const g of population) {
+                    r -= g.fitness;
+                    if (r <= 0) return g;
+                }
+                return population[population.length - 1];
+            };
+
+            while (newPop.length < popSize) {
+                const parent = selectParent();
+                newPop.push(parent.replicate());
+            }
+
+            population = newPop;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+            reproduce();
+
+            // Sample robustness (expensive to compute for all)
+            const sampleSize = Math.min(20, popSize);
+            let sumRobust = 0;
+            for (let i = 0; i < sampleSize; i++) {
+                sumRobust += population[i].robustness;
+            }
+            const meanRobust = sumRobust / sampleSize;
+
+            robustnessHistory.push(meanRobust);
+            diversityHistory.push(calculateDiversity());
+
+            if (robustnessHistory.length > 400) {
+                robustnessHistory.shift();
+                diversityHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2;
+
+            // Genome structure visualization
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Gene Activity Levels (sample genomes)', padding, 25);
+
+            const sampleSize = Math.min(15, popSize);
+            const funcWidth = width / NUM_FUNCTIONS;
+            const copyHeight = (height - 40) / sampleSize;
+
+            for (let i = 0; i < sampleSize; i++) {
+                const genome = population[i];
+                for (let f = 0; f < NUM_FUNCTIONS; f++) {
+                    const x = padding + f * funcWidth;
+                    const y = padding + i * copyHeight;
+
+                    // Draw each copy
+                    const copyWidth = funcWidth / redundancy - 2;
+                    for (let c = 0; c < redundancy; c++) {
+                        const activity = genome.genes[f]?.[c] || 0;
+                        const intensity = Math.floor(activity * 255);
+
+                        // Color by activity level
+                        ctx.fillStyle = `rgb(${139}, ${92 + intensity * 0.6}, ${246})`;
+                        ctx.fillRect(x + c * (copyWidth + 1), y, copyWidth, copyHeight - 1);
+
+                        // Mark if this copy is masked by redundancy
+                        const maxActivity = Math.max(...genome.genes[f]);
+                        if (activity < maxActivity * 0.9 && activity > 0.2) {
+                            ctx.strokeStyle = '#fbbf24';
+                            ctx.lineWidth = 1;
+                            ctx.strokeRect(x + c * (copyWidth + 1), y, copyWidth, copyHeight - 1);
+                        }
+                    }
+                }
+            }
+
+            // Function labels
+            ctx.fillStyle = '#888';
+            for (let f = 0; f < NUM_FUNCTIONS; f++) {
+                ctx.fillText(`F${f + 1}`, padding + f * funcWidth + funcWidth / 2 - 8, padding - 5);
+            }
+
+            // Legend
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(padding + width - 120, padding + 10, 10, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Cryptic (masked)', padding + width - 105, padding + 19);
+
+            // Robustness over time
+            const chartY = padding * 2 + height;
+            ctx.fillText('Robustness & Diversity Over Time', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            if (robustnessHistory.length > 1) {
+                // Robustness line
+                ctx.strokeStyle = '#8b5cf6';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < robustnessHistory.length; i++) {
+                    const x = padding + (i / robustnessHistory.length) * width;
+                    const y = chartY + height - robustnessHistory[i] * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Diversity line (scaled)
+                const maxDiv = Math.max(...diversityHistory) * 1.1 || 1;
+                ctx.strokeStyle = '#22c55e';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                for (let i = 0; i < diversityHistory.length; i++) {
+                    const x = padding + (i / diversityHistory.length) * width;
+                    const y = chartY + height - (diversityHistory[i] / maxDiv) * height * 0.8;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Legend
+            ctx.fillStyle = '#8b5cf6';
+            ctx.fillRect(padding + width - 100, chartY + 15, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Robustness', padding + width - 80, chartY + 23);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(padding + width - 100, chartY + 30, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Diversity', padding + width - 80, chartY + 38);
+        }
+
+        function updateStats() {
+            const sampleSize = Math.min(20, popSize);
+            let sumRobust = 0, sumCryptic = 0;
+            for (let i = 0; i < sampleSize; i++) {
+                sumRobust += population[i].robustness;
+                sumCryptic += population[i].crypticVariation;
+            }
+
+            const meanFit = population.reduce((sum, g) => sum + g.fitness, 0) / popSize;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('robustness').textContent = (sumRobust / sampleSize).toFixed(3);
+            document.getElementById('meanFitness').textContent = meanFit.toFixed(4);
+            document.getElementById('diversity').textContent = calculateDiversity().toFixed(4);
+            document.getElementById('cryptic').textContent = (sumCryptic / sampleSize).toFixed(1);
+        }
+
+        document.getElementById('popSlider').addEventListener('input', (e) => {
+            popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = popSize;
+        });
+
+        document.getElementById('mutSlider').addEventListener('input', (e) => {
+            mutRate = parseFloat(e.target.value);
+            document.getElementById('mutValue').textContent = mutRate.toFixed(2);
+        });
+
+        document.getElementById('redSlider').addEventListener('input', (e) => {
+            redundancy = parseInt(e.target.value);
+            document.getElementById('redValue').textContent = redundancy;
+        });
+
+        document.getElementById('selSlider').addEventListener('input', (e) => {
+            selStrength = parseFloat(e.target.value);
+            document.getElementById('selValue').textContent = selStrength.toFixed(1);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

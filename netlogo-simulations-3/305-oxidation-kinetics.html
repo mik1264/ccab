@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Oxidation Kinetics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #ff8a65; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #ff8a65; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #ff8a65; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        select { width: 100%; padding: 5px; margin-top: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Oxidation Kinetics</h1>
+            <p class="description">Metal oxidation follows rate laws: Linear (x = kt) when reaction-limited, Parabolic (x² = kt) when diffusion-limited (Wagner theory), or Logarithmic for thin films at low T.</p>
+
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">500</span>°C</label>
+                <input type="range" id="temperature" min="200" max="1000" value="500">
+            </div>
+
+            <div class="control-group">
+                <label>O₂ Pressure: <span id="pressVal">1.0</span> atm</label>
+                <input type="range" id="pressure" min="0.1" max="2.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>Metal:</label>
+                <select id="metal">
+                    <option value="Fe">Iron (Fe → Fe₂O₃)</option>
+                    <option value="Cu">Copper (Cu → Cu₂O)</option>
+                    <option value="Al">Aluminum (Al → Al₂O₃)</option>
+                    <option value="Si">Silicon (Si → SiO₂)</option>
+                </select>
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Time: <span id="simTime">0</span> hours</div>
+                <div>Oxide Thickness: <span id="thickness">0</span> μm</div>
+                <div>Rate Law: <span id="rateLaw">-</span></div>
+                <div>Rate Constant k: <span id="rateK">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let temperature = 500;
+        let pressure = 1.0;
+        let metal = 'Fe';
+
+        let oxideThickness = 0;
+        let thicknessHistory = [];
+        let oxygenAtoms = [];
+
+        // Metal properties
+        const metals = {
+            'Fe': { color: '#78909c', oxideColor: '#8b4513', Ea: 1.2, k0: 1e6, law: 'linear' },
+            'Cu': { color: '#b87333', oxideColor: '#d2691e', Ea: 0.8, k0: 1e5, law: 'parabolic' },
+            'Al': { color: '#c0c0c0', oxideColor: '#f5f5dc', Ea: 1.5, k0: 1e7, law: 'logarithmic' },
+            'Si': { color: '#444444', oxideColor: '#e8e8e8', Ea: 1.2, k0: 5e5, law: 'parabolic' }
+        };
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            oxideThickness = 0.1; // Initial native oxide
+            thicknessHistory = [];
+            oxygenAtoms = [];
+            updateStats();
+        }
+
+        function getRateConstant() {
+            const props = metals[metal];
+            const kB = 8.617e-5; // eV/K
+            const T = temperature + 273; // Kelvin
+            return props.k0 * Math.exp(-props.Ea / (kB * T)) * pressure;
+        }
+
+        function step() {
+            time += 0.1;
+
+            const k = getRateConstant();
+            const props = metals[metal];
+
+            // Calculate growth rate based on rate law
+            let growthRate;
+            if (props.law === 'linear') {
+                // dx/dt = k (reaction-limited)
+                growthRate = k * 1e-6;
+            } else if (props.law === 'parabolic') {
+                // d(x²)/dt = k, so dx/dt = k/(2x) (diffusion-limited)
+                growthRate = k * 1e-6 / (2 * oxideThickness + 0.01);
+            } else {
+                // Logarithmic: x = k*log(1 + t/τ)
+                growthRate = k * 1e-8 / (time + 1);
+            }
+
+            oxideThickness += growthRate;
+
+            // Track history
+            if (time % 1 < 0.15) {
+                thicknessHistory.push({ t: time, x: oxideThickness });
+                if (thicknessHistory.length > 200) {
+                    thicknessHistory.shift();
+                }
+            }
+
+            // Generate oxygen atoms at surface
+            if (Math.random() < 0.3 * pressure) {
+                oxygenAtoms.push({
+                    x: Math.random() * width,
+                    y: 50,
+                    vx: (Math.random() - 0.5) * 2,
+                    vy: 2 + Math.random() * 2
+                });
+            }
+
+            // Move oxygen atoms
+            for (let i = oxygenAtoms.length - 1; i >= 0; i--) {
+                const o = oxygenAtoms[i];
+                o.x += o.vx;
+                o.y += o.vy;
+
+                // Check if reaches oxide surface
+                const oxideTop = height / 2 - oxideThickness * 50;
+                if (o.y > oxideTop) {
+                    oxygenAtoms.splice(i, 1);
+                }
+
+                if (o.y > height || o.x < 0 || o.x > width) {
+                    oxygenAtoms.splice(i, 1);
+                }
+            }
+
+            // Limit atoms
+            if (oxygenAtoms.length > 200) {
+                oxygenAtoms.splice(0, 50);
+            }
+
+            updateStats();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            const props = metals[metal];
+            const metalTop = height / 2;
+            const oxidePixels = Math.min(oxideThickness * 50, height / 3);
+            const oxideTop = metalTop - oxidePixels;
+
+            // Oxygen atmosphere
+            ctx.fillStyle = 'rgba(135, 206, 235, 0.1)';
+            ctx.fillRect(0, 0, width, oxideTop);
+
+            // Oxygen molecules
+            ctx.fillStyle = 'rgba(255, 100, 100, 0.7)';
+            for (const o of oxygenAtoms) {
+                ctx.beginPath();
+                ctx.arc(o.x, o.y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Oxide layer
+            const oxideGradient = ctx.createLinearGradient(0, oxideTop, 0, metalTop);
+            oxideGradient.addColorStop(0, props.oxideColor);
+            oxideGradient.addColorStop(1, shadeColor(props.oxideColor, -30));
+            ctx.fillStyle = oxideGradient;
+            ctx.fillRect(0, oxideTop, width, oxidePixels);
+
+            // Oxide layer label
+            ctx.fillStyle = '#333';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${getOxideFormula()} (${oxideThickness.toFixed(2)} μm)`, width / 2, oxideTop + oxidePixels / 2 + 5);
+
+            // Interface markers
+            ctx.strokeStyle = '#ff8a65';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(0, oxideTop);
+            ctx.lineTo(width, oxideTop);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Metal bulk
+            ctx.fillStyle = props.color;
+            ctx.fillRect(0, metalTop, width, height - metalTop);
+
+            // Metal crystalline structure hint
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+            ctx.lineWidth = 1;
+            const gridSize = 15;
+            for (let y = metalTop + gridSize; y < height; y += gridSize) {
+                for (let x = gridSize; x < width; x += gridSize) {
+                    ctx.beginPath();
+                    ctx.arc(x, y, 2, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+            }
+
+            // Labels
+            ctx.fillStyle = '#fff';
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('O₂ Gas', 10, 30);
+            ctx.fillText(`${metal} Metal`, 10, height - 20);
+
+            // Diffusion arrows
+            ctx.strokeStyle = '#ff8a65';
+            ctx.lineWidth = 2;
+            const arrowY = oxideTop + oxidePixels / 2;
+            for (let x = 100; x < width - 100; x += 150) {
+                drawArrow(x, arrowY - 20, x, arrowY + 20);
+            }
+            ctx.fillStyle = '#ff8a65';
+            ctx.fillText('O²⁻ diffusion', width / 2 - 40, oxideTop - 10);
+
+            // Kinetics plot
+            drawKineticsPlot();
+        }
+
+        function drawArrow(x1, y1, x2, y2) {
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.moveTo(x2 - 5, y2 - 8);
+            ctx.lineTo(x2, y2);
+            ctx.lineTo(x2 + 5, y2 - 8);
+            ctx.stroke();
+        }
+
+        function drawKineticsPlot() {
+            const plotX = width - 250;
+            const plotY = 20;
+            const plotW = 230;
+            const plotH = 150;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(plotX, plotY, plotW, plotH);
+
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(plotX, plotY, plotW, plotH);
+
+            ctx.fillStyle = '#aaa';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Oxide Thickness vs Time', plotX + 10, plotY + 15);
+
+            if (thicknessHistory.length < 2) return;
+
+            const maxT = Math.max(...thicknessHistory.map(p => p.t)) || 1;
+            const maxX = Math.max(...thicknessHistory.map(p => p.x)) || 1;
+
+            const scaleX = (plotW - 40) / maxT;
+            const scaleY = (plotH - 50) / maxX;
+
+            // Axes
+            ctx.strokeStyle = '#888';
+            ctx.beginPath();
+            ctx.moveTo(plotX + 30, plotY + 30);
+            ctx.lineTo(plotX + 30, plotY + plotH - 15);
+            ctx.lineTo(plotX + plotW - 10, plotY + plotH - 15);
+            ctx.stroke();
+
+            ctx.fillStyle = '#888';
+            ctx.font = '9px sans-serif';
+            ctx.fillText('x (μm)', plotX + 5, plotY + 45);
+            ctx.fillText('t (h)', plotX + plotW - 30, plotY + plotH - 3);
+
+            // Data points
+            ctx.strokeStyle = '#ff8a65';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i < thicknessHistory.length; i++) {
+                const p = thicknessHistory[i];
+                const px = plotX + 30 + p.t * scaleX;
+                const py = plotY + plotH - 15 - p.x * scaleY;
+                if (i === 0) {
+                    ctx.moveTo(px, py);
+                } else {
+                    ctx.lineTo(px, py);
+                }
+            }
+            ctx.stroke();
+
+            // Rate law label
+            const props = metals[metal];
+            ctx.fillStyle = '#ff8a65';
+            ctx.font = '10px sans-serif';
+            let lawText;
+            if (props.law === 'linear') {
+                lawText = 'x = kt (Linear)';
+            } else if (props.law === 'parabolic') {
+                lawText = 'x² = kt (Parabolic)';
+            } else {
+                lawText = 'x = k·ln(t) (Logarithmic)';
+            }
+            ctx.fillText(lawText, plotX + 50, plotY + plotH - 25);
+        }
+
+        function getOxideFormula() {
+            const formulas = { 'Fe': 'Fe₂O₃', 'Cu': 'Cu₂O', 'Al': 'Al₂O₃', 'Si': 'SiO₂' };
+            return formulas[metal];
+        }
+
+        function shadeColor(color, percent) {
+            const num = parseInt(color.replace('#', ''), 16);
+            const amt = Math.round(2.55 * percent);
+            const R = (num >> 16) + amt;
+            const G = (num >> 8 & 0x00FF) + amt;
+            const B = (num & 0x0000FF) + amt;
+            return '#' + (0x1000000 + (R < 255 ? R < 1 ? 0 : R : 255) * 0x10000 +
+                (G < 255 ? G < 1 ? 0 : G : 255) * 0x100 +
+                (B < 255 ? B < 1 ? 0 : B : 255)).toString(16).slice(1);
+        }
+
+        function updateStats() {
+            const k = getRateConstant();
+            const props = metals[metal];
+
+            document.getElementById('simTime').textContent = time.toFixed(1);
+            document.getElementById('thickness').textContent = oxideThickness.toFixed(3);
+            document.getElementById('rateLaw').textContent = props.law.charAt(0).toUpperCase() + props.law.slice(1);
+            document.getElementById('rateK').textContent = k.toExponential(2);
+        }
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < 3; i++) step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('temperature').addEventListener('input', e => {
+            temperature = parseInt(e.target.value);
+            document.getElementById('tempVal').textContent = temperature;
+        });
+
+        document.getElementById('pressure').addEventListener('input', e => {
+            pressure = parseFloat(e.target.value);
+            document.getElementById('pressVal').textContent = pressure;
+        });
+
+        document.getElementById('metal').addEventListener('change', e => {
+            metal = e.target.value;
+            init();
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', init);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

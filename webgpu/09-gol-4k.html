@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game of Life 4K - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; cursor: crosshair; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input { width: 120px; }
+        .controls button { margin: 4px 2px; padding: 6px 12px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; }
+        .info { font-size: 10px; color: #888; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="controls">
+        <label>Speed: <span id="speedVal">1</span></label>
+        <input type="range" id="speed" min="1" max="20" step="1" value="1">
+        <label>Brush Size: <span id="brushVal">5</span></label>
+        <input type="range" id="brush" min="1" max="20" step="1" value="5">
+        <div>
+            <button onclick="togglePause()" id="pauseBtn">Pause</button>
+            <button onclick="step()">Step</button>
+            <button onclick="clear()">Clear</button>
+        </div>
+        <div>
+            <button onclick="randomize(0.2)">20% Random</button>
+            <button onclick="randomize(0.5)">50% Random</button>
+        </div>
+        <div>
+            <button onclick="addPattern('glider')">Glider</button>
+            <button onclick="addPattern('lwss')">LWSS</button>
+            <button onclick="addPattern('pulsar')">Pulsar</button>
+            <button onclick="addPattern('gosper')">Gosper Gun</button>
+        </div>
+        <div class="info">Click and drag to draw. Scroll to zoom.</div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Generation: <span id="generation">0</span> | Grid: <span id="gridSize">4096x4096</span>
+    </div>
+
+    <div id="error">WebGPU not supported</div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        const SIZE = 2048; // 2K for wider browser support, still impressive
+        let speed = 1;
+        let brushSize = 5;
+        let paused = false;
+        let generation = 0;
+        let zoom = 1;
+        let panX = 0;
+        let panY = 0;
+        let mousePos = { x: -1, y: -1 };
+        let mouseDown = false;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        const computeShader = `
+            struct Uniforms {
+                size: u32,
+            }
+
+            @group(0) @binding(0) var<storage, read> inputGrid: array<u32>;
+            @group(0) @binding(1) var<storage, read_write> outputGrid: array<u32>;
+            @group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+            fn getCell(x: i32, y: i32) -> u32 {
+                let s = i32(uniforms.size);
+                let wx = ((x % s) + s) % s;
+                let wy = ((y % s) + s) % s;
+                return inputGrid[u32(wy * s + wx)];
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= uniforms.size || id.y >= uniforms.size) { return; }
+
+                let x = i32(id.x);
+                let y = i32(id.y);
+
+                var neighbors = 0u;
+                neighbors += getCell(x - 1, y - 1);
+                neighbors += getCell(x, y - 1);
+                neighbors += getCell(x + 1, y - 1);
+                neighbors += getCell(x - 1, y);
+                neighbors += getCell(x + 1, y);
+                neighbors += getCell(x - 1, y + 1);
+                neighbors += getCell(x, y + 1);
+                neighbors += getCell(x + 1, y + 1);
+
+                let current = getCell(x, y);
+                var next = 0u;
+
+                if (current == 1u) {
+                    if (neighbors == 2u || neighbors == 3u) {
+                        next = 1u;
+                    }
+                } else {
+                    if (neighbors == 3u) {
+                        next = 1u;
+                    }
+                }
+
+                outputGrid[id.y * uniforms.size + id.x] = next;
+            }
+        `;
+
+        const renderShader = `
+            struct Uniforms {
+                size: u32,
+                zoom: f32,
+                panX: f32,
+                panY: f32,
+                canvasWidth: f32,
+                canvasHeight: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read> grid: array<u32>;
+            @group(0) @binding(1) var<uniform> uniforms: Uniforms;
+            @group(0) @binding(2) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(uniforms.canvasWidth);
+                let h = u32(uniforms.canvasHeight);
+                if (id.x >= w || id.y >= h) { return; }
+
+                // Map screen coords to grid coords
+                let aspect = uniforms.canvasWidth / uniforms.canvasHeight;
+                let scale = f32(uniforms.size) / uniforms.zoom;
+
+                let gridX = (f32(id.x) / uniforms.canvasWidth - 0.5) * scale * aspect + uniforms.panX + f32(uniforms.size) * 0.5;
+                let gridY = (f32(id.y) / uniforms.canvasHeight - 0.5) * scale + uniforms.panY + f32(uniforms.size) * 0.5;
+
+                let gx = i32(gridX);
+                let gy = i32(gridY);
+
+                var color = vec3f(0.02, 0.02, 0.05);
+
+                if (gx >= 0 && gx < i32(uniforms.size) && gy >= 0 && gy < i32(uniforms.size)) {
+                    let cell = grid[u32(gy) * uniforms.size + u32(gx)];
+                    if (cell == 1u) {
+                        // Living cells with subtle color variation
+                        let fx = fract(gridX);
+                        let fy = fract(gridY);
+                        let edge = max(abs(fx - 0.5), abs(fy - 0.5)) * 2.0;
+                        color = mix(vec3f(0.2, 0.8, 0.9), vec3f(0.1, 0.5, 0.7), edge);
+                    } else {
+                        // Dead cells - very subtle grid
+                        let fx = fract(gridX);
+                        let fy = fract(gridY);
+                        if (fx < 0.05 || fy < 0.05) {
+                            color = vec3f(0.04, 0.04, 0.08);
+                        }
+                    }
+                }
+
+                textureStore(outputTexture, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var inputTexture: texture_2d<f32>;
+            @group(0) @binding(1) var texSampler: sampler;
+
+            struct VertexOutput {
+                @builtin(position) position: vec4f,
+                @location(0) uv: vec2f,
+            }
+
+            @vertex
+            fn vertexMain(@builtin(vertex_index) idx: u32) -> VertexOutput {
+                var positions = array<vec2f, 4>(
+                    vec2f(-1.0, -1.0), vec2f(1.0, -1.0),
+                    vec2f(-1.0, 1.0), vec2f(1.0, 1.0)
+                );
+                var uvs = array<vec2f, 4>(
+                    vec2f(0.0, 1.0), vec2f(1.0, 1.0),
+                    vec2f(0.0, 0.0), vec2f(1.0, 0.0)
+                );
+
+                var output: VertexOutput;
+                output.position = vec4f(positions[idx], 0.0, 1.0);
+                output.uv = uvs[idx];
+                return output;
+            }
+
+            @fragment
+            fn fragmentMain(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(inputTexture, texSampler, uv);
+            }
+        `;
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' }
+        });
+
+        const renderPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'main' }
+        });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vertexMain' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fragmentMain', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const gridBuffers = [
+            device.createBuffer({ size: SIZE * SIZE * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+            device.createBuffer({ size: SIZE * SIZE * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+        ];
+
+        const computeUniformBuffer = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        device.queue.writeBuffer(computeUniformBuffer, 0, new Uint32Array([SIZE]));
+
+        const renderUniformBuffer = device.createBuffer({
+            size: 32,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+
+        let outputTexture = device.createTexture({
+            size: [canvas.width, canvas.height],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+
+        let computeBindGroups = [];
+        let renderBindGroups = [];
+
+        function createBindGroups() {
+            computeBindGroups = [
+                device.createBindGroup({
+                    layout: computePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: gridBuffers[0] } },
+                        { binding: 1, resource: { buffer: gridBuffers[1] } },
+                        { binding: 2, resource: { buffer: computeUniformBuffer } }
+                    ]
+                }),
+                device.createBindGroup({
+                    layout: computePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: gridBuffers[1] } },
+                        { binding: 1, resource: { buffer: gridBuffers[0] } },
+                        { binding: 2, resource: { buffer: computeUniformBuffer } }
+                    ]
+                })
+            ];
+
+            renderBindGroups = [
+                device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: gridBuffers[1] } },
+                        { binding: 1, resource: { buffer: renderUniformBuffer } },
+                        { binding: 2, resource: outputTexture.createView() }
+                    ]
+                }),
+                device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: gridBuffers[0] } },
+                        { binding: 1, resource: { buffer: renderUniformBuffer } },
+                        { binding: 2, resource: outputTexture.createView() }
+                    ]
+                })
+            ];
+        }
+
+        let displayBindGroup = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outputTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        function recreateTexture() {
+            outputTexture = device.createTexture({
+                size: [canvas.width, canvas.height],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+            });
+
+            createBindGroups();
+
+            displayBindGroup = device.createBindGroup({
+                layout: displayPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: outputTexture.createView() },
+                    { binding: 1, resource: sampler }
+                ]
+            });
+        }
+
+        function initGrid() {
+            const data = new Uint32Array(SIZE * SIZE);
+            device.queue.writeBuffer(gridBuffers[0], 0, data);
+            device.queue.writeBuffer(gridBuffers[1], 0, data);
+            generation = 0;
+        }
+
+        function randomize(density) {
+            const data = new Uint32Array(SIZE * SIZE);
+            for (let i = 0; i < SIZE * SIZE; i++) {
+                data[i] = Math.random() < density ? 1 : 0;
+            }
+            device.queue.writeBuffer(gridBuffers[0], 0, data);
+            device.queue.writeBuffer(gridBuffers[1], 0, data);
+            generation = 0;
+        }
+
+        function clear() {
+            initGrid();
+        }
+
+        function togglePause() {
+            paused = !paused;
+            document.getElementById('pauseBtn').textContent = paused ? 'Play' : 'Pause';
+        }
+
+        function step() {
+            runStep();
+        }
+
+        const PATTERNS = {
+            glider: [[0, 1], [1, 2], [2, 0], [2, 1], [2, 2]],
+            lwss: [[0, 1], [0, 4], [1, 0], [2, 0], [3, 0], [3, 4], [4, 0], [4, 1], [4, 2], [4, 3]],
+            pulsar: [], // Complex pattern
+            gosper: [] // Gosper glider gun
+        };
+
+        // Generate pulsar
+        const pulsarOffsets = [[2,0],[3,0],[4,0],[8,0],[9,0],[10,0],
+                               [0,2],[5,2],[7,2],[12,2],
+                               [0,3],[5,3],[7,3],[12,3],
+                               [0,4],[5,4],[7,4],[12,4],
+                               [2,5],[3,5],[4,5],[8,5],[9,5],[10,5]];
+        pulsarOffsets.forEach(([x, y]) => {
+            PATTERNS.pulsar.push([x, y], [x, 12 - y]);
+        });
+
+        // Simplified gosper gun
+        PATTERNS.gosper = [[0,4],[0,5],[1,4],[1,5],[10,4],[10,5],[10,6],[11,3],[11,7],[12,2],[12,8],[13,2],[13,8],[14,5],[15,3],[15,7],[16,4],[16,5],[16,6],[17,5],[20,2],[20,3],[20,4],[21,2],[21,3],[21,4],[22,1],[22,5],[24,0],[24,1],[24,5],[24,6],[34,2],[34,3],[35,2],[35,3]];
+
+        function addPattern(patternName) {
+            const pattern = PATTERNS[patternName];
+            if (!pattern) return;
+
+            const data = new Uint32Array(SIZE * SIZE);
+            const cx = SIZE / 2;
+            const cy = SIZE / 2;
+
+            pattern.forEach(([x, y]) => {
+                const px = cx + x;
+                const py = cy + y;
+                if (px >= 0 && px < SIZE && py >= 0 && py < SIZE) {
+                    data[py * SIZE + px] = 1;
+                }
+            });
+
+            device.queue.writeBuffer(gridBuffers[generation % 2], 0, data);
+        }
+
+        window.togglePause = togglePause;
+        window.step = step;
+        window.clear = clear;
+        window.randomize = randomize;
+        window.addPattern = addPattern;
+
+        createBindGroups();
+        initGrid();
+        randomize(0.15);
+
+        let lastTime = performance.now();
+
+        function runStep() {
+            const commandEncoder = device.createCommandEncoder();
+
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBindGroups[generation % 2]);
+            computePass.dispatchWorkgroups(Math.ceil(SIZE / 16), Math.ceil(SIZE / 16));
+            computePass.end();
+
+            device.queue.submit([commandEncoder.finish()]);
+            generation++;
+        }
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+
+            // Simulation
+            if (!paused) {
+                for (let i = 0; i < speed; i++) {
+                    runStep();
+                }
+            }
+
+            // Update render uniforms
+            const renderUniforms = new ArrayBuffer(32);
+            const u32 = new Uint32Array(renderUniforms);
+            const f32 = new Float32Array(renderUniforms);
+            u32[0] = SIZE;
+            f32[1] = zoom;
+            f32[2] = panX;
+            f32[3] = panY;
+            f32[4] = canvas.width;
+            f32[5] = canvas.height;
+            device.queue.writeBuffer(renderUniformBuffer, 0, renderUniforms);
+
+            const commandEncoder = device.createCommandEncoder();
+
+            // Render to texture
+            const renderPass = commandEncoder.beginComputePass();
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBindGroups[generation % 2]);
+            renderPass.dispatchWorkgroups(Math.ceil(canvas.width / 16), Math.ceil(canvas.height / 16));
+            renderPass.end();
+
+            // Display
+            const displayPass = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    storeOp: 'store'
+                }]
+            });
+            displayPass.setPipeline(displayPipeline);
+            displayPass.setBindGroup(0, displayBindGroup);
+            displayPass.draw(4);
+            displayPass.end();
+
+            device.queue.submit([commandEncoder.finish()]);
+
+            document.getElementById('fps').textContent = Math.round(1 / dt);
+            document.getElementById('generation').textContent = generation.toLocaleString();
+
+            requestAnimationFrame(render);
+        }
+
+        document.getElementById('gridSize').textContent = `${SIZE}x${SIZE}`;
+
+        // Controls
+        document.getElementById('speed').addEventListener('input', (e) => {
+            speed = parseInt(e.target.value);
+            document.getElementById('speedVal').textContent = speed;
+        });
+
+        document.getElementById('brush').addEventListener('input', (e) => {
+            brushSize = parseInt(e.target.value);
+            document.getElementById('brushVal').textContent = brushSize;
+        });
+
+        // Zoom and pan
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+            zoom *= zoomFactor;
+            zoom = Math.max(0.1, Math.min(20, zoom));
+        });
+
+        let dragging = false;
+        let lastMouse = { x: 0, y: 0 };
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0) {
+                mouseDown = true;
+            } else if (e.button === 2) {
+                dragging = true;
+            }
+            lastMouse = { x: e.clientX, y: e.clientY };
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (dragging) {
+                const dx = e.clientX - lastMouse.x;
+                const dy = e.clientY - lastMouse.y;
+
+                const scale = SIZE / zoom;
+                panX -= dx / canvas.width * scale * (canvas.width / canvas.height);
+                panY -= dy / canvas.height * scale;
+
+                lastMouse = { x: e.clientX, y: e.clientY };
+            }
+
+            if (mouseDown) {
+                // Draw cells
+                const aspect = canvas.width / canvas.height;
+                const scale = SIZE / zoom;
+
+                const gridX = (e.clientX / canvas.width - 0.5) * scale * aspect + panX + SIZE * 0.5;
+                const gridY = (e.clientY / canvas.height - 0.5) * scale + panY + SIZE * 0.5;
+
+                const data = new Uint32Array(brushSize * brushSize * 4);
+                for (let dy = -brushSize; dy <= brushSize; dy++) {
+                    for (let dx = -brushSize; dx <= brushSize; dx++) {
+                        if (dx * dx + dy * dy <= brushSize * brushSize) {
+                            const gx = Math.floor(gridX + dx);
+                            const gy = Math.floor(gridY + dy);
+                            if (gx >= 0 && gx < SIZE && gy >= 0 && gy < SIZE) {
+                                // Would need to use compute shader for proper drawing
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => { mouseDown = false; dragging = false; });
+        canvas.addEventListener('mouseleave', () => { mouseDown = false; dragging = false; });
+        canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            recreateTexture();
+        });
+
+        render();
+    </script>
+</body>
+</html>

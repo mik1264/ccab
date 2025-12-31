@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Marching Cubes GPU - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input, .controls select { width: 150px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="controls">
+        <label>Threshold: <span id="threshVal">0.5</span></label>
+        <input type="range" id="threshold" min="0.1" max="1.5" step="0.05" value="0.5">
+        <label>Shape:</label>
+        <select id="shape">
+            <option value="metaballs">Metaballs</option>
+            <option value="sphere">Sphere</option>
+            <option value="torus">Torus</option>
+            <option value="gyroid">Gyroid</option>
+        </select>
+        <label>Animation Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0" max="3" step="0.1" value="1.0">
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Triangles: <span id="triangles">0</span>
+    </div>
+
+    <div id="error">WebGPU not supported</div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let threshold = 0.5;
+        let shapeType = 0;
+        let animSpeed = 1.0;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        const GRID_SIZE = 64;
+
+        // Compute shader for generating isosurface
+        const computeShader = `
+            struct Uniforms {
+                threshold: f32,
+                time: f32,
+                shapeType: u32,
+                gridSize: u32,
+            }
+
+            struct Vertex {
+                position: vec3f,
+                normal: vec3f,
+            }
+
+            @group(0) @binding(0) var<storage, read_write> vertices: array<Vertex>;
+            @group(0) @binding(1) var<storage, read_write> vertexCount: atomic<u32>;
+            @group(0) @binding(2) var<uniform> uniforms: Uniforms;
+
+            fn sampleField(p: vec3f) -> f32 {
+                let time = uniforms.time;
+
+                switch uniforms.shapeType {
+                    case 0u: {
+                        // Metaballs
+                        var v = 0.0;
+                        let b1 = vec3f(sin(time) * 0.3, cos(time * 0.7) * 0.3, sin(time * 0.5) * 0.3);
+                        let b2 = vec3f(cos(time * 0.8) * 0.3, sin(time * 0.9) * 0.3, cos(time * 0.6) * 0.3);
+                        let b3 = vec3f(sin(time * 0.6) * 0.3, cos(time * 1.1) * 0.3, sin(time * 0.8) * 0.3);
+
+                        v += 0.3 / (length(p - b1) + 0.01);
+                        v += 0.3 / (length(p - b2) + 0.01);
+                        v += 0.3 / (length(p - b3) + 0.01);
+                        v += 0.2 / (length(p) + 0.01);
+                        return v - uniforms.threshold * 2.0;
+                    }
+                    case 1u: {
+                        // Sphere
+                        let r = 0.4 + sin(time) * 0.1;
+                        return length(p) - r;
+                    }
+                    case 2u: {
+                        // Torus
+                        let R = 0.35;
+                        let r = 0.12 + sin(time * 2.0) * 0.03;
+                        let q = vec2f(length(p.xz) - R, p.y);
+                        return length(q) - r;
+                    }
+                    case 3u: {
+                        // Gyroid
+                        let s = 6.0;
+                        let sp = p * s + vec3f(time * 0.5);
+                        return (sin(sp.x) * cos(sp.y) + sin(sp.y) * cos(sp.z) + sin(sp.z) * cos(sp.x)) / s - uniforms.threshold * 0.1;
+                    }
+                    default: { return length(p) - 0.5; }
+                }
+            }
+
+            fn calcNormal(p: vec3f) -> vec3f {
+                let e = 0.001;
+                return normalize(vec3f(
+                    sampleField(p + vec3f(e, 0.0, 0.0)) - sampleField(p - vec3f(e, 0.0, 0.0)),
+                    sampleField(p + vec3f(0.0, e, 0.0)) - sampleField(p - vec3f(0.0, e, 0.0)),
+                    sampleField(p + vec3f(0.0, 0.0, e)) - sampleField(p - vec3f(0.0, 0.0, e))
+                ));
+            }
+
+            fn interpVertex(p1: vec3f, p2: vec3f, v1: f32, v2: f32) -> vec3f {
+                if (abs(v2 - v1) < 0.00001) { return p1; }
+                let t = -v1 / (v2 - v1);
+                return p1 + t * (p2 - p1);
+            }
+
+            @compute @workgroup_size(4, 4, 4)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let gs = uniforms.gridSize;
+                if (id.x >= gs - 1u || id.y >= gs - 1u || id.z >= gs - 1u) { return; }
+
+                let cellSize = 2.0 / f32(gs);
+                let origin = vec3f(-1.0) + vec3f(id) * cellSize;
+
+                // Sample 8 corners of the cube
+                var corners: array<vec3f, 8>;
+                corners[0] = origin;
+                corners[1] = origin + vec3f(cellSize, 0.0, 0.0);
+                corners[2] = origin + vec3f(cellSize, cellSize, 0.0);
+                corners[3] = origin + vec3f(0.0, cellSize, 0.0);
+                corners[4] = origin + vec3f(0.0, 0.0, cellSize);
+                corners[5] = origin + vec3f(cellSize, 0.0, cellSize);
+                corners[6] = origin + vec3f(cellSize, cellSize, cellSize);
+                corners[7] = origin + vec3f(0.0, cellSize, cellSize);
+
+                var values: array<f32, 8>;
+                var cubeIndex = 0u;
+
+                for (var i = 0u; i < 8u; i++) {
+                    values[i] = sampleField(corners[i]);
+                    if (values[i] < 0.0) {
+                        cubeIndex |= (1u << i);
+                    }
+                }
+
+                if (cubeIndex == 0u || cubeIndex == 255u) { return; }
+
+                // Simplified marching cubes - just output some triangles for edges that cross the surface
+                // Full implementation would use lookup tables
+                var edgeVerts: array<vec3f, 12>;
+                edgeVerts[0] = interpVertex(corners[0], corners[1], values[0], values[1]);
+                edgeVerts[1] = interpVertex(corners[1], corners[2], values[1], values[2]);
+                edgeVerts[2] = interpVertex(corners[2], corners[3], values[2], values[3]);
+                edgeVerts[3] = interpVertex(corners[3], corners[0], values[3], values[0]);
+                edgeVerts[4] = interpVertex(corners[4], corners[5], values[4], values[5]);
+                edgeVerts[5] = interpVertex(corners[5], corners[6], values[5], values[6]);
+                edgeVerts[6] = interpVertex(corners[6], corners[7], values[6], values[7]);
+                edgeVerts[7] = interpVertex(corners[7], corners[4], values[7], values[4]);
+                edgeVerts[8] = interpVertex(corners[0], corners[4], values[0], values[4]);
+                edgeVerts[9] = interpVertex(corners[1], corners[5], values[1], values[5]);
+                edgeVerts[10] = interpVertex(corners[2], corners[6], values[2], values[6]);
+                edgeVerts[11] = interpVertex(corners[3], corners[7], values[3], values[7]);
+
+                // Simplified: output triangles for common cases
+                // This is a demonstration - full marching cubes would use proper lookup tables
+                let center = (corners[0] + corners[6]) * 0.5;
+                if (sampleField(center) < 0.0) {
+                    // Find active edges and create triangles
+                    var activeVerts: array<vec3f, 6>;
+                    var count = 0u;
+
+                    for (var e = 0u; e < 12u; e++) {
+                        let i1 = e;
+                        let i2 = select(e + 1u, 0u, e == 11u);
+                        if ((values[e % 8u] < 0.0) != (values[(e + 1u) % 8u] < 0.0)) {
+                            if (count < 6u) {
+                                activeVerts[count] = edgeVerts[e];
+                                count++;
+                            }
+                        }
+                    }
+
+                    if (count >= 3u) {
+                        let idx = atomicAdd(&vertexCount, 3u);
+                        if (idx + 3u < 500000u) {
+                            vertices[idx].position = activeVerts[0];
+                            vertices[idx].normal = calcNormal(activeVerts[0]);
+                            vertices[idx + 1u].position = activeVerts[1];
+                            vertices[idx + 1u].normal = calcNormal(activeVerts[1]);
+                            vertices[idx + 2u].position = activeVerts[2];
+                            vertices[idx + 2u].normal = calcNormal(activeVerts[2]);
+                        }
+                    }
+                }
+            }
+        `;
+
+        const renderShader = `
+            struct Uniforms {
+                viewProj: mat4x4f,
+                time: f32,
+            }
+
+            struct Vertex {
+                position: vec3f,
+                normal: vec3f,
+            }
+
+            struct VertexOutput {
+                @builtin(position) position: vec4f,
+                @location(0) normal: vec3f,
+                @location(1) worldPos: vec3f,
+            }
+
+            @group(0) @binding(0) var<storage, read> vertices: array<Vertex>;
+            @group(0) @binding(1) var<uniform> uniforms: Uniforms;
+
+            @vertex
+            fn vertexMain(@builtin(vertex_index) idx: u32) -> VertexOutput {
+                let v = vertices[idx];
+                var output: VertexOutput;
+                output.position = uniforms.viewProj * vec4f(v.position, 1.0);
+                output.normal = v.normal;
+                output.worldPos = v.position;
+                return output;
+            }
+
+            @fragment
+            fn fragmentMain(
+                @location(0) normal: vec3f,
+                @location(1) worldPos: vec3f
+            ) -> @location(0) vec4f {
+                let lightDir = normalize(vec3f(1.0, 1.0, 1.0));
+                let n = normalize(normal);
+
+                let diffuse = max(dot(n, lightDir), 0.0);
+                let ambient = 0.2;
+
+                let baseColor = vec3f(0.2, 0.6, 0.9);
+                let color = baseColor * (ambient + diffuse * 0.8);
+
+                // Fresnel-like rim lighting
+                let viewDir = normalize(-worldPos);
+                let rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.0);
+                let finalColor = color + vec3f(0.3, 0.5, 0.8) * rim * 0.5;
+
+                return vec4f(finalColor, 1.0);
+            }
+        `;
+
+        // Create buffers
+        const vertexBuffer = device.createBuffer({
+            size: 500000 * 24, // position + normal
+            usage: GPUBufferUsage.STORAGE
+        });
+
+        const countBuffer = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+        });
+
+        const countReadBuffer = device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        });
+
+        const computeUniformBuffer = device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+
+        const renderUniformBuffer = device.createBuffer({
+            size: 80,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+
+        // Pipelines
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' }
+        });
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vertexMain' },
+            fragment: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'fragmentMain', targets: [{ format }] },
+            primitive: { topology: 'triangle-list', cullMode: 'back' },
+            depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' }
+        });
+
+        const depthTexture = device.createTexture({
+            size: [canvas.width, canvas.height],
+            format: 'depth24plus',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT
+        });
+
+        const computeBindGroup = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: vertexBuffer } },
+                { binding: 1, resource: { buffer: countBuffer } },
+                { binding: 2, resource: { buffer: computeUniformBuffer } }
+            ]
+        });
+
+        const renderBindGroup = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: vertexBuffer } },
+                { binding: 1, resource: { buffer: renderUniformBuffer } }
+            ]
+        });
+
+        // Matrix helpers
+        function perspective(fov, aspect, near, far) {
+            const f = 1 / Math.tan(fov / 2);
+            return new Float32Array([
+                f / aspect, 0, 0, 0,
+                0, f, 0, 0,
+                0, 0, (far + near) / (near - far), -1,
+                0, 0, (2 * far * near) / (near - far), 0
+            ]);
+        }
+
+        function lookAt(eye, target, up) {
+            const z = normalize(subtract(eye, target));
+            const x = normalize(cross(up, z));
+            const y = cross(z, x);
+            return new Float32Array([
+                x[0], y[0], z[0], 0,
+                x[1], y[1], z[1], 0,
+                x[2], y[2], z[2], 0,
+                -dot(x, eye), -dot(y, eye), -dot(z, eye), 1
+            ]);
+        }
+
+        function multiply(a, b) {
+            const result = new Float32Array(16);
+            for (let i = 0; i < 4; i++) {
+                for (let j = 0; j < 4; j++) {
+                    result[j * 4 + i] = a[i] * b[j * 4] + a[i + 4] * b[j * 4 + 1] + a[i + 8] * b[j * 4 + 2] + a[i + 12] * b[j * 4 + 3];
+                }
+            }
+            return result;
+        }
+
+        function normalize(v) { const l = Math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2); return [v[0] / l, v[1] / l, v[2] / l]; }
+        function subtract(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+        function cross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+        function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+        let time = 0;
+        let lastTime = performance.now();
+        let triangleCount = 0;
+
+        async function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            time += dt * animSpeed;
+
+            // Reset count
+            device.queue.writeBuffer(countBuffer, 0, new Uint32Array([0]));
+
+            // Update compute uniforms
+            const computeUniforms = new ArrayBuffer(16);
+            new Float32Array(computeUniforms, 0, 2).set([threshold, time]);
+            new Uint32Array(computeUniforms, 8, 2).set([shapeType, GRID_SIZE]);
+            device.queue.writeBuffer(computeUniformBuffer, 0, computeUniforms);
+
+            // Camera
+            const angle = time * 0.3;
+            const eye = [Math.cos(angle) * 2.5, Math.sin(time * 0.2) * 0.5, Math.sin(angle) * 2.5];
+            const proj = perspective(Math.PI / 4, canvas.width / canvas.height, 0.1, 100);
+            const view = lookAt(eye, [0, 0, 0], [0, 1, 0]);
+            const viewProj = multiply(proj, view);
+
+            const renderUniforms = new Float32Array(20);
+            renderUniforms.set(viewProj, 0);
+            renderUniforms[16] = time;
+            device.queue.writeBuffer(renderUniformBuffer, 0, renderUniforms);
+
+            const commandEncoder = device.createCommandEncoder();
+
+            // Compute pass
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBindGroup);
+            computePass.dispatchWorkgroups(
+                Math.ceil(GRID_SIZE / 4),
+                Math.ceil(GRID_SIZE / 4),
+                Math.ceil(GRID_SIZE / 4)
+            );
+            computePass.end();
+
+            // Copy count for reading
+            commandEncoder.copyBufferToBuffer(countBuffer, 0, countReadBuffer, 0, 4);
+
+            // Render pass
+            const renderPass = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    clearValue: { r: 0.02, g: 0.02, b: 0.05, a: 1 },
+                    storeOp: 'store'
+                }],
+                depthStencilAttachment: {
+                    view: depthTexture.createView(),
+                    depthLoadOp: 'clear',
+                    depthClearValue: 1,
+                    depthStoreOp: 'store'
+                }
+            });
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBindGroup);
+            renderPass.draw(triangleCount || 3);
+            renderPass.end();
+
+            device.queue.submit([commandEncoder.finish()]);
+
+            // Read vertex count
+            await countReadBuffer.mapAsync(GPUMapMode.READ);
+            const countData = new Uint32Array(countReadBuffer.getMappedRange());
+            triangleCount = countData[0];
+            countReadBuffer.unmap();
+
+            document.getElementById('fps').textContent = Math.round(1 / dt);
+            document.getElementById('triangles').textContent = Math.floor(triangleCount / 3).toLocaleString();
+
+            requestAnimationFrame(render);
+        }
+
+        // Controls
+        document.getElementById('threshold').addEventListener('input', (e) => {
+            threshold = parseFloat(e.target.value);
+            document.getElementById('threshVal').textContent = threshold.toFixed(2);
+        });
+
+        document.getElementById('shape').addEventListener('change', (e) => {
+            const shapes = { metaballs: 0, sphere: 1, torus: 2, gyroid: 3 };
+            shapeType = shapes[e.target.value];
+        });
+
+        document.getElementById('speed').addEventListener('input', (e) => {
+            animSpeed = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = animSpeed.toFixed(1);
+        });
+
+        render();
+    </script>
+</body>
+</html>

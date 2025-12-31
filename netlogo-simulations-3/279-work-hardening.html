@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Work Hardening - Strain Hardening</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #ff7043; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #ff7043; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #ff7043; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .chart { background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Work Hardening</h1>
+            <p class="description">Strain hardening occurs as dislocations multiply and interact during plastic deformation. Dislocation density increases with strain, raising the flow stress according to Taylor hardening: σ ∝ √ρ</p>
+
+            <div class="control-group">
+                <label>Strain Rate: <span id="strainRateVal">0.01</span>/s</label>
+                <input type="range" id="strainRate" min="0.001" max="0.05" step="0.001" value="0.01">
+            </div>
+
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">300</span> K</label>
+                <input type="range" id="temperature" min="77" max="800" value="300">
+            </div>
+
+            <div class="control-group">
+                <label>Initial Dislocation Density: <span id="initDensityVal">1e10</span> m⁻²</label>
+                <input type="range" id="initDensity" min="9" max="12" step="0.5" value="10">
+            </div>
+
+            <button id="deform">Apply Strain Step</button>
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Total Strain: <span id="totalStrain">0</span>%</div>
+                <div>Flow Stress: <span id="flowStress">0</span> MPa</div>
+                <div>Dislocation Density: <span id="dislocationDensity">0</span> m⁻²</div>
+                <div>Hardening Rate: <span id="hardeningRate">0</span> MPa</div>
+            </div>
+
+            <div class="chart">
+                <canvas id="stressChart" width="280" height="120"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const chartCanvas = document.getElementById('stressChart');
+        const chartCtx = chartCanvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+
+        let strainRate = 0.01;
+        let temperature = 300;
+        let initDensity = 1e10;
+
+        let totalStrain = 0;
+        let dislocationDensity = initDensity;
+        let dislocations = [];
+        let stressStrainData = [];
+
+        // Physical constants
+        const mu = 80e9;  // Shear modulus (Pa)
+        const b = 2.5e-10; // Burgers vector (m)
+        const alpha = 0.3; // Taylor factor
+        const sigma_0 = 50e6; // Initial yield stress (Pa)
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function init() {
+            resize();
+            totalStrain = 0;
+            dislocationDensity = initDensity;
+            dislocations = [];
+            stressStrainData = [];
+
+            // Create initial dislocation distribution
+            const numDislocations = Math.min(500, Math.floor(Math.sqrt(dislocationDensity) * 0.01));
+            for (let i = 0; i < numDislocations; i++) {
+                dislocations.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height,
+                    sign: Math.random() > 0.5 ? 1 : -1,
+                    glide: Math.random() * Math.PI * 2
+                });
+            }
+
+            updateStats();
+        }
+
+        function taylorHardening() {
+            // Taylor hardening: σ = σ_0 + α * μ * b * √ρ
+            return sigma_0 + alpha * mu * b * Math.sqrt(dislocationDensity);
+        }
+
+        function kocksMecking(strain) {
+            // Kocks-Mecking model: dρ/dε = k1√ρ - k2ρ
+            // k1: dislocation storage, k2: dynamic recovery
+            const k1 = 1e8; // Storage coefficient
+            const k2 = 5 * Math.exp(-temperature / 500); // Recovery (temperature dependent)
+
+            const dRho = k1 * Math.sqrt(dislocationDensity) - k2 * dislocationDensity;
+            return dRho * strain;
+        }
+
+        function step() {
+            const dt = strainRate;
+            totalStrain += dt;
+
+            // Update dislocation density via Kocks-Mecking
+            const dRho = kocksMecking(dt);
+            dislocationDensity = Math.max(initDensity, dislocationDensity + dRho);
+
+            // Add/remove visual dislocations
+            const targetNum = Math.min(1000, Math.floor(Math.sqrt(dislocationDensity) * 0.01));
+            while (dislocations.length < targetNum) {
+                dislocations.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height,
+                    sign: Math.random() > 0.5 ? 1 : -1,
+                    glide: Math.random() * Math.PI * 2
+                });
+            }
+
+            // Move dislocations (glide motion)
+            for (const d of dislocations) {
+                const stress = taylorHardening() / 1e6;
+                const velocity = stress * 0.01 * d.sign * Math.exp(-temperature / 1000);
+                d.x += Math.cos(d.glide) * velocity;
+                d.y += Math.sin(d.glide) * velocity * 0.1;
+
+                // Wrap around
+                if (d.x < 0) d.x += width;
+                if (d.x > width) d.x -= width;
+                if (d.y < 0) d.y += height;
+                if (d.y > height) d.y -= height;
+            }
+
+            // Dislocation interactions and annihilation
+            for (let i = dislocations.length - 1; i >= 0; i--) {
+                for (let j = i - 1; j >= 0; j--) {
+                    const dx = dislocations[i].x - dislocations[j].x;
+                    const dy = dislocations[i].y - dislocations[j].y;
+                    const r = Math.sqrt(dx * dx + dy * dy);
+
+                    if (r < 5 && dislocations[i].sign !== dislocations[j].sign) {
+                        // Annihilate opposite sign dislocations
+                        dislocations.splice(i, 1);
+                        if (j < dislocations.length) dislocations.splice(j, 1);
+                        break;
+                    }
+                }
+            }
+
+            // Record stress-strain data
+            const stress = taylorHardening() / 1e6;
+            stressStrainData.push({ strain: totalStrain * 100, stress });
+            if (stressStrainData.length > 200) stressStrainData.shift();
+
+            updateStats();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw slip planes
+            ctx.strokeStyle = 'rgba(255,112,67,0.1)';
+            ctx.lineWidth = 1;
+            for (let y = 0; y < height; y += 30) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(width, y);
+                ctx.stroke();
+            }
+
+            // Draw crystal lattice distortion based on strain
+            const shear = totalStrain * 10;
+            ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+            for (let x = 0; x < width; x += 20) {
+                for (let y = 0; y < height; y += 20) {
+                    const offset = (y / height) * shear * 5;
+                    ctx.beginPath();
+                    ctx.moveTo(x + offset, y);
+                    ctx.lineTo(x + offset + 15, y);
+                    ctx.lineTo(x + offset + 15, y + 15);
+                    ctx.lineTo(x + offset, y + 15);
+                    ctx.closePath();
+                    ctx.stroke();
+                }
+            }
+
+            // Draw dislocations
+            for (const d of dislocations) {
+                ctx.fillStyle = d.sign > 0 ? '#ff5722' : '#2196f3';
+                ctx.strokeStyle = d.sign > 0 ? '#ff5722' : '#2196f3';
+                ctx.lineWidth = 2;
+
+                // Draw ⊥ or ⊤ symbol
+                ctx.beginPath();
+                if (d.sign > 0) {
+                    ctx.moveTo(d.x - 5, d.y);
+                    ctx.lineTo(d.x + 5, d.y);
+                    ctx.moveTo(d.x, d.y);
+                    ctx.lineTo(d.x, d.y + 6);
+                } else {
+                    ctx.moveTo(d.x - 5, d.y);
+                    ctx.lineTo(d.x + 5, d.y);
+                    ctx.moveTo(d.x, d.y);
+                    ctx.lineTo(d.x, d.y - 6);
+                }
+                ctx.stroke();
+            }
+
+            // Draw stress-strain curve
+            drawChart();
+        }
+
+        function drawChart() {
+            chartCtx.fillStyle = '#1a1a2e';
+            chartCtx.fillRect(0, 0, 280, 120);
+
+            // Axes
+            chartCtx.strokeStyle = '#444';
+            chartCtx.beginPath();
+            chartCtx.moveTo(40, 10);
+            chartCtx.lineTo(40, 100);
+            chartCtx.lineTo(270, 100);
+            chartCtx.stroke();
+
+            // Labels
+            chartCtx.fillStyle = '#888';
+            chartCtx.font = '10px sans-serif';
+            chartCtx.fillText('σ (MPa)', 5, 55);
+            chartCtx.fillText('ε (%)', 145, 115);
+
+            if (stressStrainData.length < 2) return;
+
+            // Find max values
+            const maxStrain = Math.max(...stressStrainData.map(d => d.strain), 1);
+            const maxStress = Math.max(...stressStrainData.map(d => d.stress), 100);
+
+            // Draw curve
+            chartCtx.strokeStyle = '#ff7043';
+            chartCtx.lineWidth = 2;
+            chartCtx.beginPath();
+
+            for (let i = 0; i < stressStrainData.length; i++) {
+                const x = 40 + (stressStrainData[i].strain / maxStrain) * 220;
+                const y = 100 - (stressStrainData[i].stress / maxStress) * 85;
+                if (i === 0) chartCtx.moveTo(x, y);
+                else chartCtx.lineTo(x, y);
+            }
+            chartCtx.stroke();
+        }
+
+        function updateStats() {
+            const stress = taylorHardening() / 1e6;
+            const hardeningRate = stressStrainData.length > 1 ?
+                (stressStrainData[stressStrainData.length - 1].stress - stressStrainData[Math.max(0, stressStrainData.length - 10)].stress) /
+                (stressStrainData[stressStrainData.length - 1].strain - stressStrainData[Math.max(0, stressStrainData.length - 10)].strain + 0.001) : 0;
+
+            document.getElementById('totalStrain').textContent = (totalStrain * 100).toFixed(2);
+            document.getElementById('flowStress').textContent = stress.toFixed(1);
+            document.getElementById('dislocationDensity').textContent = dislocationDensity.toExponential(2);
+            document.getElementById('hardeningRate').textContent = hardeningRate.toFixed(1);
+        }
+
+        function animate() {
+            if (running) {
+                step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('strainRate').addEventListener('input', e => {
+            strainRate = parseFloat(e.target.value);
+            document.getElementById('strainRateVal').textContent = strainRate;
+        });
+
+        document.getElementById('temperature').addEventListener('input', e => {
+            temperature = parseInt(e.target.value);
+            document.getElementById('tempVal').textContent = temperature;
+        });
+
+        document.getElementById('initDensity').addEventListener('input', e => {
+            initDensity = Math.pow(10, parseFloat(e.target.value));
+            document.getElementById('initDensityVal').textContent = initDensity.toExponential(0);
+        });
+
+        document.getElementById('deform').addEventListener('click', () => {
+            for (let i = 0; i < 10; i++) step();
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', resize);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

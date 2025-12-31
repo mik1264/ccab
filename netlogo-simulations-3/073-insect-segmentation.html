@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Insect Segmentation - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #f97316; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #f97316; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #f97316; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #ea580c; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #f97316; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #f97316; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(249,115,22,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #f97316; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🪲 Insect Segmentation</h1>
+            <p class="description">
+                Drosophila segmentation proceeds through a gene hierarchy: maternal gradients
+                establish axes, gap genes define broad regions, pair-rule genes create stripes,
+                and segment polarity genes refine boundaries.
+            </p>
+
+            <div class="control-group">
+                <label>Bicoid Level: <span class="value-display" id="bcdValue">0.8</span></label>
+                <input type="range" id="bcdSlider" min="0.2" max="1" step="0.1" value="0.8">
+            </div>
+
+            <div class="control-group">
+                <label>Nanos Level: <span class="value-display" id="nanosValue">0.7</span></label>
+                <input type="range" id="nanosSlider" min="0.2" max="1" step="0.1" value="0.7">
+            </div>
+
+            <div class="control-group">
+                <label>Gap Gene Threshold: <span class="value-display" id="gapValue">0.3</span></label>
+                <input type="range" id="gapSlider" min="0.1" max="0.6" step="0.05" value="0.3">
+            </div>
+
+            <div class="control-group">
+                <label>Pair-Rule Period: <span class="value-display" id="prValue">7</span></label>
+                <input type="range" id="prSlider" min="4" max="10" step="1" value="7">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Stage: <span id="stage">Syncytial</span></div>
+                <div>Segments: <span id="segments">0</span></div>
+                <div>Pattern Quality: <span id="quality">0%</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Segmentation Cascade:</strong><br>
+                1. <b>Maternal:</b> Bicoid (ant), Nanos (post)<br>
+                2. <b>Gap:</b> hunchback, Krüppel, knirps<br>
+                3. <b>Pair-rule:</b> even-skipped, fushi tarazu<br>
+                4. <b>Segment polarity:</b> engrailed, wingless
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let devStage = 0;
+
+        let bicoidLevel = 0.8;
+        let nanosLevel = 0.7;
+        let gapThreshold = 0.3;
+        let pairRulePeriod = 7;
+
+        const EMBRYO_LENGTH = 100;
+        let embryo = {
+            bicoid: [],
+            nanos: [],
+            hunchback: [],
+            kruppel: [],
+            knirps: [],
+            evenSkipped: [],
+            fushiTarazu: [],
+            engrailed: [],
+            segments: []
+        };
+
+        function initEmbryo() {
+            devStage = 0;
+
+            // Initialize arrays
+            for (let i = 0; i < EMBRYO_LENGTH; i++) {
+                const x = i / EMBRYO_LENGTH;
+
+                // Maternal gradients
+                embryo.bicoid[i] = bicoidLevel * Math.exp(-x * 4);
+                embryo.nanos[i] = nanosLevel * Math.exp(-(1 - x) * 4);
+
+                // Gap genes (will be computed)
+                embryo.hunchback[i] = 0;
+                embryo.kruppel[i] = 0;
+                embryo.knirps[i] = 0;
+
+                // Pair-rule
+                embryo.evenSkipped[i] = 0;
+                embryo.fushiTarazu[i] = 0;
+
+                // Segment polarity
+                embryo.engrailed[i] = 0;
+            }
+
+            embryo.segments = [];
+        }
+
+        function getStage() {
+            if (devStage < 0.2) return 'Syncytial Blastoderm';
+            if (devStage < 0.4) return 'Gap Gene Expression';
+            if (devStage < 0.6) return 'Pair-Rule Stripes';
+            if (devStage < 0.8) return 'Segment Polarity';
+            return 'Segmented Embryo';
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+            devStage = Math.min(1, devStage + 0.005);
+
+            // Stage 1: Gap gene activation by maternal gradients
+            if (devStage > 0.1) {
+                for (let i = 0; i < EMBRYO_LENGTH; i++) {
+                    const bcd = embryo.bicoid[i];
+                    const nos = embryo.nanos[i];
+
+                    // Hunchback - activated by bicoid, repressed by nanos
+                    embryo.hunchback[i] = Math.max(0, bcd - nos * 0.5);
+
+                    // Krüppel - activated in middle region
+                    const x = i / EMBRYO_LENGTH;
+                    const midDist = Math.abs(x - 0.5);
+                    embryo.kruppel[i] = midDist < 0.2 ? (0.2 - midDist) * 3 : 0;
+
+                    // Knirps - activated in posterior
+                    embryo.knirps[i] = x > 0.6 ? (x - 0.6) * 2 : 0;
+                }
+            }
+
+            // Stage 2: Pair-rule gene stripes
+            if (devStage > 0.3) {
+                for (let i = 0; i < EMBRYO_LENGTH; i++) {
+                    const x = i / EMBRYO_LENGTH;
+
+                    // Even-skipped: periodic pattern modulated by gap genes
+                    const period = pairRulePeriod / 100;
+                    const phase1 = Math.sin((x / period) * Math.PI * 2);
+                    embryo.evenSkipped[i] = phase1 > gapThreshold ? phase1 : 0;
+
+                    // Fushi tarazu: complementary to even-skipped
+                    const phase2 = Math.sin((x / period + 0.5) * Math.PI * 2);
+                    embryo.fushiTarazu[i] = phase2 > gapThreshold ? phase2 : 0;
+                }
+            }
+
+            // Stage 3: Segment polarity genes
+            if (devStage > 0.5) {
+                for (let i = 0; i < EMBRYO_LENGTH; i++) {
+                    // Engrailed at anterior edge of each parasegment
+                    const eve = embryo.evenSkipped[i];
+                    const ftz = embryo.fushiTarazu[i];
+
+                    // Engrailed activated at boundaries
+                    if (i > 0) {
+                        const evePrev = embryo.evenSkipped[i - 1];
+                        if (eve > 0.5 && evePrev < 0.3) {
+                            embryo.engrailed[i] = 1;
+                        }
+                    }
+                }
+            }
+
+            // Stage 4: Count segments
+            if (devStage > 0.7) {
+                embryo.segments = [];
+                let inSegment = false;
+                let segStart = 0;
+
+                for (let i = 0; i < EMBRYO_LENGTH; i++) {
+                    if (embryo.engrailed[i] > 0.5) {
+                        if (inSegment) {
+                            embryo.segments.push({ start: segStart, end: i });
+                        }
+                        inSegment = true;
+                        segStart = i;
+                    }
+                }
+                if (inSegment) {
+                    embryo.segments.push({ start: segStart, end: EMBRYO_LENGTH });
+                }
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const size = Math.min(canvas.width - padding * 2, canvas.height - padding * 2);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Drosophila Segmentation: Gene Hierarchy', padding, 25);
+
+            const embryoWidth = size * 0.8;
+            const embryoHeight = 50;
+            const startX = padding + (size - embryoWidth) / 2;
+            const cellWidth = embryoWidth / EMBRYO_LENGTH;
+
+            // Draw gene expression levels
+            const genes = [
+                { name: 'Bicoid (maternal)', data: embryo.bicoid, color: '#3b82f6', y: 0 },
+                { name: 'Nanos (maternal)', data: embryo.nanos, color: '#8b5cf6', y: 1 },
+                { name: 'Hunchback (gap)', data: embryo.hunchback, color: '#ef4444', y: 2 },
+                { name: 'Krüppel (gap)', data: embryo.kruppel, color: '#f97316', y: 3 },
+                { name: 'Even-skipped (pair-rule)', data: embryo.evenSkipped, color: '#22c55e', y: 4 },
+                { name: 'Fushi tarazu (pair-rule)', data: embryo.fushiTarazu, color: '#14b8a6', y: 5 },
+                { name: 'Engrailed (segment polarity)', data: embryo.engrailed, color: '#ec4899', y: 6 }
+            ];
+
+            genes.forEach((gene, idx) => {
+                const baseY = padding + 50 + idx * 60;
+
+                // Label
+                ctx.fillStyle = gene.color;
+                ctx.font = '10px sans-serif';
+                ctx.fillText(gene.name, padding, baseY - 5);
+
+                // Expression bar
+                for (let i = 0; i < EMBRYO_LENGTH; i++) {
+                    const level = gene.data[i];
+                    ctx.fillStyle = `rgba(${hexToRgb(gene.color)}, ${level})`;
+                    ctx.fillRect(startX + i * cellWidth, baseY, cellWidth, 30);
+                }
+
+                // Border
+                ctx.strokeStyle = '#444';
+                ctx.strokeRect(startX, baseY, embryoWidth, 30);
+            });
+
+            // Draw embryo outline with segments
+            const embryoY = padding + 50 + genes.length * 60 + 30;
+            ctx.fillStyle = '#fbbf24';
+
+            // Elliptical embryo shape
+            ctx.beginPath();
+            ctx.ellipse(startX + embryoWidth / 2, embryoY + 30, embryoWidth / 2, 30, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Draw segment boundaries
+            ctx.strokeStyle = '#1a1a2e';
+            ctx.lineWidth = 2;
+            for (const seg of embryo.segments) {
+                const x = startX + (seg.start / EMBRYO_LENGTH) * embryoWidth;
+                ctx.beginPath();
+                ctx.moveTo(x, embryoY);
+                ctx.lineTo(x, embryoY + 60);
+                ctx.stroke();
+            }
+
+            // Anterior-Posterior labels
+            ctx.fillStyle = '#888';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Anterior', startX, embryoY + 75);
+            ctx.textAlign = 'right';
+            ctx.fillText('Posterior', startX + embryoWidth, embryoY + 75);
+            ctx.textAlign = 'left';
+
+            // Stage indicator
+            ctx.fillStyle = '#f97316';
+            ctx.font = '12px sans-serif';
+            ctx.fillText(`Stage: ${getStage()}`, startX, embryoY + 95);
+        }
+
+        function hexToRgb(hex) {
+            const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+            return result ?
+                `${parseInt(result[1], 16)}, ${parseInt(result[2], 16)}, ${parseInt(result[3], 16)}` :
+                '255, 255, 255';
+        }
+
+        function updateStats() {
+            const quality = embryo.segments.length >= 7 ?
+                Math.min(100, 50 + embryo.segments.length * 5) : embryo.segments.length * 10;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('stage').textContent = getStage();
+            document.getElementById('segments').textContent = embryo.segments.length;
+            document.getElementById('quality').textContent = quality.toFixed(0) + '%';
+        }
+
+        document.getElementById('bcdSlider').addEventListener('input', (e) => {
+            bicoidLevel = parseFloat(e.target.value);
+            document.getElementById('bcdValue').textContent = bicoidLevel.toFixed(1);
+        });
+
+        document.getElementById('nanosSlider').addEventListener('input', (e) => {
+            nanosLevel = parseFloat(e.target.value);
+            document.getElementById('nanosValue').textContent = nanosLevel.toFixed(1);
+        });
+
+        document.getElementById('gapSlider').addEventListener('input', (e) => {
+            gapThreshold = parseFloat(e.target.value);
+            document.getElementById('gapValue').textContent = gapThreshold.toFixed(2);
+        });
+
+        document.getElementById('prSlider').addEventListener('input', (e) => {
+            pairRulePeriod = parseInt(e.target.value);
+            document.getElementById('prValue').textContent = pairRulePeriod;
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initEmbryo();
+            render();
+            updateStats();
+        });
+
+        initEmbryo();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

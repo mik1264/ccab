@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Developmental Constraints - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #fb923c; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #fb923c; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #fb923c; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #f97316; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #fb923c; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fb923c; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(251,146,60,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #fb923c; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🔒 Developmental Constraints</h1>
+            <p class="description">
+                Limitations on phenotypic variation due to developmental architecture.
+                Models how gene regulatory network topology restricts the possible
+                directions of evolutionary change.
+            </p>
+
+            <div class="control-group">
+                <label>Constraint Strength: <span class="value-display" id="constValue">0.6</span></label>
+                <input type="range" id="constSlider" min="0" max="1" step="0.1" value="0.6">
+            </div>
+
+            <div class="control-group">
+                <label>Network Complexity: <span class="value-display" id="netValue">4</span></label>
+                <input type="range" id="netSlider" min="2" max="8" step="1" value="4">
+            </div>
+
+            <div class="control-group">
+                <label>Selection Direction: <span class="value-display" id="selDir">+X +Y</span></label>
+                <input type="range" id="selSlider" min="0" max="3" step="1" value="0">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Population: <span id="population">0</span></div>
+                <div>Accessible Var: <span id="accessVar">0%</span></div>
+                <div>Response Angle: <span id="respAngle">0°</span></div>
+                <div>Evolvability: <span id="evolvability">0</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Constraint Types:</strong><br>
+                • <b>Absolute:</b> Some phenotypes impossible<br>
+                • <b>Quantitative:</b> Some easier than others<br>
+                • <b>Pleiotropy:</b> Trait correlations<br>
+                • <b>Canalization:</b> Buffered development
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+
+        let constraintStrength = 0.6;
+        let networkComplexity = 4;
+        let selectionDirection = 0; // 0=+X+Y, 1=-X+Y, 2=-X-Y, 3=+X-Y
+
+        let organisms = [];
+        let traitHistory = [];
+        let constraintMatrix = [];
+
+        const DIRECTIONS = ['+X +Y', '-X +Y', '-X -Y', '+X -Y'];
+
+        function generateConstraintMatrix() {
+            // Create correlation matrix based on network complexity
+            constraintMatrix = [];
+            for (let i = 0; i < 2; i++) {
+                constraintMatrix[i] = [];
+                for (let j = 0; j < 2; j++) {
+                    if (i === j) {
+                        constraintMatrix[i][j] = 1;
+                    } else {
+                        // Correlation depends on network complexity
+                        const baseCorr = 1 - (networkComplexity / 10);
+                        constraintMatrix[i][j] = baseCorr * constraintStrength;
+                    }
+                }
+            }
+        }
+
+        class Organism {
+            constructor(traits = null) {
+                // Two phenotypic traits (X and Y)
+                this.traits = traits || [0.5, 0.5];
+                this.fitness = 0;
+                this.alive = true;
+                this.age = 0;
+            }
+
+            mutate() {
+                // Generate correlated mutations based on constraint matrix
+                const rawMut = [(Math.random() - 0.5) * 0.2, (Math.random() - 0.5) * 0.2];
+
+                // Apply constraints (correlated mutations)
+                const constrainedMut = [
+                    rawMut[0] * constraintMatrix[0][0] + rawMut[1] * constraintMatrix[0][1] * constraintStrength,
+                    rawMut[0] * constraintMatrix[1][0] * constraintStrength + rawMut[1] * constraintMatrix[1][1]
+                ];
+
+                return [
+                    Math.max(0, Math.min(1, this.traits[0] + constrainedMut[0])),
+                    Math.max(0, Math.min(1, this.traits[1] + constrainedMut[1]))
+                ];
+            }
+
+            calcFitness() {
+                // Selection gradient based on direction
+                let gradX, gradY;
+                switch (selectionDirection) {
+                    case 0: gradX = 1; gradY = 1; break;
+                    case 1: gradX = -1; gradY = 1; break;
+                    case 2: gradX = -1; gradY = -1; break;
+                    case 3: gradX = 1; gradY = -1; break;
+                }
+
+                // Fitness increases with traits in selected direction
+                const fitX = gradX > 0 ? this.traits[0] : 1 - this.traits[0];
+                const fitY = gradY > 0 ? this.traits[1] : 1 - this.traits[1];
+
+                this.fitness = (fitX + fitY) / 2;
+                return this.fitness;
+            }
+
+            reproduce() {
+                if (Math.random() > this.fitness * 0.15) return null;
+                return new Organism(this.mutate());
+            }
+        }
+
+        function initPopulation() {
+            organisms = [];
+            traitHistory = [];
+            generateConstraintMatrix();
+
+            for (let i = 0; i < 80; i++) {
+                organisms.push(new Organism());
+            }
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+
+            // Update fitness
+            organisms.forEach(org => {
+                org.age++;
+                org.calcFitness();
+                if (org.age > 100 || Math.random() < 0.03 / org.fitness) {
+                    org.alive = false;
+                }
+            });
+
+            // Reproduction
+            const offspring = [];
+            organisms.filter(o => o.alive).forEach(org => {
+                const child = org.reproduce();
+                if (child) offspring.push(child);
+            });
+            organisms.push(...offspring);
+
+            // Remove dead and limit
+            organisms = organisms.filter(o => o.alive);
+            while (organisms.length > 100) {
+                organisms.sort((a, b) => a.fitness - b.fitness);
+                organisms.shift();
+            }
+
+            // Track statistics
+            if (generation % 3 === 0) {
+                const alive = organisms.filter(o => o.alive);
+                if (alive.length > 0) {
+                    const meanX = alive.reduce((s, o) => s + o.traits[0], 0) / alive.length;
+                    const meanY = alive.reduce((s, o) => s + o.traits[1], 0) / alive.length;
+
+                    traitHistory.push({
+                        time: generation,
+                        x: meanX,
+                        y: meanY
+                    });
+                    if (traitHistory.length > 200) traitHistory.shift();
+                }
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Title
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Developmental Constraints: Restricted Evolutionary Paths', 20, 25);
+
+            // Selection direction
+            ctx.fillStyle = '#fb923c';
+            ctx.font = '14px sans-serif';
+            ctx.fillText(`Selection: ${DIRECTIONS[selectionDirection]}`, 20, 55);
+
+            // Draw trait space
+            drawTraitSpace();
+
+            // Draw constraint ellipse
+            drawConstraintEllipse();
+
+            // Draw evolutionary trajectory
+            drawTrajectory();
+        }
+
+        function drawTraitSpace() {
+            const spaceX = 50;
+            const spaceY = 80;
+            const spaceW = canvas.width * 0.4;
+            const spaceH = canvas.height - 150;
+
+            // Background
+            ctx.fillStyle = 'rgba(0,0,0,0.2)';
+            ctx.fillRect(spaceX, spaceY, spaceW, spaceH);
+
+            // Axes
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(spaceX, spaceY + spaceH);
+            ctx.lineTo(spaceX + spaceW, spaceY + spaceH);
+            ctx.moveTo(spaceX, spaceY + spaceH);
+            ctx.lineTo(spaceX, spaceY);
+            ctx.stroke();
+
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Trait X', spaceX + spaceW/2 - 20, spaceY + spaceH + 15);
+            ctx.save();
+            ctx.translate(spaceX - 15, spaceY + spaceH/2);
+            ctx.rotate(-Math.PI/2);
+            ctx.fillText('Trait Y', -20, 0);
+            ctx.restore();
+
+            // Selection gradient
+            let gradX, gradY;
+            switch (selectionDirection) {
+                case 0: gradX = 1; gradY = 1; break;
+                case 1: gradX = -1; gradY = 1; break;
+                case 2: gradX = -1; gradY = -1; break;
+                case 3: gradX = 1; gradY = -1; break;
+            }
+
+            // Draw selection arrow
+            const arrowCX = spaceX + spaceW/2;
+            const arrowCY = spaceY + spaceH/2;
+            const arrowLen = 50;
+
+            ctx.strokeStyle = '#fb923c';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(arrowCX, arrowCY);
+            ctx.lineTo(arrowCX + gradX * arrowLen, arrowCY - gradY * arrowLen);
+            ctx.stroke();
+
+            // Arrow head
+            ctx.fillStyle = '#fb923c';
+            ctx.beginPath();
+            const endX = arrowCX + gradX * arrowLen;
+            const endY = arrowCY - gradY * arrowLen;
+            const angle = Math.atan2(-gradY, gradX);
+            ctx.moveTo(endX, endY);
+            ctx.lineTo(endX - 10 * Math.cos(angle - 0.3), endY + 10 * Math.sin(angle - 0.3));
+            ctx.lineTo(endX - 10 * Math.cos(angle + 0.3), endY + 10 * Math.sin(angle + 0.3));
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#888';
+            ctx.font = '9px sans-serif';
+            ctx.fillText('Selection', endX + 5, endY - 5);
+
+            // Draw organisms
+            organisms.filter(o => o.alive).forEach(org => {
+                const x = spaceX + org.traits[0] * spaceW;
+                const y = spaceY + spaceH - org.traits[1] * spaceH;
+
+                ctx.fillStyle = `rgba(251, 146, 60, ${0.3 + org.fitness * 0.7})`;
+                ctx.beginPath();
+                ctx.arc(x, y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // Draw mean position
+            const alive = organisms.filter(o => o.alive);
+            if (alive.length > 0) {
+                const meanX = alive.reduce((s, o) => s + o.traits[0], 0) / alive.length;
+                const meanY = alive.reduce((s, o) => s + o.traits[1], 0) / alive.length;
+
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.arc(spaceX + meanX * spaceW, spaceY + spaceH - meanY * spaceH, 6, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function drawConstraintEllipse() {
+            const cx = canvas.width * 0.7;
+            const cy = canvas.height * 0.3;
+            const size = 100;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(cx - size - 20, cy - size - 30, size * 2 + 40, size * 2 + 50);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Constraint Ellipse (Accessible Variation)', cx - size, cy - size - 10);
+
+            // Draw ellipse representing constrained variation
+            const angle = Math.PI / 4 * (1 - constraintStrength); // Rotation based on correlation
+            const axisRatio = 0.3 + (1 - constraintStrength) * 0.7; // Eccentricity
+
+            ctx.strokeStyle = '#fb923c';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, size, size * axisRatio, angle, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Fill with gradient
+            ctx.fillStyle = 'rgba(251, 146, 60, 0.2)';
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, size, size * axisRatio, angle, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Axes of ellipse
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.setLineDash([3, 3]);
+            ctx.lineWidth = 1;
+
+            // Major axis
+            ctx.beginPath();
+            ctx.moveTo(cx - size * Math.cos(angle), cy - size * Math.sin(angle));
+            ctx.lineTo(cx + size * Math.cos(angle), cy + size * Math.sin(angle));
+            ctx.stroke();
+
+            // Minor axis
+            ctx.beginPath();
+            ctx.moveTo(cx - size * axisRatio * Math.cos(angle + Math.PI/2), cy - size * axisRatio * Math.sin(angle + Math.PI/2));
+            ctx.lineTo(cx + size * axisRatio * Math.cos(angle + Math.PI/2), cy + size * axisRatio * Math.sin(angle + Math.PI/2));
+            ctx.stroke();
+
+            ctx.setLineDash([]);
+
+            // Labels
+            ctx.fillStyle = '#888';
+            ctx.font = '9px sans-serif';
+            ctx.fillText('High constraint = elongated', cx - size, cy + size + 20);
+            ctx.fillText('Low constraint = circular', cx - size, cy + size + 35);
+        }
+
+        function drawTrajectory() {
+            const graphX = canvas.width * 0.52;
+            const graphY = canvas.height * 0.55;
+            const graphW = canvas.width * 0.44;
+            const graphH = canvas.height * 0.35;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(graphX, graphY, graphW, graphH);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Evolutionary Trajectory', graphX + 5, graphY + 15);
+
+            // Draw trajectory in trait space
+            if (traitHistory.length > 1) {
+                ctx.strokeStyle = '#fb923c';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+
+                traitHistory.forEach((record, i) => {
+                    const x = graphX + 30 + record.x * (graphW - 60);
+                    const y = graphY + graphH - 30 - record.y * (graphH - 60);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+
+                // Current position
+                const last = traitHistory[traitHistory.length - 1];
+                ctx.fillStyle = '#fff';
+                ctx.beginPath();
+                ctx.arc(graphX + 30 + last.x * (graphW - 60), graphY + graphH - 30 - last.y * (graphH - 60), 5, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Start position
+                const first = traitHistory[0];
+                ctx.fillStyle = '#666';
+                ctx.beginPath();
+                ctx.arc(graphX + 30 + first.x * (graphW - 60), graphY + graphH - 30 - first.y * (graphH - 60), 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Axes
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(graphX + 30, graphY + graphH - 30);
+            ctx.lineTo(graphX + graphW - 10, graphY + graphH - 30);
+            ctx.moveTo(graphX + 30, graphY + graphH - 30);
+            ctx.lineTo(graphX + 30, graphY + 25);
+            ctx.stroke();
+
+            ctx.fillStyle = '#666';
+            ctx.fillText('X', graphX + graphW - 20, graphY + graphH - 15);
+            ctx.fillText('Y', graphX + 15, graphY + 35);
+        }
+
+        function updateStats() {
+            const alive = organisms.filter(o => o.alive);
+
+            if (alive.length > 1) {
+                // Calculate response to selection
+                if (traitHistory.length > 10) {
+                    const recent = traitHistory.slice(-10);
+                    const dx = recent[recent.length - 1].x - recent[0].x;
+                    const dy = recent[recent.length - 1].y - recent[0].y;
+
+                    // Angle of response
+                    const respAngle = Math.atan2(dy, dx) * 180 / Math.PI;
+
+                    // Expected angle
+                    let expectedAngle;
+                    switch (selectionDirection) {
+                        case 0: expectedAngle = 45; break;
+                        case 1: expectedAngle = 135; break;
+                        case 2: expectedAngle = -135; break;
+                        case 3: expectedAngle = -45; break;
+                    }
+
+                    const angleDiff = Math.abs(respAngle - expectedAngle);
+
+                    document.getElementById('respAngle').textContent = respAngle.toFixed(0) + '°';
+
+                    // Evolvability (rate of change)
+                    const evolvability = Math.sqrt(dx * dx + dy * dy) * 100;
+                    document.getElementById('evolvability').textContent = evolvability.toFixed(2);
+                }
+
+                // Accessible variation
+                const accessibleVar = (1 - constraintStrength) * 100;
+                document.getElementById('accessVar').textContent = accessibleVar.toFixed(0) + '%';
+
+                document.getElementById('population').textContent = alive.length;
+            }
+
+            document.getElementById('generation').textContent = generation;
+        }
+
+        document.getElementById('constSlider').addEventListener('input', (e) => {
+            constraintStrength = parseFloat(e.target.value);
+            document.getElementById('constValue').textContent = constraintStrength.toFixed(1);
+            generateConstraintMatrix();
+        });
+
+        document.getElementById('netSlider').addEventListener('input', (e) => {
+            networkComplexity = parseInt(e.target.value);
+            document.getElementById('netValue').textContent = networkComplexity;
+            generateConstraintMatrix();
+        });
+
+        document.getElementById('selSlider').addEventListener('input', (e) => {
+            selectionDirection = parseInt(e.target.value);
+            document.getElementById('selDir').textContent = DIRECTIONS[selectionDirection];
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

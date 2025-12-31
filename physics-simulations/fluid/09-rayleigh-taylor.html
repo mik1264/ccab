@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rayleigh-Taylor Instability</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0f;
+            color: #fff;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            overflow: hidden;
+        }
+        #canvas { display: block; width: 100vw; height: 100vh; }
+        .controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.85);
+            padding: 20px;
+            border-radius: 12px;
+            z-index: 100;
+            min-width: 280px;
+        }
+        h1 { font-size: 1.3em; margin-bottom: 5px; color: #e91e63; }
+        .subtitle { font-size: 0.85em; color: #888; margin-bottom: 15px; }
+        .slider-group { margin-bottom: 12px; }
+        .slider-group label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+            font-size: 0.85em;
+            color: #aaa;
+        }
+        .slider-group input[type="range"] {
+            width: 100%;
+            height: 6px;
+            -webkit-appearance: none;
+            background: #333;
+            border-radius: 3px;
+        }
+        .slider-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #e91e63;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        .button-row { display: flex; gap: 10px; margin-top: 15px; }
+        button {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 6px;
+            background: #e91e63;
+            color: #fff;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        button:hover { background: #c2185b; }
+        .stats {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #333;
+            font-size: 0.85em;
+            color: #888;
+        }
+        .back-link {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            color: #e91e63;
+            text-decoration: none;
+            z-index: 100;
+        }
+        .info {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 8px;
+            max-width: 400px;
+            font-size: 0.85em;
+            color: #aaa;
+            line-height: 1.5;
+        }
+        .info h3 { color: #e91e63; margin-bottom: 8px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div class="controls">
+        <h1>Rayleigh-Taylor Instability</h1>
+        <p class="subtitle">Density-Driven Mixing</p>
+
+        <div class="slider-group">
+            <label>Gravity <span id="gravityVal">0.5</span></label>
+            <input type="range" id="gravity" min="0.1" max="2" step="0.1" value="0.5">
+        </div>
+
+        <div class="slider-group">
+            <label>Density Ratio <span id="densityVal">2.0</span></label>
+            <input type="range" id="densityRatio" min="1.2" max="5" step="0.1" value="2.0">
+        </div>
+
+        <div class="slider-group">
+            <label>Perturbation Mode <span id="modeVal">4</span></label>
+            <input type="range" id="mode" min="1" max="12" step="1" value="4">
+        </div>
+
+        <div class="slider-group">
+            <label>Surface Tension <span id="tensionVal">0.02</span></label>
+            <input type="range" id="tension" min="0" max="0.1" step="0.005" value="0.02">
+        </div>
+
+        <div class="button-row">
+            <button id="resetBtn">Reset</button>
+            <button id="pauseBtn">Pause</button>
+        </div>
+
+        <div class="stats">
+            <div>Grid: <span id="gridSize">0×0</span></div>
+            <div>Mixing: <span id="mixing">0%</span></div>
+            <div>FPS: <span id="fps">0</span></div>
+        </div>
+    </div>
+
+    <a href="../index.html" class="back-link">← Back</a>
+
+    <div class="info">
+        <h3>Rayleigh-Taylor Instability</h3>
+        <p>When a dense fluid sits atop a lighter one under gravity, the interface
+        is unstable. Small perturbations grow into characteristic "fingers" and
+        "mushroom" structures. This occurs in supernovae, oil-water mixtures, and
+        atmospheric phenomena.</p>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height, gridWidth, gridHeight;
+        const CELL_SIZE = 3;
+
+        let rho, u, v;
+        let rhoNext, uNext, vNext;
+
+        let gravity = 0.5;
+        let densityRatio = 2.0;
+        let perturbMode = 4;
+        let surfaceTension = 0.02;
+        let paused = false;
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            width = canvas.width;
+            height = canvas.height;
+            gridWidth = Math.floor(width / CELL_SIZE);
+            gridHeight = Math.floor(height / CELL_SIZE);
+            document.getElementById('gridSize').textContent = `${gridWidth}×${gridHeight}`;
+            init();
+        }
+
+        function init() {
+            const size = gridWidth * gridHeight;
+            rho = new Float32Array(size);
+            u = new Float32Array(size);
+            v = new Float32Array(size);
+            rhoNext = new Float32Array(size);
+            uNext = new Float32Array(size);
+            vNext = new Float32Array(size);
+
+            // Heavy fluid on top, light on bottom
+            const midY = gridHeight * 0.4;
+
+            for (let y = 0; y < gridHeight; y++) {
+                for (let x = 0; x < gridWidth; x++) {
+                    const i = y * gridWidth + x;
+
+                    // Sinusoidal perturbation
+                    const perturbation = 0.03 * gridHeight * Math.sin(perturbMode * Math.PI * x / gridWidth);
+                    const interface_y = midY + perturbation;
+
+                    // Smooth transition
+                    const transition = 0.02 * gridHeight;
+                    const blend = 0.5 * (1 + Math.tanh((y - interface_y) / transition));
+
+                    // Heavy fluid (densityRatio) on top, light (1.0) on bottom
+                    rho[i] = 1.0 + (densityRatio - 1.0) * (1 - blend);
+
+                    u[i] = 0;
+                    v[i] = 0;
+                }
+            }
+        }
+
+        function idx(x, y) {
+            x = (x + gridWidth) % gridWidth;
+            y = Math.max(0, Math.min(gridHeight - 1, y));
+            return y * gridWidth + x;
+        }
+
+        function step(dt) {
+            // Calculate pressure and apply forces
+            for (let y = 1; y < gridHeight - 1; y++) {
+                for (let x = 0; x < gridWidth; x++) {
+                    const i = idx(x, y);
+
+                    // Gravity force
+                    const gForce = gravity * (rho[i] - 1.5);
+
+                    // Pressure gradient (simplified)
+                    const dpdx = (rho[idx(x+1, y)] - rho[idx(x-1, y)]) * 0.5;
+                    const dpdy = (rho[idx(x, y+1)] - rho[idx(x, y-1)]) * 0.5;
+
+                    // Surface tension (Laplacian of density)
+                    const lapRho = rho[idx(x-1, y)] + rho[idx(x+1, y)] +
+                                   rho[idx(x, y-1)] + rho[idx(x, y+1)] - 4 * rho[i];
+
+                    // Update velocities
+                    uNext[i] = u[i] - dt * dpdx / rho[i] + dt * surfaceTension * lapRho * dpdx;
+                    vNext[i] = v[i] + dt * gForce - dt * dpdy / rho[i] + dt * surfaceTension * lapRho * dpdy;
+
+                    // Viscosity
+                    const lapU = u[idx(x-1, y)] + u[idx(x+1, y)] + u[idx(x, y-1)] + u[idx(x, y+1)] - 4 * u[i];
+                    const lapV = v[idx(x-1, y)] + v[idx(x+1, y)] + v[idx(x, y-1)] + v[idx(x, y+1)] - 4 * v[i];
+
+                    uNext[i] += 0.01 * lapU;
+                    vNext[i] += 0.01 * lapV;
+                }
+            }
+
+            [u, uNext] = [uNext, u];
+            [v, vNext] = [vNext, v];
+
+            // Advect density
+            for (let y = 1; y < gridHeight - 1; y++) {
+                for (let x = 0; x < gridWidth; x++) {
+                    const i = idx(x, y);
+
+                    // Backtrace
+                    const srcX = x - u[i] * dt * 30;
+                    const srcY = y - v[i] * dt * 30;
+
+                    // Bilinear interpolation
+                    const x0 = Math.floor(srcX);
+                    const y0 = Math.floor(srcY);
+                    const fx = srcX - x0;
+                    const fy = srcY - y0;
+
+                    const i00 = idx(x0, y0);
+                    const i10 = idx(x0 + 1, y0);
+                    const i01 = idx(x0, y0 + 1);
+                    const i11 = idx(x0 + 1, y0 + 1);
+
+                    rhoNext[i] = (1 - fx) * (1 - fy) * rho[i00] +
+                                 fx * (1 - fy) * rho[i10] +
+                                 (1 - fx) * fy * rho[i01] +
+                                 fx * fy * rho[i11];
+                }
+            }
+
+            // Boundary conditions
+            for (let x = 0; x < gridWidth; x++) {
+                rhoNext[idx(x, 0)] = densityRatio;
+                rhoNext[idx(x, gridHeight - 1)] = 1.0;
+                u[idx(x, 0)] = u[idx(x, gridHeight - 1)] = 0;
+                v[idx(x, 0)] = v[idx(x, gridHeight - 1)] = 0;
+            }
+
+            [rho, rhoNext] = [rhoNext, rho];
+        }
+
+        function calculateMixing() {
+            let mixedCells = 0;
+            const threshold = 0.3;
+            const midRho = (1.0 + densityRatio) / 2;
+
+            for (let i = 0; i < rho.length; i++) {
+                if (Math.abs(rho[i] - midRho) < threshold) {
+                    mixedCells++;
+                }
+            }
+
+            return (mixedCells / rho.length * 100).toFixed(1);
+        }
+
+        function draw() {
+            const imageData = ctx.createImageData(width, height);
+            const data = imageData.data;
+
+            const minRho = 1.0;
+            const maxRho = densityRatio;
+
+            for (let y = 0; y < gridHeight; y++) {
+                for (let x = 0; x < gridWidth; x++) {
+                    const i = idx(x, y);
+                    const density = rho[i];
+                    const normalized = (density - minRho) / (maxRho - minRho);
+
+                    // Pink for heavy, cyan for light
+                    const r = Math.floor(233 * normalized + 50 * (1 - normalized));
+                    const g = Math.floor(30 * normalized + 200 * (1 - normalized));
+                    const b = Math.floor(99 * normalized + 220 * (1 - normalized));
+
+                    // Add velocity-based highlighting
+                    const speed = Math.sqrt(u[i] * u[i] + v[i] * v[i]);
+                    const highlight = Math.min(50, speed * 20);
+
+                    for (let py = 0; py < CELL_SIZE; py++) {
+                        for (let px = 0; px < CELL_SIZE; px++) {
+                            const screenX = x * CELL_SIZE + px;
+                            const screenY = y * CELL_SIZE + py;
+                            if (screenX < width && screenY < height) {
+                                const pixelIdx = (screenY * width + screenX) * 4;
+                                data[pixelIdx] = Math.min(255, r + highlight);
+                                data[pixelIdx + 1] = Math.min(255, g + highlight);
+                                data[pixelIdx + 2] = Math.min(255, b + highlight);
+                                data[pixelIdx + 3] = 255;
+                            }
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+        // UI
+        document.getElementById('gravity').addEventListener('input', (e) => {
+            gravity = parseFloat(e.target.value);
+            document.getElementById('gravityVal').textContent = gravity.toFixed(1);
+        });
+
+        document.getElementById('densityRatio').addEventListener('input', (e) => {
+            densityRatio = parseFloat(e.target.value);
+            document.getElementById('densityVal').textContent = densityRatio.toFixed(1);
+        });
+
+        document.getElementById('mode').addEventListener('input', (e) => {
+            perturbMode = parseInt(e.target.value);
+            document.getElementById('modeVal').textContent = perturbMode;
+        });
+
+        document.getElementById('tension').addEventListener('input', (e) => {
+            surfaceTension = parseFloat(e.target.value);
+            document.getElementById('tensionVal').textContent = surfaceTension.toFixed(3);
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', init);
+
+        document.getElementById('pauseBtn').addEventListener('click', function() {
+            paused = !paused;
+            this.textContent = paused ? 'Resume' : 'Pause';
+        });
+
+        window.addEventListener('resize', resize);
+
+        let lastTime = performance.now();
+        let frameCount = 0;
+        let fpsTime = 0;
+
+        function animate() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+
+            frameCount++;
+            fpsTime += dt;
+            if (fpsTime >= 1) {
+                document.getElementById('fps').textContent = Math.round(frameCount / fpsTime);
+                document.getElementById('mixing').textContent = calculateMixing() + '%';
+                frameCount = 0;
+                fpsTime = 0;
+            }
+
+            if (!paused) {
+                for (let i = 0; i < 3; i++) {
+                    step(0.016);
+                }
+            }
+            draw();
+
+            requestAnimationFrame(animate);
+        }
+
+        resize();
+        animate();
+    </script>
+</body>
+</html>

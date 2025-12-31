@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reward Prediction Error - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #fbbf24; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #fbbf24; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #fbbf24; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #f59e0b; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #fbbf24; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(251,191,36,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #fbbf24; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>⚡ Reward Prediction Error</h1>
+            <p class="description">
+                Dopamine neurons signal reward prediction error (RPE): the difference
+                between received and expected reward. This TD learning signal drives
+                reinforcement learning throughout the brain.
+            </p>
+
+            <div class="control-group">
+                <label>Learning Rate (α): <span class="value-display" id="alphaValue">0.1</span></label>
+                <input type="range" id="alphaSlider" min="0.01" max="0.5" step="0.01" value="0.1">
+            </div>
+
+            <div class="control-group">
+                <label>Discount (γ): <span class="value-display" id="gammaValue">0.9</span></label>
+                <input type="range" id="gammaSlider" min="0.5" max="0.99" step="0.01" value="0.9">
+            </div>
+
+            <div class="control-group">
+                <label>Reward Magnitude: <span class="value-display" id="rewardValue">1.0</span></label>
+                <input type="range" id="rewardSlider" min="0" max="2" step="0.1" value="1.0">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+            <button id="rewardBtn">Deliver Reward</button>
+            <button id="omitBtn">Omit Reward</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Expected Value: <span id="expected">0.00</span></div>
+                <div>RPE (δ): <span id="rpe">0.00</span></div>
+                <div>DA Firing: <span id="daFiring">baseline</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>TD Learning:</strong><br>
+                • δ = r + γV(s') - V(s)<br>
+                • δ > 0: Better than expected<br>
+                • δ < 0: Worse than expected<br>
+                • δ = 0: As expected
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+
+        let alpha = 0.1;
+        let gamma = 0.9;
+        let rewardMagnitude = 1.0;
+
+        // Conditioning states
+        const N_CUES = 3;
+        let values = new Array(N_CUES).fill(0);
+        let currentCue = -1;
+        let cueOnset = 0;
+        let rewardDelivered = false;
+        let currentRPE = 0;
+        let daFiring = 0; // Dopamine neuron firing rate
+
+        let rpeHistory = [];
+        let valueHistory = [];
+        let trialHistory = [];
+
+        function initSimulation() {
+            values = new Array(N_CUES).fill(0);
+            currentCue = -1;
+            cueOnset = 0;
+            rewardDelivered = false;
+            currentRPE = 0;
+            daFiring = 0;
+            rpeHistory = [];
+            valueHistory = [];
+            trialHistory = [];
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+
+            // Simulate conditioning trial
+            if (generation % 100 === 0) {
+                // Present random cue
+                currentCue = Math.floor(Math.random() * N_CUES);
+                cueOnset = generation;
+                rewardDelivered = false;
+            }
+
+            // Reward delivery (delayed after cue)
+            if (currentCue >= 0 && generation - cueOnset === 50 && !rewardDelivered) {
+                // 80% reward probability for cue 0, 50% for cue 1, 20% for cue 2
+                const probs = [0.8, 0.5, 0.2];
+                if (Math.random() < probs[currentCue]) {
+                    deliverReward();
+                } else {
+                    omitReward();
+                }
+                rewardDelivered = true;
+            }
+
+            // Decay dopamine firing back to baseline
+            daFiring = daFiring * 0.95;
+            currentRPE = currentRPE * 0.9;
+
+            // Track history
+            if (generation % 5 === 0) {
+                rpeHistory.push({ time: generation, rpe: currentRPE, da: daFiring });
+                if (rpeHistory.length > 200) rpeHistory.shift();
+
+                valueHistory.push({ time: generation, values: [...values] });
+                if (valueHistory.length > 200) valueHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function deliverReward() {
+            if (currentCue < 0) return;
+
+            const reward = rewardMagnitude;
+            const expected = values[currentCue];
+
+            // Compute RPE
+            currentRPE = reward - expected;
+            daFiring = 1 + currentRPE; // Baseline + RPE
+
+            // Update value
+            values[currentCue] += alpha * currentRPE;
+
+            trialHistory.push({
+                cue: currentCue,
+                reward: reward,
+                expected: expected,
+                rpe: currentRPE,
+                type: 'reward'
+            });
+        }
+
+        function omitReward() {
+            if (currentCue < 0) return;
+
+            const reward = 0;
+            const expected = values[currentCue];
+
+            // Negative RPE
+            currentRPE = reward - expected;
+            daFiring = Math.max(0, 1 + currentRPE); // Dip below baseline
+
+            // Update value (decrease expectation)
+            values[currentCue] += alpha * currentRPE;
+            values[currentCue] = Math.max(0, values[currentCue]);
+
+            trialHistory.push({
+                cue: currentCue,
+                reward: reward,
+                expected: expected,
+                rpe: currentRPE,
+                type: 'omission'
+            });
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Dopaminergic Reward Prediction Error', 20, 25);
+
+            drawDopamineNeuron();
+            drawValueEstimates();
+            drawRPETrace();
+            drawTrialTimeline();
+        }
+
+        function drawDopamineNeuron() {
+            const cx = 150;
+            const cy = 180;
+            const maxSize = 80;
+
+            // Neuron body
+            const size = 40 + Math.abs(daFiring) * 30;
+            const hue = daFiring > 1 ? 45 : daFiring < 1 ? 0 : 200; // Yellow=positive, red=negative, blue=baseline
+
+            // Glow
+            ctx.fillStyle = `rgba(251, 191, 36, ${Math.abs(daFiring - 1) * 0.3})`;
+            ctx.beginPath();
+            ctx.arc(cx, cy, size + 20, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Main body
+            ctx.fillStyle = `hsl(${hue}, 80%, ${40 + daFiring * 20}%)`;
+            ctx.beginPath();
+            ctx.arc(cx, cy, size, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Spikes
+            const spikeCount = Math.floor(daFiring * 5);
+            for (let i = 0; i < spikeCount; i++) {
+                const angle = (i / spikeCount) * Math.PI * 2 + generation * 0.1;
+                const spikeLen = 20 + Math.random() * 20;
+
+                ctx.strokeStyle = '#fbbf24';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(angle) * size, cy + Math.sin(angle) * size);
+                ctx.lineTo(cx + Math.cos(angle) * (size + spikeLen), cy + Math.sin(angle) * (size + spikeLen));
+                ctx.stroke();
+            }
+
+            // Label
+            ctx.fillStyle = '#fff';
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('DA Neuron', cx, cy + 5);
+            ctx.font = '10px sans-serif';
+            ctx.fillText(`Firing: ${(daFiring * 100).toFixed(0)}%`, cx, cy + 20);
+            ctx.textAlign = 'left';
+
+            // RPE indicator
+            ctx.fillStyle = '#888';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Reward Prediction Error:', cx - 80, cy + 90);
+
+            const barWidth = 160;
+            const barHeight = 20;
+            const barX = cx - barWidth / 2;
+            const barY = cy + 100;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(barX, barY, barWidth, barHeight);
+
+            // Center line
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(barX + barWidth / 2, barY);
+            ctx.lineTo(barX + barWidth / 2, barY + barHeight);
+            ctx.stroke();
+
+            // RPE bar
+            const rpeWidth = Math.min(Math.abs(currentRPE) * barWidth / 4, barWidth / 2);
+            if (currentRPE > 0) {
+                ctx.fillStyle = '#4ade80';
+                ctx.fillRect(barX + barWidth / 2, barY, rpeWidth, barHeight);
+            } else if (currentRPE < 0) {
+                ctx.fillStyle = '#f87171';
+                ctx.fillRect(barX + barWidth / 2 - rpeWidth, barY, rpeWidth, barHeight);
+            }
+
+            ctx.fillStyle = '#888';
+            ctx.font = '9px sans-serif';
+            ctx.fillText('−', barX + 3, barY + 14);
+            ctx.fillText('+', barX + barWidth - 10, barY + 14);
+        }
+
+        function drawValueEstimates() {
+            const startX = 320;
+            const startY = 100;
+
+            ctx.fillStyle = '#888';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Learned Value Estimates (V)', startX, startY - 15);
+
+            const colors = ['#fbbf24', '#60a5fa', '#34d399'];
+            const probs = [0.8, 0.5, 0.2];
+
+            values.forEach((v, i) => {
+                const barX = startX;
+                const barY = startY + i * 50;
+                const barMaxW = 200;
+                const barH = 30;
+
+                // Cue label
+                ctx.fillStyle = colors[i];
+                ctx.font = '12px sans-serif';
+                ctx.fillText(`Cue ${i} (P=${probs[i]})`, barX, barY - 5);
+
+                // Background
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.fillRect(barX, barY, barMaxW, barH);
+
+                // Value bar
+                ctx.fillStyle = colors[i];
+                ctx.fillRect(barX, barY, Math.min(v, 2) / 2 * barMaxW, barH);
+
+                // Highlight current cue
+                if (i === currentCue) {
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(barX, barY, barMaxW, barH);
+                }
+
+                // Value text
+                ctx.fillStyle = '#fff';
+                ctx.font = '10px sans-serif';
+                ctx.fillText(v.toFixed(2), barX + barMaxW + 10, barY + 20);
+            });
+        }
+
+        function drawRPETrace() {
+            const graphX = 320;
+            const graphY = 300;
+            const graphW = canvas.width - graphX - 50;
+            const graphH = 120;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(graphX, graphY, graphW, graphH);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('RPE Signal Over Time', graphX + 5, graphY - 5);
+
+            if (rpeHistory.length < 2) return;
+
+            const centerY = graphY + graphH / 2;
+
+            // Zero line
+            ctx.strokeStyle = '#444';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(graphX, centerY);
+            ctx.lineTo(graphX + graphW, centerY);
+            ctx.stroke();
+
+            // RPE trace
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            rpeHistory.forEach((record, i) => {
+                const x = graphX + (i / 200) * graphW;
+                const y = centerY - record.rpe * graphH * 0.4;
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // DA firing trace
+            ctx.strokeStyle = '#f472b6';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+
+            rpeHistory.forEach((record, i) => {
+                const x = graphX + (i / 200) * graphW;
+                const y = graphY + graphH - record.da * graphH * 0.4 - 10;
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Legend
+            ctx.fillStyle = '#fbbf24';
+            ctx.fillRect(graphX + graphW - 100, graphY + 10, 10, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('RPE (δ)', graphX + graphW - 85, graphY + 18);
+
+            ctx.fillStyle = '#f472b6';
+            ctx.fillRect(graphX + graphW - 100, graphY + 25, 10, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('DA firing', graphX + graphW - 85, graphY + 33);
+        }
+
+        function drawTrialTimeline() {
+            const timeX = 50;
+            const timeY = canvas.height - 100;
+            const timeW = canvas.width - 100;
+
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Recent Trials', timeX, timeY - 10);
+
+            const recentTrials = trialHistory.slice(-20);
+
+            recentTrials.forEach((trial, i) => {
+                const x = timeX + i * (timeW / 20);
+                const y = timeY;
+
+                // Trial marker
+                ctx.fillStyle = trial.type === 'reward' ? '#4ade80' : '#f87171';
+                ctx.fillRect(x, y, timeW / 22, 30);
+
+                // Cue indicator
+                const colors = ['#fbbf24', '#60a5fa', '#34d399'];
+                ctx.fillStyle = colors[trial.cue];
+                ctx.beginPath();
+                ctx.arc(x + (timeW / 44), y - 10, 5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // Legend
+            ctx.fillStyle = '#4ade80';
+            ctx.fillRect(timeX, timeY + 45, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Reward', timeX + 20, timeY + 53);
+
+            ctx.fillStyle = '#f87171';
+            ctx.fillRect(timeX + 80, timeY + 45, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Omission', timeX + 100, timeY + 53);
+        }
+
+        function updateStats() {
+            const expected = currentCue >= 0 ? values[currentCue] : 0;
+            const daState = daFiring > 1.2 ? 'BURST' : daFiring < 0.8 ? 'PAUSE' : 'baseline';
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('expected').textContent = expected.toFixed(2);
+            document.getElementById('rpe').textContent = currentRPE.toFixed(2);
+            document.getElementById('daFiring').textContent = daState;
+        }
+
+        document.getElementById('alphaSlider').addEventListener('input', (e) => {
+            alpha = parseFloat(e.target.value);
+            document.getElementById('alphaValue').textContent = alpha.toFixed(2);
+        });
+
+        document.getElementById('gammaSlider').addEventListener('input', (e) => {
+            gamma = parseFloat(e.target.value);
+            document.getElementById('gammaValue').textContent = gamma.toFixed(2);
+        });
+
+        document.getElementById('rewardSlider').addEventListener('input', (e) => {
+            rewardMagnitude = parseFloat(e.target.value);
+            document.getElementById('rewardValue').textContent = rewardMagnitude.toFixed(1);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initSimulation();
+            render();
+            updateStats();
+        });
+
+        document.getElementById('rewardBtn').addEventListener('click', () => {
+            currentCue = Math.floor(Math.random() * N_CUES);
+            deliverReward();
+            render();
+        });
+
+        document.getElementById('omitBtn').addEventListener('click', () => {
+            currentCue = Math.floor(Math.random() * N_CUES);
+            omitReward();
+            render();
+        });
+
+        initSimulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

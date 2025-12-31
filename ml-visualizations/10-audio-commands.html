@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Commands - ML Visualizations - CCAB</title>
+    <style>
+        body { margin: 0; padding: 20px; background: #0f0f1a; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .back-link { display: inline-block; padding: 8px 16px; background: rgba(124, 58, 237, 0.2); color: #a78bfa; text-decoration: none; border-radius: 6px; margin-bottom: 20px; }
+        .back-link:hover { background: rgba(124, 58, 237, 0.4); }
+        h1 { color: #a78bfa; margin-bottom: 10px; }
+        .subtitle { color: #888; margin-bottom: 20px; }
+        button { background: #7C3AED; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; font-size: 16px; }
+        button:hover { background: #6D28D9; }
+        #loading { text-align: center; padding: 50px; }
+        .spinner { width: 50px; height: 50px; border: 4px solid rgba(255,255,255,0.1); border-top-color: #7C3AED; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 20px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .listening { text-align: center; margin: 30px 0; }
+        .mic-icon { font-size: 80px; animation: pulse 1.5s ease-in-out infinite; }
+        @keyframes pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.1); opacity: 0.7; } }
+        .detected { font-size: 72px; text-align: center; margin: 20px 0; color: #10B981; text-transform: uppercase; animation: pop 0.3s ease; }
+        @keyframes pop { 0% { transform: scale(0.5); } 50% { transform: scale(1.2); } 100% { transform: scale(1); } }
+        .words-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin-top: 30px; }
+        .word-card { background: rgba(255,255,255,0.05); border: 2px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 15px; text-align: center; transition: all 0.3s; }
+        .word-card.active { background: rgba(16, 185, 129, 0.2); border-color: #10B981; transform: scale(1.05); }
+        .word-card .word { font-size: 16px; font-weight: bold; }
+        .word-card .prob { font-size: 12px; color: #888; margin-top: 5px; }
+        .spectrogram { margin: 30px 0; }
+        #specCanvas { border-radius: 8px; background: rgba(255,255,255,0.02); }
+        .status { text-align: center; font-size: 14px; color: #888; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to ML Gallery</a>
+    <h1>Audio Command Recognition</h1>
+    <p class="subtitle">Recognize spoken words using the Speech Commands model</p>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <p>Loading Speech Commands model...</p>
+    </div>
+
+    <div id="main" style="display: none;">
+        <div style="text-align: center;">
+            <button id="startBtn" onclick="toggleListening()">Start Listening</button>
+        </div>
+
+        <div class="listening" id="listeningIndicator" style="display: none;">
+            <div class="mic-icon">🎤</div>
+            <p>Listening for commands...</p>
+        </div>
+
+        <div class="detected" id="detected"></div>
+
+        <div class="spectrogram">
+            <canvas id="specCanvas" width="800" height="100"></canvas>
+        </div>
+
+        <div class="status" id="status">Click "Start Listening" and say one of the words below</div>
+
+        <h3 style="margin-top: 30px;">Recognized Words:</h3>
+        <div class="words-grid" id="wordsGrid"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.5.4/dist/speech-commands.min.js"></script>
+    <script>
+        let recognizer;
+        let isListening = false;
+        let specCanvas, specCtx;
+        let words = [];
+
+        async function init() {
+            recognizer = speechCommands.create('BROWSER_FFT');
+            await recognizer.ensureModelLoaded();
+
+            words = recognizer.wordLabels();
+
+            // Create word cards
+            const grid = document.getElementById('wordsGrid');
+            for (let word of words) {
+                if (word === '_background_noise_' || word === '_unknown_') continue;
+                grid.innerHTML += `
+                    <div class="word-card" id="word-${word}">
+                        <div class="word">${word}</div>
+                        <div class="prob" id="prob-${word}">-</div>
+                    </div>
+                `;
+            }
+
+            specCanvas = document.getElementById('specCanvas');
+            specCtx = specCanvas.getContext('2d');
+
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('main').style.display = 'block';
+        }
+
+        async function toggleListening() {
+            const btn = document.getElementById('startBtn');
+            const indicator = document.getElementById('listeningIndicator');
+
+            if (isListening) {
+                recognizer.stopListening();
+                isListening = false;
+                btn.textContent = 'Start Listening';
+                indicator.style.display = 'none';
+                document.getElementById('status').textContent = 'Stopped listening';
+            } else {
+                try {
+                    await recognizer.listen(result => {
+                        const scores = result.scores;
+                        const maxIndex = scores.indexOf(Math.max(...scores));
+                        const detectedWord = words[maxIndex];
+                        const confidence = scores[maxIndex];
+
+                        // Update all word probabilities
+                        for (let i = 0; i < words.length; i++) {
+                            const word = words[i];
+                            if (word === '_background_noise_' || word === '_unknown_') continue;
+
+                            const card = document.getElementById(`word-${word}`);
+                            const prob = document.getElementById(`prob-${word}`);
+
+                            if (card && prob) {
+                                prob.textContent = `${(scores[i] * 100).toFixed(0)}%`;
+
+                                if (i === maxIndex && confidence > 0.7) {
+                                    card.classList.add('active');
+                                } else {
+                                    card.classList.remove('active');
+                                }
+                            }
+                        }
+
+                        // Show detected word if confidence is high
+                        if (confidence > 0.75 && detectedWord !== '_background_noise_' && detectedWord !== '_unknown_') {
+                            const detected = document.getElementById('detected');
+                            detected.textContent = detectedWord;
+                            detected.style.animation = 'none';
+                            setTimeout(() => detected.style.animation = 'pop 0.3s ease', 10);
+                        }
+
+                        // Draw spectrogram
+                        drawSpectrogram(result.spectrogram.data);
+
+                    }, {
+                        probabilityThreshold: 0.5,
+                        overlapFactor: 0.5
+                    });
+
+                    isListening = true;
+                    btn.textContent = 'Stop Listening';
+                    indicator.style.display = 'block';
+                    document.getElementById('status').textContent = 'Listening... Speak a command!';
+
+                } catch (err) {
+                    alert('Error starting microphone: ' + err.message);
+                }
+            }
+        }
+
+        function drawSpectrogram(data) {
+            const width = specCanvas.width;
+            const height = specCanvas.height;
+
+            // Shift existing content left
+            const imageData = specCtx.getImageData(4, 0, width - 4, height);
+            specCtx.putImageData(imageData, 0, 0);
+
+            // Draw new column
+            const columnHeight = Math.sqrt(data.length);
+            const step = Math.floor(data.length / height);
+
+            for (let y = 0; y < height; y++) {
+                const value = data[y * step] || 0;
+                const normalized = Math.min(1, Math.max(0, (value + 1) / 2));
+
+                // Color mapping: dark purple -> bright cyan
+                const r = Math.floor(normalized * 124);
+                const g = Math.floor(normalized * 200 + 50);
+                const b = Math.floor(200 - normalized * 50);
+
+                specCtx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+                specCtx.fillRect(width - 4, height - y - 1, 4, 1);
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>

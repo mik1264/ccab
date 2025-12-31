@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phase Field Modeling - Microstructure Evolution</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #ba68c8; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        select { width: 100%; padding: 8px; background: #2a2a3e; color: #e8e6e1; border: 1px solid #444; border-radius: 4px; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #ba68c8; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #ba68c8; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .equation { background: rgba(186,104,200,0.1); padding: 8px; border-radius: 5px; margin-top: 10px; font-family: monospace; font-size: 0.7rem; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Phase Field Modeling</h1>
+            <p class="description">Phase field method simulates microstructure evolution by tracking order parameters that distinguish phases. Used for solidification, grain growth, and phase transformations.</p>
+
+            <div class="control-group">
+                <label>Scenario:</label>
+                <select id="scenario">
+                    <option value="solidification">Dendritic Solidification</option>
+                    <option value="spinodal">Spinodal Decomposition</option>
+                    <option value="grainGrowth">Grain Growth</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Interface Width (ε): <span id="epsilonVal">0.05</span></label>
+                <input type="range" id="epsilon" min="0.01" max="0.2" step="0.01" value="0.05">
+            </div>
+
+            <div class="control-group">
+                <label>Mobility (M): <span id="mobilityVal">1.0</span></label>
+                <input type="range" id="mobility" min="0.1" max="3.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>Undercooling: <span id="undercoolingVal">0.5</span></label>
+                <input type="range" id="undercooling" min="0.1" max="1.0" step="0.1" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Anisotropy: <span id="anisotropyVal">0.04</span></label>
+                <input type="range" id="anisotropy" min="0" max="0.1" step="0.01" value="0.04">
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="addSeed">Add Seed</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Solid Fraction: <span id="solidFraction">0</span>%</div>
+                <div>Interface Length: <span id="interfaceLength">0</span></div>
+                <div>Time Step: <span id="timeStep">0</span></div>
+            </div>
+
+            <div class="equation">
+                ∂φ/∂t = M[ε²∇²φ - f'(φ) + λg'(φ)u]<br>
+                Allen-Cahn / Cahn-Hilliard dynamics
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let timeStep = 0;
+
+        let scenario = 'solidification';
+        let epsilon = 0.05;
+        let mobility = 1.0;
+        let undercooling = 0.5;
+        let anisotropyStrength = 0.04;
+
+        const CELL_SIZE = 2;
+        let cols, rows;
+        let phi = [];      // Phase field (0=liquid, 1=solid)
+        let phi_new = [];
+        let temp = [];     // Temperature field
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+            cols = Math.floor(width / CELL_SIZE);
+            rows = Math.floor(height / CELL_SIZE);
+        }
+
+        function init() {
+            resize();
+            timeStep = 0;
+            phi = new Array(cols * rows).fill(0);
+            phi_new = new Array(cols * rows).fill(0);
+            temp = new Array(cols * rows).fill(-undercooling);
+
+            const cx = Math.floor(cols / 2);
+            const cy = Math.floor(rows / 2);
+
+            if (scenario === 'solidification') {
+                // Single seed for dendritic growth
+                addSeed(cx, cy, 5);
+            } else if (scenario === 'spinodal') {
+                // Random initial condition for spinodal decomposition
+                for (let i = 0; i < cols * rows; i++) {
+                    phi[i] = 0.5 + (Math.random() - 0.5) * 0.1;
+                }
+            } else if (scenario === 'grainGrowth') {
+                // Multiple grains
+                for (let i = 0; i < 20; i++) {
+                    const x = Math.floor(Math.random() * cols);
+                    const y = Math.floor(Math.random() * rows);
+                    addSeed(x, y, 3 + Math.random() * 5);
+                }
+            }
+
+            updateStats();
+        }
+
+        function addSeed(cx, cy, radius) {
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const r = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+                    if (r < radius) {
+                        phi[y * cols + x] = 1;
+                    }
+                }
+            }
+        }
+
+        function laplacian(arr, x, y) {
+            const idx = y * cols + x;
+            let lap = -4 * arr[idx];
+
+            if (x > 0) lap += arr[idx - 1];
+            else lap += arr[idx]; // Neumann BC
+
+            if (x < cols - 1) lap += arr[idx + 1];
+            else lap += arr[idx];
+
+            if (y > 0) lap += arr[idx - cols];
+            else lap += arr[idx];
+
+            if (y < rows - 1) lap += arr[idx + cols];
+            else lap += arr[idx];
+
+            return lap;
+        }
+
+        function gradient(arr, x, y) {
+            const idx = y * cols + x;
+            let gx = 0, gy = 0;
+
+            if (x > 0 && x < cols - 1) {
+                gx = (arr[idx + 1] - arr[idx - 1]) / 2;
+            }
+            if (y > 0 && y < rows - 1) {
+                gy = (arr[idx + cols] - arr[idx - cols]) / 2;
+            }
+
+            return { gx, gy };
+        }
+
+        function freeEnergy(p) {
+            // Double-well potential: f(φ) = φ²(1-φ)²
+            return p * p * (1 - p) * (1 - p);
+        }
+
+        function freeEnergyDerivative(p) {
+            // f'(φ) = 2φ(1-φ)(1-2φ)
+            return 2 * p * (1 - p) * (1 - 2 * p);
+        }
+
+        function step() {
+            timeStep++;
+            const dt = 0.01;
+            const eps2 = epsilon * epsilon;
+
+            if (scenario === 'solidification') {
+                // Kobayashi model for dendritic solidification
+                for (let y = 1; y < rows - 1; y++) {
+                    for (let x = 1; x < cols - 1; x++) {
+                        const idx = y * cols + x;
+                        const p = phi[idx];
+                        const u = temp[idx];
+
+                        const grad = gradient(phi, x, y);
+                        const theta = Math.atan2(grad.gy, grad.gx);
+
+                        // Anisotropic interface energy
+                        const eps_theta = epsilon * (1 + anisotropyStrength * Math.cos(4 * theta));
+                        const eps_theta2 = eps_theta * eps_theta;
+
+                        const lap = laplacian(phi, x, y);
+
+                        // Phase field equation
+                        const m = p * (1 - p);
+                        const lambda = 6.9; // Coupling constant
+
+                        const dpdt = mobility * (eps_theta2 * lap + m * (p - 0.5 + lambda * u));
+
+                        phi_new[idx] = Math.max(0, Math.min(1, p + dt * dpdt));
+
+                        // Temperature equation (latent heat release)
+                        temp[idx] += dt * (laplacian(temp, x, y) + (phi_new[idx] - p) / dt);
+                    }
+                }
+            } else if (scenario === 'spinodal') {
+                // Cahn-Hilliard equation for spinodal decomposition
+                // ∂φ/∂t = ∇²(f'(φ) - ε²∇²φ)
+
+                // First compute chemical potential μ = f'(φ) - ε²∇²φ
+                const mu = new Array(cols * rows).fill(0);
+                for (let y = 1; y < rows - 1; y++) {
+                    for (let x = 1; x < cols - 1; x++) {
+                        const idx = y * cols + x;
+                        const p = phi[idx];
+                        const lap = laplacian(phi, x, y);
+                        mu[idx] = freeEnergyDerivative(p) - eps2 * lap;
+                    }
+                }
+
+                // Then evolve φ
+                for (let y = 1; y < rows - 1; y++) {
+                    for (let x = 1; x < cols - 1; x++) {
+                        const idx = y * cols + x;
+                        const lapMu = laplacian(mu, x, y);
+                        phi_new[idx] = phi[idx] + dt * mobility * lapMu;
+                        phi_new[idx] = Math.max(0, Math.min(1, phi_new[idx]));
+                    }
+                }
+            } else if (scenario === 'grainGrowth') {
+                // Allen-Cahn for grain growth
+                for (let y = 1; y < rows - 1; y++) {
+                    for (let x = 1; x < cols - 1; x++) {
+                        const idx = y * cols + x;
+                        const p = phi[idx];
+                        const lap = laplacian(phi, x, y);
+
+                        const dpdt = mobility * (eps2 * lap - freeEnergyDerivative(p));
+                        phi_new[idx] = Math.max(0, Math.min(1, p + dt * dpdt));
+                    }
+                }
+            }
+
+            // Swap arrays
+            [phi, phi_new] = [phi_new, phi];
+
+            updateStats();
+        }
+
+        function draw() {
+            const imageData = ctx.createImageData(width, height);
+            const data = imageData.data;
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const idx = y * cols + x;
+                    const p = phi[idx];
+
+                    for (let py = 0; py < CELL_SIZE; py++) {
+                        for (let px = 0; px < CELL_SIZE; px++) {
+                            const pixelX = x * CELL_SIZE + px;
+                            const pixelY = y * CELL_SIZE + py;
+                            if (pixelX >= width || pixelY >= height) continue;
+
+                            const pIdx = (pixelY * width + pixelX) * 4;
+
+                            if (scenario === 'solidification') {
+                                // Solid = purple, liquid = dark blue, temp overlay
+                                const t = temp[idx];
+                                data[pIdx] = Math.floor(p * 186 + (1 - p) * 30);
+                                data[pIdx + 1] = Math.floor(p * 104 + (1 - p) * 30);
+                                data[pIdx + 2] = Math.floor(p * 200 + (1 - p) * 80);
+                            } else if (scenario === 'spinodal') {
+                                // Two phases: yellow and blue
+                                data[pIdx] = Math.floor(p * 255);
+                                data[pIdx + 1] = Math.floor(p * 200);
+                                data[pIdx + 2] = Math.floor((1 - p) * 255);
+                            } else {
+                                // Grain: purple scale
+                                data[pIdx] = Math.floor(p * 186);
+                                data[pIdx + 1] = Math.floor(p * 104);
+                                data[pIdx + 2] = Math.floor(p * 200);
+                            }
+                            data[pIdx + 3] = 255;
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+        }
+
+        function updateStats() {
+            const solidCount = phi.filter(p => p > 0.5).length;
+            const solidFraction = (solidCount / (cols * rows) * 100).toFixed(1);
+
+            let interfaceLength = 0;
+            for (let y = 1; y < rows - 1; y++) {
+                for (let x = 1; x < cols - 1; x++) {
+                    const p = phi[y * cols + x];
+                    if (p > 0.1 && p < 0.9) interfaceLength++;
+                }
+            }
+
+            document.getElementById('solidFraction').textContent = solidFraction;
+            document.getElementById('interfaceLength').textContent = interfaceLength;
+            document.getElementById('timeStep').textContent = timeStep;
+        }
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < 10; i++) step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('scenario').addEventListener('change', e => {
+            scenario = e.target.value;
+            init();
+        });
+
+        document.getElementById('epsilon').addEventListener('input', e => {
+            epsilon = parseFloat(e.target.value);
+            document.getElementById('epsilonVal').textContent = epsilon;
+        });
+
+        document.getElementById('mobility').addEventListener('input', e => {
+            mobility = parseFloat(e.target.value);
+            document.getElementById('mobilityVal').textContent = mobility;
+        });
+
+        document.getElementById('undercooling').addEventListener('input', e => {
+            undercooling = parseFloat(e.target.value);
+            document.getElementById('undercoolingVal').textContent = undercooling;
+        });
+
+        document.getElementById('anisotropy').addEventListener('input', e => {
+            anisotropyStrength = parseFloat(e.target.value);
+            document.getElementById('anisotropyVal').textContent = anisotropyStrength;
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('addSeed').addEventListener('click', () => {
+            const x = Math.floor(Math.random() * cols);
+            const y = Math.floor(Math.random() * rows);
+            addSeed(x, y, 5);
+        });
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', () => { resize(); init(); });
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

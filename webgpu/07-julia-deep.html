@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Julia Set Deep Zoom - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; cursor: crosshair; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; max-width: 220px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input { width: 100%; }
+        .controls button { margin: 5px 2px; padding: 6px 12px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; }
+        .presets { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+        .presets button { flex: 1; min-width: 45%; }
+        .info { font-size: 10px; color: #888; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="controls">
+        <label>Real (c.x): <span id="cxVal">-0.7</span></label>
+        <input type="range" id="cx" min="-1.5" max="1.5" step="0.01" value="-0.7">
+        <label>Imaginary (c.y): <span id="cyVal">0.27</span></label>
+        <input type="range" id="cy" min="-1.5" max="1.5" step="0.01" value="0.27">
+        <label>Max Iterations: <span id="iterVal">500</span></label>
+        <input type="range" id="iterations" min="100" max="2000" step="100" value="500">
+        <label>Color Speed: <span id="colorVal">1.0</span></label>
+        <input type="range" id="colorSpeed" min="0.1" max="3" step="0.1" value="1.0">
+
+        <div class="presets">
+            <button onclick="setPreset(-0.7, 0.27)">Classic</button>
+            <button onclick="setPreset(-0.8, 0.156)">Spiral</button>
+            <button onclick="setPreset(0.285, 0.01)">Dendrite</button>
+            <button onclick="setPreset(-0.4, 0.6)">Rabbit</button>
+            <button onclick="setPreset(0.355, 0.355)">Galaxy</button>
+            <button onclick="setPreset(-0.75, 0.11)">Snowflake</button>
+        </div>
+
+        <button onclick="resetZoom()" style="width: 100%; margin-top: 10px;">Reset Zoom</button>
+        <button onclick="toggleAnimate()" id="animBtn" style="width: 100%;">Animate C</button>
+
+        <div class="info">
+            Scroll to zoom. Click to center. Drag to pan.
+        </div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Zoom: <span id="zoom">1.0</span>x | Center: (<span id="centerX">0</span>, <span id="centerY">0</span>)
+    </div>
+
+    <div id="error">WebGPU not supported</div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let cx = -0.7;
+        let cy = 0.27;
+        let maxIterations = 500;
+        let colorSpeed = 1.0;
+        let centerX = 0;
+        let centerY = 0;
+        let zoom = 1;
+        let animating = false;
+        let animTime = 0;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        const computeShader = `
+            struct Uniforms {
+                cx: f32,
+                cy: f32,
+                centerX: f32,
+                centerY: f32,
+                zoom: f32,
+                maxIter: u32,
+                width: u32,
+                height: u32,
+                colorSpeed: f32,
+                time: f32,
+            }
+
+            @group(0) @binding(0) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> uniforms: Uniforms;
+
+            fn hsl2rgb(h: f32, s: f32, l: f32) -> vec3f {
+                let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+                let x = c * (1.0 - abs((h * 6.0) % 2.0 - 1.0));
+                let m = l - c * 0.5;
+
+                var rgb: vec3f;
+                let h6 = h * 6.0;
+                if (h6 < 1.0) { rgb = vec3f(c, x, 0.0); }
+                else if (h6 < 2.0) { rgb = vec3f(x, c, 0.0); }
+                else if (h6 < 3.0) { rgb = vec3f(0.0, c, x); }
+                else if (h6 < 4.0) { rgb = vec3f(0.0, x, c); }
+                else if (h6 < 5.0) { rgb = vec3f(x, 0.0, c); }
+                else { rgb = vec3f(c, 0.0, x); }
+
+                return rgb + m;
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= uniforms.width || id.y >= uniforms.height) { return; }
+
+                let aspect = f32(uniforms.width) / f32(uniforms.height);
+                let scale = 3.0 / uniforms.zoom;
+
+                // Map pixel to complex plane
+                let zx = (f32(id.x) / f32(uniforms.width) - 0.5) * scale * aspect + uniforms.centerX;
+                let zy = (f32(id.y) / f32(uniforms.height) - 0.5) * scale + uniforms.centerY;
+
+                var z = vec2f(zx, zy);
+                let c = vec2f(uniforms.cx, uniforms.cy);
+
+                var i = 0u;
+                var smooth_i = 0.0;
+
+                for (; i < uniforms.maxIter; i++) {
+                    // z = z^2 + c
+                    let zx2 = z.x * z.x - z.y * z.y + c.x;
+                    let zy2 = 2.0 * z.x * z.y + c.y;
+                    z = vec2f(zx2, zy2);
+
+                    let mag2 = dot(z, z);
+                    if (mag2 > 256.0) {
+                        // Smooth coloring
+                        smooth_i = f32(i) + 1.0 - log2(log2(mag2) * 0.5);
+                        break;
+                    }
+                }
+
+                var color: vec3f;
+                if (i >= uniforms.maxIter) {
+                    color = vec3f(0.0);
+                } else {
+                    // Color based on iteration count
+                    let t = smooth_i * uniforms.colorSpeed * 0.02 + uniforms.time * 0.1;
+                    let h = fract(t);
+                    let s = 0.8;
+                    let l = 0.5 + 0.3 * cos(smooth_i * 0.1);
+                    color = hsl2rgb(h, s, l);
+                }
+
+                textureStore(outputTexture, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const renderShader = `
+            @group(0) @binding(0) var inputTexture: texture_2d<f32>;
+            @group(0) @binding(1) var texSampler: sampler;
+
+            struct VertexOutput {
+                @builtin(position) position: vec4f,
+                @location(0) uv: vec2f,
+            }
+
+            @vertex
+            fn vertexMain(@builtin(vertex_index) idx: u32) -> VertexOutput {
+                var positions = array<vec2f, 4>(
+                    vec2f(-1.0, -1.0), vec2f(1.0, -1.0),
+                    vec2f(-1.0, 1.0), vec2f(1.0, 1.0)
+                );
+                var uvs = array<vec2f, 4>(
+                    vec2f(0.0, 1.0), vec2f(1.0, 1.0),
+                    vec2f(0.0, 0.0), vec2f(1.0, 0.0)
+                );
+
+                var output: VertexOutput;
+                output.position = vec4f(positions[idx], 0.0, 1.0);
+                output.uv = uvs[idx];
+                return output;
+            }
+
+            @fragment
+            fn fragmentMain(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(inputTexture, texSampler, uv);
+            }
+        `;
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' }
+        });
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vertexMain' },
+            fragment: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'fragmentMain', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const uniformBuffer = device.createBuffer({
+            size: 48,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+
+        let outputTexture = device.createTexture({
+            size: [canvas.width, canvas.height],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        let computeBindGroup = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outputTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        let renderBindGroup = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outputTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        function recreateTexture() {
+            outputTexture = device.createTexture({
+                size: [canvas.width, canvas.height],
+                format: 'rgba8unorm',
+                usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+            });
+
+            computeBindGroup = device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: outputTexture.createView() },
+                    { binding: 1, resource: { buffer: uniformBuffer } }
+                ]
+            });
+
+            renderBindGroup = device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: outputTexture.createView() },
+                    { binding: 1, resource: sampler }
+                ]
+            });
+        }
+
+        let lastTime = performance.now();
+        let time = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            time += dt;
+
+            if (animating) {
+                animTime += dt * 0.3;
+                cx = 0.7885 * Math.cos(animTime);
+                cy = 0.7885 * Math.sin(animTime);
+                document.getElementById('cx').value = cx;
+                document.getElementById('cy').value = cy;
+                document.getElementById('cxVal').textContent = cx.toFixed(3);
+                document.getElementById('cyVal').textContent = cy.toFixed(3);
+            }
+
+            const uniforms = new ArrayBuffer(48);
+            const f32 = new Float32Array(uniforms);
+            const u32 = new Uint32Array(uniforms);
+
+            f32[0] = cx;
+            f32[1] = cy;
+            f32[2] = centerX;
+            f32[3] = centerY;
+            f32[4] = zoom;
+            u32[5] = maxIterations;
+            u32[6] = canvas.width;
+            u32[7] = canvas.height;
+            f32[8] = colorSpeed;
+            f32[9] = time;
+
+            device.queue.writeBuffer(uniformBuffer, 0, uniforms);
+
+            const commandEncoder = device.createCommandEncoder();
+
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBindGroup);
+            computePass.dispatchWorkgroups(Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+            computePass.end();
+
+            const renderPass = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    storeOp: 'store'
+                }]
+            });
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBindGroup);
+            renderPass.draw(4);
+            renderPass.end();
+
+            device.queue.submit([commandEncoder.finish()]);
+
+            document.getElementById('fps').textContent = Math.round(1 / dt);
+            document.getElementById('zoom').textContent = zoom.toFixed(zoom > 100 ? 0 : 1);
+            document.getElementById('centerX').textContent = centerX.toFixed(4);
+            document.getElementById('centerY').textContent = centerY.toFixed(4);
+
+            requestAnimationFrame(render);
+        }
+
+        function setPreset(x, y) {
+            cx = x;
+            cy = y;
+            document.getElementById('cx').value = cx;
+            document.getElementById('cy').value = cy;
+            document.getElementById('cxVal').textContent = cx.toFixed(3);
+            document.getElementById('cyVal').textContent = cy.toFixed(3);
+        }
+
+        function resetZoom() {
+            centerX = 0;
+            centerY = 0;
+            zoom = 1;
+        }
+
+        function toggleAnimate() {
+            animating = !animating;
+            document.getElementById('animBtn').textContent = animating ? 'Stop Animation' : 'Animate C';
+        }
+
+        window.setPreset = setPreset;
+        window.resetZoom = resetZoom;
+        window.toggleAnimate = toggleAnimate;
+
+        // Controls
+        document.getElementById('cx').addEventListener('input', (e) => {
+            cx = parseFloat(e.target.value);
+            document.getElementById('cxVal').textContent = cx.toFixed(3);
+        });
+
+        document.getElementById('cy').addEventListener('input', (e) => {
+            cy = parseFloat(e.target.value);
+            document.getElementById('cyVal').textContent = cy.toFixed(3);
+        });
+
+        document.getElementById('iterations').addEventListener('input', (e) => {
+            maxIterations = parseInt(e.target.value);
+            document.getElementById('iterVal').textContent = maxIterations;
+        });
+
+        document.getElementById('colorSpeed').addEventListener('input', (e) => {
+            colorSpeed = parseFloat(e.target.value);
+            document.getElementById('colorVal').textContent = colorSpeed.toFixed(1);
+        });
+
+        // Zoom and pan
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+            zoom *= zoomFactor;
+        });
+
+        let dragging = false;
+        let lastMouse = { x: 0, y: 0 };
+
+        canvas.addEventListener('mousedown', (e) => {
+            dragging = true;
+            lastMouse = { x: e.clientX, y: e.clientY };
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+
+            const dx = e.clientX - lastMouse.x;
+            const dy = e.clientY - lastMouse.y;
+
+            const scale = 3.0 / zoom;
+            const aspect = canvas.width / canvas.height;
+
+            centerX -= dx / canvas.width * scale * aspect;
+            centerY -= dy / canvas.height * scale;
+
+            lastMouse = { x: e.clientX, y: e.clientY };
+        });
+
+        canvas.addEventListener('mouseup', () => dragging = false);
+        canvas.addEventListener('mouseleave', () => dragging = false);
+
+        canvas.addEventListener('click', (e) => {
+            if (Math.abs(e.clientX - lastMouse.x) > 5 || Math.abs(e.clientY - lastMouse.y) > 5) return;
+
+            const scale = 3.0 / zoom;
+            const aspect = canvas.width / canvas.height;
+
+            centerX = (e.clientX / canvas.width - 0.5) * scale * aspect + centerX;
+            centerY = (e.clientY / canvas.height - 0.5) * scale + centerY;
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            recreateTexture();
+        });
+
+        render();
+    </script>
+</body>
+</html>

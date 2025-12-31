@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Codon Bias Evolution - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #06b6d4; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #06b6d4; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #06b6d4; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #0891b2; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #06b6d4; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #06b6d4; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(6,182,212,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #06b6d4; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🧬 Codon Bias Evolution</h1>
+            <p class="description">
+                Synonymous codons aren't equivalent: some translate faster/more accurately.
+                Selection-mutation-drift balance determines codon usage. High expression
+                genes show stronger bias toward optimal codons.
+            </p>
+
+            <div class="control-group">
+                <label>Population Size (Ne): <span class="value-display" id="popValue">500</span></label>
+                <input type="range" id="popSlider" min="50" max="2000" value="500">
+            </div>
+
+            <div class="control-group">
+                <label>Mutation Bias: <span class="value-display" id="mutBiasValue">0.6</span></label>
+                <input type="range" id="mutBiasSlider" min="0.5" max="0.9" step="0.05" value="0.6">
+                <div style="font-size: 0.65rem; color: #666;">Probability of mutating to non-optimal</div>
+            </div>
+
+            <div class="control-group">
+                <label>Selection Strength: <span class="value-display" id="selValue">0.001</span></label>
+                <input type="range" id="selSlider" min="0" max="0.01" step="0.0005" value="0.001">
+            </div>
+
+            <div class="control-group">
+                <label>Expression Level: <span class="value-display" id="exprValue">1.0</span></label>
+                <input type="range" id="exprSlider" min="0.1" max="5" step="0.1" value="1.0">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Optimal Codon Freq: <span id="optimalFreq">0.50</span></div>
+                <div>Mean Fitness: <span id="meanFitness">1.00</span></div>
+                <div>CAI (Codon Adaptation): <span id="cai">0.50</span></div>
+                <div>Effective Ne×s: <span id="nes">0.50</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Selection-Mutation-Drift:</strong> When Ne×s >> 1, selection dominates
+                and optimal codons fix. When Ne×s << 1, drift dominates and mutation bias
+                determines frequency. E. coli shows strong bias; humans show weak bias.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let population = [];
+        let freqHistory = [];
+        let caiHistory = [];
+
+        let popSize = 500;
+        let mutBias = 0.6; // Probability of mutating to non-optimal
+        let selStrength = 0.001;
+        let expressionLevel = 1.0;
+
+        const NUM_CODONS = 20; // Positions in gene
+
+        class Gene {
+            constructor(codons = null) {
+                // Each position: 1 = optimal codon, 0 = non-optimal
+                this.codons = codons || new Array(NUM_CODONS).fill(0).map(() =>
+                    Math.random() < 0.5 ? 1 : 0
+                );
+            }
+
+            get optimalCount() {
+                return this.codons.filter(c => c === 1).length;
+            }
+
+            get cai() {
+                return this.optimalCount / NUM_CODONS;
+            }
+
+            get fitness() {
+                // Translation efficiency depends on optimal codon usage
+                // Effect is multiplicative and depends on expression level
+                const optFrac = this.cai;
+                const efficiency = 1 + selStrength * expressionLevel * (optFrac - 0.5) * NUM_CODONS;
+                return Math.max(0.1, efficiency);
+            }
+
+            replicate() {
+                const newCodons = [...this.codons];
+
+                // Mutations at each codon position
+                const mutRate = 0.02;
+                for (let i = 0; i < NUM_CODONS; i++) {
+                    if (Math.random() < mutRate) {
+                        if (newCodons[i] === 1) {
+                            // Optimal -> Non-optimal (mutation bias)
+                            if (Math.random() < mutBias) {
+                                newCodons[i] = 0;
+                            }
+                        } else {
+                            // Non-optimal -> Optimal
+                            if (Math.random() < (1 - mutBias)) {
+                                newCodons[i] = 1;
+                            }
+                        }
+                    }
+                }
+
+                return new Gene(newCodons);
+            }
+        }
+
+        function initPopulation() {
+            population = [];
+            freqHistory = [];
+            caiHistory = [];
+
+            for (let i = 0; i < popSize; i++) {
+                population.push(new Gene());
+            }
+        }
+
+        function reproduce() {
+            const totalFit = population.reduce((sum, g) => sum + g.fitness, 0);
+            const newPop = [];
+
+            const selectParent = () => {
+                let r = Math.random() * totalFit;
+                for (const g of population) {
+                    r -= g.fitness;
+                    if (r <= 0) return g;
+                }
+                return population[population.length - 1];
+            };
+
+            while (newPop.length < popSize) {
+                const parent = selectParent();
+                newPop.push(parent.replicate());
+            }
+
+            population = newPop;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+            reproduce();
+
+            // Calculate population stats
+            const optFreq = population.reduce((sum, g) => sum + g.optimalCount, 0) / (popSize * NUM_CODONS);
+            const meanCAI = population.reduce((sum, g) => sum + g.cai, 0) / popSize;
+
+            freqHistory.push(optFreq);
+            caiHistory.push(meanCAI);
+
+            if (freqHistory.length > 500) {
+                freqHistory.shift();
+                caiHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2;
+
+            // Codon usage visualization for sample genes
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Codon Usage in Sample Genes (blue=optimal, gray=non-optimal)', padding, 25);
+
+            const sampleSize = Math.min(30, popSize);
+            const cellWidth = Math.min(15, width / NUM_CODONS);
+            const cellHeight = Math.min(10, (height - 30) / sampleSize);
+
+            for (let i = 0; i < sampleSize; i++) {
+                const gene = population[i];
+                for (let j = 0; j < NUM_CODONS; j++) {
+                    const x = padding + j * cellWidth;
+                    const y = padding + i * cellHeight;
+
+                    ctx.fillStyle = gene.codons[j] === 1 ? '#06b6d4' : '#374151';
+                    ctx.fillRect(x, y, cellWidth - 1, cellHeight - 1);
+                }
+            }
+
+            // Frequency over time
+            const chartY = padding * 2 + height;
+            ctx.fillStyle = '#888';
+            ctx.fillText('Optimal Codon Frequency Over Time', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            // Expected equilibrium line
+            const expectedFreq = (1 - mutBias) / (mutBias + (1 - mutBias));
+            ctx.strokeStyle = '#555';
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY + height - expectedFreq * height);
+            ctx.lineTo(padding + width, chartY + height - expectedFreq * height);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#555';
+            ctx.fillText(`Drift eq: ${expectedFreq.toFixed(2)}`, padding + 5, chartY + height - expectedFreq * height - 5);
+
+            if (freqHistory.length > 1) {
+                ctx.strokeStyle = '#06b6d4';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < freqHistory.length; i++) {
+                    const x = padding + (i / freqHistory.length) * width;
+                    const y = chartY + height - freqHistory[i] * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // Axis labels
+            ctx.fillStyle = '#888';
+            ctx.fillText('1.0', padding - 25, chartY + 5);
+            ctx.fillText('0.0', padding - 25, chartY + height);
+            ctx.fillText('Generation', padding + width / 2 - 30, chartY + height + 20);
+
+            // Ne×s indicator
+            const nes = popSize * selStrength * expressionLevel;
+            ctx.fillText(`Ne×s = ${nes.toFixed(2)} ${nes > 1 ? '(selection)' : '(drift)'}`,
+                padding + width - 150, chartY + 20);
+        }
+
+        function updateStats() {
+            const optFreq = population.reduce((sum, g) => sum + g.optimalCount, 0) / (popSize * NUM_CODONS);
+            const meanFit = population.reduce((sum, g) => sum + g.fitness, 0) / popSize;
+            const meanCAI = population.reduce((sum, g) => sum + g.cai, 0) / popSize;
+            const nes = popSize * selStrength * expressionLevel;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('optimalFreq').textContent = optFreq.toFixed(4);
+            document.getElementById('meanFitness').textContent = meanFit.toFixed(4);
+            document.getElementById('cai').textContent = meanCAI.toFixed(4);
+            document.getElementById('nes').textContent = nes.toFixed(3);
+        }
+
+        document.getElementById('popSlider').addEventListener('input', (e) => {
+            popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = popSize;
+        });
+
+        document.getElementById('mutBiasSlider').addEventListener('input', (e) => {
+            mutBias = parseFloat(e.target.value);
+            document.getElementById('mutBiasValue').textContent = mutBias.toFixed(2);
+        });
+
+        document.getElementById('selSlider').addEventListener('input', (e) => {
+            selStrength = parseFloat(e.target.value);
+            document.getElementById('selValue').textContent = selStrength.toFixed(4);
+        });
+
+        document.getElementById('exprSlider').addEventListener('input', (e) => {
+            expressionLevel = parseFloat(e.target.value);
+            document.getElementById('exprValue').textContent = expressionLevel.toFixed(1);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

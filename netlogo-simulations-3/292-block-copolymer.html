@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Block Copolymer Self-Assembly</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #b2dfdb; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        select { width: 100%; padding: 8px; background: #2a2a3e; color: #e8e6e1; border: 1px solid #444; border-radius: 4px; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #b2dfdb; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #b2dfdb; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Block Copolymer Assembly</h1>
+            <p class="description">AB diblock copolymers self-assemble into microphase-separated structures. Morphology depends on volume fraction: spheres → cylinders → gyroid → lamellae.</p>
+
+            <div class="control-group">
+                <label>Volume Fraction fA: <span id="fracVal">0.5</span></label>
+                <input type="range" id="fraction" min="0.1" max="0.9" step="0.05" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>χN (Segregation): <span id="chiNVal">20</span></label>
+                <input type="range" id="chiN" min="5" max="50" value="20">
+            </div>
+
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">1.0</span></label>
+                <input type="range" id="temperature" min="0.5" max="2.0" step="0.1" value="1.0">
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Morphology: <span id="morphology">-</span></div>
+                <div>Order Parameter: <span id="orderParam">0</span></div>
+                <div>Domain Size: <span id="domainSize">0</span></div>
+                <div>Time: <span id="simTime">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let volumeFraction = 0.5;
+        let chiN = 20;
+        let temperature = 1.0;
+
+        const CELL_SIZE = 3;
+        let cols, rows;
+        let phi = [];      // Composition field (0 = B, 1 = A)
+        let phi_new = [];
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+            cols = Math.floor(width / CELL_SIZE);
+            rows = Math.floor(height / CELL_SIZE);
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            phi = new Array(cols * rows);
+            phi_new = new Array(cols * rows);
+
+            // Initialize with random fluctuations around mean composition
+            const noise = 0.1;
+            for (let i = 0; i < cols * rows; i++) {
+                phi[i] = volumeFraction + (Math.random() - 0.5) * noise;
+                phi[i] = Math.max(0, Math.min(1, phi[i]));
+            }
+
+            updateStats();
+        }
+
+        function freeEnergy(p) {
+            // Flory-Huggins free energy density
+            const eps = 1e-6;
+            const pA = Math.max(eps, Math.min(1 - eps, p));
+            const pB = 1 - pA;
+
+            // f = (1/N)[pA*ln(pA) + pB*ln(pB)] + χ*pA*pB
+            const entropy = pA * Math.log(pA) + pB * Math.log(pB);
+            const enthalpy = (chiN / 20) * pA * pB / temperature;
+
+            return entropy + enthalpy;
+        }
+
+        function chemicalPotential(p) {
+            const eps = 1e-6;
+            const pA = Math.max(eps, Math.min(1 - eps, p));
+
+            // μ = df/dp = ln(pA) - ln(1-pA) + χ(1-2pA)
+            const chi = chiN / 20 / temperature;
+            return Math.log(pA) - Math.log(1 - pA) + chi * (1 - 2 * pA);
+        }
+
+        function laplacian(arr, x, y) {
+            const idx = y * cols + x;
+            let lap = -4 * arr[idx];
+
+            lap += arr[y * cols + ((x - 1 + cols) % cols)];
+            lap += arr[y * cols + ((x + 1) % cols)];
+            lap += arr[((y - 1 + rows) % rows) * cols + x];
+            lap += arr[((y + 1) % rows) * cols + x];
+
+            return lap;
+        }
+
+        function step() {
+            time += 0.01;
+            const dt = 0.1;
+            const kappa = 0.5;  // Gradient energy coefficient
+            const M = 1.0;     // Mobility
+
+            // Cahn-Hilliard dynamics for phase separation
+            const mu = new Array(cols * rows);
+
+            // Calculate chemical potential field
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const idx = y * cols + x;
+                    const lapPhi = laplacian(phi, x, y);
+                    mu[idx] = chemicalPotential(phi[idx]) - kappa * lapPhi;
+                }
+            }
+
+            // Evolve composition
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const idx = y * cols + x;
+                    const lapMu = laplacian(mu, x, y);
+
+                    phi_new[idx] = phi[idx] + dt * M * lapMu;
+                    phi_new[idx] = Math.max(0.01, Math.min(0.99, phi_new[idx]));
+                }
+            }
+
+            [phi, phi_new] = [phi_new, phi];
+
+            updateStats();
+        }
+
+        function predictMorphology() {
+            if (chiN < 10.5) return 'Disordered';
+
+            if (volumeFraction < 0.2 || volumeFraction > 0.8) {
+                return 'Spheres';
+            } else if (volumeFraction < 0.3 || volumeFraction > 0.7) {
+                return 'Cylinders';
+            } else if (volumeFraction < 0.4 || volumeFraction > 0.6) {
+                return 'Gyroid';
+            } else {
+                return 'Lamellae';
+            }
+        }
+
+        function calculateOrderParameter() {
+            // Order parameter: variance of composition
+            let mean = 0, variance = 0;
+
+            for (let i = 0; i < cols * rows; i++) {
+                mean += phi[i];
+            }
+            mean /= cols * rows;
+
+            for (let i = 0; i < cols * rows; i++) {
+                variance += (phi[i] - mean) * (phi[i] - mean);
+            }
+            variance /= cols * rows;
+
+            return Math.sqrt(variance);
+        }
+
+        function draw() {
+            const imageData = ctx.createImageData(width, height);
+            const data = imageData.data;
+
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const idx = y * cols + x;
+                    const p = phi[idx];
+
+                    for (let py = 0; py < CELL_SIZE; py++) {
+                        for (let px = 0; px < CELL_SIZE; px++) {
+                            const pixelX = x * CELL_SIZE + px;
+                            const pixelY = y * CELL_SIZE + py;
+                            if (pixelX >= width || pixelY >= height) continue;
+
+                            const pIdx = (pixelY * width + pixelX) * 4;
+
+                            // A block = teal, B block = coral
+                            data[pIdx] = Math.floor(p * 178 + (1 - p) * 255);
+                            data[pIdx + 1] = Math.floor(p * 223 + (1 - p) * 127);
+                            data[pIdx + 2] = Math.floor(p * 219 + (1 - p) * 80);
+                            data[pIdx + 3] = 255;
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+
+            // Draw phase diagram inset
+            drawPhaseDiagram();
+        }
+
+        function drawPhaseDiagram() {
+            const pdX = 20;
+            const pdY = height - 120;
+            const pdW = 100;
+            const pdH = 100;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(pdX - 5, pdY - 5, pdW + 10, pdH + 20);
+
+            // Axes
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(pdX, pdY);
+            ctx.lineTo(pdX, pdY + pdH);
+            ctx.lineTo(pdX + pdW, pdY + pdH);
+            ctx.stroke();
+
+            // Labels
+            ctx.fillStyle = '#888';
+            ctx.font = '8px sans-serif';
+            ctx.fillText('χN', pdX - 3, pdY - 5);
+            ctx.fillText('f', pdX + pdW / 2, pdY + pdH + 12);
+
+            // Phase boundaries (simplified)
+            ctx.strokeStyle = '#b2dfdb';
+            ctx.lineWidth = 1;
+
+            // ODT line
+            ctx.beginPath();
+            ctx.moveTo(pdX, pdY + pdH - 10.5 / 50 * pdH);
+            ctx.lineTo(pdX + pdW, pdY + pdH - 10.5 / 50 * pdH);
+            ctx.stroke();
+
+            // Current point
+            const curX = pdX + volumeFraction * pdW;
+            const curY = pdY + pdH - chiN / 50 * pdH;
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(curX, curY, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function updateStats() {
+            const orderParam = calculateOrderParameter();
+
+            // Estimate domain size from structure
+            let domainSize = 0;
+            let count = 0;
+            for (let y = 1; y < rows - 1; y++) {
+                for (let x = 1; x < cols - 1; x++) {
+                    const idx = y * cols + x;
+                    if (phi[idx] > 0.5 && phi[idx - 1] < 0.5) {
+                        // Interface crossing
+                        domainSize += x;
+                        count++;
+                    }
+                }
+            }
+            domainSize = count > 0 ? cols / count : 0;
+
+            document.getElementById('morphology').textContent = predictMorphology();
+            document.getElementById('orderParam').textContent = orderParam.toFixed(3);
+            document.getElementById('domainSize').textContent = (domainSize * CELL_SIZE).toFixed(1) + ' px';
+            document.getElementById('simTime').textContent = time.toFixed(2);
+        }
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < 10; i++) step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('fraction').addEventListener('input', e => {
+            volumeFraction = parseFloat(e.target.value);
+            document.getElementById('fracVal').textContent = volumeFraction;
+        });
+
+        document.getElementById('chiN').addEventListener('input', e => {
+            chiN = parseInt(e.target.value);
+            document.getElementById('chiNVal').textContent = chiN;
+        });
+
+        document.getElementById('temperature').addEventListener('input', e => {
+            temperature = parseFloat(e.target.value);
+            document.getElementById('tempVal').textContent = temperature;
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', () => { resize(); init(); });
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

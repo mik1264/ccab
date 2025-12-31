@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FRET - Förster Resonance Energy Transfer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #ff6b6b; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        select { width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #ff6b6b; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #ff6b6b; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>FRET Energy Transfer</h1>
+            <p class="description">Förster Resonance Energy Transfer: non-radiative dipole-dipole coupling between donor and acceptor. Efficiency E = 1/(1+(r/R₀)⁶). R₀ depends on spectral overlap, orientation (κ²), and quantum yield.</p>
+
+            <div class="control-group">
+                <label>FRET Pair:</label>
+                <select id="pair">
+                    <option value="cfp_yfp">CFP-YFP</option>
+                    <option value="gfp_rfp">GFP-RFP</option>
+                    <option value="cy3_cy5">Cy3-Cy5</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Distance: <span id="distVal">5.0</span> nm</label>
+                <input type="range" id="distance" min="1" max="15" step="0.1" value="5.0">
+            </div>
+
+            <div class="control-group">
+                <label>Orientation (κ²): <span id="kappaVal">0.67</span></label>
+                <input type="range" id="kappa" min="0" max="4" step="0.01" value="0.67">
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="excite">Excite Donor</button>
+
+            <div class="stats">
+                <div>R₀ (Förster): <span id="r0">4.9</span> nm</div>
+                <div>FRET Efficiency: <span id="efficiency">50</span>%</div>
+                <div>Donor/Acceptor Ratio: <span id="ratio">1.0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let time = 0;
+
+        let pairType = 'cfp_yfp';
+        let distance = 5.0;
+        let kappa2 = 0.67;
+
+        let donor = { x: 0, y: 0, excited: false, exciteTime: 0 };
+        let acceptor = { x: 0, y: 0, excited: false, exciteTime: 0 };
+        let photons = [];
+        let energyTransfer = null;
+
+        const FRET_PAIRS = {
+            cfp_yfp: {
+                donor: { name: 'CFP', excMax: 433, emMax: 475, color: '#00bfff' },
+                acceptor: { name: 'YFP', excMax: 514, emMax: 527, color: '#ffff00' },
+                R0_base: 4.9 // nm at κ²=2/3
+            },
+            gfp_rfp: {
+                donor: { name: 'GFP', excMax: 488, emMax: 507, color: '#00ff00' },
+                acceptor: { name: 'RFP', excMax: 555, emMax: 584, color: '#ff4444' },
+                R0_base: 5.1
+            },
+            cy3_cy5: {
+                donor: { name: 'Cy3', excMax: 550, emMax: 570, color: '#ff8c00' },
+                acceptor: { name: 'Cy5', excMax: 649, emMax: 670, color: '#dc143c' },
+                R0_base: 5.3
+            }
+        };
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+            updatePositions();
+        }
+
+        function updatePositions() {
+            const centerX = (width - 320) / 2;
+            const centerY = height / 2;
+            const scaledDist = distance * 20;
+
+            donor.x = centerX - scaledDist / 2;
+            donor.y = centerY;
+            acceptor.x = centerX + scaledDist / 2;
+            acceptor.y = centerY;
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            donor.excited = false;
+            acceptor.excited = false;
+            photons = [];
+            energyTransfer = null;
+            updateStats();
+        }
+
+        function getR0() {
+            const pair = FRET_PAIRS[pairType];
+            // R0 scales with (κ²)^(1/6)
+            return pair.R0_base * Math.pow(kappa2 / 0.67, 1/6);
+        }
+
+        function getFRETEfficiency() {
+            const R0 = getR0();
+            return 1 / (1 + Math.pow(distance / R0, 6));
+        }
+
+        function excite() {
+            donor.excited = true;
+            donor.exciteTime = time;
+
+            // Create excitation photon
+            photons.push({
+                x: 50,
+                y: donor.y,
+                vx: 8,
+                vy: 0,
+                type: 'excitation',
+                color: FRET_PAIRS[pairType].donor.color
+            });
+        }
+
+        function step() {
+            time += 0.016;
+            const pair = FRET_PAIRS[pairType];
+            const efficiency = getFRETEfficiency();
+
+            // Update photons
+            for (let i = photons.length - 1; i >= 0; i--) {
+                const p = photons[i];
+                p.x += p.vx;
+                p.y += p.vy;
+
+                // Excitation photon absorption
+                if (p.type === 'excitation' && Math.abs(p.x - donor.x) < 15) {
+                    donor.excited = true;
+                    donor.exciteTime = time;
+                    photons.splice(i, 1);
+                    continue;
+                }
+
+                if (p.x > width - 300 || p.x < 0 || p.y < 0 || p.y > height) {
+                    photons.splice(i, 1);
+                }
+            }
+
+            // Handle excited donor
+            if (donor.excited) {
+                const excitedDuration = time - donor.exciteTime;
+
+                if (excitedDuration > 0.5) {
+                    donor.excited = false;
+
+                    // FRET or direct emission?
+                    if (Math.random() < efficiency) {
+                        // FRET occurs - energy transfer to acceptor
+                        energyTransfer = {
+                            startTime: time,
+                            progress: 0
+                        };
+                        acceptor.excited = true;
+                        acceptor.exciteTime = time + 0.3;
+                    } else {
+                        // Donor emission
+                        const angle = Math.random() * Math.PI * 2;
+                        photons.push({
+                            x: donor.x,
+                            y: donor.y,
+                            vx: Math.cos(angle) * 5,
+                            vy: Math.sin(angle) * 5,
+                            type: 'donor_emission',
+                            color: pair.donor.color,
+                            alpha: 1
+                        });
+                    }
+                }
+            }
+
+            // Update energy transfer animation
+            if (energyTransfer) {
+                energyTransfer.progress = (time - energyTransfer.startTime) / 0.3;
+                if (energyTransfer.progress >= 1) {
+                    energyTransfer = null;
+                }
+            }
+
+            // Handle excited acceptor
+            if (acceptor.excited) {
+                const excitedDuration = time - acceptor.exciteTime;
+
+                if (excitedDuration > 0.5) {
+                    acceptor.excited = false;
+
+                    // Acceptor emission
+                    const angle = Math.random() * Math.PI * 2;
+                    photons.push({
+                        x: acceptor.x,
+                        y: acceptor.y,
+                        vx: Math.cos(angle) * 5,
+                        vy: Math.sin(angle) * 5,
+                        type: 'acceptor_emission',
+                        color: pair.acceptor.color,
+                        alpha: 1
+                    });
+                }
+            }
+
+            // Fade emitted photons
+            for (const p of photons) {
+                if (p.alpha !== undefined) {
+                    p.alpha -= 0.02;
+                }
+            }
+
+            updateStats();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            drawMolecularDiagram();
+            drawFluorophores();
+            drawEnergyTransfer();
+            drawPhotons();
+            drawSpectraOverlap();
+            drawEfficiencyCurve();
+        }
+
+        function drawMolecularDiagram() {
+            const pair = FRET_PAIRS[pairType];
+
+            // Title
+            ctx.fillStyle = '#ff6b6b';
+            ctx.font = '14px sans-serif';
+            ctx.fillText('Förster Resonance Energy Transfer (FRET)', 100, 40);
+
+            // Distance annotation
+            ctx.strokeStyle = '#888';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(donor.x, donor.y + 60);
+            ctx.lineTo(acceptor.x, donor.y + 60);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#aaa';
+            ctx.font = '12px sans-serif';
+            ctx.fillText(`r = ${distance.toFixed(1)} nm`, (donor.x + acceptor.x) / 2 - 25, donor.y + 80);
+
+            // Labels
+            ctx.fillStyle = pair.donor.color;
+            ctx.fillText(pair.donor.name + ' (Donor)', donor.x - 30, donor.y - 70);
+
+            ctx.fillStyle = pair.acceptor.color;
+            ctx.fillText(pair.acceptor.name + ' (Acceptor)', acceptor.x - 30, acceptor.y - 70);
+        }
+
+        function drawFluorophores() {
+            const pair = FRET_PAIRS[pairType];
+
+            // Donor
+            if (donor.excited) {
+                const pulse = 0.5 + 0.5 * Math.sin(time * 15);
+                ctx.fillStyle = pair.donor.color;
+                ctx.globalAlpha = 0.3 + pulse * 0.4;
+                ctx.beginPath();
+                ctx.arc(donor.x, donor.y, 40 + pulse * 10, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+
+            ctx.fillStyle = pair.donor.color;
+            ctx.beginPath();
+            ctx.arc(donor.x, donor.y, 25, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Dipole representation
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(donor.x - 15, donor.y);
+            ctx.lineTo(donor.x + 15, donor.y);
+            ctx.stroke();
+
+            // Acceptor
+            if (acceptor.excited) {
+                const pulse = 0.5 + 0.5 * Math.sin(time * 15);
+                ctx.fillStyle = pair.acceptor.color;
+                ctx.globalAlpha = 0.3 + pulse * 0.4;
+                ctx.beginPath();
+                ctx.arc(acceptor.x, acceptor.y, 40 + pulse * 10, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+
+            ctx.fillStyle = pair.acceptor.color;
+            ctx.beginPath();
+            ctx.arc(acceptor.x, acceptor.y, 25, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Dipole representation (orientation affects κ²)
+            const angle = Math.PI * (kappa2 / 4);
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(acceptor.x - 15 * Math.cos(angle), acceptor.y - 15 * Math.sin(angle));
+            ctx.lineTo(acceptor.x + 15 * Math.cos(angle), acceptor.y + 15 * Math.sin(angle));
+            ctx.stroke();
+        }
+
+        function drawEnergyTransfer() {
+            if (!energyTransfer) return;
+
+            const pair = FRET_PAIRS[pairType];
+            const progress = energyTransfer.progress;
+
+            // Non-radiative energy transfer visualization
+            const numWaves = 5;
+            for (let i = 0; i < numWaves; i++) {
+                const waveProgress = (progress + i / numWaves) % 1;
+                const x = donor.x + (acceptor.x - donor.x) * waveProgress;
+                const y = donor.y;
+
+                const gradient = ctx.createRadialGradient(x, y, 0, x, y, 20);
+                gradient.addColorStop(0, pair.donor.color);
+                gradient.addColorStop(0.5, pair.acceptor.color);
+                gradient.addColorStop(1, 'transparent');
+
+                ctx.globalAlpha = 0.6 * (1 - Math.abs(waveProgress - 0.5) * 2);
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(x, y, 20, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.globalAlpha = 1;
+
+            // Oscillating field lines
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < 8; i++) {
+                const phase = progress * Math.PI * 4 + i * Math.PI / 4;
+                ctx.beginPath();
+                for (let t = 0; t <= 1; t += 0.05) {
+                    const x = donor.x + (acceptor.x - donor.x) * t;
+                    const amplitude = 20 * Math.sin(Math.PI * t) * (1 - progress);
+                    const y = donor.y + amplitude * Math.sin(phase + t * 10);
+                    if (t === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+        }
+
+        function drawPhotons() {
+            for (const p of photons) {
+                ctx.fillStyle = p.color;
+                ctx.globalAlpha = p.alpha !== undefined ? Math.max(0, p.alpha) : 1;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Trail
+                ctx.strokeStyle = p.color;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(p.x - p.vx * 5, p.y - p.vy * 5);
+                ctx.stroke();
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        function drawSpectraOverlap() {
+            const plotX = 100;
+            const plotY = height - 180;
+            const plotW = (width - 450) / 2 - 20;
+            const plotH = 120;
+
+            const pair = FRET_PAIRS[pairType];
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(plotX - 10, plotY - 20, plotW + 20, plotH + 45);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Spectral Overlap', plotX, plotY - 5);
+
+            // Donor emission spectrum
+            ctx.fillStyle = pair.donor.color;
+            ctx.globalAlpha = 0.4;
+            ctx.beginPath();
+            ctx.moveTo(plotX, plotY + plotH);
+            for (let lambda = 400; lambda <= 700; lambda += 2) {
+                const diff = lambda - pair.donor.emMax;
+                const intensity = Math.exp(-(diff * diff) / (30 * 30));
+                const x = plotX + ((lambda - 400) / 300) * plotW;
+                const y = plotY + plotH - intensity * (plotH - 10);
+                ctx.lineTo(x, y);
+            }
+            ctx.lineTo(plotX + plotW, plotY + plotH);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            // Acceptor absorption spectrum
+            ctx.fillStyle = pair.acceptor.color;
+            ctx.globalAlpha = 0.4;
+            ctx.beginPath();
+            ctx.moveTo(plotX, plotY + plotH);
+            for (let lambda = 400; lambda <= 700; lambda += 2) {
+                const diff = lambda - pair.acceptor.excMax;
+                const intensity = Math.exp(-(diff * diff) / (35 * 35));
+                const x = plotX + ((lambda - 400) / 300) * plotW;
+                const y = plotY + plotH - intensity * (plotH - 10);
+                ctx.lineTo(x, y);
+            }
+            ctx.lineTo(plotX + plotW, plotY + plotH);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            // Overlap region highlight
+            ctx.fillStyle = '#ff6b6b';
+            ctx.globalAlpha = 0.3;
+            ctx.beginPath();
+            ctx.moveTo(plotX, plotY + plotH);
+            for (let lambda = 400; lambda <= 700; lambda += 2) {
+                const donorDiff = lambda - pair.donor.emMax;
+                const donorI = Math.exp(-(donorDiff * donorDiff) / (30 * 30));
+                const accDiff = lambda - pair.acceptor.excMax;
+                const accI = Math.exp(-(accDiff * accDiff) / (35 * 35));
+                const overlap = Math.min(donorI, accI);
+                const x = plotX + ((lambda - 400) / 300) * plotW;
+                const y = plotY + plotH - overlap * (plotH - 10);
+                ctx.lineTo(x, y);
+            }
+            ctx.lineTo(plotX + plotW, plotY + plotH);
+            ctx.closePath();
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            // Legend
+            ctx.fillStyle = pair.donor.color;
+            ctx.font = '9px sans-serif';
+            ctx.fillText('Donor Em.', plotX + 5, plotY + 15);
+            ctx.fillStyle = pair.acceptor.color;
+            ctx.fillText('Acceptor Abs.', plotX + 5, plotY + 27);
+            ctx.fillStyle = '#ff6b6b';
+            ctx.fillText('Overlap (J)', plotX + 5, plotY + 39);
+        }
+
+        function drawEfficiencyCurve() {
+            const plotX = 100 + (width - 450) / 2;
+            const plotY = height - 180;
+            const plotW = (width - 450) / 2 - 20;
+            const plotH = 120;
+
+            const R0 = getR0();
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(plotX - 10, plotY - 20, plotW + 20, plotH + 45);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('FRET Efficiency vs Distance', plotX, plotY - 5);
+
+            // E = 1/(1+(r/R0)^6) curve
+            ctx.strokeStyle = '#ff6b6b';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let r = 0.5; r <= 15; r += 0.2) {
+                const E = 1 / (1 + Math.pow(r / R0, 6));
+                const x = plotX + (r / 15) * plotW;
+                const y = plotY + plotH - E * (plotH - 10);
+                if (r === 0.5) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Current distance marker
+            const currentE = getFRETEfficiency();
+            const markerX = plotX + (distance / 15) * plotW;
+            const markerY = plotY + plotH - currentE * (plotH - 10);
+
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(markerX, markerY, 6, 0, Math.PI * 2);
+            ctx.fill();
+
+            // R0 annotation
+            const r0X = plotX + (R0 / 15) * plotW;
+            ctx.strokeStyle = '#888';
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(r0X, plotY);
+            ctx.lineTo(r0X, plotY + plotH);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '9px sans-serif';
+            ctx.fillText(`R₀=${R0.toFixed(1)}nm`, r0X - 15, plotY + plotH + 15);
+
+            // 50% efficiency line
+            ctx.strokeStyle = '#666';
+            ctx.setLineDash([2, 2]);
+            ctx.beginPath();
+            ctx.moveTo(plotX, plotY + plotH / 2);
+            ctx.lineTo(plotX + plotW, plotY + plotH / 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillText('50%', plotX - 25, plotY + plotH / 2 + 3);
+        }
+
+        function updateStats() {
+            const R0 = getR0();
+            const efficiency = getFRETEfficiency();
+            const ratio = (1 - efficiency) / Math.max(0.01, efficiency);
+
+            document.getElementById('r0').textContent = R0.toFixed(1);
+            document.getElementById('efficiency').textContent = (efficiency * 100).toFixed(0);
+            document.getElementById('ratio').textContent = ratio.toFixed(2);
+        }
+
+        function animate() {
+            step();
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('pair').addEventListener('change', e => {
+            pairType = e.target.value;
+            updatePositions();
+            updateStats();
+        });
+
+        document.getElementById('distance').addEventListener('input', e => {
+            distance = parseFloat(e.target.value);
+            document.getElementById('distVal').textContent = distance.toFixed(1);
+            updatePositions();
+        });
+
+        document.getElementById('kappa').addEventListener('input', e => {
+            kappa2 = parseFloat(e.target.value);
+            document.getElementById('kappaVal').textContent = kappa2.toFixed(2);
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('excite').addEventListener('click', excite);
+
+        window.addEventListener('resize', init);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

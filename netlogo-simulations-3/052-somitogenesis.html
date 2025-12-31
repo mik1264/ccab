@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Somitogenesis - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #ec4899; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #ec4899; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #ec4899; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #db2777; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #ec4899; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #ec4899; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(236,72,153,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #ec4899; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🦴 Somitogenesis</h1>
+            <p class="description">
+                Clock and Wavefront model: oscillating gene expression (Notch, Wnt, FGF)
+                combined with a receding wavefront creates periodic somite segments
+                in vertebrate embryos.
+            </p>
+
+            <div class="control-group">
+                <label>Clock Period: <span class="value-display" id="periodValue">30</span></label>
+                <input type="range" id="periodSlider" min="10" max="60" value="30">
+                <div style="font-size: 0.65rem; color: #666;">Oscillation period (steps)</div>
+            </div>
+
+            <div class="control-group">
+                <label>Wavefront Speed: <span class="value-display" id="waveValue">0.5</span></label>
+                <input type="range" id="waveSlider" min="0.1" max="1" step="0.1" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>FGF Gradient Slope: <span class="value-display" id="fgfValue">0.02</span></label>
+                <input type="range" id="fgfSlider" min="0.01" max="0.05" step="0.005" value="0.02">
+            </div>
+
+            <div class="control-group">
+                <label>Coupling Strength: <span class="value-display" id="coupValue">0.3</span></label>
+                <input type="range" id="coupSlider" min="0" max="1" step="0.1" value="0.3">
+                <div style="font-size: 0.65rem; color: #666;">Cell-cell synchronization</div>
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Somites Formed: <span id="somites">0</span></div>
+                <div>Wavefront Position: <span id="wavefront">0</span></div>
+                <div>PSM Length: <span id="psmLength">0</span></div>
+                <div>Clock Phase: <span id="clockPhase">0°</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Clock-Wavefront Model:</strong> Cells in the presomitic mesoderm (PSM)
+                oscillate with ~2 hour period (mouse). The wavefront (determination front)
+                recedes posteriorly. When oscillating cells cross the wavefront at the right
+                phase, they segment to form a somite boundary.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let cells = [];
+        let somiteBoundaries = [];
+        let wavefrontPosition = 100;
+        const NUM_CELLS = 100;
+
+        let clockPeriod = 30;
+        let wavefrontSpeed = 0.5;
+        let fgfSlope = 0.02;
+        let couplingStrength = 0.3;
+
+        class Cell {
+            constructor(position) {
+                this.position = position;
+                this.phase = Math.random() * Math.PI * 2; // Oscillator phase
+                this.segmented = false;
+                this.somiteNumber = -1;
+            }
+
+            get fgfLevel() {
+                // FGF gradient: high in posterior (tail), low in anterior
+                const relPos = (NUM_CELLS - this.position) / NUM_CELLS;
+                return Math.max(0, relPos * fgfSlope * 100);
+            }
+
+            get inPSM() {
+                return this.position > wavefrontPosition && !this.segmented;
+            }
+
+            get atWavefront() {
+                return Math.abs(this.position - wavefrontPosition) < 2 && !this.segmented;
+            }
+
+            oscillate(neighbors) {
+                if (!this.inPSM) return;
+
+                // Intrinsic oscillation
+                const omega = (2 * Math.PI) / clockPeriod;
+                this.phase += omega;
+
+                // Coupling to neighbors (Notch-mediated synchronization)
+                for (const neighbor of neighbors) {
+                    if (neighbor.inPSM) {
+                        const phaseDiff = neighbor.phase - this.phase;
+                        this.phase += couplingStrength * Math.sin(phaseDiff) * 0.1;
+                    }
+                }
+
+                // Keep phase in [0, 2π)
+                this.phase = this.phase % (Math.PI * 2);
+            }
+
+            get oscillationValue() {
+                // Hes7-like oscillation
+                return Math.sin(this.phase);
+            }
+        }
+
+        function initCells() {
+            cells = [];
+            somiteBoundaries = [];
+            wavefrontPosition = 100;
+
+            for (let i = 0; i < NUM_CELLS; i++) {
+                cells.push(new Cell(i));
+            }
+
+            // Initial phase wave pattern
+            for (let i = 0; i < cells.length; i++) {
+                if (cells[i].position > 50) {
+                    cells[i].phase = (cells[i].position - 50) * 0.1;
+                }
+            }
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+
+            // Wavefront recedes posteriorly
+            wavefrontPosition -= wavefrontSpeed * 0.1;
+
+            // Check for somite formation
+            let somiteFormed = false;
+            for (const cell of cells) {
+                if (cell.atWavefront) {
+                    // Cell crosses wavefront - check phase
+                    // Somite boundary forms when cells are at specific phase
+                    if (Math.abs(cell.oscillationValue) < 0.3) { // Near zero crossing
+                        if (!somiteBoundaries.includes(Math.round(cell.position))) {
+                            somiteBoundaries.push(Math.round(cell.position));
+                            somiteFormed = true;
+                        }
+                    }
+                    cell.segmented = true;
+                    cell.somiteNumber = somiteBoundaries.length;
+                }
+            }
+
+            // Oscillate PSM cells
+            for (let i = 0; i < cells.length; i++) {
+                const neighbors = [];
+                if (i > 0) neighbors.push(cells[i - 1]);
+                if (i < cells.length - 1) neighbors.push(cells[i + 1]);
+                cells[i].oscillate(neighbors);
+            }
+
+            // Tail growth (add new cells)
+            if (generation % 50 === 0 && cells.length < 150) {
+                cells.push(new Cell(cells.length));
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2 - 20;
+
+            // Embryo visualization
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Vertebrate Embryo: Somite Formation', padding, 25);
+
+            const cellWidth = width / cells.length;
+
+            // Draw cells
+            for (const cell of cells) {
+                const x = padding + cell.position * cellWidth;
+                const y = padding + height / 2;
+
+                if (cell.segmented) {
+                    // Formed somite
+                    const hue = (cell.somiteNumber * 30) % 360;
+                    ctx.fillStyle = `hsl(${hue}, 60%, 50%)`;
+                    ctx.fillRect(x, y - 30, cellWidth, 60);
+
+                    // Somite boundaries
+                    if (somiteBoundaries.includes(Math.round(cell.position))) {
+                        ctx.strokeStyle = '#fff';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.moveTo(x, y - 35);
+                        ctx.lineTo(x, y + 35);
+                        ctx.stroke();
+                    }
+                } else {
+                    // PSM - color by oscillation phase
+                    const osc = (cell.oscillationValue + 1) / 2; // 0-1
+                    const r = Math.floor(osc * 200 + 55);
+                    const g = Math.floor((1 - osc) * 100 + 100);
+                    const b = Math.floor(osc * 100 + 100);
+                    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+                    ctx.fillRect(x, y - 25, cellWidth, 50);
+                }
+            }
+
+            // Wavefront indicator
+            const wfX = padding + wavefrontPosition * cellWidth;
+            ctx.strokeStyle = '#22c55e';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(wfX, padding);
+            ctx.lineTo(wfX, padding + height);
+            ctx.stroke();
+            ctx.fillStyle = '#22c55e';
+            ctx.fillText('Wavefront', wfX - 30, padding + height + 15);
+
+            // Labels
+            ctx.fillStyle = '#888';
+            ctx.fillText('← Anterior (Head)', padding, padding + height + 15);
+            ctx.fillText('Posterior (Tail) →', padding + width - 100, padding + height + 15);
+
+            // Oscillation profile
+            const chartY = padding * 2 + height + 30;
+            ctx.fillText('Gene Expression Oscillations in PSM', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY + height / 2);
+            ctx.lineTo(padding + width, chartY + height / 2);
+            ctx.stroke();
+
+            // Draw oscillation wave
+            ctx.strokeStyle = '#ec4899';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            let started = false;
+            for (const cell of cells) {
+                if (cell.inPSM) {
+                    const x = padding + cell.position * cellWidth;
+                    const y = chartY + height / 2 - cell.oscillationValue * (height / 2 - 10);
+                    if (!started) {
+                        ctx.moveTo(x, y);
+                        started = true;
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                }
+            }
+            ctx.stroke();
+
+            // FGF gradient
+            ctx.strokeStyle = '#f59e0b';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            for (const cell of cells) {
+                const x = padding + cell.position * cellWidth;
+                const fgf = cell.fgfLevel / (fgfSlope * 100);
+                const y = chartY + height - fgf * (height / 2);
+                if (cell.position === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Legend
+            ctx.fillStyle = '#ec4899';
+            ctx.fillRect(padding + 10, chartY + 10, 15, 3);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Hes7', padding + 30, chartY + 14);
+
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(padding + 70, chartY + 10, 15, 3);
+            ctx.fillText('FGF', padding + 90, chartY + 14);
+        }
+
+        function updateStats() {
+            const psmCells = cells.filter(c => c.inPSM);
+            const avgPhase = psmCells.length > 0 ?
+                psmCells.reduce((s, c) => s + c.phase, 0) / psmCells.length : 0;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('somites').textContent = somiteBoundaries.length;
+            document.getElementById('wavefront').textContent = wavefrontPosition.toFixed(1);
+            document.getElementById('psmLength').textContent = psmCells.length;
+            document.getElementById('clockPhase').textContent = ((avgPhase / Math.PI * 180) % 360).toFixed(0) + '°';
+        }
+
+        document.getElementById('periodSlider').addEventListener('input', (e) => {
+            clockPeriod = parseInt(e.target.value);
+            document.getElementById('periodValue').textContent = clockPeriod;
+        });
+
+        document.getElementById('waveSlider').addEventListener('input', (e) => {
+            wavefrontSpeed = parseFloat(e.target.value);
+            document.getElementById('waveValue').textContent = wavefrontSpeed.toFixed(1);
+        });
+
+        document.getElementById('fgfSlider').addEventListener('input', (e) => {
+            fgfSlope = parseFloat(e.target.value);
+            document.getElementById('fgfValue').textContent = fgfSlope.toFixed(3);
+        });
+
+        document.getElementById('coupSlider').addEventListener('input', (e) => {
+            couplingStrength = parseFloat(e.target.value);
+            document.getElementById('coupValue').textContent = couplingStrength.toFixed(1);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initCells();
+            render();
+            updateStats();
+        });
+
+        initCells();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

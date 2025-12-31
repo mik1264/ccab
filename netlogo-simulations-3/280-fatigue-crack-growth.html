@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fatigue Crack Growth - Paris Law</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #ef5350; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #ef5350; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #ef5350; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .chart { background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; margin-top: 10px; }
+        .equation { background: rgba(239,83,80,0.1); padding: 8px; border-radius: 5px; margin-top: 10px; font-family: monospace; font-size: 0.7rem; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Fatigue Crack Growth</h1>
+            <p class="description">Paris law describes crack growth rate under cyclic loading: da/dN = C(ΔK)^m. The stress intensity factor ΔK increases with crack length until critical fracture.</p>
+
+            <div class="control-group">
+                <label>Stress Amplitude Δσ: <span id="stressVal">100</span> MPa</label>
+                <input type="range" id="stress" min="50" max="200" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Paris Exponent m: <span id="mVal">3.0</span></label>
+                <input type="range" id="mParam" min="2" max="5" step="0.1" value="3.0">
+            </div>
+
+            <div class="control-group">
+                <label>Initial Crack a₀: <span id="crackVal">5</span> mm</label>
+                <input type="range" id="initCrack" min="1" max="20" value="5">
+            </div>
+
+            <div class="control-group">
+                <label>Specimen Width W: <span id="widthVal">100</span> mm</label>
+                <input type="range" id="specWidth" min="50" max="200" value="100">
+            </div>
+
+            <button id="cycle">Apply 100 Cycles</button>
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Crack Length: <span id="crackLength">5</span> mm</div>
+                <div>Cycles: <span id="cycles">0</span></div>
+                <div>ΔK: <span id="deltaK">0</span> MPa√m</div>
+                <div>da/dN: <span id="growthRate">0</span> mm/cycle</div>
+                <div>Status: <span id="status">Growing</span></div>
+            </div>
+
+            <div class="equation">
+                da/dN = C(ΔK)^m<br>
+                ΔK = Δσ√(πa) × Y(a/W)
+            </div>
+
+            <div class="chart">
+                <canvas id="crackChart" width="280" height="100"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const chartCanvas = document.getElementById('crackChart');
+        const chartCtx = chartCanvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+
+        let stressAmp = 100;  // MPa
+        let m = 3.0;          // Paris exponent
+        let initCrack = 5;    // mm
+        let specWidth = 100;  // mm
+
+        let crackLength = initCrack;
+        let cycles = 0;
+        let crackHistory = [];
+        let fractured = false;
+
+        // Paris law constant (typical for steel)
+        const C = 1e-11;  // mm/cycle / (MPa√m)^m
+        const Kc = 50;    // Fracture toughness MPa√m
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function init() {
+            resize();
+            crackLength = initCrack;
+            cycles = 0;
+            crackHistory = [];
+            fractured = false;
+            updateStats();
+        }
+
+        // Geometry factor for edge crack
+        function geometryFactor(aOverW) {
+            // Finite width correction
+            return 1.12 - 0.231 * aOverW + 10.55 * Math.pow(aOverW, 2) -
+                   21.72 * Math.pow(aOverW, 3) + 30.39 * Math.pow(aOverW, 4);
+        }
+
+        function stressIntensity() {
+            const a = crackLength / 1000;  // Convert to meters
+            const aOverW = crackLength / specWidth;
+            const Y = geometryFactor(aOverW);
+            return stressAmp * Math.sqrt(Math.PI * a) * Y;
+        }
+
+        function growthRate() {
+            const deltaK = stressIntensity();
+            return C * Math.pow(deltaK, m);
+        }
+
+        function step() {
+            if (fractured) return;
+
+            const dN = 10;  // Cycles per step
+            cycles += dN;
+
+            const deltaK = stressIntensity();
+            const dadN = growthRate();
+            crackLength += dadN * dN;
+
+            // Record history
+            crackHistory.push({ cycles, crackLength, deltaK });
+            if (crackHistory.length > 200) crackHistory.shift();
+
+            // Check for fracture
+            if (deltaK >= Kc || crackLength >= specWidth * 0.8) {
+                fractured = true;
+            }
+
+            updateStats();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            const scale = Math.min(width, height) / 150;
+            const cx = width / 2;
+            const cy = height / 2;
+
+            // Draw specimen
+            const specW = specWidth * scale;
+            const specH = specWidth * 1.5 * scale;
+
+            ctx.fillStyle = '#3a3a4e';
+            ctx.fillRect(cx - specW / 2, cy - specH / 2, specW, specH);
+
+            // Draw crack
+            const crackW = crackLength * scale;
+            ctx.fillStyle = '#1a1a2e';
+            ctx.beginPath();
+            ctx.moveTo(cx - specW / 2, cy - 2);
+            ctx.lineTo(cx - specW / 2 + crackW, cy - 2);
+            ctx.lineTo(cx - specW / 2 + crackW, cy + 2);
+            ctx.lineTo(cx - specW / 2, cy + 2);
+            ctx.closePath();
+            ctx.fill();
+
+            // Crack tip stress field visualization
+            if (!fractured) {
+                const tipX = cx - specW / 2 + crackW;
+                const deltaK = stressIntensity();
+                const intensity = Math.min(1, deltaK / Kc);
+
+                // Stress concentration at crack tip
+                const gradient = ctx.createRadialGradient(tipX, cy, 0, tipX, cy, 30 * intensity);
+                gradient.addColorStop(0, `rgba(239, 83, 80, ${intensity})`);
+                gradient.addColorStop(1, 'rgba(239, 83, 80, 0)');
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(tipX, cy, 30 * intensity, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Plastic zone (circular approximation)
+                const rp = (deltaK * deltaK) / (2 * Math.PI * 500 * 500) * 1000 * scale;
+                ctx.strokeStyle = 'rgba(255,193,7,0.5)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(tipX, cy, Math.min(rp, 50), 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // Loading arrows
+            ctx.strokeStyle = '#ef5350';
+            ctx.lineWidth = 3;
+            ctx.fillStyle = '#ef5350';
+
+            // Top arrows
+            for (let x = -1; x <= 1; x += 0.5) {
+                const ax = cx + x * specW * 0.3;
+                const ay = cy - specH / 2 - 20;
+                drawArrow(ax, ay - 30, ax, ay);
+            }
+
+            // Bottom arrows
+            for (let x = -1; x <= 1; x += 0.5) {
+                const ax = cx + x * specW * 0.3;
+                const ay = cy + specH / 2 + 20;
+                drawArrow(ax, ay + 30, ax, ay);
+            }
+
+            // Fracture overlay
+            if (fractured) {
+                ctx.fillStyle = 'rgba(239, 83, 80, 0.3)';
+                ctx.fillRect(0, 0, width, height);
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 48px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('FRACTURED', cx, cy - 100);
+            }
+
+            // Draw chart
+            drawChart();
+        }
+
+        function drawArrow(x1, y1, x2, y2) {
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+
+            const angle = Math.atan2(y2 - y1, x2 - x1);
+            ctx.beginPath();
+            ctx.moveTo(x2, y2);
+            ctx.lineTo(x2 - 10 * Math.cos(angle - 0.5), y2 - 10 * Math.sin(angle - 0.5));
+            ctx.lineTo(x2 - 10 * Math.cos(angle + 0.5), y2 - 10 * Math.sin(angle + 0.5));
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function drawChart() {
+            chartCtx.fillStyle = '#1a1a2e';
+            chartCtx.fillRect(0, 0, 280, 100);
+
+            chartCtx.strokeStyle = '#444';
+            chartCtx.beginPath();
+            chartCtx.moveTo(30, 10);
+            chartCtx.lineTo(30, 85);
+            chartCtx.lineTo(270, 85);
+            chartCtx.stroke();
+
+            chartCtx.fillStyle = '#888';
+            chartCtx.font = '9px sans-serif';
+            chartCtx.fillText('a', 10, 50);
+            chartCtx.fillText('N (cycles)', 130, 98);
+
+            if (crackHistory.length < 2) return;
+
+            const maxN = Math.max(...crackHistory.map(d => d.cycles));
+            const maxA = Math.max(...crackHistory.map(d => d.crackLength));
+
+            chartCtx.strokeStyle = '#ef5350';
+            chartCtx.lineWidth = 2;
+            chartCtx.beginPath();
+
+            for (let i = 0; i < crackHistory.length; i++) {
+                const x = 30 + (crackHistory[i].cycles / maxN) * 230;
+                const y = 85 - (crackHistory[i].crackLength / maxA) * 70;
+                if (i === 0) chartCtx.moveTo(x, y);
+                else chartCtx.lineTo(x, y);
+            }
+            chartCtx.stroke();
+        }
+
+        function updateStats() {
+            const deltaK = stressIntensity();
+            const dadN = growthRate();
+
+            document.getElementById('crackLength').textContent = crackLength.toFixed(2);
+            document.getElementById('cycles').textContent = cycles.toLocaleString();
+            document.getElementById('deltaK').textContent = deltaK.toFixed(2);
+            document.getElementById('growthRate').textContent = dadN.toExponential(2);
+            document.getElementById('status').textContent = fractured ? 'FRACTURED!' :
+                (deltaK > Kc * 0.8 ? 'Critical!' : 'Growing');
+            document.getElementById('status').style.color = fractured ? '#ef5350' :
+                (deltaK > Kc * 0.8 ? '#ffc107' : '#4caf50');
+        }
+
+        function animate() {
+            if (running && !fractured) {
+                step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('stress').addEventListener('input', e => {
+            stressAmp = parseInt(e.target.value);
+            document.getElementById('stressVal').textContent = stressAmp;
+        });
+
+        document.getElementById('mParam').addEventListener('input', e => {
+            m = parseFloat(e.target.value);
+            document.getElementById('mVal').textContent = m;
+        });
+
+        document.getElementById('initCrack').addEventListener('input', e => {
+            initCrack = parseInt(e.target.value);
+            document.getElementById('crackVal').textContent = initCrack;
+        });
+
+        document.getElementById('specWidth').addEventListener('input', e => {
+            specWidth = parseInt(e.target.value);
+            document.getElementById('widthVal').textContent = specWidth;
+        });
+
+        document.getElementById('cycle').addEventListener('click', () => {
+            for (let i = 0; i < 100; i++) step();
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', resize);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

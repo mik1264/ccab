@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chromatography</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #00bcd4; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        select { width: 100%; padding: 5px; background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #00bcd4; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #00bcd4; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Chromatography</h1>
+            <p class="description">Separation based on differential partitioning between mobile and stationary phases. Retention time depends on affinity for stationary phase. Resolution = 2(tR2-tR1)/(w1+w2).</p>
+
+            <div class="control-group">
+                <label>Method:</label>
+                <select id="method">
+                    <option value="hplc">HPLC (Liquid)</option>
+                    <option value="gc">GC (Gas)</option>
+                    <option value="tlc">TLC (Thin Layer)</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Flow Rate: <span id="flowVal">1.0</span> mL/min</label>
+                <input type="range" id="flow" min="0.2" max="3.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>Column Polarity: <span id="polarVal">0.5</span></label>
+                <input type="range" id="polarity" min="0" max="1" step="0.05" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">25</span> °C</label>
+                <input type="range" id="temperature" min="20" max="300" value="25">
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="inject">Inject Sample</button>
+            <button id="toggleRun">Run</button>
+
+            <div class="stats">
+                <div>Time: <span id="runTime">0</span> min</div>
+                <div>Peaks Detected: <span id="peaks">0</span></div>
+                <div>Resolution: <span id="resolution">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let method = 'hplc';
+        let flowRate = 1.0;
+        let columnPolarity = 0.5;
+        let temperature = 25;
+
+        let analytes = [];
+        let chromatogram = [];
+        let injected = false;
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            running = false;
+            injected = false;
+            analytes = [];
+            chromatogram = [];
+
+            document.getElementById('toggleRun').textContent = 'Run';
+            updateStats();
+        }
+
+        function injectSample() {
+            injected = true;
+
+            // Create analytes with different properties
+            const colors = ['#f44336', '#4caf50', '#2196f3', '#ff9800', '#9c27b0'];
+            const names = ['Compound A', 'Compound B', 'Compound C', 'Compound D', 'Compound E'];
+
+            analytes = [];
+            const numAnalytes = 3 + Math.floor(Math.random() * 3);
+
+            for (let i = 0; i < numAnalytes; i++) {
+                analytes.push({
+                    name: names[i],
+                    color: colors[i],
+                    polarity: Math.random(), // 0 = nonpolar, 1 = polar
+                    mw: 100 + Math.random() * 400,
+                    position: 0, // Position along column
+                    concentration: 0.5 + Math.random() * 0.5,
+                    eluted: false,
+                    retentionTime: 0
+                });
+            }
+        }
+
+        function getRetentionFactor(analyte) {
+            // k' depends on analyte-stationary phase interaction
+            let k;
+
+            if (method === 'hplc') {
+                // Reverse phase: nonpolar analytes retained longer on nonpolar column
+                const polarityMatch = 1 - Math.abs(analyte.polarity - (1 - columnPolarity));
+                k = polarityMatch * 5 + 1;
+            } else if (method === 'gc') {
+                // Volatility (lower MW = faster)
+                k = (analyte.mw / 100) * (1 + columnPolarity * (1 - analyte.polarity));
+                k *= 300 / temperature; // Temperature effect
+            } else {
+                // TLC: polar compounds travel less on polar stationary phase
+                k = Math.abs(analyte.polarity - columnPolarity) * 3 + 0.5;
+            }
+
+            return k;
+        }
+
+        function step() {
+            if (!injected || !running) return;
+
+            time += 0.05;
+
+            const columnLength = 100;
+
+            for (const analyte of analytes) {
+                if (analyte.eluted) continue;
+
+                const k = getRetentionFactor(analyte);
+                const velocity = flowRate / (1 + k);
+
+                // Band broadening (diffusion)
+                if (!analyte.bandwidth) analyte.bandwidth = 2;
+                analyte.bandwidth += 0.01 * Math.sqrt(time);
+
+                analyte.position += velocity * 0.5;
+
+                // Check if eluted
+                if (analyte.position >= columnLength) {
+                    analyte.eluted = true;
+                    analyte.retentionTime = time;
+
+                    // Add to chromatogram
+                    chromatogram.push({
+                        time: time,
+                        height: analyte.concentration,
+                        width: analyte.bandwidth,
+                        color: analyte.color,
+                        name: analyte.name
+                    });
+                }
+            }
+
+            updateStats();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            if (method === 'tlc') {
+                drawTLC();
+            } else {
+                drawColumn();
+            }
+
+            drawChromatogram();
+
+            // Title
+            ctx.fillStyle = '#00bcd4';
+            ctx.font = '14px sans-serif';
+            let title;
+            switch (method) {
+                case 'hplc': title = 'High Performance Liquid Chromatography'; break;
+                case 'gc': title = 'Gas Chromatography'; break;
+                case 'tlc': title = 'Thin Layer Chromatography'; break;
+            }
+            ctx.fillText(title, 100, 50);
+        }
+
+        function drawColumn() {
+            const colX = 150;
+            const colY = 100;
+            const colW = 60;
+            const colH = 300;
+
+            // Column housing
+            ctx.fillStyle = '#444';
+            ctx.fillRect(colX - 10, colY - 20, colW + 20, colH + 40);
+
+            // Stationary phase (packing)
+            ctx.fillStyle = 'rgba(200, 200, 200, 0.3)';
+            ctx.fillRect(colX, colY, colW, colH);
+
+            // Column walls
+            ctx.strokeStyle = '#888';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(colX, colY, colW, colH);
+
+            // Inlet
+            ctx.fillStyle = '#666';
+            ctx.beginPath();
+            ctx.moveTo(colX + colW / 2 - 15, colY - 20);
+            ctx.lineTo(colX + colW / 2 + 15, colY - 20);
+            ctx.lineTo(colX + colW / 2 + 10, colY);
+            ctx.lineTo(colX + colW / 2 - 10, colY);
+            ctx.closePath();
+            ctx.fill();
+
+            // Outlet
+            ctx.beginPath();
+            ctx.moveTo(colX + colW / 2 - 10, colY + colH);
+            ctx.lineTo(colX + colW / 2 + 10, colY + colH);
+            ctx.lineTo(colX + colW / 2 + 15, colY + colH + 20);
+            ctx.lineTo(colX + colW / 2 - 15, colY + colH + 20);
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw analyte bands
+            for (const analyte of analytes) {
+                if (analyte.eluted) continue;
+
+                const bandY = colY + (analyte.position / 100) * colH;
+                const bandH = analyte.bandwidth * 2;
+
+                // Gaussian band shape
+                for (let dy = -bandH; dy <= bandH; dy++) {
+                    const intensity = Math.exp(-dy * dy / (bandH * bandH / 2));
+                    ctx.fillStyle = analyte.color;
+                    ctx.globalAlpha = intensity * 0.8;
+                    ctx.fillRect(colX + 5, bandY + dy, colW - 10, 1);
+                }
+                ctx.globalAlpha = 1;
+            }
+
+            // Flow direction arrow
+            ctx.fillStyle = '#fff';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Flow', colX + colW + 20, colY + colH / 2);
+
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(colX + colW + 30, colY);
+            ctx.lineTo(colX + colW + 30, colY + colH);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(colX + colW + 25, colY + colH - 10);
+            ctx.lineTo(colX + colW + 30, colY + colH);
+            ctx.lineTo(colX + colW + 35, colY + colH - 10);
+            ctx.fill();
+
+            // Detector
+            ctx.fillStyle = '#333';
+            ctx.fillRect(colX - 5, colY + colH + 25, colW + 10, 30);
+            ctx.fillStyle = '#00bcd4';
+            ctx.fillRect(colX, colY + colH + 30, colW, 20);
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Detector', colX + 5, colY + colH + 45);
+        }
+
+        function drawTLC() {
+            const plateX = 120;
+            const plateY = 100;
+            const plateW = 150;
+            const plateH = 300;
+
+            // TLC plate
+            ctx.fillStyle = '#e0e0e0';
+            ctx.fillRect(plateX, plateY, plateW, plateH);
+
+            // Silica surface texture
+            ctx.fillStyle = 'rgba(200, 200, 200, 0.5)';
+            for (let i = 0; i < 100; i++) {
+                ctx.beginPath();
+                ctx.arc(
+                    plateX + Math.random() * plateW,
+                    plateY + Math.random() * plateH,
+                    1 + Math.random() * 2,
+                    0, Math.PI * 2
+                );
+                ctx.fill();
+            }
+
+            // Origin line
+            ctx.strokeStyle = '#999';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(plateX, plateY + plateH - 30);
+            ctx.lineTo(plateX + plateW, plateY + plateH - 30);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#666';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Origin', plateX + plateW + 10, plateY + plateH - 25);
+
+            // Solvent front
+            if (injected) {
+                const frontY = plateY + plateH - 30 - time * 20;
+                if (frontY > plateY) {
+                    ctx.strokeStyle = '#03a9f4';
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(plateX, frontY);
+                    ctx.lineTo(plateX + plateW, frontY);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillText('Solvent front', plateX + plateW + 10, frontY);
+                }
+            }
+
+            // Draw spots
+            for (const analyte of analytes) {
+                const spotX = plateX + plateW / 2;
+                const startY = plateY + plateH - 30;
+                const spotY = startY - (analyte.position / 100) * (plateH - 50);
+
+                const spotSize = 10 + analyte.bandwidth;
+
+                // Spot with diffusion
+                const gradient = ctx.createRadialGradient(spotX, spotY, 0, spotX, spotY, spotSize);
+                gradient.addColorStop(0, analyte.color);
+                gradient.addColorStop(1, 'transparent');
+
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(spotX, spotY, spotSize, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Solvent reservoir
+            ctx.fillStyle = 'rgba(3, 169, 244, 0.3)';
+            ctx.fillRect(plateX - 10, plateY + plateH - 10, plateW + 20, 20);
+        }
+
+        function drawChromatogram() {
+            const plotX = 350;
+            const plotY = 100;
+            const plotW = width - 700;
+            const plotH = 250;
+
+            // Background
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(plotX - 10, plotY - 20, plotW + 20, plotH + 60);
+
+            // Title
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Chromatogram', plotX, plotY - 5);
+
+            // Axes
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(plotX, plotY);
+            ctx.lineTo(plotX, plotY + plotH);
+            ctx.lineTo(plotX + plotW, plotY + plotH);
+            ctx.stroke();
+
+            // Draw baseline
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(plotX, plotY + plotH - 10);
+            ctx.lineTo(plotX + plotW, plotY + plotH - 10);
+            ctx.stroke();
+
+            // Draw peaks from chromatogram data
+            const maxTime = Math.max(20, time);
+
+            for (const peak of chromatogram) {
+                const peakX = plotX + (peak.time / maxTime) * plotW;
+                const peakH = peak.height * (plotH - 20);
+
+                ctx.fillStyle = peak.color;
+
+                // Gaussian peak shape
+                for (let x = -50; x <= 50; x++) {
+                    const gaussX = x / (peak.width * 2);
+                    const gaussY = Math.exp(-gaussX * gaussX / 2);
+                    const drawX = peakX + x;
+                    const drawH = peakH * gaussY;
+
+                    if (drawX >= plotX && drawX <= plotX + plotW) {
+                        ctx.fillRect(drawX, plotY + plotH - 10 - drawH, 1, drawH);
+                    }
+                }
+
+                // Peak label
+                if (peakX > plotX && peakX < plotX + plotW - 50) {
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '9px sans-serif';
+                    ctx.fillText(peak.name, peakX - 20, plotY + plotH - peakH - 25);
+                    ctx.fillText('tR=' + peak.time.toFixed(1), peakX - 15, plotY + plotH - peakH - 15);
+                }
+            }
+
+            // Current time marker
+            const currentX = plotX + (time / maxTime) * plotW;
+            ctx.strokeStyle = '#ffeb3b';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(currentX, plotY);
+            ctx.lineTo(currentX, plotY + plotH);
+            ctx.stroke();
+
+            // Axis labels
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Time (min)', plotX + plotW / 2, plotY + plotH + 25);
+            ctx.save();
+            ctx.translate(plotX - 25, plotY + plotH / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText('Signal', 0, 0);
+            ctx.restore();
+        }
+
+        function updateStats() {
+            const peakCount = chromatogram.length;
+
+            // Calculate resolution between adjacent peaks
+            let resolution = 0;
+            if (chromatogram.length >= 2) {
+                const sorted = [...chromatogram].sort((a, b) => a.time - b.time);
+                for (let i = 1; i < sorted.length; i++) {
+                    const Rs = 2 * (sorted[i].time - sorted[i-1].time) /
+                              (sorted[i].width + sorted[i-1].width);
+                    resolution = Math.max(resolution, Rs);
+                }
+            }
+
+            document.getElementById('runTime').textContent = time.toFixed(1);
+            document.getElementById('peaks').textContent = peakCount;
+            document.getElementById('resolution').textContent = resolution.toFixed(2);
+        }
+
+        function animate() {
+            if (running) {
+                step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('method').addEventListener('change', e => {
+            method = e.target.value;
+            init();
+        });
+
+        document.getElementById('flow').addEventListener('input', e => {
+            flowRate = parseFloat(e.target.value);
+            document.getElementById('flowVal').textContent = flowRate.toFixed(1);
+        });
+
+        document.getElementById('polarity').addEventListener('input', e => {
+            columnPolarity = parseFloat(e.target.value);
+            document.getElementById('polarVal').textContent = columnPolarity;
+        });
+
+        document.getElementById('temperature').addEventListener('input', e => {
+            temperature = parseInt(e.target.value);
+            document.getElementById('tempVal').textContent = temperature;
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('inject').addEventListener('click', injectSample);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            if (!injected) injectSample();
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', init);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

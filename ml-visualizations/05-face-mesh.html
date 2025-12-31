@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Mesh 3D - ML Visualizations - CCAB</title>
+    <style>
+        body { margin: 0; padding: 20px; background: #0f0f1a; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        .back-link { display: inline-block; padding: 8px 16px; background: rgba(124, 58, 237, 0.2); color: #a78bfa; text-decoration: none; border-radius: 6px; margin-bottom: 20px; }
+        .back-link:hover { background: rgba(124, 58, 237, 0.4); }
+        h1 { color: #a78bfa; margin-bottom: 10px; }
+        .subtitle { color: #888; margin-bottom: 20px; }
+        .container { position: relative; display: inline-block; }
+        #video { border-radius: 8px; transform: scaleX(-1); }
+        #canvas { position: absolute; top: 0; left: 0; border-radius: 8px; transform: scaleX(-1); }
+        button { background: #7C3AED; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; margin-top: 15px; margin-right: 10px; }
+        button:hover { background: #6D28D9; }
+        select { background: #1a1a2e; color: #e8e6e1; padding: 10px; border-radius: 6px; border: 1px solid #7C3AED; margin-top: 15px; margin-right: 10px; }
+        #loading { text-align: center; padding: 50px; }
+        .spinner { width: 50px; height: 50px; border: 4px solid rgba(255,255,255,0.1); border-top-color: #7C3AED; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 20px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .stats { margin-top: 15px; font-size: 14px; color: #888; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to ML Gallery</a>
+    <h1>Face Mesh 3D</h1>
+    <p class="subtitle">468 facial landmarks tracked in real-time using MediaPipe</p>
+
+    <div id="loading">
+        <div class="spinner"></div>
+        <p>Loading Face Mesh model...</p>
+    </div>
+
+    <div id="main" style="display: none;">
+        <div class="container">
+            <video id="video" width="640" height="480" autoplay playsinline></video>
+            <canvas id="canvas" width="640" height="480"></canvas>
+        </div>
+
+        <div>
+            <button onclick="startCamera()">Start Camera</button>
+            <select id="vizMode">
+                <option value="points">Points Only</option>
+                <option value="mesh" selected>Mesh</option>
+                <option value="contours">Contours</option>
+            </select>
+        </div>
+
+        <div class="stats">
+            <p>FPS: <span id="fps">0</span> | Landmarks: <span id="landmarks">0</span></p>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/face-landmarks-detection@1.0.5/dist/face-landmarks-detection.min.js"></script>
+    <script>
+        let detector;
+        let video, canvas, ctx;
+        let running = false;
+        let lastTime = 0;
+
+        // Face mesh triangulation (simplified)
+        const TRIANGULATION = [];
+        // Generate approximate triangulation
+        for (let i = 0; i < 450; i += 3) {
+            TRIANGULATION.push([i, i + 1, i + 2]);
+        }
+
+        // Contour indices (approximate)
+        const CONTOURS = {
+            lips: [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291],
+            leftEye: [33, 7, 163, 144, 145, 153, 154, 155, 133],
+            rightEye: [362, 382, 381, 380, 374, 373, 390, 249, 263],
+            face: [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+        };
+
+        async function init() {
+            const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh;
+            detector = await faceLandmarksDetection.createDetector(model, {
+                runtime: 'tfjs',
+                refineLandmarks: true,
+                maxFaces: 1
+            });
+
+            video = document.getElementById('video');
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d');
+
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('main').style.display = 'block';
+        }
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 640, height: 480 }
+                });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    running = true;
+                    detectFace();
+                };
+            } catch (err) {
+                alert('Camera access denied. Error: ' + err.message);
+            }
+        }
+
+        async function detectFace() {
+            if (!running) return;
+
+            const faces = await detector.estimateFaces(video);
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (faces.length > 0) {
+                const face = faces[0];
+                const keypoints = face.keypoints;
+
+                document.getElementById('landmarks').textContent = keypoints.length;
+
+                const mode = document.getElementById('vizMode').value;
+
+                if (mode === 'points') {
+                    drawPoints(keypoints);
+                } else if (mode === 'mesh') {
+                    drawMesh(keypoints);
+                } else if (mode === 'contours') {
+                    drawContours(keypoints);
+                }
+            } else {
+                document.getElementById('landmarks').textContent = '0';
+            }
+
+            // Calculate FPS
+            const now = performance.now();
+            const fps = 1000 / (now - lastTime);
+            lastTime = now;
+            document.getElementById('fps').textContent = Math.round(fps);
+
+            requestAnimationFrame(detectFace);
+        }
+
+        function drawPoints(keypoints) {
+            for (let i = 0; i < keypoints.length; i++) {
+                const kp = keypoints[i];
+                ctx.beginPath();
+                ctx.arc(kp.x, kp.y, 1, 0, Math.PI * 2);
+                ctx.fillStyle = `hsl(${(i / keypoints.length) * 360}, 80%, 60%)`;
+                ctx.fill();
+            }
+        }
+
+        function drawMesh(keypoints) {
+            ctx.strokeStyle = 'rgba(124, 58, 237, 0.3)';
+            ctx.lineWidth = 0.5;
+
+            // Draw triangulated mesh (approximate)
+            for (let i = 0; i < keypoints.length - 2; i += 1) {
+                const neighbors = findNeighbors(i, keypoints);
+                for (let n of neighbors) {
+                    if (n > i) {
+                        ctx.beginPath();
+                        ctx.moveTo(keypoints[i].x, keypoints[i].y);
+                        ctx.lineTo(keypoints[n].x, keypoints[n].y);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // Draw points on top
+            for (let kp of keypoints) {
+                ctx.beginPath();
+                ctx.arc(kp.x, kp.y, 1, 0, Math.PI * 2);
+                ctx.fillStyle = '#10B981';
+                ctx.fill();
+            }
+        }
+
+        function findNeighbors(index, keypoints) {
+            const neighbors = [];
+            const threshold = 15;
+            const pt = keypoints[index];
+
+            for (let i = 0; i < keypoints.length; i++) {
+                if (i === index) continue;
+                const d = Math.hypot(keypoints[i].x - pt.x, keypoints[i].y - pt.y);
+                if (d < threshold) neighbors.push(i);
+            }
+            return neighbors.slice(0, 6);
+        }
+
+        function drawContours(keypoints) {
+            ctx.lineWidth = 2;
+
+            // Draw face contour
+            drawContour(keypoints, CONTOURS.face, '#7C3AED');
+
+            // Draw eyes
+            drawContour(keypoints, CONTOURS.leftEye, '#10B981');
+            drawContour(keypoints, CONTOURS.rightEye, '#10B981');
+
+            // Draw lips
+            drawContour(keypoints, CONTOURS.lips, '#EF4444');
+        }
+
+        function drawContour(keypoints, indices, color) {
+            if (indices.some(i => i >= keypoints.length)) return;
+
+            ctx.strokeStyle = color;
+            ctx.beginPath();
+
+            const firstValid = indices.find(i => keypoints[i]);
+            if (firstValid === undefined) return;
+
+            ctx.moveTo(keypoints[firstValid].x, keypoints[firstValid].y);
+
+            for (let i of indices) {
+                if (keypoints[i]) {
+                    ctx.lineTo(keypoints[i].x, keypoints[i].y);
+                }
+            }
+
+            ctx.closePath();
+            ctx.stroke();
+        }
+
+        init();
+    </script>
+</body>
+</html>

@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vocal Visualizer - Audio-Visual Hybrid</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a1a;
+            color: #fff;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            overflow: hidden;
+        }
+        #canvas { display: block; width: 100vw; height: 100vh; }
+        .controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.85);
+            padding: 20px;
+            border-radius: 12px;
+            z-index: 100;
+            min-width: 300px;
+        }
+        h1 { font-size: 1.3em; margin-bottom: 5px; color: #7c4dff; }
+        .subtitle { font-size: 0.85em; color: #888; margin-bottom: 15px; }
+        .button-row { display: flex; gap: 10px; margin-bottom: 15px; }
+        button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 6px;
+            background: #7c4dff;
+            color: #fff;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        button:hover { background: #651fff; }
+        button:disabled { background: #444; cursor: not-allowed; }
+        .viz-modes { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 15px; }
+        .mode-btn {
+            padding: 6px 12px;
+            background: #222;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: #888;
+            font-size: 0.8em;
+            cursor: pointer;
+        }
+        .mode-btn:hover, .mode-btn.active {
+            background: #7c4dff;
+            border-color: #7c4dff;
+            color: #fff;
+        }
+        .slider-group { margin-bottom: 12px; }
+        .slider-group label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+            font-size: 0.85em;
+            color: #aaa;
+        }
+        .slider-group input[type="range"] {
+            width: 100%;
+            height: 6px;
+            -webkit-appearance: none;
+            background: #333;
+            border-radius: 3px;
+        }
+        .slider-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #7c4dff;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        .stats {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #333;
+            font-size: 0.85em;
+            color: #888;
+        }
+        .pitch-display {
+            font-size: 2em;
+            color: #7c4dff;
+            text-align: center;
+            margin: 10px 0;
+        }
+        .note-name {
+            font-size: 1.5em;
+            text-align: center;
+            color: #fff;
+        }
+        .back-link {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            color: #7c4dff;
+            text-decoration: none;
+            z-index: 100;
+        }
+        .info {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 8px;
+            max-width: 350px;
+            font-size: 0.85em;
+            color: #aaa;
+            line-height: 1.5;
+        }
+        .info h3 { color: #7c4dff; margin-bottom: 8px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div class="controls">
+        <h1>Vocal Visualizer</h1>
+        <p class="subtitle">Pitch + Formant Analysis</p>
+
+        <div class="button-row">
+            <button id="startBtn">Start Microphone</button>
+        </div>
+
+        <div class="pitch-display" id="pitch">-- Hz</div>
+        <div class="note-name" id="note">--</div>
+
+        <div class="viz-modes">
+            <span class="mode-btn active" data-mode="waveform">Waveform</span>
+            <span class="mode-btn" data-mode="formants">Formants</span>
+            <span class="mode-btn" data-mode="pitch">Pitch Track</span>
+            <span class="mode-btn" data-mode="vowel">Vowel Space</span>
+        </div>
+
+        <div class="slider-group">
+            <label>Smoothing <span id="smoothVal">0.8</span></label>
+            <input type="range" id="smooth" min="0" max="0.95" step="0.05" value="0.8">
+        </div>
+
+        <div class="slider-group">
+            <label>Sensitivity <span id="sensVal">1.0</span></label>
+            <input type="range" id="sensitivity" min="0.5" max="2" step="0.1" value="1">
+        </div>
+
+        <div class="stats">
+            <div>Volume: <span id="volume">0</span> dB</div>
+            <div>F1: <span id="f1">--</span> Hz</div>
+            <div>F2: <span id="f2">--</span> Hz</div>
+        </div>
+    </div>
+
+    <a href="../index.html" class="back-link">← Back to Gallery</a>
+
+    <div class="info">
+        <h3>Voice Analysis</h3>
+        <p>Analyzes your voice in real-time. Detects pitch (fundamental frequency),
+        formants (F1, F2 for vowel sounds), and visualizes the acoustic properties
+        of speech and singing.</p>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let audioContext, analyser, dataArray, floatData, source;
+        let audioStarted = false;
+
+        let vizMode = 'waveform';
+        let smoothing = 0.8;
+        let sensitivity = 1;
+
+        let pitchHistory = [];
+        const MAX_PITCH_HISTORY = 200;
+
+        // Note names
+        const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            width = canvas.width;
+            height = canvas.height;
+        }
+
+        function frequencyToNote(freq) {
+            if (freq < 20) return { name: '--', octave: 0, cents: 0 };
+            const noteNum = 12 * (Math.log2(freq / 440)) + 69;
+            const roundedNote = Math.round(noteNum);
+            const cents = Math.round((noteNum - roundedNote) * 100);
+            const noteName = noteNames[roundedNote % 12];
+            const octave = Math.floor(roundedNote / 12) - 1;
+            return { name: noteName, octave, cents };
+        }
+
+        function autoCorrelate(buffer, sampleRate) {
+            // Simple autocorrelation pitch detection
+            const SIZE = buffer.length;
+            let rms = 0;
+
+            for (let i = 0; i < SIZE; i++) {
+                rms += buffer[i] * buffer[i];
+            }
+            rms = Math.sqrt(rms / SIZE);
+
+            if (rms < 0.01) return -1; // Not enough signal
+
+            let r1 = 0, r2 = SIZE - 1;
+            const threshold = 0.2;
+
+            for (let i = 0; i < SIZE / 2; i++) {
+                if (Math.abs(buffer[i]) < threshold) {
+                    r1 = i;
+                    break;
+                }
+            }
+
+            for (let i = 1; i < SIZE / 2; i++) {
+                if (Math.abs(buffer[SIZE - i]) < threshold) {
+                    r2 = SIZE - i;
+                    break;
+                }
+            }
+
+            const trimmedBuffer = buffer.slice(r1, r2);
+            const trimmedSize = trimmedBuffer.length;
+
+            const c = new Float32Array(trimmedSize);
+            for (let i = 0; i < trimmedSize; i++) {
+                for (let j = 0; j < trimmedSize - i; j++) {
+                    c[i] += trimmedBuffer[j] * trimmedBuffer[j + i];
+                }
+            }
+
+            let d = 0;
+            while (c[d] > c[d + 1]) d++;
+
+            let maxVal = -1, maxPos = -1;
+            for (let i = d; i < trimmedSize; i++) {
+                if (c[i] > maxVal) {
+                    maxVal = c[i];
+                    maxPos = i;
+                }
+            }
+
+            let T0 = maxPos;
+
+            // Parabolic interpolation
+            if (T0 > 0 && T0 < trimmedSize - 1) {
+                const x1 = c[T0 - 1], x2 = c[T0], x3 = c[T0 + 1];
+                const a = (x1 + x3 - 2 * x2) / 2;
+                const b = (x3 - x1) / 2;
+                if (a) T0 = T0 - b / (2 * a);
+            }
+
+            return sampleRate / T0;
+        }
+
+        function findFormants(dataArray) {
+            // Simplified formant detection using spectral peaks
+            const peaks = [];
+            const binSize = audioContext.sampleRate / analyser.fftSize;
+
+            for (let i = 2; i < dataArray.length - 2; i++) {
+                if (dataArray[i] > dataArray[i - 1] &&
+                    dataArray[i] > dataArray[i + 1] &&
+                    dataArray[i] > dataArray[i - 2] &&
+                    dataArray[i] > dataArray[i + 2] &&
+                    dataArray[i] > 128) {
+                    peaks.push({ freq: i * binSize, magnitude: dataArray[i] });
+                }
+            }
+
+            peaks.sort((a, b) => b.magnitude - a.magnitude);
+
+            // F1 typically 300-800 Hz, F2 typically 800-2500 Hz
+            let f1 = null, f2 = null;
+            for (const peak of peaks) {
+                if (!f1 && peak.freq > 200 && peak.freq < 1000) {
+                    f1 = peak.freq;
+                } else if (!f2 && peak.freq > 800 && peak.freq < 3000) {
+                    f2 = peak.freq;
+                }
+                if (f1 && f2) break;
+            }
+
+            return { f1, f2 };
+        }
+
+        function drawWaveform() {
+            analyser.getByteTimeDomainData(dataArray);
+
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#7c4dff';
+            ctx.beginPath();
+
+            const sliceWidth = width / dataArray.length;
+            let x = 0;
+
+            for (let i = 0; i < dataArray.length; i++) {
+                const v = dataArray[i] / 128.0;
+                const y = height / 2 + (v - 1) * height * 0.4 * sensitivity;
+
+                if (i === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+                x += sliceWidth;
+            }
+
+            ctx.stroke();
+
+            // Center line
+            ctx.strokeStyle = 'rgba(124, 77, 255, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, height / 2);
+            ctx.lineTo(width, height / 2);
+            ctx.stroke();
+        }
+
+        function drawFormants() {
+            analyser.getByteFrequencyData(dataArray);
+            const formants = findFormants(dataArray);
+
+            // Spectrum
+            const barWidth = width / dataArray.length;
+            for (let i = 0; i < dataArray.length; i++) {
+                const value = dataArray[i] * sensitivity;
+                const barHeight = (value / 255) * height * 0.8;
+
+                const freq = i * (audioContext.sampleRate / analyser.fftSize);
+                let hue = 260; // Purple
+
+                // Highlight formant regions
+                if (formants.f1 && Math.abs(freq - formants.f1) < 100) {
+                    hue = 0; // Red for F1
+                } else if (formants.f2 && Math.abs(freq - formants.f2) < 100) {
+                    hue = 200; // Blue for F2
+                }
+
+                ctx.fillStyle = `hsla(${hue}, 80%, 50%, ${0.5 + value / 510})`;
+                ctx.fillRect(i * barWidth, height - barHeight, barWidth - 1, barHeight);
+            }
+
+            // Labels
+            ctx.font = '14px Arial';
+            ctx.fillStyle = '#ff5252';
+            if (formants.f1) {
+                const f1x = (formants.f1 / (audioContext.sampleRate / 2)) * width;
+                ctx.fillText(`F1: ${Math.round(formants.f1)}Hz`, f1x, 30);
+            }
+            ctx.fillStyle = '#448aff';
+            if (formants.f2) {
+                const f2x = (formants.f2 / (audioContext.sampleRate / 2)) * width;
+                ctx.fillText(`F2: ${Math.round(formants.f2)}Hz`, f2x, 50);
+            }
+
+            document.getElementById('f1').textContent = formants.f1 ? Math.round(formants.f1) : '--';
+            document.getElementById('f2').textContent = formants.f2 ? Math.round(formants.f2) : '--';
+        }
+
+        function drawPitchTrack() {
+            // Draw pitch history
+            ctx.strokeStyle = '#7c4dff';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+
+            for (let i = 0; i < pitchHistory.length; i++) {
+                const pitch = pitchHistory[i];
+                if (pitch < 0) continue;
+
+                const x = (i / MAX_PITCH_HISTORY) * width;
+                // Map pitch to Y (50-500 Hz range)
+                const normalizedPitch = Math.log2(pitch / 50) / Math.log2(500 / 50);
+                const y = height - normalizedPitch * height * 0.8 - height * 0.1;
+
+                if (i === 0 || pitchHistory[i - 1] < 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            }
+            ctx.stroke();
+
+            // Note lines
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+            ctx.lineWidth = 1;
+            ctx.font = '12px Arial';
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+
+            for (let note = 36; note < 84; note += 12) { // C2 to C6
+                const freq = 440 * Math.pow(2, (note - 69) / 12);
+                const normalizedPitch = Math.log2(freq / 50) / Math.log2(500 / 50);
+                const y = height - normalizedPitch * height * 0.8 - height * 0.1;
+
+                if (y > 0 && y < height) {
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(width, y);
+                    ctx.stroke();
+                    ctx.fillText(`${noteNames[note % 12]}${Math.floor(note / 12) - 1}`, 10, y - 5);
+                }
+            }
+        }
+
+        function drawVowelSpace() {
+            analyser.getByteFrequencyData(dataArray);
+            const formants = findFormants(dataArray);
+
+            // Draw vowel quadrilateral
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+            ctx.lineWidth = 2;
+
+            const vowels = {
+                'i': { f1: 300, f2: 2300 },
+                'e': { f1: 400, f2: 2100 },
+                'a': { f1: 700, f2: 1200 },
+                'o': { f1: 500, f2: 900 },
+                'u': { f1: 350, f2: 800 }
+            };
+
+            // Map F1/F2 to screen coordinates
+            const mapF1 = (f1) => (f1 - 200) / 600 * height * 0.7 + height * 0.1;
+            const mapF2 = (f2) => width - (f2 - 600) / 2000 * width * 0.7 - width * 0.1;
+
+            // Draw vowel points
+            ctx.font = '24px Arial';
+            for (const [vowel, freqs] of Object.entries(vowels)) {
+                const x = mapF2(freqs.f2);
+                const y = mapF1(freqs.f1);
+
+                ctx.fillStyle = 'rgba(124, 77, 255, 0.5)';
+                ctx.beginPath();
+                ctx.arc(x, y, 20, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = '#fff';
+                ctx.textAlign = 'center';
+                ctx.fillText(vowel, x, y + 8);
+            }
+
+            // Draw current position
+            if (formants.f1 && formants.f2) {
+                const x = mapF2(formants.f2);
+                const y = mapF1(formants.f1);
+
+                ctx.fillStyle = '#ff4081';
+                ctx.beginPath();
+                ctx.arc(x, y, 15, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Trail
+                ctx.strokeStyle = 'rgba(255, 64, 129, 0.5)';
+                ctx.lineWidth = 3;
+            }
+
+            // Axis labels
+            ctx.fillStyle = '#888';
+            ctx.font = '14px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('F2 (Hz) →', width / 2, height - 20);
+            ctx.save();
+            ctx.translate(30, height / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText('F1 (Hz) →', 0, 0);
+            ctx.restore();
+        }
+
+        document.getElementById('startBtn').addEventListener('click', async function() {
+            if (audioStarted) return;
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                analyser.smoothingTimeConstant = smoothing;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                floatData = new Float32Array(analyser.fftSize);
+
+                source = audioContext.createMediaStreamSource(stream);
+                source.connect(analyser);
+
+                audioStarted = true;
+                this.textContent = 'Listening...';
+                this.disabled = true;
+            } catch (err) {
+                console.error('Audio error:', err);
+                this.textContent = 'Mic Failed';
+            }
+        });
+
+        // Mode buttons
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                vizMode = btn.dataset.mode;
+            });
+        });
+
+        // UI
+        document.getElementById('smooth').addEventListener('input', (e) => {
+            smoothing = parseFloat(e.target.value);
+            document.getElementById('smoothVal').textContent = smoothing.toFixed(2);
+            if (analyser) analyser.smoothingTimeConstant = smoothing;
+        });
+
+        document.getElementById('sensitivity').addEventListener('input', (e) => {
+            sensitivity = parseFloat(e.target.value);
+            document.getElementById('sensVal').textContent = sensitivity.toFixed(1);
+        });
+
+        window.addEventListener('resize', resize);
+
+        function draw() {
+            ctx.fillStyle = 'rgba(10, 10, 26, 0.3)';
+            ctx.fillRect(0, 0, width, height);
+
+            if (audioStarted && analyser) {
+                // Pitch detection
+                analyser.getFloatTimeDomainData(floatData);
+                const pitch = autoCorrelate(floatData, audioContext.sampleRate);
+
+                pitchHistory.push(pitch);
+                if (pitchHistory.length > MAX_PITCH_HISTORY) {
+                    pitchHistory.shift();
+                }
+
+                // Update pitch display
+                if (pitch > 0) {
+                    document.getElementById('pitch').textContent = Math.round(pitch) + ' Hz';
+                    const note = frequencyToNote(pitch);
+                    document.getElementById('note').textContent = `${note.name}${note.octave} (${note.cents > 0 ? '+' : ''}${note.cents}¢)`;
+                } else {
+                    document.getElementById('pitch').textContent = '-- Hz';
+                    document.getElementById('note').textContent = '--';
+                }
+
+                // Volume
+                analyser.getByteFrequencyData(dataArray);
+                let sum = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                    sum += dataArray[i];
+                }
+                const avg = sum / dataArray.length;
+                const db = avg > 0 ? 20 * Math.log10(avg / 255) : -60;
+                document.getElementById('volume').textContent = Math.round(db);
+
+                // Draw based on mode
+                switch (vizMode) {
+                    case 'waveform':
+                        drawWaveform();
+                        break;
+                    case 'formants':
+                        drawFormants();
+                        break;
+                    case 'pitch':
+                        drawPitchTrack();
+                        break;
+                    case 'vowel':
+                        drawVowelSpace();
+                        break;
+                }
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        resize();
+        draw();
+    </script>
+</body>
+</html>

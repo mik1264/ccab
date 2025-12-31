@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NMR Dynamics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #2196f3; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #2196f3; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #2196f3; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>NMR Spin Dynamics</h1>
+            <p class="description">Nuclear spins precess in magnetic field (B₀) at Larmor frequency. RF pulses tip magnetization. T₁ (spin-lattice) and T₂ (spin-spin) relaxation return system to equilibrium.</p>
+
+            <div class="control-group">
+                <label>B₀ Field Strength: <span id="b0Val">7.0</span> T</label>
+                <input type="range" id="b0" min="1" max="20" step="0.5" value="7.0">
+            </div>
+
+            <div class="control-group">
+                <label>RF Pulse Angle: <span id="pulseVal">90</span>°</label>
+                <input type="range" id="pulse" min="0" max="180" value="90">
+            </div>
+
+            <div class="control-group">
+                <label>T₁ Relaxation: <span id="t1Val">1.0</span> s</label>
+                <input type="range" id="t1" min="0.1" max="5.0" step="0.1" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>T₂ Relaxation: <span id="t2Val">0.5</span> s</label>
+                <input type="range" id="t2" min="0.05" max="2.0" step="0.05" value="0.5">
+            </div>
+
+            <button id="reset">Reset (Equilibrium)</button>
+            <button id="applyPulse">Apply RF Pulse</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Mz: <span id="mz">1.00</span></div>
+                <div>Mxy: <span id="mxy">0.00</span></div>
+                <div>Phase: <span id="phase">0</span>°</div>
+                <div>FID Signal: <span id="fid">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let B0 = 7.0;       // Tesla
+        let pulseAngle = 90; // Degrees
+        let T1 = 1.0;       // Spin-lattice relaxation
+        let T2 = 0.5;       // Spin-spin relaxation
+
+        // Magnetization vector
+        let Mx = 0, My = 0, Mz = 1; // Starts at equilibrium (along z)
+        let M0 = 1; // Equilibrium magnetization
+
+        // FID recording
+        let fidData = [];
+        let spectrum = [];
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            Mx = 0;
+            My = 0;
+            Mz = M0;
+            fidData = [];
+            spectrum = [];
+            running = false;
+            document.getElementById('toggleRun').textContent = 'Run';
+            updateStats();
+        }
+
+        function applyPulse() {
+            // RF pulse rotates magnetization around x-axis
+            const angle = pulseAngle * Math.PI / 180;
+
+            const newMy = My * Math.cos(angle) - Mz * Math.sin(angle);
+            const newMz = My * Math.sin(angle) + Mz * Math.cos(angle);
+
+            My = newMy;
+            Mz = newMz;
+
+            // Clear FID for new acquisition
+            fidData = [];
+            spectrum = [];
+            time = 0;
+
+            updateStats();
+        }
+
+        function step() {
+            time += 0.001;
+
+            // Larmor precession frequency (simplified, γ = 42.58 MHz/T for ¹H)
+            const gamma = 42.58e6; // Hz/T
+            const omega = 2 * Math.PI * gamma * B0 * 1e-9; // Scaled for visualization
+
+            // Precession in xy-plane
+            const Mxy = Math.sqrt(Mx * Mx + My * My);
+            const phase = Math.atan2(My, Mx);
+            const newPhase = phase + omega;
+
+            Mx = Mxy * Math.cos(newPhase);
+            My = Mxy * Math.sin(newPhase);
+
+            // T2 relaxation (transverse decay)
+            const decayT2 = Math.exp(-0.001 / T2);
+            Mx *= decayT2;
+            My *= decayT2;
+
+            // T1 relaxation (longitudinal recovery)
+            Mz += (M0 - Mz) * (1 - Math.exp(-0.001 / T1));
+
+            // Record FID
+            const signal = My; // Detected signal (y-component in rotating frame)
+            fidData.push({ time: time, signal: signal });
+
+            // Keep reasonable array size
+            if (fidData.length > 2000) {
+                fidData.shift();
+            }
+
+            updateStats();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            draw3DVisualization();
+            drawFID();
+            drawSpinEnsemble();
+
+            // Title
+            ctx.fillStyle = '#2196f3';
+            ctx.font = '14px sans-serif';
+            ctx.fillText('Nuclear Magnetic Resonance', 100, 50);
+
+            // Magnetic field indicator
+            ctx.fillStyle = '#aaa';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('B₀ = ' + B0.toFixed(1) + ' T (↑ z-axis)', 100, 75);
+        }
+
+        function draw3DVisualization() {
+            const cx = 250;
+            const cy = 280;
+            const scale = 100;
+
+            // Draw coordinate axes
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+
+            // Z-axis (up)
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx, cy - scale * 1.2);
+            ctx.stroke();
+            ctx.fillStyle = '#888';
+            ctx.fillText('z (B₀)', cx + 5, cy - scale * 1.2);
+
+            // X-axis (right-forward)
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + scale * 0.8, cy + scale * 0.4);
+            ctx.stroke();
+            ctx.fillText('x', cx + scale * 0.8, cy + scale * 0.4 + 15);
+
+            // Y-axis (left-forward)
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx - scale * 0.8, cy + scale * 0.4);
+            ctx.stroke();
+            ctx.fillText('y', cx - scale * 0.8 - 15, cy + scale * 0.4);
+
+            // Draw xy-plane circle
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.ellipse(cx, cy + scale * 0.2, scale * 0.8, scale * 0.3, 0, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Draw magnetization vector
+            const Mscale = 80;
+
+            // Project 3D to 2D (simple oblique projection)
+            const projX = cx + Mx * Mscale * 0.8 - My * Mscale * 0.8;
+            const projY = cy + (Mx * 0.4 + My * 0.4) * Mscale - Mz * Mscale;
+
+            // Vector
+            ctx.strokeStyle = '#f44336';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(projX, projY);
+            ctx.stroke();
+
+            // Arrow head
+            ctx.fillStyle = '#f44336';
+            ctx.beginPath();
+            ctx.arc(projX, projY, 6, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Mz component (dashed line to z-axis)
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(projX, projY);
+            ctx.lineTo(cx, cy - Mz * Mscale);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // xy projection
+            const projXY_x = cx + Mx * Mscale * 0.8 - My * Mscale * 0.8;
+            const projXY_y = cy + scale * 0.2 + (Mx * 0.4 + My * 0.4) * Mscale * 0.3;
+
+            ctx.strokeStyle = 'rgba(244, 67, 54, 0.5)';
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(cx, cy + scale * 0.2);
+            ctx.lineTo(projXY_x, projXY_y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Labels
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('M', projX + 10, projY - 5);
+
+            // Phase indicator
+            const Mxy = Math.sqrt(Mx * Mx + My * My);
+            if (Mxy > 0.01) {
+                ctx.fillStyle = '#aaa';
+                ctx.font = '10px sans-serif';
+                const phase = Math.atan2(My, Mx) * 180 / Math.PI;
+                ctx.fillText('φ = ' + phase.toFixed(0) + '°', cx + 60, cy + 80);
+            }
+        }
+
+        function drawSpinEnsemble() {
+            const ensembleX = 500;
+            const ensembleY = 200;
+            const radius = 60;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(ensembleX - 80, ensembleY - 90, 160, 180);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Spin Ensemble', ensembleX - 40, ensembleY - 75);
+
+            // Draw individual spins (simplified)
+            const numSpins = 20;
+            const spinPhase = Math.atan2(My, Mx);
+
+            for (let i = 0; i < numSpins; i++) {
+                const angle = (i / numSpins) * Math.PI * 2;
+                const r = 40 + Math.random() * 20;
+                const sx = ensembleX + Math.cos(angle) * r * 0.8;
+                const sy = ensembleY + Math.sin(angle) * r * 0.6;
+
+                // Spin arrow
+                const Mxy = Math.sqrt(Mx * Mx + My * My);
+                const spinAngle = spinPhase + (Math.random() - 0.5) * (1 - Mxy) * Math.PI;
+
+                ctx.strokeStyle = '#2196f3';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(sx, sy);
+                ctx.lineTo(
+                    sx + Math.cos(spinAngle) * 15,
+                    sy - Mz * 15
+                );
+                ctx.stroke();
+
+                // Spin dot
+                ctx.fillStyle = '#2196f3';
+                ctx.beginPath();
+                ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Net magnetization indicator
+            ctx.fillStyle = '#aaa';
+            ctx.font = '9px sans-serif';
+            ctx.fillText('Net M ↑', ensembleX - 20, ensembleY + 70);
+        }
+
+        function drawFID() {
+            const plotX = 100;
+            const plotY = height - 180;
+            const plotW = width - 450;
+            const plotH = 120;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.fillRect(plotX - 10, plotY - 30, plotW + 20, plotH + 50);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Free Induction Decay (FID)', plotX, plotY - 15);
+
+            // Axes
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(plotX, plotY);
+            ctx.lineTo(plotX, plotY + plotH);
+            ctx.lineTo(plotX + plotW, plotY + plotH);
+            ctx.stroke();
+
+            // Zero line
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(plotX, plotY + plotH / 2);
+            ctx.lineTo(plotX + plotW, plotY + plotH / 2);
+            ctx.stroke();
+
+            // Draw FID signal
+            if (fidData.length > 1) {
+                ctx.strokeStyle = '#4caf50';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+
+                const maxTime = fidData[fidData.length - 1].time;
+
+                for (let i = 0; i < fidData.length; i++) {
+                    const d = fidData[i];
+                    const x = plotX + (d.time / Math.max(2, maxTime)) * plotW;
+                    const y = plotY + plotH / 2 - d.signal * (plotH / 2) * 0.8;
+
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // T2 envelope
+            ctx.strokeStyle = 'rgba(255, 152, 0, 0.5)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            for (let t = 0; t <= 2; t += 0.02) {
+                const x = plotX + (t / 2) * plotW;
+                const envelope = Math.exp(-t / T2);
+                const y = plotY + plotH / 2 - envelope * (plotH / 2) * 0.8;
+                if (t === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Labels
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Time (s)', plotX + plotW / 2, plotY + plotH + 20);
+            ctx.fillText('T₂ decay', plotX + plotW - 60, plotY + 20);
+
+            // Bloch equations
+            ctx.fillStyle = '#aaa';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('dMz/dt = (M₀-Mz)/T₁', plotX + plotW + 30, plotY + 20);
+            ctx.fillText('dMxy/dt = -Mxy/T₂', plotX + plotW + 30, plotY + 40);
+        }
+
+        function updateStats() {
+            const Mxy = Math.sqrt(Mx * Mx + My * My);
+            const phase = Math.atan2(My, Mx) * 180 / Math.PI;
+
+            document.getElementById('mz').textContent = Mz.toFixed(3);
+            document.getElementById('mxy').textContent = Mxy.toFixed(3);
+            document.getElementById('phase').textContent = phase.toFixed(0);
+            document.getElementById('fid').textContent = My.toFixed(3);
+        }
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < 5; i++) step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('b0').addEventListener('input', e => {
+            B0 = parseFloat(e.target.value);
+            document.getElementById('b0Val').textContent = B0.toFixed(1);
+        });
+
+        document.getElementById('pulse').addEventListener('input', e => {
+            pulseAngle = parseInt(e.target.value);
+            document.getElementById('pulseVal').textContent = pulseAngle;
+        });
+
+        document.getElementById('t1').addEventListener('input', e => {
+            T1 = parseFloat(e.target.value);
+            document.getElementById('t1Val').textContent = T1.toFixed(1);
+        });
+
+        document.getElementById('t2').addEventListener('input', e => {
+            T2 = parseFloat(e.target.value);
+            document.getElementById('t2Val').textContent = T2.toFixed(2);
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('applyPulse').addEventListener('click', () => {
+            applyPulse();
+            running = true;
+            document.getElementById('toggleRun').textContent = 'Pause';
+        });
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', init);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

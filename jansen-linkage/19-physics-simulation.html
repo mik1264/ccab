@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jansen Linkage - Physics Simulation</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e;
+            min-height: 100vh;
+            font-family: 'Segoe UI', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; }
+        h1 {
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            color: #f39c12; font-size: 1.2rem;
+        }
+        a.back-link {
+            position: fixed; top: 20px; left: 20px;
+            color: #f39c12; text-decoration: none;
+        }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 10px;
+        }
+        button {
+            background: #f39c12; color: #000; border: none;
+            padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold;
+        }
+        .physics-info {
+            position: fixed; top: 60px; right: 20px;
+            background: rgba(0,0,0,0.6); padding: 15px;
+            border-radius: 10px; color: #fff; font-size: 0.8rem;
+        }
+        .physics-info div { margin: 5px 0; }
+        .physics-info span { color: #f39c12; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <h1>Interactive Physics Simulation</h1>
+    <canvas id="canvas"></canvas>
+    <div class="physics-info">
+        <div>Torque: <span id="torque">0</span> N·m</div>
+        <div>Angular Velocity: <span id="angVel">0</span> rad/s</div>
+        <div>Foot Speed: <span id="footSpeed">0</span> m/s</div>
+        <div>Ground Force: <span id="groundForce">0</span> N</div>
+    </div>
+    <div class="controls">
+        <button onclick="applyImpulse(-1)">← Push Left</button>
+        <button onclick="toggleGravity()">Toggle Gravity</button>
+        <button onclick="applyImpulse(1)">Push Right →</button>
+        <button onclick="reset()">Reset</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const PARAMS = {
+            a: 38.0, b: 41.5, c: 39.3, d: 40.1, e: 55.8,
+            f: 39.4, g: 36.7, h: 65.7, i: 49.0, j: 50.0,
+            k: 61.9, l: 7.8, m: 15.0
+        };
+
+        // Physics state
+        let state = {
+            theta: 0,
+            angularVelocity: 0.5,
+            x: 0,  // horizontal position of whole mechanism
+            vx: 0, // horizontal velocity
+            gravity: true,
+            motorTorque: 0.5
+        };
+
+        const PHYSICS = {
+            friction: 0.02,
+            groundY: null,
+            mass: 10,
+            momentOfInertia: 500,
+            motorPower: 2,
+            groundStiffness: 1000,
+            groundDamping: 50
+        };
+
+        function circleIntersection(x1, y1, r1, x2, y2, r2, selectUpper = true) {
+            const d = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+            if (d > r1 + r2 || d < Math.abs(r1 - r2) || d === 0) return null;
+            const a = (r1 * r1 - r2 * r2 + d * d) / (2 * d);
+            const h = Math.sqrt(Math.max(0, r1 * r1 - a * a));
+            const px = x1 + a * (x2 - x1) / d;
+            const py = y1 + a * (y2 - y1) / d;
+            const ix1 = px + h * (y2 - y1) / d;
+            const iy1 = py - h * (x2 - x1) / d;
+            const ix2 = px - h * (y2 - y1) / d;
+            const iy2 = py + h * (x2 - x1) / d;
+            return selectUpper ? (iy1 < iy2 ? { x: ix1, y: iy1 } : { x: ix2, y: iy2 })
+                               : (iy1 > iy2 ? { x: ix1, y: iy1 } : { x: ix2, y: iy2 });
+        }
+
+        function calculateJoints(theta) {
+            const p = PARAMS;
+            const O = { x: 0, y: 0 };
+            const M = { x: -p.l, y: -p.m };
+            const A = { x: p.a * Math.cos(theta), y: p.a * Math.sin(theta) };
+            const B = circleIntersection(A.x, A.y, p.b, M.x, M.y, p.j, true);
+            if (!B) return null;
+            const C = circleIntersection(A.x, A.y, p.d, B.x, B.y, p.c, false);
+            if (!C) return null;
+            const D = circleIntersection(B.x, B.y, p.e, C.x, C.y, p.f, false);
+            if (!D) return null;
+            const E = circleIntersection(M.x, M.y, p.i, D.x, D.y, p.g, true);
+            if (!E) return null;
+            const F = circleIntersection(E.x, E.y, p.h, D.x, D.y, p.k, false);
+            if (!F) return null;
+            return { O, M, A, B, C, D, E, F };
+        }
+
+        function updatePhysics(dt) {
+            // Motor torque
+            const torque = state.motorTorque * PHYSICS.motorPower;
+
+            // Angular acceleration
+            const angAccel = torque / PHYSICS.momentOfInertia;
+            state.angularVelocity += angAccel * dt;
+            state.angularVelocity *= (1 - PHYSICS.friction * dt);
+            state.theta += state.angularVelocity * dt;
+
+            // Get foot position
+            const joints = calculateJoints(state.theta);
+            if (!joints) return;
+
+            // Ground interaction
+            const SCALE = 2.5;
+            const footY = joints.F.y * SCALE;
+            const groundLevel = 150;
+
+            let groundForce = 0;
+            if (footY > groundLevel) {
+                // Foot is below ground - apply spring force
+                const penetration = footY - groundLevel;
+                const footVy = state.angularVelocity * joints.F.x * SCALE; // approximate
+
+                groundForce = penetration * PHYSICS.groundStiffness + footVy * PHYSICS.groundDamping;
+
+                // This force affects horizontal motion (simplified)
+                const forwardForce = state.angularVelocity > 0 ? groundForce * 0.3 : -groundForce * 0.3;
+                state.vx += forwardForce * dt / PHYSICS.mass;
+            }
+
+            // Update position
+            state.x += state.vx * dt * 10;
+            state.vx *= (1 - 0.01); // air resistance
+
+            // Wrap around screen
+            if (state.x > canvas.width + 200) state.x = -200;
+            if (state.x < -200) state.x = canvas.width + 200;
+
+            // Update UI
+            document.getElementById('torque').textContent = torque.toFixed(2);
+            document.getElementById('angVel').textContent = state.angularVelocity.toFixed(2);
+            document.getElementById('footSpeed').textContent = (Math.abs(state.angularVelocity) * 60).toFixed(1);
+            document.getElementById('groundForce').textContent = groundForce.toFixed(1);
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const SCALE = 2.5;
+            const cx = state.x + canvas.width / 2;
+            const cy = canvas.height / 2 - 50;
+
+            // Ground
+            const groundY = cy + 150;
+            PHYSICS.groundY = groundY;
+
+            ctx.fillStyle = '#2d2d44';
+            ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+
+            ctx.strokeStyle = '#f39c12';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(0, groundY);
+            ctx.lineTo(canvas.width, groundY);
+            ctx.stroke();
+
+            // Grid on ground
+            ctx.strokeStyle = 'rgba(243, 156, 18, 0.1)';
+            ctx.lineWidth = 1;
+            for (let x = (state.x * 0.5) % 50; x < canvas.width; x += 50) {
+                ctx.beginPath();
+                ctx.moveTo(x, groundY);
+                ctx.lineTo(x, canvas.height);
+                ctx.stroke();
+            }
+
+            const joints = calculateJoints(state.theta);
+            if (!joints) return;
+
+            // Draw foot trajectory
+            ctx.strokeStyle = 'rgba(243, 156, 18, 0.2)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            let first = true;
+            for (let t = 0; t < Math.PI * 2; t += 0.05) {
+                const j = calculateJoints(t);
+                if (j) {
+                    const x = cx + j.F.x * SCALE;
+                    const y = cy + j.F.y * SCALE;
+                    if (first) { ctx.moveTo(x, y); first = false; }
+                    else ctx.lineTo(x, y);
+                }
+            }
+            ctx.closePath();
+            ctx.stroke();
+
+            // Draw linkage
+            const links = [
+                [joints.O, joints.A], [joints.A, joints.B], [joints.M, joints.B],
+                [joints.A, joints.C], [joints.B, joints.C], [joints.B, joints.D],
+                [joints.C, joints.D], [joints.M, joints.E], [joints.D, joints.E],
+                [joints.E, joints.F], [joints.D, joints.F]
+            ];
+
+            ctx.strokeStyle = '#f39c12';
+            ctx.lineWidth = 3;
+            ctx.lineCap = 'round';
+            links.forEach(([p1, p2]) => {
+                ctx.beginPath();
+                ctx.moveTo(cx + p1.x * SCALE, cy + p1.y * SCALE);
+                ctx.lineTo(cx + p2.x * SCALE, cy + p2.y * SCALE);
+                ctx.stroke();
+            });
+
+            // Joints
+            [joints.O, joints.M].forEach(j => {
+                ctx.fillStyle = '#e74c3c';
+                ctx.beginPath();
+                ctx.arc(cx + j.x * SCALE, cy + j.y * SCALE, 6, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            [joints.A, joints.B, joints.C, joints.D, joints.E].forEach(j => {
+                ctx.fillStyle = '#f39c12';
+                ctx.beginPath();
+                ctx.arc(cx + j.x * SCALE, cy + j.y * SCALE, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // Foot with contact indicator
+            const footScreenY = cy + joints.F.y * SCALE;
+            const onGround = footScreenY >= groundY - 5;
+
+            ctx.shadowColor = onGround ? '#e74c3c' : '#2ecc71';
+            ctx.shadowBlur = 20;
+            ctx.fillStyle = onGround ? '#e74c3c' : '#2ecc71';
+            ctx.beginPath();
+            ctx.arc(cx + joints.F.x * SCALE, footScreenY, 8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+
+            // Velocity indicator
+            ctx.strokeStyle = 'rgba(46, 204, 113, 0.5)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - 100);
+            ctx.lineTo(cx + state.vx * 2, cy - 100);
+            ctx.stroke();
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Velocity', cx, cy - 115);
+        }
+
+        function applyImpulse(direction) {
+            state.angularVelocity += direction * 2;
+        }
+
+        function toggleGravity() {
+            state.gravity = !state.gravity;
+            state.motorTorque = state.gravity ? 0.5 : 0;
+        }
+
+        function reset() {
+            state = {
+                theta: 0,
+                angularVelocity: 0.5,
+                x: 0,
+                vx: 0,
+                gravity: true,
+                motorTorque: 0.5
+            };
+        }
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+
+            updatePhysics(dt * 60); // Scale for 60 FPS feel
+            draw();
+
+            requestAnimationFrame(animate);
+        }
+
+        requestAnimationFrame(animate);
+
+        // Mouse interaction
+        canvas.addEventListener('mousedown', (e) => {
+            const centerX = state.x + canvas.width / 2;
+            if (e.clientX < centerX) {
+                state.motorTorque = -1;
+            } else {
+                state.motorTorque = 1;
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            state.motorTorque = 0.5;
+        });
+    </script>
+</body>
+</html>

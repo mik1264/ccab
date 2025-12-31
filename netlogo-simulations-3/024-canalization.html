@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Canalization - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #2dd4bf; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #2dd4bf; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #2dd4bf; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #14b8a6; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #2dd4bf; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #2dd4bf; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(45,212,191,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #2dd4bf; }
+        .stress-indicator { padding: 8px; margin-top: 10px; border-radius: 5px; text-align: center; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🛡️ Canalization</h1>
+            <p class="description">
+                Waddington's canalization: development is buffered against genetic and
+                environmental perturbations. Cryptic genetic variation accumulates.
+                Stress can release this variation (decanalization).
+            </p>
+
+            <div class="control-group">
+                <label>Population Size: <span class="value-display" id="popValue">100</span></label>
+                <input type="range" id="popSlider" min="50" max="300" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Buffering Capacity: <span class="value-display" id="bufferValue">0.8</span></label>
+                <input type="range" id="bufferSlider" min="0" max="1" step="0.1" value="0.8">
+                <div style="font-size: 0.65rem; color: #666;">High = strong canalization</div>
+            </div>
+
+            <div class="control-group">
+                <label>Mutation Rate: <span class="value-display" id="mutValue">0.05</span></label>
+                <input type="range" id="mutSlider" min="0.01" max="0.2" step="0.01" value="0.05">
+            </div>
+
+            <div class="control-group">
+                <label>Stress Level: <span class="value-display" id="stressValue">0</span></label>
+                <input type="range" id="stressSlider" min="0" max="1" step="0.1" value="0">
+            </div>
+
+            <div class="stress-indicator" id="stressIndicator" style="background: #22c55e;">
+                No Stress - Canalized
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+            <button id="stressPulseBtn">Apply Stress Pulse</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Genetic Variance: <span id="genVar">0.00</span></div>
+                <div>Phenotypic Variance: <span id="phenoVar">0.00</span></div>
+                <div>Cryptic Variation: <span id="cryptic">0.00</span></div>
+                <div>Mean Fitness: <span id="meanFitness">1.00</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Hsp90 Capacitor:</strong> Chaperone proteins buffer mutational effects.
+                Under stress, Hsp90 is overwhelmed and cryptic variation is expressed.
+                This may explain punctuated equilibrium patterns.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let population = [];
+        let genVarHistory = [];
+        let phenoVarHistory = [];
+
+        let popSize = 100;
+        let bufferingCapacity = 0.8;
+        let mutRate = 0.05;
+        let stressLevel = 0;
+
+        const OPTIMAL_PHENOTYPE = 0.5;
+        const NUM_LOCI = 10;
+
+        class Individual {
+            constructor(genotype = null, bufferStrength = null) {
+                // Genotype: sum determines genetic value
+                this.genotype = genotype || new Array(NUM_LOCI).fill(0).map(() => Math.random());
+                // Individual's buffering capacity
+                this.bufferStrength = bufferStrength !== null ? bufferStrength : bufferingCapacity;
+            }
+
+            get geneticValue() {
+                return this.genotype.reduce((a, b) => a + b, 0) / NUM_LOCI;
+            }
+
+            get phenotype() {
+                // Phenotype = canalized value unless stress overcomes buffering
+                const deviation = this.geneticValue - OPTIMAL_PHENOTYPE;
+
+                // Effective buffering decreases with stress
+                const effectiveBuffer = Math.max(0, this.bufferStrength - stressLevel);
+
+                // Phenotype is pushed toward optimal, but not completely
+                return OPTIMAL_PHENOTYPE + deviation * (1 - effectiveBuffer);
+            }
+
+            get crypticVariation() {
+                // Amount of genetic variation that is hidden by canalization
+                const deviation = Math.abs(this.geneticValue - OPTIMAL_PHENOTYPE);
+                const expressed = Math.abs(this.phenotype - OPTIMAL_PHENOTYPE);
+                return deviation - expressed;
+            }
+
+            get fitness() {
+                const diff = Math.abs(this.phenotype - OPTIMAL_PHENOTYPE);
+                return Math.exp(-diff * 5);
+            }
+
+            replicate() {
+                // Copy genotype with mutations
+                const newGeno = this.genotype.map(g => {
+                    if (Math.random() < mutRate) {
+                        return Math.max(0, Math.min(1, g + (Math.random() - 0.5) * 0.3));
+                    }
+                    return g;
+                });
+
+                // Buffer strength can evolve slightly
+                let newBuffer = this.bufferStrength;
+                if (Math.random() < 0.01) {
+                    newBuffer = Math.max(0, Math.min(1, newBuffer + (Math.random() - 0.5) * 0.1));
+                }
+
+                return new Individual(newGeno, newBuffer);
+            }
+        }
+
+        function initPopulation() {
+            population = [];
+            genVarHistory = [];
+            phenoVarHistory = [];
+
+            for (let i = 0; i < popSize; i++) {
+                population.push(new Individual());
+            }
+            updateStressIndicator();
+        }
+
+        function updateStressIndicator() {
+            const indicator = document.getElementById('stressIndicator');
+            if (stressLevel < 0.3) {
+                indicator.style.background = '#22c55e';
+                indicator.textContent = 'No Stress - Canalized';
+            } else if (stressLevel < 0.7) {
+                indicator.style.background = '#f59e0b';
+                indicator.textContent = 'Moderate Stress - Partial Release';
+            } else {
+                indicator.style.background = '#ef4444';
+                indicator.textContent = 'High Stress - Decanalized!';
+            }
+        }
+
+        function calculateVariance(values) {
+            const mean = values.reduce((a, b) => a + b, 0) / values.length;
+            return values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length;
+        }
+
+        function reproduce() {
+            const totalFit = population.reduce((sum, ind) => sum + ind.fitness, 0);
+            const newPop = [];
+
+            const selectParent = () => {
+                let r = Math.random() * totalFit;
+                for (const ind of population) {
+                    r -= ind.fitness;
+                    if (r <= 0) return ind;
+                }
+                return population[population.length - 1];
+            };
+
+            while (newPop.length < popSize) {
+                const parent = selectParent();
+                newPop.push(parent.replicate());
+            }
+
+            population = newPop;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+            reproduce();
+
+            const genVar = calculateVariance(population.map(ind => ind.geneticValue));
+            const phenoVar = calculateVariance(population.map(ind => ind.phenotype));
+
+            genVarHistory.push(genVar);
+            phenoVarHistory.push(phenoVar);
+
+            if (genVarHistory.length > 400) {
+                genVarHistory.shift();
+                phenoVarHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2;
+
+            // Epigenetic landscape visualization
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Waddington\'s Epigenetic Landscape (Phenotype Space)', padding, 25);
+
+            // Draw landscape with valleys
+            const landscapeY = padding + 30;
+            const landscapeHeight = height - 40;
+
+            // Valley shape based on buffering
+            ctx.strokeStyle = '#2dd4bf';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            for (let x = 0; x <= width; x++) {
+                const phenoValue = x / width;
+                const distFromOpt = Math.abs(phenoValue - OPTIMAL_PHENOTYPE);
+                const effectiveBuffer = Math.max(0, bufferingCapacity - stressLevel);
+
+                // Valley depth = buffering strength
+                const valleyDepth = effectiveBuffer * 0.8;
+                const landscape = distFromOpt * distFromOpt * (1 - valleyDepth) + valleyDepth * distFromOpt * 0.3;
+
+                const y = landscapeY + landscape * landscapeHeight;
+                if (x === 0) ctx.moveTo(padding + x, y);
+                else ctx.lineTo(padding + x, y);
+            }
+            ctx.stroke();
+
+            // Draw individuals as balls on landscape
+            for (const ind of population) {
+                const x = padding + ind.phenotype * width;
+                const distFromOpt = Math.abs(ind.phenotype - OPTIMAL_PHENOTYPE);
+                const effectiveBuffer = Math.max(0, bufferingCapacity - stressLevel);
+                const valleyDepth = effectiveBuffer * 0.8;
+                const landscape = distFromOpt * distFromOpt * (1 - valleyDepth) + valleyDepth * distFromOpt * 0.3;
+                const y = landscapeY + landscape * landscapeHeight - 5;
+
+                // Color by genetic value (hidden variation)
+                const genIntensity = Math.abs(ind.geneticValue - 0.5) * 2;
+                ctx.fillStyle = `rgba(45, 212, 191, ${0.5 + genIntensity * 0.5})`;
+                ctx.beginPath();
+                ctx.arc(x, y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Optimal phenotype marker
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(padding + OPTIMAL_PHENOTYPE * width - 2, landscapeY - 10, 4, landscapeHeight + 20);
+            ctx.fillText('Optimal', padding + OPTIMAL_PHENOTYPE * width - 20, landscapeY - 15);
+
+            // Variance over time
+            const chartY = padding * 2 + height;
+            ctx.fillText('Genetic vs Phenotypic Variance (Cryptic Variation)', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            if (genVarHistory.length > 1) {
+                const maxVar = Math.max(...genVarHistory, ...phenoVarHistory) * 1.2 || 0.01;
+
+                // Genetic variance
+                ctx.strokeStyle = '#3b82f6';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < genVarHistory.length; i++) {
+                    const x = padding + (i / genVarHistory.length) * width;
+                    const y = chartY + height - (genVarHistory[i] / maxVar) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Phenotypic variance
+                ctx.strokeStyle = '#2dd4bf';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < phenoVarHistory.length; i++) {
+                    const x = padding + (i / phenoVarHistory.length) * width;
+                    const y = chartY + height - (phenoVarHistory[i] / maxVar) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // Legend
+            ctx.fillStyle = '#3b82f6';
+            ctx.fillRect(padding + width - 120, chartY + 15, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Genetic', padding + width - 100, chartY + 23);
+            ctx.fillStyle = '#2dd4bf';
+            ctx.fillRect(padding + width - 120, chartY + 30, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Phenotypic', padding + width - 100, chartY + 38);
+        }
+
+        function updateStats() {
+            const genVar = calculateVariance(population.map(ind => ind.geneticValue));
+            const phenoVar = calculateVariance(population.map(ind => ind.phenotype));
+            const cryptic = population.reduce((sum, ind) => sum + ind.crypticVariation, 0) / popSize;
+            const meanFit = population.reduce((sum, ind) => sum + ind.fitness, 0) / popSize;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('genVar').textContent = genVar.toFixed(4);
+            document.getElementById('phenoVar').textContent = phenoVar.toFixed(4);
+            document.getElementById('cryptic').textContent = cryptic.toFixed(4);
+            document.getElementById('meanFitness').textContent = meanFit.toFixed(4);
+        }
+
+        document.getElementById('popSlider').addEventListener('input', (e) => {
+            popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = popSize;
+        });
+
+        document.getElementById('bufferSlider').addEventListener('input', (e) => {
+            bufferingCapacity = parseFloat(e.target.value);
+            document.getElementById('bufferValue').textContent = bufferingCapacity.toFixed(1);
+        });
+
+        document.getElementById('mutSlider').addEventListener('input', (e) => {
+            mutRate = parseFloat(e.target.value);
+            document.getElementById('mutValue').textContent = mutRate.toFixed(2);
+        });
+
+        document.getElementById('stressSlider').addEventListener('input', (e) => {
+            stressLevel = parseFloat(e.target.value);
+            document.getElementById('stressValue').textContent = stressLevel.toFixed(1);
+            updateStressIndicator();
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        document.getElementById('stressPulseBtn').addEventListener('click', () => {
+            stressLevel = 0.9;
+            document.getElementById('stressSlider').value = 0.9;
+            document.getElementById('stressValue').textContent = '0.9';
+            updateStressIndicator();
+            setTimeout(() => {
+                stressLevel = 0;
+                document.getElementById('stressSlider').value = 0;
+                document.getElementById('stressValue').textContent = '0';
+                updateStressIndicator();
+            }, 5000);
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

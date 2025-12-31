@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Glass Transition</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #e1bee7; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #e1bee7; color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #e1bee7; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .chart { background: rgba(0,0,0,0.5); padding: 10px; border-radius: 5px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>Glass Transition</h1>
+            <p class="description">The glass transition is a kinetic phenomenon where a liquid becomes an amorphous solid. Viscosity diverges dramatically as T → Tg. Particles become trapped in local energy minima.</p>
+
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">1.0</span> T/Tg</label>
+                <input type="range" id="temperature" min="0.5" max="2.0" step="0.05" value="1.0">
+            </div>
+
+            <div class="control-group">
+                <label>Cooling Rate: <span id="coolVal">0.01</span></label>
+                <input type="range" id="coolRate" min="0.001" max="0.05" step="0.001" value="0.01">
+            </div>
+
+            <div class="control-group">
+                <label>Fragility: <span id="fragilityVal">50</span></label>
+                <input type="range" id="fragility" min="20" max="150" value="50">
+            </div>
+
+            <button id="cool">Cool Slowly</button>
+            <button id="quench">Quench</button>
+            <button id="reset">Reset (Melt)</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>State: <span id="state">Liquid</span></div>
+                <div>Viscosity: <span id="viscosity">0</span></div>
+                <div>Relaxation Time: <span id="relaxTime">0</span></div>
+                <div>MSD: <span id="msd">0</span></div>
+            </div>
+
+            <div class="chart">
+                <canvas id="viscChart" width="280" height="100"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const chartCanvas = document.getElementById('viscChart');
+        const chartCtx = chartCanvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let temperature = 1.0;  // T/Tg
+        let coolingRate = 0.01;
+        let fragility = 50;  // Angell fragility index
+
+        let particles = [];
+        let cooling = false;
+        let quenching = false;
+        let viscosityHistory = [];
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            temperature = 2.0;
+            particles = [];
+            viscosityHistory = [];
+            cooling = false;
+            quenching = false;
+
+            document.getElementById('temperature').value = temperature;
+            document.getElementById('tempVal').textContent = temperature.toFixed(2);
+
+            // Create particles in liquid state
+            const numParticles = 300;
+            for (let i = 0; i < numParticles; i++) {
+                particles.push({
+                    x: 100 + Math.random() * (width - 200),
+                    y: 100 + Math.random() * (height - 200),
+                    vx: (Math.random() - 0.5) * 5,
+                    vy: (Math.random() - 0.5) * 5,
+                    radius: 8 + Math.random() * 4,
+                    x0: 0, y0: 0  // Initial position for MSD
+                });
+            }
+
+            // Store initial positions
+            for (const p of particles) {
+                p.x0 = p.x;
+                p.y0 = p.y;
+            }
+
+            updateStats();
+        }
+
+        function viscosity() {
+            // Vogel-Fulcher-Tammann: η = η₀ exp(DT₀/(T-T₀))
+            // or Angell form: log(η) = A + B/(T - T₀)
+            // At T = Tg, η ≈ 10^12 Pa·s
+
+            const T0 = 0.7;  // Vogel temperature
+            const D = fragility / 100;  // Fragility parameter
+
+            if (temperature <= T0) return 1e15;
+
+            const logViscosity = 12 + D * T0 / (temperature - T0);
+            return Math.pow(10, Math.min(15, logViscosity - 10));
+        }
+
+        function relaxationTime() {
+            // τ = η / G (Maxwell relation)
+            return viscosity() * 0.1;
+        }
+
+        function step() {
+            time += 0.1;
+
+            // Cooling
+            if (cooling) {
+                temperature = Math.max(0.6, temperature - coolingRate);
+                document.getElementById('temperature').value = temperature;
+                document.getElementById('tempVal').textContent = temperature.toFixed(2);
+            }
+
+            if (quenching) {
+                temperature = Math.max(0.6, temperature - 0.1);
+                document.getElementById('temperature').value = temperature;
+                document.getElementById('tempVal').textContent = temperature.toFixed(2);
+                if (temperature <= 0.6) quenching = false;
+            }
+
+            const visc = viscosity();
+            const thermalVelocity = Math.sqrt(temperature) * 3;
+            const dampingFactor = Math.min(1, 1 / (1 + visc * 0.0001));
+
+            for (const p of particles) {
+                // Thermal motion (reduced at low T due to viscosity)
+                p.vx += (Math.random() - 0.5) * thermalVelocity * dampingFactor;
+                p.vy += (Math.random() - 0.5) * thermalVelocity * dampingFactor;
+
+                // Viscous damping
+                p.vx *= dampingFactor;
+                p.vy *= dampingFactor;
+
+                // Update position
+                p.x += p.vx;
+                p.y += p.vy;
+
+                // Boundary conditions
+                if (p.x < 50) { p.x = 50; p.vx = Math.abs(p.vx); }
+                if (p.x > width - 50) { p.x = width - 50; p.vx = -Math.abs(p.vx); }
+                if (p.y < 50) { p.y = 50; p.vy = Math.abs(p.vy); }
+                if (p.y > height - 50) { p.y = height - 50; p.vy = -Math.abs(p.vy); }
+            }
+
+            // Particle-particle interactions (soft repulsion)
+            for (let i = 0; i < particles.length; i++) {
+                for (let j = i + 1; j < particles.length; j++) {
+                    const p1 = particles[i];
+                    const p2 = particles[j];
+
+                    const dx = p2.x - p1.x;
+                    const dy = p2.y - p1.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const minDist = p1.radius + p2.radius;
+
+                    if (dist < minDist && dist > 0) {
+                        const overlap = minDist - dist;
+                        const force = overlap * 0.3 * dampingFactor;
+
+                        const nx = dx / dist;
+                        const ny = dy / dist;
+
+                        p1.vx -= nx * force;
+                        p1.vy -= ny * force;
+                        p2.vx += nx * force;
+                        p2.vy += ny * force;
+                    }
+                }
+            }
+
+            // Record viscosity history
+            viscosityHistory.push({ T: temperature, visc: Math.log10(visc) });
+            if (viscosityHistory.length > 200) viscosityHistory.shift();
+
+            updateStats();
+        }
+
+        function calculateMSD() {
+            let msd = 0;
+            for (const p of particles) {
+                const dx = p.x - p.x0;
+                const dy = p.y - p.y0;
+                msd += dx * dx + dy * dy;
+            }
+            return msd / particles.length;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            // Background indicates state
+            const isGlass = temperature < 1.0;
+            const alpha = isGlass ? 0.2 : 0.05;
+            ctx.fillStyle = isGlass ? `rgba(225, 190, 231, ${alpha})` : `rgba(255, 200, 150, ${alpha})`;
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw container
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(45, 45, width - 90, height - 90);
+
+            // Draw particles with motion blur based on viscosity
+            const visc = viscosity();
+            const blur = Math.max(0, 5 - Math.log10(visc) * 0.5);
+
+            for (const p of particles) {
+                // Color based on mobility
+                const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+                const mobility = Math.min(1, speed / 3);
+
+                const hue = 280 + (1 - mobility) * 60;  // Purple to pink
+                ctx.fillStyle = `hsla(${hue}, 60%, 60%, 0.8)`;
+
+                // Motion blur trail
+                if (blur > 0.5 && speed > 0.5) {
+                    ctx.globalAlpha = 0.3;
+                    for (let i = 1; i <= 3; i++) {
+                        ctx.beginPath();
+                        ctx.arc(p.x - p.vx * i * 0.5, p.y - p.vy * i * 0.5,
+                               p.radius * (1 - i * 0.2), 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                    ctx.globalAlpha = 1;
+                }
+
+                // Main particle
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw cage effect visualization at low T
+            if (temperature < 1.0) {
+                ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+                ctx.lineWidth = 1;
+
+                for (const p of particles) {
+                    // Find nearest neighbors
+                    const neighbors = [];
+                    for (const p2 of particles) {
+                        if (p === p2) continue;
+                        const dx = p2.x - p.x;
+                        const dy = p2.y - p.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist < 40) neighbors.push(p2);
+                    }
+
+                    // Draw cage
+                    if (neighbors.length >= 4) {
+                        ctx.beginPath();
+                        for (const n of neighbors) {
+                            ctx.moveTo(p.x, p.y);
+                            ctx.lineTo(n.x, n.y);
+                        }
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // State label
+            ctx.fillStyle = isGlass ? '#e1bee7' : '#ffcc80';
+            ctx.font = 'bold 24px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(isGlass ? 'GLASS' : 'LIQUID', width / 2, 30);
+
+            // Draw viscosity chart
+            drawChart();
+        }
+
+        function drawChart() {
+            chartCtx.fillStyle = '#1a1a2e';
+            chartCtx.fillRect(0, 0, 280, 100);
+
+            // Axes
+            chartCtx.strokeStyle = '#444';
+            chartCtx.beginPath();
+            chartCtx.moveTo(30, 10);
+            chartCtx.lineTo(30, 85);
+            chartCtx.lineTo(270, 85);
+            chartCtx.stroke();
+
+            // Labels
+            chartCtx.fillStyle = '#888';
+            chartCtx.font = '9px sans-serif';
+            chartCtx.fillText('log η', 5, 50);
+            chartCtx.fillText('T/Tg', 145, 98);
+
+            // Tg marker
+            chartCtx.strokeStyle = '#e1bee7';
+            chartCtx.setLineDash([3, 3]);
+            const tgX = 30 + (1.0 - 0.5) / 1.5 * 240;
+            chartCtx.beginPath();
+            chartCtx.moveTo(tgX, 10);
+            chartCtx.lineTo(tgX, 85);
+            chartCtx.stroke();
+            chartCtx.setLineDash([]);
+            chartCtx.fillText('Tg', tgX - 5, 95);
+
+            // Draw viscosity data
+            if (viscosityHistory.length > 1) {
+                chartCtx.strokeStyle = '#e1bee7';
+                chartCtx.lineWidth = 2;
+                chartCtx.beginPath();
+
+                for (let i = 0; i < viscosityHistory.length; i++) {
+                    const d = viscosityHistory[i];
+                    const x = 30 + (d.T - 0.5) / 1.5 * 240;
+                    const y = 85 - (d.visc - 1) / 5 * 70;
+
+                    if (i === 0) chartCtx.moveTo(x, y);
+                    else chartCtx.lineTo(x, y);
+                }
+                chartCtx.stroke();
+            }
+
+            // Current point
+            const curX = 30 + (temperature - 0.5) / 1.5 * 240;
+            const curY = 85 - (Math.log10(viscosity()) - 1) / 5 * 70;
+            chartCtx.fillStyle = '#fff';
+            chartCtx.beginPath();
+            chartCtx.arc(curX, Math.max(15, Math.min(80, curY)), 4, 0, Math.PI * 2);
+            chartCtx.fill();
+        }
+
+        function updateStats() {
+            const visc = viscosity();
+            const tau = relaxationTime();
+            const msd = calculateMSD();
+
+            const state = temperature > 1.2 ? 'Liquid' :
+                         temperature > 1.0 ? 'Supercooled' :
+                         temperature > 0.8 ? 'Glass Transition' : 'Glass';
+
+            document.getElementById('state').textContent = state;
+            document.getElementById('viscosity').textContent = visc.toExponential(1);
+            document.getElementById('relaxTime').textContent = tau.toExponential(1);
+            document.getElementById('msd').textContent = msd.toFixed(1);
+        }
+
+        function animate() {
+            if (running) {
+                step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('temperature').addEventListener('input', e => {
+            temperature = parseFloat(e.target.value);
+            document.getElementById('tempVal').textContent = temperature.toFixed(2);
+            cooling = false;
+            quenching = false;
+        });
+
+        document.getElementById('coolRate').addEventListener('input', e => {
+            coolingRate = parseFloat(e.target.value);
+            document.getElementById('coolVal').textContent = coolingRate;
+        });
+
+        document.getElementById('fragility').addEventListener('input', e => {
+            fragility = parseInt(e.target.value);
+            document.getElementById('fragilityVal').textContent = fragility;
+        });
+
+        document.getElementById('cool').addEventListener('click', () => {
+            cooling = !cooling;
+            quenching = false;
+            running = true;
+            document.getElementById('toggleRun').textContent = 'Pause';
+        });
+
+        document.getElementById('quench').addEventListener('click', () => {
+            quenching = true;
+            cooling = false;
+            running = true;
+            document.getElementById('toggleRun').textContent = 'Pause';
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', () => { resize(); init(); });
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ploidy Evolution - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; padding: 20px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; width: 100%; height: 100%; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #34d399; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #34d399; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #34d399; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #10b981; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #34d399; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #34d399; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(52,211,153,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #34d399; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🧬 Ploidy Evolution</h1>
+            <p class="description">
+                Haploids (1n) vs Diploids (2n): Diploids mask deleterious alleles but
+                adapt slower. Haploids expose all mutations to selection immediately.
+            </p>
+
+            <div class="control-group">
+                <label>Population Size: <span class="value-display" id="popValue">200</span></label>
+                <input type="range" id="popSlider" min="50" max="500" value="200">
+            </div>
+
+            <div class="control-group">
+                <label>Deleterious Mut Rate: <span class="value-display" id="delMutValue">0.05</span></label>
+                <input type="range" id="delMutSlider" min="0.01" max="0.2" step="0.01" value="0.05">
+            </div>
+
+            <div class="control-group">
+                <label>Beneficial Mut Rate: <span class="value-display" id="benMutValue">0.01</span></label>
+                <input type="range" id="benMutSlider" min="0.001" max="0.05" step="0.001" value="0.01">
+            </div>
+
+            <div class="control-group">
+                <label>Dominance (h): <span class="value-display" id="domValue">0.3</span></label>
+                <input type="range" id="domSlider" min="0" max="1" step="0.1" value="0.3">
+                <div style="font-size: 0.65rem; color: #666;">h=0 recessive, h=0.5 codominant, h=1 dominant</div>
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Haploid Fitness: <span id="hapFitness">1.00</span></div>
+                <div>Diploid Fitness: <span id="dipFitness">1.00</span></div>
+                <div>Haploid Fraction: <span id="hapFraction">0.50</span></div>
+                <div>Mutation Load: <span id="mutLoad">0.00</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Ploidy Trade-off:</strong> Diploids shelter deleterious recessives
+                (advantage in stable environments) but beneficial mutations are partially
+                masked, slowing adaptation (disadvantage when adapting).
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let population = [];
+        let hapHistory = [];
+        let dipHistory = [];
+        let fractionHistory = [];
+
+        let popSize = 200;
+        let delMutRate = 0.05;
+        let benMutRate = 0.01;
+        let dominance = 0.3;
+        const genomeSize = 20;
+        const selCoef = 0.1;
+
+        class Individual {
+            constructor(isHaploid, genome1 = null, genome2 = null) {
+                this.isHaploid = isHaploid;
+                this.genome1 = genome1 || new Array(genomeSize).fill(0);
+                this.genome2 = this.isHaploid ? null : (genome2 || new Array(genomeSize).fill(0));
+            }
+
+            get fitness() {
+                let fit = 1;
+                for (let i = 0; i < genomeSize; i++) {
+                    if (this.isHaploid) {
+                        if (this.genome1[i] === -1) fit *= (1 - selCoef);
+                        else if (this.genome1[i] === 1) fit *= (1 + selCoef);
+                    } else {
+                        const a1 = this.genome1[i];
+                        const a2 = this.genome2[i];
+                        if (a1 === -1 && a2 === -1) fit *= (1 - selCoef);
+                        else if (a1 === -1 || a2 === -1) fit *= (1 - dominance * selCoef);
+                        if (a1 === 1 && a2 === 1) fit *= (1 + selCoef);
+                        else if (a1 === 1 || a2 === 1) fit *= (1 + dominance * selCoef);
+                    }
+                }
+                return Math.max(0.01, fit);
+            }
+
+            mutate() {
+                for (let i = 0; i < genomeSize; i++) {
+                    if (this.genome1[i] === 0) {
+                        if (Math.random() < delMutRate) this.genome1[i] = -1;
+                        else if (Math.random() < benMutRate) this.genome1[i] = 1;
+                    }
+                    if (!this.isHaploid && this.genome2[i] === 0) {
+                        if (Math.random() < delMutRate) this.genome2[i] = -1;
+                        else if (Math.random() < benMutRate) this.genome2[i] = 1;
+                    }
+                }
+            }
+        }
+
+        function initPopulation() {
+            population = [];
+            hapHistory = [];
+            dipHistory = [];
+            fractionHistory = [];
+
+            for (let i = 0; i < popSize; i++) {
+                population.push(new Individual(Math.random() < 0.5));
+            }
+        }
+
+        function reproduce() {
+            const newPop = [];
+            const totalFit = population.reduce((sum, ind) => sum + ind.fitness, 0);
+
+            const selectParent = () => {
+                let r = Math.random() * totalFit;
+                for (const ind of population) {
+                    r -= ind.fitness;
+                    if (r <= 0) return ind;
+                }
+                return population[population.length - 1];
+            };
+
+            while (newPop.length < popSize) {
+                const parent1 = selectParent();
+                const parent2 = selectParent();
+
+                // Offspring inherits ploidy from parent1 with small chance of transition
+                let isHaploid = parent1.isHaploid;
+                if (Math.random() < 0.01) isHaploid = !isHaploid;
+
+                let offspring;
+                if (isHaploid) {
+                    const gamete = parent1.isHaploid ? [...parent1.genome1] :
+                        parent1.genome1.map((a, i) => Math.random() < 0.5 ? a : parent1.genome2[i]);
+                    offspring = new Individual(true, gamete);
+                } else {
+                    const g1 = parent1.isHaploid ? [...parent1.genome1] :
+                        parent1.genome1.map((a, i) => Math.random() < 0.5 ? a : parent1.genome2[i]);
+                    const g2 = parent2.isHaploid ? [...parent2.genome1] :
+                        parent2.genome1.map((a, i) => Math.random() < 0.5 ? a : parent2.genome2[i]);
+                    offspring = new Individual(false, g1, g2);
+                }
+
+                offspring.mutate();
+                newPop.push(offspring);
+            }
+
+            population = newPop;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+            reproduce();
+
+            const haploids = population.filter(ind => ind.isHaploid);
+            const diploids = population.filter(ind => !ind.isHaploid);
+
+            const hapFit = haploids.length > 0 ?
+                haploids.reduce((sum, ind) => sum + ind.fitness, 0) / haploids.length : 0;
+            const dipFit = diploids.length > 0 ?
+                diploids.reduce((sum, ind) => sum + ind.fitness, 0) / diploids.length : 0;
+
+            hapHistory.push(hapFit);
+            dipHistory.push(dipFit);
+            fractionHistory.push(haploids.length / popSize);
+
+            if (hapHistory.length > 400) {
+                hapHistory.shift();
+                dipHistory.shift();
+                fractionHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2;
+
+            // Fitness chart
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Mean Fitness: Haploid vs Diploid', padding, 25);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, padding);
+            ctx.lineTo(padding, padding + height);
+            ctx.lineTo(padding + width, padding + height);
+            ctx.stroke();
+
+            if (hapHistory.length > 1) {
+                const allFit = [...hapHistory, ...dipHistory].filter(f => f > 0);
+                const maxFit = Math.max(...allFit) * 1.1;
+                const minFit = Math.min(...allFit) * 0.9;
+                const range = maxFit - minFit;
+
+                ctx.strokeStyle = '#34d399';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < hapHistory.length; i++) {
+                    if (hapHistory[i] === 0) continue;
+                    const x = padding + (i / hapHistory.length) * width;
+                    const y = padding + height - ((hapHistory[i] - minFit) / range) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                ctx.strokeStyle = '#8b5cf6';
+                ctx.beginPath();
+                for (let i = 0; i < dipHistory.length; i++) {
+                    if (dipHistory[i] === 0) continue;
+                    const x = padding + (i / dipHistory.length) * width;
+                    const y = padding + height - ((dipHistory[i] - minFit) / range) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // Legend
+            ctx.fillStyle = '#34d399';
+            ctx.fillRect(padding + width - 100, padding + 10, 15, 15);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Haploid', padding + width - 80, padding + 22);
+            ctx.fillStyle = '#8b5cf6';
+            ctx.fillRect(padding + width - 100, padding + 30, 15, 15);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Diploid', padding + width - 80, padding + 42);
+
+            // Fraction chart
+            const chartY = padding * 2 + height;
+            ctx.fillStyle = '#888';
+            ctx.fillText('Haploid Fraction', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            if (fractionHistory.length > 1) {
+                ctx.strokeStyle = '#34d399';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < fractionHistory.length; i++) {
+                    const x = padding + (i / fractionHistory.length) * width;
+                    const y = chartY + height - fractionHistory[i] * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+        }
+
+        function updateStats() {
+            const haploids = population.filter(ind => ind.isHaploid);
+            const diploids = population.filter(ind => !ind.isHaploid);
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('hapFitness').textContent = haploids.length > 0 ?
+                (haploids.reduce((sum, ind) => sum + ind.fitness, 0) / haploids.length).toFixed(3) : '0';
+            document.getElementById('dipFitness').textContent = diploids.length > 0 ?
+                (diploids.reduce((sum, ind) => sum + ind.fitness, 0) / diploids.length).toFixed(3) : '0';
+            document.getElementById('hapFraction').textContent = (haploids.length / popSize).toFixed(3);
+
+            const avgFit = population.reduce((sum, ind) => sum + ind.fitness, 0) / popSize;
+            document.getElementById('mutLoad').textContent = (1 - avgFit).toFixed(3);
+        }
+
+        document.getElementById('popSlider').addEventListener('input', (e) => {
+            popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = popSize;
+        });
+
+        document.getElementById('delMutSlider').addEventListener('input', (e) => {
+            delMutRate = parseFloat(e.target.value);
+            document.getElementById('delMutValue').textContent = delMutRate.toFixed(2);
+        });
+
+        document.getElementById('benMutSlider').addEventListener('input', (e) => {
+            benMutRate = parseFloat(e.target.value);
+            document.getElementById('benMutValue').textContent = benMutRate.toFixed(3);
+        });
+
+        document.getElementById('domSlider').addEventListener('input', (e) => {
+            dominance = parseFloat(e.target.value);
+            document.getElementById('domValue').textContent = dominance.toFixed(1);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

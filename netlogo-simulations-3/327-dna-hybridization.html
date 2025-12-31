@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DNA Hybridization</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #canvas-container { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #controls { width: 320px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #03a9f4; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; }
+        button { width: 100%; padding: 10px; margin-bottom: 8px; background: #03a9f4; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.75rem; margin-top: 10px; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #03a9f4; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to Gallery</a>
+    <div id="container">
+        <div id="canvas-container"><canvas id="canvas"></canvas></div>
+        <div id="controls">
+            <h1>DNA Hybridization</h1>
+            <p class="description">DNA duplex formation follows Watson-Crick base pairing (A-T, G-C). Melting temperature (Tm) depends on GC content and salt concentration. Nearest-neighbor model predicts thermodynamics.</p>
+
+            <div class="control-group">
+                <label>Temperature: <span id="tempVal">25</span> °C</label>
+                <input type="range" id="temperature" min="10" max="95" value="25">
+            </div>
+
+            <div class="control-group">
+                <label>Salt Concentration: <span id="saltVal">50</span> mM</label>
+                <input type="range" id="salt" min="10" max="200" value="50">
+            </div>
+
+            <div class="control-group">
+                <label>GC Content: <span id="gcVal">50</span>%</label>
+                <input type="range" id="gc" min="20" max="80" value="50">
+            </div>
+
+            <div class="control-group">
+                <label>Strand Length: <span id="lenVal">20</span> bp</label>
+                <input type="range" id="length" min="10" max="40" value="20">
+            </div>
+
+            <button id="reset">Reset</button>
+            <button id="toggleRun">Run/Pause</button>
+
+            <div class="stats">
+                <div>Tm (calc): <span id="tm">0</span> °C</div>
+                <div>Fraction Hybridized: <span id="hybridized">0</span>%</div>
+                <div>ΔG: <span id="deltaG">0</span> kcal/mol</div>
+                <div>H-bonds: <span id="hbonds">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let width, height;
+        let running = false;
+        let time = 0;
+
+        let temperature = 25;
+        let saltConc = 50;
+        let gcContent = 50;
+        let strandLength = 20;
+
+        let strand1 = [];
+        let strand2 = [];
+        let hybridized = false;
+        let hybridProgress = 0;
+
+        const BASES = ['A', 'T', 'G', 'C'];
+        const BASE_COLORS = {
+            'A': '#4caf50',
+            'T': '#f44336',
+            'G': '#2196f3',
+            'C': '#ff9800'
+        };
+        const COMPLEMENT = { 'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G' };
+
+        function resize() {
+            const container = document.getElementById('canvas-container');
+            width = container.clientWidth;
+            height = container.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+
+        function generateSequence(length, gcTarget) {
+            const sequence = [];
+            const gcBases = Math.round(length * gcTarget / 100);
+            const atBases = length - gcBases;
+
+            // Create pool
+            for (let i = 0; i < gcBases / 2; i++) {
+                sequence.push('G');
+                sequence.push('C');
+            }
+            for (let i = 0; i < atBases / 2; i++) {
+                sequence.push('A');
+                sequence.push('T');
+            }
+
+            // Shuffle
+            for (let i = sequence.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [sequence[i], sequence[j]] = [sequence[j], sequence[i]];
+            }
+
+            return sequence.slice(0, length);
+        }
+
+        function init() {
+            resize();
+            time = 0;
+            hybridized = false;
+            hybridProgress = 0;
+
+            // Generate sequence
+            strand1 = generateSequence(strandLength, gcContent).map((base, i) => ({
+                base: base,
+                x: 150 + i * 25,
+                y: height / 2 - 100,
+                vx: 0,
+                vy: 0
+            }));
+
+            // Complementary strand
+            strand2 = strand1.map((b, i) => ({
+                base: COMPLEMENT[b.base],
+                x: 150 + i * 25,
+                y: height / 2 + 100,
+                vx: 0,
+                vy: 0
+            }));
+
+            updateStats();
+        }
+
+        function calculateTm() {
+            // Wallace rule approximation: Tm = 2(A+T) + 4(G+C)
+            const gc = strand1.filter(b => b.base === 'G' || b.base === 'C').length;
+            const at = strand1.length - gc;
+
+            // More accurate: salt-adjusted Tm
+            let tm = 81.5 + 16.6 * Math.log10(saltConc / 1000) + 0.41 * gcContent - 675 / strandLength;
+            return tm;
+        }
+
+        function calculateDeltaG() {
+            // Simplified nearest-neighbor calculation
+            // ΔG = ΔH - TΔS
+            let dH = 0;
+            let dS = 0;
+
+            // Initiation
+            dH += -0.2;
+            dS += -5.7;
+
+            // Sum nearest-neighbor parameters (simplified)
+            for (let i = 0; i < strand1.length - 1; i++) {
+                const pair = strand1[i].base + strand1[i + 1].base;
+                // Approximate values
+                if (pair.includes('G') && pair.includes('C')) {
+                    dH += -9.0;
+                    dS += -24;
+                } else {
+                    dH += -7.0;
+                    dS += -20;
+                }
+            }
+
+            const T = temperature + 273.15;
+            return dH - (T * dS / 1000);
+        }
+
+        function step() {
+            time += 0.02;
+
+            const tm = calculateTm();
+            const dG = calculateDeltaG();
+
+            // Probability of hybridization based on temperature vs Tm
+            const hybridProb = 1 / (1 + Math.exp((temperature - tm) / 5));
+
+            if (!hybridized && Math.random() < hybridProb * 0.02) {
+                hybridized = true;
+            }
+
+            if (hybridized && Math.random() < (1 - hybridProb) * 0.01) {
+                hybridized = false;
+                hybridProgress = 0;
+            }
+
+            // Animate hybridization
+            if (hybridized && hybridProgress < 1) {
+                hybridProgress += 0.02;
+            } else if (!hybridized && hybridProgress > 0) {
+                hybridProgress -= 0.03;
+                hybridProgress = Math.max(0, hybridProgress);
+            }
+
+            // Update strand positions
+            const targetY1 = hybridized ? height / 2 - 25 : height / 2 - 100;
+            const targetY2 = hybridized ? height / 2 + 25 : height / 2 + 100;
+
+            for (let i = 0; i < strand1.length; i++) {
+                // Strand 1 moves down when hybridizing
+                strand1[i].y += (targetY1 - strand1[i].y) * 0.1;
+
+                // Strand 2 moves up
+                strand2[i].y += (targetY2 - strand2[i].y) * 0.1;
+
+                // Thermal motion
+                const thermal = Math.sqrt(temperature / 25);
+                strand1[i].x += (Math.random() - 0.5) * thermal * (1 - hybridProgress);
+                strand1[i].y += (Math.random() - 0.5) * thermal * (1 - hybridProgress);
+                strand2[i].x += (Math.random() - 0.5) * thermal * (1 - hybridProgress);
+                strand2[i].y += (Math.random() - 0.5) * thermal * (1 - hybridProgress);
+            }
+
+            updateStats();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, width, height);
+
+            const baseSize = 15;
+            const spacing = 25;
+
+            // Draw backbone (sugar-phosphate)
+            ctx.strokeStyle = '#888';
+            ctx.lineWidth = 3;
+
+            // Strand 1 backbone
+            ctx.beginPath();
+            for (let i = 0; i < strand1.length; i++) {
+                const b = strand1[i];
+                if (i === 0) ctx.moveTo(b.x, b.y);
+                else ctx.lineTo(b.x, b.y);
+            }
+            ctx.stroke();
+
+            // Strand 2 backbone
+            ctx.beginPath();
+            for (let i = 0; i < strand2.length; i++) {
+                const b = strand2[i];
+                if (i === 0) ctx.moveTo(b.x, b.y);
+                else ctx.lineTo(b.x, b.y);
+            }
+            ctx.stroke();
+
+            // Draw hydrogen bonds when hybridized
+            if (hybridProgress > 0) {
+                ctx.strokeStyle = `rgba(255, 255, 255, ${hybridProgress * 0.5})`;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+
+                for (let i = 0; i < strand1.length; i++) {
+                    const b1 = strand1[i];
+                    const b2 = strand2[i];
+
+                    // Number of H-bonds: A-T = 2, G-C = 3
+                    const numBonds = (b1.base === 'G' || b1.base === 'C') ? 3 : 2;
+
+                    for (let j = 0; j < numBonds; j++) {
+                        const offset = (j - (numBonds - 1) / 2) * 3;
+                        ctx.beginPath();
+                        ctx.moveTo(b1.x + offset, b1.y + baseSize);
+                        ctx.lineTo(b2.x + offset, b2.y - baseSize);
+                        ctx.stroke();
+                    }
+                }
+                ctx.setLineDash([]);
+            }
+
+            // Draw bases
+            for (let i = 0; i < strand1.length; i++) {
+                // Strand 1 base
+                const b1 = strand1[i];
+                ctx.fillStyle = BASE_COLORS[b1.base];
+                ctx.beginPath();
+                ctx.arc(b1.x, b1.y, baseSize, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.fillText(b1.base, b1.x - 4, b1.y + 4);
+
+                // Strand 2 base
+                const b2 = strand2[i];
+                ctx.fillStyle = BASE_COLORS[b2.base];
+                ctx.beginPath();
+                ctx.arc(b2.x, b2.y, baseSize, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.fillText(b2.base, b2.x - 4, b2.y + 4);
+            }
+
+            // Direction labels
+            ctx.fillStyle = '#aaa';
+            ctx.font = '11px sans-serif';
+            ctx.fillText("5'", strand1[0].x - 25, strand1[0].y);
+            ctx.fillText("3'", strand1[strand1.length - 1].x + 20, strand1[strand1.length - 1].y);
+            ctx.fillText("3'", strand2[0].x - 25, strand2[0].y);
+            ctx.fillText("5'", strand2[strand2.length - 1].x + 20, strand2[strand2.length - 1].y);
+
+            // Legend
+            ctx.fillStyle = '#03a9f4';
+            ctx.font = '14px sans-serif';
+            ctx.fillText('DNA Duplex Formation', 100, 50);
+
+            // Base pair legend
+            const legendY = height - 60;
+            Object.entries(BASE_COLORS).forEach(([base, color], i) => {
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(100 + i * 70, legendY, 10, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.font = '10px sans-serif';
+                ctx.fillText(base, 96 + i * 70, legendY + 3);
+            });
+
+            // Base pairing rules
+            ctx.fillStyle = '#aaa';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('A-T: 2 H-bonds  |  G-C: 3 H-bonds', 100, height - 25);
+
+            // Melting curve
+            drawMeltingCurve();
+        }
+
+        function drawMeltingCurve() {
+            const plotX = width - 280;
+            const plotY = 100;
+            const plotW = 200;
+            const plotH = 150;
+
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(plotX - 10, plotY - 20, plotW + 20, plotH + 50);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Melting Curve', plotX, plotY - 5);
+
+            const tm = calculateTm();
+
+            // Draw sigmoidal curve
+            ctx.strokeStyle = '#03a9f4';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+
+            for (let i = 0; i <= 100; i++) {
+                const T = 10 + i * 0.85; // 10-95°C
+                const frac = 1 / (1 + Math.exp((T - tm) / 5));
+                const x = plotX + (i / 100) * plotW;
+                const y = plotY + plotH - frac * plotH;
+
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Current temperature marker
+            const currentFrac = 1 / (1 + Math.exp((temperature - tm) / 5));
+            const markerX = plotX + ((temperature - 10) / 85) * plotW;
+            const markerY = plotY + plotH - currentFrac * plotH;
+
+            ctx.fillStyle = '#ffeb3b';
+            ctx.beginPath();
+            ctx.arc(markerX, markerY, 6, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Tm line
+            ctx.strokeStyle = '#f44336';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            const tmX = plotX + ((tm - 10) / 85) * plotW;
+            ctx.beginPath();
+            ctx.moveTo(tmX, plotY);
+            ctx.lineTo(tmX, plotY + plotH);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = '#f44336';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Tm', tmX - 8, plotY + plotH + 15);
+
+            // Axes labels
+            ctx.fillStyle = '#888';
+            ctx.fillText('Temperature (°C)', plotX + plotW / 2 - 40, plotY + plotH + 30);
+        }
+
+        function updateStats() {
+            const tm = calculateTm();
+            const dG = calculateDeltaG();
+            const frac = 1 / (1 + Math.exp((temperature - tm) / 5));
+
+            // Count H-bonds
+            let hbonds = 0;
+            if (hybridProgress > 0.5) {
+                for (const b of strand1) {
+                    hbonds += (b.base === 'G' || b.base === 'C') ? 3 : 2;
+                }
+            }
+
+            document.getElementById('tm').textContent = tm.toFixed(1);
+            document.getElementById('hybridized').textContent = (frac * 100).toFixed(1);
+            document.getElementById('deltaG').textContent = dG.toFixed(2);
+            document.getElementById('hbonds').textContent = hbonds;
+        }
+
+        function animate() {
+            if (running) {
+                step();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('temperature').addEventListener('input', e => {
+            temperature = parseInt(e.target.value);
+            document.getElementById('tempVal').textContent = temperature;
+        });
+
+        document.getElementById('salt').addEventListener('input', e => {
+            saltConc = parseInt(e.target.value);
+            document.getElementById('saltVal').textContent = saltConc;
+        });
+
+        document.getElementById('gc').addEventListener('input', e => {
+            gcContent = parseInt(e.target.value);
+            document.getElementById('gcVal').textContent = gcContent;
+        });
+
+        document.getElementById('length').addEventListener('input', e => {
+            strandLength = parseInt(e.target.value);
+            document.getElementById('lenVal').textContent = strandLength;
+        });
+
+        document.getElementById('reset').addEventListener('click', init);
+        document.getElementById('toggleRun').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('toggleRun').textContent = running ? 'Pause' : 'Run';
+        });
+
+        window.addEventListener('resize', init);
+
+        init();
+        animate();
+    </script>
+</body>
+</html>

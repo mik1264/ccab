@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hybrid Zone Dynamics - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #06b6d4; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #06b6d4; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #06b6d4; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #0891b2; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #06b6d4; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #06b6d4; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(6,182,212,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #06b6d4; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🌊 Hybrid Zone Dynamics</h1>
+            <p class="description">
+                Hybrid zones form where different populations meet. Cline width depends
+                on the balance between selection against hybrids and gene flow.
+                Zones can be stable, move, or collapse over time.
+            </p>
+
+            <div class="control-group">
+                <label>Grid Size: <span class="value-display" id="gridValue">50</span></label>
+                <input type="range" id="gridSlider" min="30" max="80" value="50">
+            </div>
+
+            <div class="control-group">
+                <label>Selection (s): <span class="value-display" id="selValue">0.3</span></label>
+                <input type="range" id="selSlider" min="0" max="0.8" step="0.05" value="0.3">
+            </div>
+
+            <div class="control-group">
+                <label>Dispersal (σ): <span class="value-display" id="dispValue">2</span></label>
+                <input type="range" id="dispSlider" min="1" max="5" step="0.5" value="2">
+            </div>
+
+            <div class="control-group">
+                <label>Hybrid Fitness: <span class="value-display" id="hybridValue">0.5</span></label>
+                <input type="range" id="hybridSlider" min="0" max="1" step="0.1" value="0.5">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Cline Width: <span id="clineWidth">0.00</span></div>
+                <div>Cline Center: <span id="clineCenter">0.50</span></div>
+                <div>Hybrid Frequency: <span id="hybridFreq">0.00</span></div>
+                <div>Expected Width (σ/√s): <span id="expectedWidth">0.00</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Tension Zone Theory:</strong> Cline width ≈ σ/√s where σ is dispersal
+                and s is selection. Narrow zones indicate strong selection or limited dispersal.
+                Zones can move due to asymmetric fitness, density, or genetic factors.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let grid = [];
+        let clineHistory = [];
+
+        let gridSize = 50;
+        let selection = 0.3;
+        let dispersal = 2;
+        let hybridFitness = 0.5;
+
+        function initGrid() {
+            grid = [];
+            clineHistory = [];
+
+            for (let x = 0; x < gridSize; x++) {
+                grid[x] = [];
+                for (let y = 0; y < gridSize; y++) {
+                    // Allele frequency: 0 = species A, 1 = species B
+                    // Initial cline at center
+                    const freq = x < gridSize / 2 ? 0 : 1;
+                    grid[x][y] = {
+                        freq: freq + (Math.random() - 0.5) * 0.1,
+                        fitness: 1
+                    };
+                    grid[x][y].freq = Math.max(0, Math.min(1, grid[x][y].freq));
+                }
+            }
+        }
+
+        function calculateFitness(freq) {
+            // Heterozygote (intermediate freq) has reduced fitness
+            // Using quadratic approximation
+            const heterozygosity = 2 * freq * (1 - freq);
+            return 1 - (1 - hybridFitness) * heterozygosity * selection;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+
+            const newGrid = [];
+
+            for (let x = 0; x < gridSize; x++) {
+                newGrid[x] = [];
+                for (let y = 0; y < gridSize; y++) {
+                    // Gene flow from neighbors (weighted by distance)
+                    let totalWeight = 0;
+                    let weightedFreq = 0;
+
+                    for (let dx = -3; dx <= 3; dx++) {
+                        for (let dy = -3; dy <= 3; dy++) {
+                            const nx = x + dx;
+                            const ny = y + dy;
+                            if (nx >= 0 && nx < gridSize && ny >= 0 && ny < gridSize) {
+                                const dist = Math.sqrt(dx * dx + dy * dy);
+                                // Gaussian dispersal kernel
+                                const weight = Math.exp(-dist * dist / (2 * dispersal * dispersal));
+                                totalWeight += weight;
+                                weightedFreq += grid[nx][ny].freq * weight;
+                            }
+                        }
+                    }
+
+                    let newFreq = weightedFreq / totalWeight;
+
+                    // Selection
+                    const fitness = calculateFitness(grid[x][y].freq);
+                    const neighborFitness = calculateFitness(newFreq);
+
+                    // Frequency change due to selection
+                    if (Math.random() < selection) {
+                        // Move toward homozygosity
+                        if (newFreq > 0.5) {
+                            newFreq = Math.min(1, newFreq + (1 - hybridFitness) * 0.1);
+                        } else {
+                            newFreq = Math.max(0, newFreq - (1 - hybridFitness) * 0.1);
+                        }
+                    }
+
+                    // Random drift
+                    newFreq += (Math.random() - 0.5) * 0.02;
+                    newFreq = Math.max(0, Math.min(1, newFreq));
+
+                    newGrid[x][y] = {
+                        freq: newFreq,
+                        fitness: calculateFitness(newFreq)
+                    };
+                }
+            }
+
+            grid = newGrid;
+
+            // Calculate cline statistics
+            const clineStats = calculateCline();
+            clineHistory.push(clineStats);
+            if (clineHistory.length > 200) clineHistory.shift();
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function calculateCline() {
+            // Average frequency across y-axis for each x position
+            const profile = [];
+            for (let x = 0; x < gridSize; x++) {
+                let sum = 0;
+                for (let y = 0; y < gridSize; y++) {
+                    sum += grid[x][y].freq;
+                }
+                profile.push(sum / gridSize);
+            }
+
+            // Find cline center (where freq = 0.5)
+            let center = gridSize / 2;
+            for (let x = 0; x < gridSize - 1; x++) {
+                if ((profile[x] < 0.5 && profile[x + 1] >= 0.5) ||
+                    (profile[x] > 0.5 && profile[x + 1] <= 0.5)) {
+                    center = x + (0.5 - profile[x]) / (profile[x + 1] - profile[x]);
+                    break;
+                }
+            }
+
+            // Estimate cline width (10%-90% transition)
+            let x10 = 0, x90 = gridSize;
+            for (let x = 0; x < gridSize; x++) {
+                if (profile[x] > 0.1 && x10 === 0) x10 = x;
+                if (profile[x] > 0.9) { x90 = x; break; }
+            }
+            const width = Math.abs(x90 - x10);
+
+            return { center: center / gridSize, width: width / gridSize, profile };
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const gridAreaSize = Math.min(canvas.width - padding * 2, (canvas.height - padding * 3) / 2);
+            const cellSize = gridAreaSize / gridSize;
+
+            // Draw grid
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Spatial Distribution (Allele Frequency)', padding, 25);
+
+            for (let x = 0; x < gridSize; x++) {
+                for (let y = 0; y < gridSize; y++) {
+                    const freq = grid[x][y].freq;
+                    // Blue (species A) to Red (species B)
+                    const r = Math.floor(freq * 255);
+                    const b = Math.floor((1 - freq) * 255);
+                    const g = Math.floor(Math.min(freq, 1 - freq) * 2 * 100); // Green for hybrids
+
+                    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+                    ctx.fillRect(
+                        padding + x * cellSize,
+                        padding + y * cellSize,
+                        cellSize,
+                        cellSize
+                    );
+                }
+            }
+
+            // Draw cline center line
+            if (clineHistory.length > 0) {
+                const lastStats = clineHistory[clineHistory.length - 1];
+                const centerX = padding + lastStats.center * gridAreaSize;
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                ctx.moveTo(centerX, padding);
+                ctx.lineTo(centerX, padding + gridAreaSize);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Labels
+            ctx.fillStyle = '#888';
+            ctx.fillText('Species A', padding, padding + gridAreaSize + 15);
+            ctx.fillText('Species B', padding + gridAreaSize - 60, padding + gridAreaSize + 15);
+
+            // Cline profile and history
+            const chartY = padding * 2 + gridAreaSize + 20;
+            const chartHeight = canvas.height - chartY - padding;
+
+            ctx.fillText('Cline Profile Over Time', padding, chartY - 10);
+
+            // Draw current cline profile
+            if (clineHistory.length > 0) {
+                const lastStats = clineHistory[clineHistory.length - 1];
+
+                ctx.strokeStyle = '#06b6d4';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < lastStats.profile.length; i++) {
+                    const x = padding + (i / gridSize) * gridAreaSize;
+                    const y = chartY + chartHeight - lastStats.profile[i] * chartHeight;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Draw cline center history
+                ctx.strokeStyle = '#f59e0b';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let i = 0; i < clineHistory.length; i++) {
+                    const x = padding + gridAreaSize + 30 + (i / clineHistory.length) * (canvas.width - gridAreaSize - padding * 2 - 30);
+                    const y = chartY + chartHeight - clineHistory[i].center * chartHeight;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // Axes
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + chartHeight);
+            ctx.lineTo(padding + gridAreaSize, chartY + chartHeight);
+            ctx.stroke();
+
+            ctx.fillStyle = '#888';
+            ctx.fillText('Freq', padding - 30, chartY + chartHeight / 2);
+            ctx.fillText('Position', padding + gridAreaSize / 2 - 20, chartY + chartHeight + 15);
+        }
+
+        function updateStats() {
+            if (clineHistory.length === 0) return;
+
+            const stats = clineHistory[clineHistory.length - 1];
+            const expectedWidth = dispersal / Math.sqrt(selection) / gridSize;
+
+            // Count hybrids (intermediate frequencies)
+            let hybridCount = 0;
+            for (let x = 0; x < gridSize; x++) {
+                for (let y = 0; y < gridSize; y++) {
+                    const freq = grid[x][y].freq;
+                    if (freq > 0.2 && freq < 0.8) hybridCount++;
+                }
+            }
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('clineWidth').textContent = stats.width.toFixed(3);
+            document.getElementById('clineCenter').textContent = stats.center.toFixed(3);
+            document.getElementById('hybridFreq').textContent = (hybridCount / (gridSize * gridSize)).toFixed(3);
+            document.getElementById('expectedWidth').textContent = expectedWidth.toFixed(3);
+        }
+
+        document.getElementById('gridSlider').addEventListener('input', (e) => {
+            gridSize = parseInt(e.target.value);
+            document.getElementById('gridValue').textContent = gridSize;
+        });
+
+        document.getElementById('selSlider').addEventListener('input', (e) => {
+            selection = parseFloat(e.target.value);
+            document.getElementById('selValue').textContent = selection.toFixed(2);
+        });
+
+        document.getElementById('dispSlider').addEventListener('input', (e) => {
+            dispersal = parseFloat(e.target.value);
+            document.getElementById('dispValue').textContent = dispersal.toFixed(1);
+        });
+
+        document.getElementById('hybridSlider').addEventListener('input', (e) => {
+            hybridFitness = parseFloat(e.target.value);
+            document.getElementById('hybridValue').textContent = hybridFitness.toFixed(1);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initGrid();
+            render();
+            updateStats();
+        });
+
+        initGrid();
+        render();
+    </script>
+</body>
+</html>

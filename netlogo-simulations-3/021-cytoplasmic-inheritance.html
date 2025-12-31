@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cytoplasmic Inheritance - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #f472b6; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #f472b6; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #f472b6; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #ec4899; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #f472b6; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #f472b6; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(244,114,182,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #f472b6; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🧬 Cytoplasmic Inheritance</h1>
+            <p class="description">
+                Mitochondrial DNA (mtDNA) is maternally inherited. Without recombination,
+                deleterious mutations accumulate (Muller's ratchet). The mtDNA bottleneck
+                during development helps purge mutations.
+            </p>
+
+            <div class="control-group">
+                <label>Population Size: <span class="value-display" id="popValue">100</span></label>
+                <input type="range" id="popSlider" min="50" max="300" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>mtDNA per Cell: <span class="value-display" id="mtValue">100</span></label>
+                <input type="range" id="mtSlider" min="20" max="500" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Bottleneck Size: <span class="value-display" id="bnValue">20</span></label>
+                <input type="range" id="bnSlider" min="1" max="100" value="20">
+            </div>
+
+            <div class="control-group">
+                <label>Mutation Rate: <span class="value-display" id="mutValue">0.01</span></label>
+                <input type="range" id="mutSlider" min="0.001" max="0.05" step="0.001" value="0.01">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Mean Mutation Load: <span id="mutLoad">0.00</span></div>
+                <div>Mean Fitness: <span id="meanFitness">1.00</span></div>
+                <div>Mt Heteroplasmy: <span id="heteroplasmy">0.00</span></div>
+                <div>Ratchet Clicks: <span id="ratchet">0</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Muller's Ratchet:</strong> Without recombination, the least-loaded
+                class can be lost by drift, causing irreversible accumulation of mutations.
+                The bottleneck increases variance, enabling selection among cells.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let population = [];
+        let loadHistory = [];
+        let fitnessHistory = [];
+        let ratchetClicks = 0;
+        let lastMinLoad = 0;
+
+        let popSize = 100;
+        let mtPerCell = 100;
+        let bottleneckSize = 20;
+        let mutRate = 0.01;
+
+        class Individual {
+            constructor(mtDNA = null) {
+                // Each mtDNA has a mutation count
+                this.mtDNA = mtDNA || new Array(mtPerCell).fill(0);
+            }
+
+            get mutationLoad() {
+                return this.mtDNA.reduce((a, b) => a + b, 0) / this.mtDNA.length;
+            }
+
+            get heteroplasmy() {
+                // Variance in mutation counts
+                const mean = this.mutationLoad;
+                const variance = this.mtDNA.reduce((sum, m) => sum + Math.pow(m - mean, 2), 0) / this.mtDNA.length;
+                return Math.sqrt(variance);
+            }
+
+            get fitness() {
+                // Fitness decreases with mutation load
+                return Math.exp(-0.1 * this.mutationLoad);
+            }
+
+            replicate() {
+                // Bottleneck: sample subset of mtDNA
+                const sampled = [];
+                for (let i = 0; i < bottleneckSize; i++) {
+                    const idx = Math.floor(Math.random() * this.mtDNA.length);
+                    sampled.push(this.mtDNA[idx]);
+                }
+
+                // Amplify back to full size
+                const newMt = [];
+                while (newMt.length < mtPerCell) {
+                    const template = sampled[Math.floor(Math.random() * sampled.length)];
+                    // Mutation during replication
+                    let muts = template;
+                    if (Math.random() < mutRate) {
+                        muts = template + 1;
+                    }
+                    newMt.push(muts);
+                }
+
+                return new Individual(newMt);
+            }
+        }
+
+        function initPopulation() {
+            population = [];
+            loadHistory = [];
+            fitnessHistory = [];
+            ratchetClicks = 0;
+            lastMinLoad = 0;
+
+            for (let i = 0; i < popSize; i++) {
+                population.push(new Individual());
+            }
+        }
+
+        function reproduce() {
+            const totalFit = population.reduce((sum, ind) => sum + ind.fitness, 0);
+            const newPop = [];
+
+            const selectMother = () => {
+                let r = Math.random() * totalFit;
+                for (const ind of population) {
+                    r -= ind.fitness;
+                    if (r <= 0) return ind;
+                }
+                return population[population.length - 1];
+            };
+
+            while (newPop.length < popSize) {
+                const mother = selectMother();
+                newPop.push(mother.replicate());
+            }
+
+            population = newPop;
+        }
+
+        function checkRatchet() {
+            const minLoad = Math.min(...population.map(ind => Math.min(...ind.mtDNA)));
+            if (minLoad > lastMinLoad) {
+                ratchetClicks++;
+                lastMinLoad = minLoad;
+            }
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+            reproduce();
+            checkRatchet();
+
+            const meanLoad = population.reduce((sum, ind) => sum + ind.mutationLoad, 0) / popSize;
+            const meanFit = population.reduce((sum, ind) => sum + ind.fitness, 0) / popSize;
+
+            loadHistory.push(meanLoad);
+            fitnessHistory.push(meanFit);
+
+            if (loadHistory.length > 400) {
+                loadHistory.shift();
+                fitnessHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2;
+
+            // mtDNA visualization for sample individuals
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('mtDNA Mutation Loads (sample individuals)', padding, 25);
+
+            const sampleSize = Math.min(20, popSize);
+            const mtWidth = Math.min(4, (width - 20) / mtPerCell);
+            const rowHeight = (height - 30) / sampleSize;
+
+            for (let i = 0; i < sampleSize; i++) {
+                const ind = population[i];
+                for (let j = 0; j < ind.mtDNA.length; j++) {
+                    const x = padding + j * mtWidth;
+                    const y = padding + i * rowHeight;
+
+                    // Color by mutation count
+                    const muts = ind.mtDNA[j];
+                    const intensity = Math.min(255, muts * 50);
+                    ctx.fillStyle = `rgb(${244}, ${114 - intensity / 2}, ${182 - intensity / 2})`;
+                    ctx.fillRect(x, y, mtWidth - 0.5, rowHeight - 1);
+                }
+            }
+
+            // Mutation load distribution
+            ctx.fillStyle = '#888';
+            ctx.fillText('Mutations: 0 = pink, many = dark', padding, padding + height - 5);
+
+            // Mutation load over time
+            const chartY = padding * 2 + height;
+            ctx.fillText('Mean Mutation Load Over Time (Muller\'s Ratchet)', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            if (loadHistory.length > 1) {
+                const maxLoad = Math.max(...loadHistory) * 1.1 || 1;
+
+                ctx.strokeStyle = '#f472b6';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < loadHistory.length; i++) {
+                    const x = padding + (i / loadHistory.length) * width;
+                    const y = chartY + height - (loadHistory[i] / maxLoad) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Fitness line
+                ctx.strokeStyle = '#22c55e';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                for (let i = 0; i < fitnessHistory.length; i++) {
+                    const x = padding + (i / fitnessHistory.length) * width;
+                    const y = chartY + height - fitnessHistory[i] * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Legend
+            ctx.fillStyle = '#f472b6';
+            ctx.fillRect(padding + width - 120, chartY + 15, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Mut Load', padding + width - 100, chartY + 23);
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(padding + width - 120, chartY + 30, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Fitness', padding + width - 100, chartY + 38);
+        }
+
+        function updateStats() {
+            const meanLoad = population.reduce((sum, ind) => sum + ind.mutationLoad, 0) / popSize;
+            const meanFit = population.reduce((sum, ind) => sum + ind.fitness, 0) / popSize;
+            const meanHet = population.reduce((sum, ind) => sum + ind.heteroplasmy, 0) / popSize;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('mutLoad').textContent = meanLoad.toFixed(3);
+            document.getElementById('meanFitness').textContent = meanFit.toFixed(4);
+            document.getElementById('heteroplasmy').textContent = meanHet.toFixed(3);
+            document.getElementById('ratchet').textContent = ratchetClicks;
+        }
+
+        document.getElementById('popSlider').addEventListener('input', (e) => {
+            popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = popSize;
+        });
+
+        document.getElementById('mtSlider').addEventListener('input', (e) => {
+            mtPerCell = parseInt(e.target.value);
+            document.getElementById('mtValue').textContent = mtPerCell;
+        });
+
+        document.getElementById('bnSlider').addEventListener('input', (e) => {
+            bottleneckSize = parseInt(e.target.value);
+            document.getElementById('bnValue').textContent = bottleneckSize;
+        });
+
+        document.getElementById('mutSlider').addEventListener('input', (e) => {
+            mutRate = parseFloat(e.target.value);
+            document.getElementById('mutValue').textContent = mutRate.toFixed(3);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

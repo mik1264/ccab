@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Path Tracer - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; max-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input { width: 100%; }
+        .controls button { margin-top: 10px; padding: 8px 16px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; width: 100%; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="controls">
+        <label>Max Bounces: <span id="bouncesVal">4</span></label>
+        <input type="range" id="bounces" min="1" max="8" step="1" value="4">
+        <label>Samples/Frame: <span id="samplesVal">1</span></label>
+        <input type="range" id="samples" min="1" max="4" step="1" value="1">
+        <button onclick="resetAccumulator()">Reset Image</button>
+        <p style="font-size: 10px; color: #888; margin-top: 10px;">Image progressively refines over time</p>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Samples: <span id="totalSamples">0</span>
+    </div>
+
+    <div id="error">WebGPU not supported</div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        canvas.width = Math.min(window.innerWidth, 1280);
+        canvas.height = Math.min(window.innerHeight, 720);
+
+        let maxBounces = 4;
+        let samplesPerFrame = 1;
+        let totalSamples = 0;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        // Path tracing compute shader
+        const computeShader = `
+            struct Uniforms {
+                width: u32,
+                height: u32,
+                frame: u32,
+                maxBounces: u32,
+                samples: u32,
+            }
+
+            @group(0) @binding(0) var<storage, read_write> accumulator: array<vec4f>;
+            @group(0) @binding(1) var<uniform> uniforms: Uniforms;
+            @group(0) @binding(2) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+
+            struct Ray {
+                origin: vec3f,
+                direction: vec3f,
+            }
+
+            struct HitInfo {
+                hit: bool,
+                t: f32,
+                pos: vec3f,
+                normal: vec3f,
+                material: u32,
+            }
+
+            fn random(seed: ptr<function, u32>) -> f32 {
+                *seed = *seed * 747796405u + 2891336453u;
+                let word = ((*seed >> ((*seed >> 28u) + 4u)) ^ *seed) * 277803737u;
+                return f32((word >> 22u) ^ word) / 4294967295.0;
+            }
+
+            fn randomInUnitSphere(seed: ptr<function, u32>) -> vec3f {
+                loop {
+                    let p = vec3f(
+                        random(seed) * 2.0 - 1.0,
+                        random(seed) * 2.0 - 1.0,
+                        random(seed) * 2.0 - 1.0
+                    );
+                    if (dot(p, p) < 1.0) { return normalize(p); }
+                }
+            }
+
+            fn intersectSphere(ray: Ray, center: vec3f, radius: f32) -> HitInfo {
+                var hit: HitInfo;
+                hit.hit = false;
+
+                let oc = ray.origin - center;
+                let a = dot(ray.direction, ray.direction);
+                let b = dot(oc, ray.direction);
+                let c = dot(oc, oc) - radius * radius;
+                let discriminant = b * b - a * c;
+
+                if (discriminant > 0.0) {
+                    let t = (-b - sqrt(discriminant)) / a;
+                    if (t > 0.001) {
+                        hit.hit = true;
+                        hit.t = t;
+                        hit.pos = ray.origin + ray.direction * t;
+                        hit.normal = normalize(hit.pos - center);
+                    }
+                }
+                return hit;
+            }
+
+            fn intersectPlane(ray: Ray, y: f32) -> HitInfo {
+                var hit: HitInfo;
+                hit.hit = false;
+
+                if (abs(ray.direction.y) > 0.0001) {
+                    let t = (y - ray.origin.y) / ray.direction.y;
+                    if (t > 0.001) {
+                        hit.hit = true;
+                        hit.t = t;
+                        hit.pos = ray.origin + ray.direction * t;
+                        hit.normal = vec3f(0.0, 1.0, 0.0);
+                    }
+                }
+                return hit;
+            }
+
+            fn trace(ray: Ray) -> HitInfo {
+                var closest: HitInfo;
+                closest.hit = false;
+                closest.t = 1e20;
+
+                // Ground plane
+                let plane = intersectPlane(ray, -1.0);
+                if (plane.hit && plane.t < closest.t) {
+                    closest = plane;
+                    closest.material = 0u; // Diffuse floor
+                }
+
+                // Spheres
+                let s1 = intersectSphere(ray, vec3f(0.0, 0.0, -3.0), 1.0);
+                if (s1.hit && s1.t < closest.t) {
+                    closest = s1;
+                    closest.material = 1u; // Red diffuse
+                }
+
+                let s2 = intersectSphere(ray, vec3f(-2.0, 0.0, -4.0), 1.0);
+                if (s2.hit && s2.t < closest.t) {
+                    closest = s2;
+                    closest.material = 2u; // Metal
+                }
+
+                let s3 = intersectSphere(ray, vec3f(2.0, 0.0, -4.0), 1.0);
+                if (s3.hit && s3.t < closest.t) {
+                    closest = s3;
+                    closest.material = 3u; // Glass
+                }
+
+                let s4 = intersectSphere(ray, vec3f(0.0, 1.5, -3.0), 0.5);
+                if (s4.hit && s4.t < closest.t) {
+                    closest = s4;
+                    closest.material = 4u; // Emissive
+                }
+
+                return closest;
+            }
+
+            fn getMaterialColor(material: u32, pos: vec3f) -> vec3f {
+                switch material {
+                    case 0u: {
+                        // Checkerboard floor
+                        let checker = floor(pos.x) + floor(pos.z);
+                        if (fract(checker * 0.5) < 0.5) {
+                            return vec3f(0.9, 0.9, 0.9);
+                        }
+                        return vec3f(0.1, 0.1, 0.1);
+                    }
+                    case 1u: { return vec3f(0.8, 0.2, 0.2); }
+                    case 2u: { return vec3f(0.9, 0.9, 0.9); }
+                    case 3u: { return vec3f(1.0, 1.0, 1.0); }
+                    case 4u: { return vec3f(1.0, 1.0, 1.0); }
+                    default: { return vec3f(0.5, 0.5, 0.5); }
+                }
+            }
+
+            fn pathTrace(ray: Ray, seed: ptr<function, u32>) -> vec3f {
+                var currentRay = ray;
+                var color = vec3f(1.0);
+                var light = vec3f(0.0);
+
+                for (var bounce = 0u; bounce < uniforms.maxBounces; bounce++) {
+                    let hit = trace(currentRay);
+
+                    if (!hit.hit) {
+                        // Sky gradient
+                        let t = 0.5 * (currentRay.direction.y + 1.0);
+                        let sky = mix(vec3f(1.0, 1.0, 1.0), vec3f(0.5, 0.7, 1.0), t);
+                        light += color * sky;
+                        break;
+                    }
+
+                    let matColor = getMaterialColor(hit.material, hit.pos);
+
+                    // Emissive material
+                    if (hit.material == 4u) {
+                        light += color * matColor * 5.0;
+                        break;
+                    }
+
+                    // Reflection
+                    if (hit.material == 2u) {
+                        // Metal reflection
+                        currentRay.origin = hit.pos;
+                        currentRay.direction = reflect(currentRay.direction, hit.normal);
+                        currentRay.direction += randomInUnitSphere(seed) * 0.1;
+                        currentRay.direction = normalize(currentRay.direction);
+                        color *= matColor * 0.9;
+                    } else if (hit.material == 3u) {
+                        // Glass (simplified)
+                        currentRay.origin = hit.pos;
+                        if (random(seed) < 0.1) {
+                            currentRay.direction = reflect(currentRay.direction, hit.normal);
+                        } else {
+                            currentRay.direction = refract(currentRay.direction, hit.normal, 0.66);
+                        }
+                        color *= matColor;
+                    } else {
+                        // Diffuse
+                        currentRay.origin = hit.pos;
+                        currentRay.direction = normalize(hit.normal + randomInUnitSphere(seed));
+                        color *= matColor * 0.6;
+                    }
+                }
+
+                return light;
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= uniforms.width || id.y >= uniforms.height) { return; }
+
+                let pixelIndex = id.y * uniforms.width + id.x;
+                var seed = (id.x * 1973u + id.y * 9277u + uniforms.frame * 26699u) | 1u;
+
+                var color = vec3f(0.0);
+
+                for (var s = 0u; s < uniforms.samples; s++) {
+                    let u = (f32(id.x) + random(&seed)) / f32(uniforms.width) * 2.0 - 1.0;
+                    let v = (f32(id.y) + random(&seed)) / f32(uniforms.height) * -2.0 + 1.0;
+
+                    let aspect = f32(uniforms.width) / f32(uniforms.height);
+
+                    var ray: Ray;
+                    ray.origin = vec3f(0.0, 1.0, 3.0);
+                    ray.direction = normalize(vec3f(u * aspect, v, -1.5));
+
+                    color += pathTrace(ray, &seed);
+                }
+
+                color /= f32(uniforms.samples);
+
+                // Accumulate
+                let prev = accumulator[pixelIndex];
+                let weight = 1.0 / f32(uniforms.frame + 1u);
+                let accumulated = mix(prev.rgb, color, weight);
+                accumulator[pixelIndex] = vec4f(accumulated, 1.0);
+
+                // Gamma correction and output
+                let gamma = pow(accumulated, vec3f(1.0 / 2.2));
+                textureStore(outputTexture, vec2i(id.xy), vec4f(gamma, 1.0));
+            }
+        `;
+
+        const renderShader = `
+            @group(0) @binding(0) var inputTexture: texture_2d<f32>;
+            @group(0) @binding(1) var texSampler: sampler;
+
+            struct VertexOutput {
+                @builtin(position) position: vec4f,
+                @location(0) uv: vec2f,
+            }
+
+            @vertex
+            fn vertexMain(@builtin(vertex_index) idx: u32) -> VertexOutput {
+                var positions = array<vec2f, 4>(
+                    vec2f(-1.0, -1.0), vec2f(1.0, -1.0),
+                    vec2f(-1.0, 1.0), vec2f(1.0, 1.0)
+                );
+                var uvs = array<vec2f, 4>(
+                    vec2f(0.0, 1.0), vec2f(1.0, 1.0),
+                    vec2f(0.0, 0.0), vec2f(1.0, 0.0)
+                );
+
+                var output: VertexOutput;
+                output.position = vec4f(positions[idx], 0.0, 1.0);
+                output.uv = uvs[idx];
+                return output;
+            }
+
+            @fragment
+            fn fragmentMain(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(inputTexture, texSampler, uv);
+            }
+        `;
+
+        // Create pipelines
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' }
+        });
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'vertexMain' },
+            fragment: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'fragmentMain', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        // Create buffers
+        const accumulatorBuffer = device.createBuffer({
+            size: canvas.width * canvas.height * 16,
+            usage: GPUBufferUsage.STORAGE
+        });
+
+        const uniformBuffer = device.createBuffer({
+            size: 20,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+
+        const outputTexture = device.createTexture({
+            size: [canvas.width, canvas.height],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const computeBindGroup = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: accumulatorBuffer } },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+                { binding: 2, resource: outputTexture.createView() }
+            ]
+        });
+
+        const renderBindGroup = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outputTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let frame = 0;
+        let lastTime = performance.now();
+
+        function resetAccumulator() {
+            frame = 0;
+            totalSamples = 0;
+        }
+
+        function render() {
+            const now = performance.now();
+            const fps = Math.round(1000 / (now - lastTime));
+            lastTime = now;
+
+            document.getElementById('fps').textContent = fps;
+            totalSamples += samplesPerFrame;
+            document.getElementById('totalSamples').textContent = totalSamples;
+
+            const uniforms = new Uint32Array([
+                canvas.width, canvas.height, frame, maxBounces, samplesPerFrame
+            ]);
+            device.queue.writeBuffer(uniformBuffer, 0, uniforms);
+
+            const commandEncoder = device.createCommandEncoder();
+
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBindGroup);
+            computePass.dispatchWorkgroups(Math.ceil(canvas.width / 8), Math.ceil(canvas.height / 8));
+            computePass.end();
+
+            const renderPass = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    storeOp: 'store'
+                }]
+            });
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBindGroup);
+            renderPass.draw(4);
+            renderPass.end();
+
+            device.queue.submit([commandEncoder.finish()]);
+
+            frame++;
+            requestAnimationFrame(render);
+        }
+
+        window.resetAccumulator = resetAccumulator;
+
+        document.getElementById('bounces').addEventListener('input', (e) => {
+            maxBounces = parseInt(e.target.value);
+            document.getElementById('bouncesVal').textContent = maxBounces;
+            resetAccumulator();
+        });
+
+        document.getElementById('samples').addEventListener('input', (e) => {
+            samplesPerFrame = parseInt(e.target.value);
+            document.getElementById('samplesVal').textContent = samplesPerFrame;
+        });
+
+        render();
+    </script>
+</body>
+</html>

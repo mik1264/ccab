@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polyploid Speciation - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #84cc16; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #84cc16; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #84cc16; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #65a30d; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #84cc16; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #84cc16; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(132,204,22,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #84cc16; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🧫 Polyploid Speciation</h1>
+            <p class="description">
+                Whole-genome duplication creates instant reproductive isolation.
+                Polyploids cannot mate with diploid parents. Autopolyploids arise
+                within species; allopolyploids from hybridization + WGD.
+            </p>
+
+            <div class="control-group">
+                <label>Population Size: <span class="value-display" id="popValue">100</span></label>
+                <input type="range" id="popSlider" min="50" max="200" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>WGD Rate: <span class="value-display" id="wgdValue">0.01</span></label>
+                <input type="range" id="wgdSlider" min="0.001" max="0.05" step="0.001" value="0.01">
+            </div>
+
+            <div class="control-group">
+                <label>Polyploid Fitness: <span class="value-display" id="fitValue">1.1</span></label>
+                <input type="range" id="fitSlider" min="0.5" max="1.5" step="0.1" value="1.1">
+            </div>
+
+            <div class="control-group">
+                <label>Establishment Threshold: <span class="value-display" id="threshValue">3</span></label>
+                <input type="range" id="threshSlider" min="1" max="10" value="3">
+                <div style="font-size: 0.65rem; color: #666;">Min polyploids to persist</div>
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+            <button id="hybridBtn">Create Allopolyploid</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Diploids (2n): <span id="diploids">100</span></div>
+                <div>Tetraploids (4n): <span id="tetraploids">0</span></div>
+                <div>WGD Events: <span id="wgdEvents">0</span></div>
+                <div>Establishment Success: <span id="established">No</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Instant Speciation:</strong> Polyploids are reproductively isolated
+                from diploids immediately. Challenge: minority cytotype disadvantage
+                (finding mates). Solution: self-fertilization, clonal reproduction,
+                or multiple independent origins.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let population = [];
+        let ploidy2History = [];
+        let ploidy4History = [];
+        let wgdEvents = 0;
+
+        let popSize = 100;
+        let wgdRate = 0.01;
+        let polyploidFitness = 1.1;
+        let establishThreshold = 3;
+
+        class Individual {
+            constructor(ploidy = 2, x = null, y = null) {
+                this.ploidy = ploidy; // 2 = diploid, 4 = tetraploid
+                this.x = x !== null ? x : Math.random();
+                this.y = y !== null ? y : Math.random();
+                this.age = 0;
+            }
+
+            get fitness() {
+                // Tetraploids may have fitness advantage (or disadvantage)
+                return this.ploidy === 4 ? polyploidFitness : 1.0;
+            }
+
+            canMateWith(other) {
+                // Can only mate with same ploidy level
+                return this.ploidy === other.ploidy;
+            }
+
+            reproduce(mate) {
+                // Offspring inherit ploidy
+                const x = (this.x + mate.x) / 2 + (Math.random() - 0.5) * 0.1;
+                const y = (this.y + mate.y) / 2 + (Math.random() - 0.5) * 0.1;
+
+                // Rare WGD event during reproduction
+                let offspringPloidy = this.ploidy;
+                if (this.ploidy === 2 && Math.random() < wgdRate) {
+                    offspringPloidy = 4; // Whole genome duplication!
+                    wgdEvents++;
+                }
+
+                return new Individual(offspringPloidy,
+                    Math.max(0, Math.min(1, x)),
+                    Math.max(0, Math.min(1, y)));
+            }
+        }
+
+        function initPopulation() {
+            population = [];
+            ploidy2History = [];
+            ploidy4History = [];
+            wgdEvents = 0;
+
+            for (let i = 0; i < popSize; i++) {
+                population.push(new Individual(2));
+            }
+        }
+
+        function reproduce() {
+            const newPop = [];
+
+            // Group by ploidy
+            const diploids = population.filter(i => i.ploidy === 2);
+            const tetraploids = population.filter(i => i.ploidy === 4);
+
+            // Reproduction within ploidy groups
+            const reproduceGroup = (group, targetSize) => {
+                const offspring = [];
+                if (group.length < 2) {
+                    // Minority cytotype disadvantage - can't find mates
+                    // But can self-fertilize at reduced rate
+                    for (const ind of group) {
+                        if (Math.random() < 0.3) {
+                            offspring.push(ind.reproduce(ind));
+                        }
+                    }
+                    return offspring;
+                }
+
+                const fitnesses = group.map(i => i.fitness);
+                const totalFit = fitnesses.reduce((a, b) => a + b, 0);
+
+                const selectParent = () => {
+                    let r = Math.random() * totalFit;
+                    for (let i = 0; i < group.length; i++) {
+                        r -= fitnesses[i];
+                        if (r <= 0) return group[i];
+                    }
+                    return group[group.length - 1];
+                };
+
+                while (offspring.length < targetSize) {
+                    const p1 = selectParent();
+                    const p2 = selectParent();
+                    if (p1 !== p2) {
+                        offspring.push(p1.reproduce(p2));
+                    }
+                }
+
+                return offspring;
+            };
+
+            // Calculate target sizes based on relative fitness
+            const totalDiploidFit = diploids.reduce((s, i) => s + i.fitness, 0);
+            const totalTetraploidFit = tetraploids.reduce((s, i) => s + i.fitness, 0);
+            const totalFit = totalDiploidFit + totalTetraploidFit;
+
+            let targetDiploids = Math.round(popSize * (totalDiploidFit / totalFit));
+            let targetTetraploids = popSize - targetDiploids;
+
+            // Ensure minimum viable population for tetraploids
+            if (tetraploids.length > 0 && tetraploids.length < establishThreshold) {
+                // Minority cytotype disadvantage
+                targetTetraploids = Math.min(targetTetraploids, tetraploids.length);
+                targetDiploids = popSize - targetTetraploids;
+            }
+
+            const newDiploids = reproduceGroup(diploids, targetDiploids);
+            const newTetraploids = reproduceGroup(tetraploids, targetTetraploids);
+
+            population = [...newDiploids, ...newTetraploids];
+        }
+
+        function createAllopolyploid() {
+            // Simulate hybridization + WGD
+            // Add a few tetraploids directly
+            for (let i = 0; i < 5; i++) {
+                population.push(new Individual(4));
+            }
+            wgdEvents += 5;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+            reproduce();
+
+            const diploids = population.filter(i => i.ploidy === 2).length;
+            const tetraploids = population.filter(i => i.ploidy === 4).length;
+
+            ploidy2History.push(diploids);
+            ploidy4History.push(tetraploids);
+
+            if (ploidy2History.length > 400) {
+                ploidy2History.shift();
+                ploidy4History.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2;
+
+            // Spatial distribution
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Spatial Distribution (Diploids vs Tetraploids)', padding, 25);
+
+            // Draw individuals
+            for (const ind of population) {
+                const x = padding + ind.x * width;
+                const y = padding + ind.y * height;
+
+                if (ind.ploidy === 2) {
+                    ctx.fillStyle = '#3b82f6';
+                    ctx.beginPath();
+                    ctx.arc(x, y, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                } else {
+                    ctx.fillStyle = '#84cc16';
+                    // Draw as larger square (more chromosomes!)
+                    ctx.fillRect(x - 5, y - 5, 10, 10);
+                }
+            }
+
+            // Legend
+            ctx.fillStyle = '#3b82f6';
+            ctx.beginPath();
+            ctx.arc(padding + width - 100, padding + 15, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#888';
+            ctx.fillText('Diploid (2n)', padding + width - 90, padding + 18);
+
+            ctx.fillStyle = '#84cc16';
+            ctx.fillRect(padding + width - 105, padding + 25, 10, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Tetraploid (4n)', padding + width - 90, padding + 33);
+
+            // Population dynamics over time
+            const chartY = padding * 2 + height;
+            ctx.fillText('Population Dynamics', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            if (ploidy2History.length > 1) {
+                // Diploids
+                ctx.strokeStyle = '#3b82f6';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < ploidy2History.length; i++) {
+                    const x = padding + (i / ploidy2History.length) * width;
+                    const y = chartY + height - (ploidy2History[i] / popSize) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Tetraploids
+                ctx.strokeStyle = '#84cc16';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < ploidy4History.length; i++) {
+                    const x = padding + (i / ploidy4History.length) * width;
+                    const y = chartY + height - (ploidy4History[i] / popSize) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Threshold line
+                ctx.strokeStyle = '#888';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                const threshY = chartY + height - (establishThreshold / popSize) * height;
+                ctx.moveTo(padding, threshY);
+                ctx.lineTo(padding + width, threshY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = '#888';
+                ctx.fillText('Establishment threshold', padding + 10, threshY - 5);
+            }
+        }
+
+        function updateStats() {
+            const diploids = population.filter(i => i.ploidy === 2).length;
+            const tetraploids = population.filter(i => i.ploidy === 4).length;
+            const established = tetraploids >= establishThreshold;
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('diploids').textContent = diploids;
+            document.getElementById('tetraploids').textContent = tetraploids;
+            document.getElementById('wgdEvents').textContent = wgdEvents;
+            document.getElementById('established').textContent = established ? 'Yes ✓' : 'No';
+            document.getElementById('established').style.color = established ? '#84cc16' : '#ef4444';
+        }
+
+        document.getElementById('popSlider').addEventListener('input', (e) => {
+            popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = popSize;
+        });
+
+        document.getElementById('wgdSlider').addEventListener('input', (e) => {
+            wgdRate = parseFloat(e.target.value);
+            document.getElementById('wgdValue').textContent = wgdRate.toFixed(3);
+        });
+
+        document.getElementById('fitSlider').addEventListener('input', (e) => {
+            polyploidFitness = parseFloat(e.target.value);
+            document.getElementById('fitValue').textContent = polyploidFitness.toFixed(1);
+        });
+
+        document.getElementById('threshSlider').addEventListener('input', (e) => {
+            establishThreshold = parseInt(e.target.value);
+            document.getElementById('threshValue').textContent = establishThreshold;
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        document.getElementById('hybridBtn').addEventListener('click', () => {
+            createAllopolyploid();
+            render();
+            updateStats();
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

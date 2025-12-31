@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cooperative Breeding - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #06b6d4; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #06b6d4; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #06b6d4; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #0891b2; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #06b6d4; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #06b6d4; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(6,182,212,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #06b6d4; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🐦 Cooperative Breeding</h1>
+            <p class="description">
+                Helpers at the nest: offspring delay dispersal to help parents raise siblings.
+                Explained by kin selection (helping relatives) and ecological constraints
+                (few territories available).
+            </p>
+
+            <div class="control-group">
+                <label>Territory Availability: <span class="value-display" id="terrValue">0.3</span></label>
+                <input type="range" id="terrSlider" min="0.1" max="0.9" step="0.1" value="0.3">
+                <div style="font-size: 0.65rem; color: #666;">Low = habitat saturated</div>
+            </div>
+
+            <div class="control-group">
+                <label>Helper Effect: <span class="value-display" id="helpValue">0.3</span></label>
+                <input type="range" id="helpSlider" min="0" max="0.8" step="0.1" value="0.3">
+                <div style="font-size: 0.65rem; color: #666;">Boost to brood survival per helper</div>
+            </div>
+
+            <div class="control-group">
+                <label>Relatedness to Brood: <span class="value-display" id="relValue">0.5</span></label>
+                <input type="range" id="relSlider" min="0.25" max="0.75" step="0.05" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <label>Helper Survival Bonus: <span class="value-display" id="survValue">0.1</span></label>
+                <input type="range" id="survSlider" min="0" max="0.3" step="0.05" value="0.1">
+                <div style="font-size: 0.65rem; color: #666;">Safety of staying home</div>
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Groups: <span id="groups">0</span></div>
+                <div>Total Helpers: <span id="helpers">0</span></div>
+                <div>Avg Group Size: <span id="groupSize">0</span></div>
+                <div>Helper Frequency: <span id="helperFreq">0%</span></div>
+                <div>Avg Inclusive Fitness: <span id="inclFit">0</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Hamilton's Rule:</strong> Helping evolves when rB > C, where r = relatedness,
+                B = benefit to recipient, C = cost to helper. When territories are scarce,
+                the cost of helping (delayed reproduction) decreases, favoring cooperative breeding.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let groups = [];
+        let helperFreqHistory = [];
+        let groupSizeHistory = [];
+
+        let territoryAvailability = 0.3;
+        let helperEffect = 0.3;
+        let relatedness = 0.5;
+        let helperSurvivalBonus = 0.1;
+
+        class Individual {
+            constructor(helpingTendency = 0.5) {
+                this.helpingTendency = helpingTendency; // Probability to help vs disperse
+                this.age = 0;
+                this.isHelper = false;
+                this.isBreeder = false;
+            }
+        }
+
+        class Group {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.breeders = [new Individual(), new Individual()]; // Breeding pair
+                this.breeders[0].isBreeder = true;
+                this.breeders[1].isBreeder = true;
+                this.helpers = [];
+                this.offspring = [];
+            }
+
+            get size() {
+                return this.breeders.length + this.helpers.length;
+            }
+
+            breed() {
+                // Base clutch size
+                let clutchSize = 3;
+
+                // Helpers increase survival of offspring
+                const survivalBoost = 1 + this.helpers.length * helperEffect;
+                const surviving = Math.floor(clutchSize * Math.min(survivalBoost, 2));
+
+                this.offspring = [];
+                for (let i = 0; i < surviving; i++) {
+                    // Offspring inherit helping tendency from parents
+                    const parentTendency = (this.breeders[0].helpingTendency + this.breeders[1].helpingTendency) / 2;
+                    const mutation = (Math.random() - 0.5) * 0.2;
+                    const tendency = Math.max(0, Math.min(1, parentTendency + mutation));
+                    this.offspring.push(new Individual(tendency));
+                }
+            }
+
+            processOffspring() {
+                const dispersers = [];
+
+                for (const offspring of this.offspring) {
+                    // Decision: help or disperse?
+                    const helpProbability = offspring.helpingTendency * (1 - territoryAvailability);
+
+                    if (Math.random() < helpProbability) {
+                        // Become helper
+                        offspring.isHelper = true;
+                        this.helpers.push(offspring);
+                    } else {
+                        // Try to disperse
+                        dispersers.push(offspring);
+                    }
+                }
+
+                this.offspring = [];
+                return dispersers;
+            }
+
+            mortality() {
+                // Breeder mortality
+                this.breeders = this.breeders.filter(() => Math.random() > 0.2);
+
+                // Helper mortality (lower due to safety of home)
+                this.helpers = this.helpers.filter(() => Math.random() > (0.2 - helperSurvivalBonus));
+
+                // Age everyone
+                [...this.breeders, ...this.helpers].forEach(i => i.age++);
+            }
+
+            inheritBreederPosition() {
+                // If breeder slot opens, helper can inherit
+                while (this.breeders.length < 2 && this.helpers.length > 0) {
+                    const promoted = this.helpers.shift();
+                    promoted.isHelper = false;
+                    promoted.isBreeder = true;
+                    this.breeders.push(promoted);
+                }
+            }
+
+            calculateInclusiveFitness() {
+                // For helpers: indirect fitness from helping raise siblings
+                const directFitness = 0; // Helpers don't reproduce
+                const indirectFitness = this.offspring.length * relatedness * helperEffect;
+                return directFitness + indirectFitness;
+            }
+        }
+
+        function initPopulation() {
+            groups = [];
+            helperFreqHistory = [];
+            groupSizeHistory = [];
+
+            // Create initial groups
+            const gridSize = 5;
+            for (let i = 0; i < gridSize; i++) {
+                for (let j = 0; j < gridSize; j++) {
+                    groups.push(new Group(
+                        (i + 0.5) / gridSize,
+                        (j + 0.5) / gridSize
+                    ));
+                }
+            }
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+
+            // Breeding
+            groups.forEach(g => g.breed());
+
+            // Collect dispersers
+            let allDispersers = [];
+            groups.forEach(g => {
+                allDispersers.push(...g.processOffspring());
+            });
+
+            // Mortality
+            groups.forEach(g => g.mortality());
+
+            // Helper inheritance
+            groups.forEach(g => g.inheritBreederPosition());
+
+            // Dispersers try to find new territories
+            const emptyGroups = groups.filter(g => g.breeders.length === 0);
+
+            // Shuffle dispersers
+            allDispersers.sort(() => Math.random() - 0.5);
+
+            for (const disperser of allDispersers) {
+                if (Math.random() < territoryAvailability) {
+                    // Successfully find territory
+                    if (emptyGroups.length > 0) {
+                        const group = emptyGroups.pop();
+                        disperser.isBreeder = true;
+                        group.breeders.push(disperser);
+                    } else {
+                        // Create new group if space
+                        if (groups.length < 30) {
+                            const newGroup = new Group(Math.random(), Math.random());
+                            newGroup.breeders = [disperser];
+                            disperser.isBreeder = true;
+                            groups.push(newGroup);
+                        }
+                    }
+                }
+                // Failed dispersers die
+            }
+
+            // Remove empty groups
+            groups = groups.filter(g => g.breeders.length > 0);
+
+            // Statistics
+            const totalIndividuals = groups.reduce((s, g) => s + g.size, 0);
+            const totalHelpers = groups.reduce((s, g) => s + g.helpers.length, 0);
+            const helperFreq = totalIndividuals > 0 ? totalHelpers / totalIndividuals : 0;
+            const avgGroupSize = groups.length > 0 ? totalIndividuals / groups.length : 0;
+
+            helperFreqHistory.push(helperFreq);
+            groupSizeHistory.push(avgGroupSize);
+
+            if (helperFreqHistory.length > 200) {
+                helperFreqHistory.shift();
+                groupSizeHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2 - 20;
+
+            // Territory map
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Breeding Territories (size = group size, helpers in green)', padding, 25);
+
+            for (const group of groups) {
+                const x = padding + group.x * width;
+                const y = padding + group.y * height;
+
+                // Territory
+                const radius = 10 + group.size * 5;
+                ctx.fillStyle = 'rgba(100, 100, 100, 0.3)';
+                ctx.beginPath();
+                ctx.arc(x, y, radius, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Breeders (central)
+                ctx.fillStyle = '#f59e0b';
+                for (let i = 0; i < group.breeders.length; i++) {
+                    const bx = x + (i - 0.5) * 8;
+                    ctx.beginPath();
+                    ctx.arc(bx, y, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // Helpers (surrounding)
+                ctx.fillStyle = '#22c55e';
+                for (let i = 0; i < group.helpers.length; i++) {
+                    const angle = (i / group.helpers.length) * Math.PI * 2;
+                    const hx = x + Math.cos(angle) * 12;
+                    const hy = y + Math.sin(angle) * 12;
+                    ctx.beginPath();
+                    ctx.arc(hx, hy, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // Legend
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath();
+            ctx.arc(padding + width - 80, padding + 10, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#888';
+            ctx.fillText('Breeder', padding + width - 70, padding + 14);
+
+            ctx.fillStyle = '#22c55e';
+            ctx.beginPath();
+            ctx.arc(padding + width - 80, padding + 25, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#888';
+            ctx.fillText('Helper', padding + width - 70, padding + 29);
+
+            // Evolution chart
+            const chartY = padding * 2 + height + 20;
+            ctx.fillStyle = '#888';
+            ctx.fillText('Helper Frequency & Group Size Over Time', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            // Helper frequency
+            if (helperFreqHistory.length > 1) {
+                ctx.strokeStyle = '#22c55e';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < helperFreqHistory.length; i++) {
+                    const x = padding + (i / helperFreqHistory.length) * width;
+                    const y = chartY + height - helperFreqHistory[i] * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Group size (normalized)
+                const maxSize = Math.max(5, ...groupSizeHistory);
+                ctx.strokeStyle = '#06b6d4';
+                ctx.beginPath();
+                for (let i = 0; i < groupSizeHistory.length; i++) {
+                    const x = padding + (i / groupSizeHistory.length) * width;
+                    const y = chartY + height - (groupSizeHistory[i] / maxSize) * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // Chart legend
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(padding + 10, chartY + 10, 15, 3);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Helper Freq', padding + 30, chartY + 14);
+
+            ctx.fillStyle = '#06b6d4';
+            ctx.fillRect(padding + 110, chartY + 10, 15, 3);
+            ctx.fillText('Group Size', padding + 130, chartY + 14);
+        }
+
+        function updateStats() {
+            const totalIndividuals = groups.reduce((s, g) => s + g.size, 0);
+            const totalHelpers = groups.reduce((s, g) => s + g.helpers.length, 0);
+            const helperFreq = totalIndividuals > 0 ? totalHelpers / totalIndividuals : 0;
+            const avgGroupSize = groups.length > 0 ? totalIndividuals / groups.length : 0;
+            const avgInclFit = groups.reduce((s, g) => s + g.calculateInclusiveFitness(), 0) / Math.max(1, groups.length);
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('groups').textContent = groups.length;
+            document.getElementById('helpers').textContent = totalHelpers;
+            document.getElementById('groupSize').textContent = avgGroupSize.toFixed(1);
+            document.getElementById('helperFreq').textContent = (helperFreq * 100).toFixed(1) + '%';
+            document.getElementById('inclFit').textContent = avgInclFit.toFixed(2);
+        }
+
+        document.getElementById('terrSlider').addEventListener('input', (e) => {
+            territoryAvailability = parseFloat(e.target.value);
+            document.getElementById('terrValue').textContent = territoryAvailability.toFixed(1);
+        });
+
+        document.getElementById('helpSlider').addEventListener('input', (e) => {
+            helperEffect = parseFloat(e.target.value);
+            document.getElementById('helpValue').textContent = helperEffect.toFixed(1);
+        });
+
+        document.getElementById('relSlider').addEventListener('input', (e) => {
+            relatedness = parseFloat(e.target.value);
+            document.getElementById('relValue').textContent = relatedness.toFixed(2);
+        });
+
+        document.getElementById('survSlider').addEventListener('input', (e) => {
+            helperSurvivalBonus = parseFloat(e.target.value);
+            document.getElementById('survValue').textContent = helperSurvivalBonus.toFixed(2);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>

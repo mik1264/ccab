@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Evolvability - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e8e6e1; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #main-area { flex: 1; display: flex; flex-direction: column; padding: 20px; gap: 15px; }
+        canvas { background: rgba(0,0,0,0.3); border-radius: 8px; flex: 1; }
+        #controls { width: 300px; background: rgba(0,0,0,0.8); padding: 20px; overflow-y: auto; }
+        h1 { font-size: 1.2rem; margin-bottom: 10px; color: #10b981; }
+        .description { font-size: 0.75rem; color: #888; margin-bottom: 15px; line-height: 1.4; }
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 0.8rem; margin-bottom: 5px; color: #aaa; }
+        input[type="range"] { width: 100%; margin-bottom: 5px; }
+        .value-display { font-size: 0.75rem; color: #10b981; }
+        button { width: 100%; padding: 10px; margin-bottom: 10px; background: #10b981; color: #1a1a2e; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #059669; }
+        .stats { background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px; font-size: 0.8rem; margin-top: 15px; }
+        .stats div { margin-bottom: 5px; }
+        .stats span { color: #10b981; }
+        .back-link { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #10b981; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; }
+        .theory { background: rgba(16,185,129,0.1); padding: 10px; border-radius: 5px; font-size: 0.7rem; margin-top: 15px; border-left: 3px solid #10b981; }
+    </style>
+</head>
+<body>
+    <a href="../netlogo-simulations/index.html" class="back-link">← Back to Simulations</a>
+
+    <div id="container">
+        <div id="main-area">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="controls">
+            <h1>🧬 Evolvability</h1>
+            <p class="description">
+                Evolvability = capacity to generate adaptive variation. Modular genotype-phenotype
+                maps enable independent evolution of different traits. Compare modular vs
+                pleiotropic architectures under changing selection.
+            </p>
+
+            <div class="control-group">
+                <label>Population Size: <span class="value-display" id="popValue">100</span></label>
+                <input type="range" id="popSlider" min="50" max="300" value="100">
+            </div>
+
+            <div class="control-group">
+                <label>Modularity: <span class="value-display" id="modValue">0.8</span></label>
+                <input type="range" id="modSlider" min="0" max="1" step="0.1" value="0.8">
+                <div style="font-size: 0.65rem; color: #666;">0=pleiotropic, 1=fully modular</div>
+            </div>
+
+            <div class="control-group">
+                <label>Mutation Rate: <span class="value-display" id="mutValue">0.05</span></label>
+                <input type="range" id="mutSlider" min="0.01" max="0.2" step="0.01" value="0.05">
+            </div>
+
+            <div class="control-group">
+                <label>Env Change Rate: <span class="value-display" id="envValue">0.02</span></label>
+                <input type="range" id="envSlider" min="0" max="0.1" step="0.01" value="0.02">
+            </div>
+
+            <button id="startBtn">Start Simulation</button>
+            <button id="resetBtn">Reset</button>
+            <button id="shiftEnvBtn">Shift Environment</button>
+
+            <div class="stats">
+                <div>Generation: <span id="generation">0</span></div>
+                <div>Mean Fitness: <span id="meanFitness">1.00</span></div>
+                <div>Evolvability Score: <span id="evolvability">0.00</span></div>
+                <div>Genetic Variance: <span id="variance">0.00</span></div>
+                <div>Env Shifts Survived: <span id="shifts">0</span></div>
+            </div>
+
+            <div class="theory">
+                <strong>Facilitated Variation:</strong> Modular systems store information about
+                past environments. Small genetic changes can unleash large, coordinated
+                phenotypic responses when selection changes.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth - 15;
+            canvas.height = canvas.parentElement.clientHeight - 15;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let running = false;
+        let generation = 0;
+        let population = [];
+        let fitnessHistory = [];
+        let evolvHistory = [];
+        let envShifts = 0;
+
+        let popSize = 100;
+        let modularity = 0.8;
+        let mutRate = 0.05;
+        let envChangeRate = 0.02;
+
+        const NUM_TRAITS = 4;
+        const GENES_PER_TRAIT = 3;
+        const TOTAL_GENES = NUM_TRAITS * GENES_PER_TRAIT;
+
+        // Current optimal phenotype
+        let optimum = new Array(NUM_TRAITS).fill(0.5);
+
+        class Genome {
+            constructor(genes = null) {
+                this.genes = genes || new Array(TOTAL_GENES).fill(0).map(() => Math.random());
+            }
+
+            // Genotype-phenotype map with modularity
+            get phenotype() {
+                const traits = [];
+
+                for (let t = 0; t < NUM_TRAITS; t++) {
+                    let traitValue = 0;
+                    let contributions = 0;
+
+                    for (let g = 0; g < TOTAL_GENES; g++) {
+                        const primaryTrait = Math.floor(g / GENES_PER_TRAIT);
+                        let weight;
+
+                        if (primaryTrait === t) {
+                            // Primary effect
+                            weight = 1.0;
+                        } else {
+                            // Pleiotropic effect (reduced by modularity)
+                            weight = (1 - modularity) * 0.3;
+                        }
+
+                        traitValue += this.genes[g] * weight;
+                        contributions += weight;
+                    }
+
+                    traits.push(traitValue / contributions);
+                }
+
+                return traits;
+            }
+
+            get fitness() {
+                const pheno = this.phenotype;
+                let fit = 1;
+
+                for (let t = 0; t < NUM_TRAITS; t++) {
+                    const diff = Math.abs(pheno[t] - optimum[t]);
+                    fit *= Math.exp(-diff * 5);
+                }
+
+                return Math.max(0.01, fit);
+            }
+
+            replicate() {
+                const newGenes = [...this.genes];
+
+                for (let g = 0; g < TOTAL_GENES; g++) {
+                    if (Math.random() < mutRate) {
+                        newGenes[g] += (Math.random() - 0.5) * 0.2;
+                        newGenes[g] = Math.max(0, Math.min(1, newGenes[g]));
+                    }
+                }
+
+                return new Genome(newGenes);
+            }
+        }
+
+        function calculateEvolvability() {
+            // Evolvability = genetic variance in fitness after random mutation
+            const testSize = 20;
+            let variances = [];
+
+            for (let i = 0; i < testSize; i++) {
+                const parent = population[Math.floor(Math.random() * population.length)];
+                const mutants = [];
+
+                for (let j = 0; j < 10; j++) {
+                    mutants.push(parent.replicate().fitness);
+                }
+
+                const mean = mutants.reduce((a, b) => a + b, 0) / mutants.length;
+                const variance = mutants.reduce((sum, f) => sum + Math.pow(f - mean, 2), 0) / mutants.length;
+                variances.push(variance);
+            }
+
+            return variances.reduce((a, b) => a + b, 0) / variances.length;
+        }
+
+        function calculateGeneticVariance() {
+            let totalVar = 0;
+            for (let g = 0; g < TOTAL_GENES; g++) {
+                const values = population.map(ind => ind.genes[g]);
+                const mean = values.reduce((a, b) => a + b, 0) / values.length;
+                const variance = values.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / values.length;
+                totalVar += variance;
+            }
+            return totalVar / TOTAL_GENES;
+        }
+
+        function shiftEnvironment() {
+            // Shift one random trait's optimum
+            const trait = Math.floor(Math.random() * NUM_TRAITS);
+            optimum[trait] = Math.random();
+            envShifts++;
+        }
+
+        function initPopulation() {
+            population = [];
+            fitnessHistory = [];
+            evolvHistory = [];
+            envShifts = 0;
+            optimum = new Array(NUM_TRAITS).fill(0.5);
+
+            for (let i = 0; i < popSize; i++) {
+                population.push(new Genome());
+            }
+        }
+
+        function reproduce() {
+            const totalFit = population.reduce((sum, g) => sum + g.fitness, 0);
+            const newPop = [];
+
+            const selectParent = () => {
+                let r = Math.random() * totalFit;
+                for (const g of population) {
+                    r -= g.fitness;
+                    if (r <= 0) return g;
+                }
+                return population[population.length - 1];
+            };
+
+            while (newPop.length < popSize) {
+                const parent = selectParent();
+                newPop.push(parent.replicate());
+            }
+
+            population = newPop;
+        }
+
+        function update() {
+            if (!running) return;
+
+            generation++;
+
+            // Random environment shifts
+            if (Math.random() < envChangeRate) {
+                shiftEnvironment();
+            }
+
+            reproduce();
+
+            const meanFit = population.reduce((sum, g) => sum + g.fitness, 0) / popSize;
+            const evolv = calculateEvolvability();
+
+            fitnessHistory.push(meanFit);
+            evolvHistory.push(evolv);
+
+            if (fitnessHistory.length > 400) {
+                fitnessHistory.shift();
+                evolvHistory.shift();
+            }
+
+            render();
+            updateStats();
+            requestAnimationFrame(update);
+        }
+
+        function render() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 1)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            const padding = 50;
+            const width = canvas.width - padding * 2;
+            const height = (canvas.height - padding * 3) / 2;
+
+            // Phenotype space visualization
+            ctx.fillStyle = '#888';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Phenotype Space (Trait 1 vs Trait 2)', padding, 25);
+
+            // Draw optimum
+            ctx.fillStyle = '#10b981';
+            ctx.beginPath();
+            ctx.arc(
+                padding + optimum[0] * width,
+                padding + (1 - optimum[1]) * height,
+                10, 0, Math.PI * 2
+            );
+            ctx.fill();
+            ctx.strokeStyle = '#10b981';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Draw population
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.5)';
+            for (const ind of population) {
+                const pheno = ind.phenotype;
+                const x = padding + pheno[0] * width;
+                const y = padding + (1 - pheno[1]) * height;
+
+                ctx.beginPath();
+                ctx.arc(x, y, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Axes
+            ctx.strokeStyle = '#444';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(padding, padding);
+            ctx.lineTo(padding, padding + height);
+            ctx.lineTo(padding + width, padding + height);
+            ctx.stroke();
+
+            ctx.fillStyle = '#888';
+            ctx.fillText('Trait 1', padding + width / 2, padding + height + 20);
+            ctx.save();
+            ctx.translate(padding - 20, padding + height / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText('Trait 2', 0, 0);
+            ctx.restore();
+
+            // Fitness over time
+            const chartY = padding * 2 + height;
+            ctx.fillText('Fitness & Evolvability Over Time', padding, chartY - 10);
+
+            ctx.strokeStyle = '#444';
+            ctx.beginPath();
+            ctx.moveTo(padding, chartY);
+            ctx.lineTo(padding, chartY + height);
+            ctx.lineTo(padding + width, chartY + height);
+            ctx.stroke();
+
+            if (fitnessHistory.length > 1) {
+                // Fitness
+                ctx.strokeStyle = '#10b981';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < fitnessHistory.length; i++) {
+                    const x = padding + (i / fitnessHistory.length) * width;
+                    const y = chartY + height - fitnessHistory[i] * height;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Evolvability (scaled)
+                const maxEvolv = Math.max(...evolvHistory) * 1.1 || 0.001;
+                ctx.strokeStyle = '#f59e0b';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                for (let i = 0; i < evolvHistory.length; i++) {
+                    const x = padding + (i / evolvHistory.length) * width;
+                    const y = chartY + height - (evolvHistory[i] / maxEvolv) * height * 0.8;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Legend
+            ctx.fillStyle = '#10b981';
+            ctx.fillRect(padding + width - 100, chartY + 15, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Fitness', padding + width - 80, chartY + 23);
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(padding + width - 100, chartY + 30, 15, 10);
+            ctx.fillStyle = '#888';
+            ctx.fillText('Evolvability', padding + width - 80, chartY + 38);
+        }
+
+        function updateStats() {
+            const meanFit = population.reduce((sum, g) => sum + g.fitness, 0) / popSize;
+            const evolv = evolvHistory[evolvHistory.length - 1] || 0;
+            const genVar = calculateGeneticVariance();
+
+            document.getElementById('generation').textContent = generation;
+            document.getElementById('meanFitness').textContent = meanFit.toFixed(4);
+            document.getElementById('evolvability').textContent = evolv.toFixed(5);
+            document.getElementById('variance').textContent = genVar.toFixed(4);
+            document.getElementById('shifts').textContent = envShifts;
+        }
+
+        document.getElementById('popSlider').addEventListener('input', (e) => {
+            popSize = parseInt(e.target.value);
+            document.getElementById('popValue').textContent = popSize;
+        });
+
+        document.getElementById('modSlider').addEventListener('input', (e) => {
+            modularity = parseFloat(e.target.value);
+            document.getElementById('modValue').textContent = modularity.toFixed(1);
+        });
+
+        document.getElementById('mutSlider').addEventListener('input', (e) => {
+            mutRate = parseFloat(e.target.value);
+            document.getElementById('mutValue').textContent = mutRate.toFixed(2);
+        });
+
+        document.getElementById('envSlider').addEventListener('input', (e) => {
+            envChangeRate = parseFloat(e.target.value);
+            document.getElementById('envValue').textContent = envChangeRate.toFixed(2);
+        });
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            running = !running;
+            document.getElementById('startBtn').textContent = running ? 'Pause' : 'Start Simulation';
+            if (running) update();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            running = false;
+            generation = 0;
+            document.getElementById('startBtn').textContent = 'Start Simulation';
+            initPopulation();
+            render();
+            updateStats();
+        });
+
+        document.getElementById('shiftEnvBtn').addEventListener('click', () => {
+            shiftEnvironment();
+            render();
+        });
+
+        initPopulation();
+        render();
+        updateStats();
+    </script>
+</body>
+</html>
