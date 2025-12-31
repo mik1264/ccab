@@ -2,7 +2,7 @@
 
 **Last Updated:** 2025-12-30
 **Repository:** ccab (Claude Code and Algorithmic Beauty)
-**Current Stats:** 97 galleries, 1,530+ demos
+**Current Stats:** 99 galleries, 1,580+ demos
 
 ---
 
