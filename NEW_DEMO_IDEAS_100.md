@@ -73,10 +73,10 @@ This check is a strong guard against obvious duplicates in the current demo set.
 53. **[x] XGBoost Step-by-Step** (`xgboost`) — Build boosted trees iteratively; visualize residuals and learning rate effects. Suggested: Canvas 2D.
 54. **[x] AdaBoost with Stumps** (`adaboost`) — Show weight updates on points, stump selection, and margin evolution. Suggested: Canvas 2D.
 55. **[x] RANSAC Robust Fitting** (`ransac`) — Fit a line/circle with outliers; show inlier sets across iterations and confidence. Suggested: Canvas 2D.
-56. **Autodiff Graph Visualizer** (`autodiff`) — Build a computation graph from an expression and animate forward/reverse mode passes. Suggested: Canvas 2D.
-57. **Neural Tangent Kernel Intuition** (`ntk`) — Compare kernel regression prediction to a wide network trained by gradient descent. Suggested: Canvas 2D.
-58. **Grad-CAM for Tiny CNNs** (`gradcam`) — Train on simple shapes; display activation maps and gradient-weighted heatmaps. Suggested: Canvas 2D.
-59. **Jackknife Bias/Variance Tool** (`jackknife`) — Remove-one resamples to estimate bias/SE; compare to analytic results. Suggested: Canvas 2D.
+56. **[x] Autodiff Graph Visualizer** (`autodiff`) — Build a computation graph from an expression and animate forward/reverse mode passes. Suggested: Canvas 2D.
+57. **[x] Neural Tangent Kernel Intuition** (`ntk`) — Compare kernel regression prediction to a wide network trained by gradient descent. Suggested: Canvas 2D.
+58. **[x] Grad-CAM for Tiny CNNs** (`gradcam`) — Train on simple shapes; display activation maps and gradient-weighted heatmaps. Suggested: Canvas 2D.
+59. **[x] Jackknife Bias/Variance Tool** (`jackknife`) — Remove-one resamples to estimate bias/SE; compare to analytic results. Suggested: Canvas 2D.
 60. **[x] Expectation–Maximization Walkthrough** (`expectationmaximization`) — EM for mixture of Gaussians or coin flips; visualize responsibilities and log-likelihood. Suggested: Canvas 2D.
 
 ## Physics, Chemistry & Biology (61–80)
