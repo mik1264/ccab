@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Garbage Collection Simulator - CCAB</title>
+    <link rel="stylesheet" href="../assets/css/gallery-standard.css">
+    <style>
+        body {
+            background: #f0f2f5;
+            color: #333;
+            font-family: system-ui, sans-serif;
+            padding: 2rem;
+        }
+        .container { max-width: 1000px; margin: 0 auto; }
+        .controls { 
+            background: white; padding: 1rem; border-radius: 8px; margin-bottom: 1rem; 
+            display: flex; gap: 1rem; align-items: center; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        button {
+            padding: 0.5rem 1rem; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px;
+        }
+        button:disabled { background: #ccc; }
+        .heap-container {
+            display: grid;
+            grid-template-columns: repeat(10, 1fr);
+            gap: 10px;
+            background: #2c3e50;
+            padding: 20px;
+            border-radius: 8px;
+            position: relative;
+        }
+        .memory-block {
+            aspect-ratio: 1;
+            background: #ecf0f1;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            position: relative;
+            transition: all 0.5s ease;
+        }
+        .memory-block.root { border: 3px solid #e74c3c; }
+        .memory-block.allocated { background: #3498db; color: white; }
+        .memory-block.marked { background: #2ecc71; } /* Green */
+        .memory-block.garbage { background: #95a5a6; opacity: 0.5; }
+        
+        /* Arrows for references? CSS references are hard. We'll use Canvas overlay. */
+        #canvas-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 10;
+        }
+        
+        .legend {
+            display: flex; gap: 15px; margin-bottom: 10px; font-size: 0.9rem;
+        }
+        .legend span { display: flex; align-items: center; gap: 5px; }
+        .dot { width: 12px; height: 12px; border-radius: 2px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <a href="../index.html" class="gallery-back">← Back to Gallery</a>
+    <h1>Garbage Collection Visualization</h1>
+    
+    <div class="legend">
+        <span><div class="dot" style="background:#ecf0f1"></div> Free</span>
+        <span><div class="dot" style="background:#3498db"></div> Live Object</span>
+        <span><div class="dot" style="background:#2ecc71"></div> Marked (Reachable)</span>
+        <span><div class="dot" style="border: 2px solid #e74c3c"></div> Root</span>
+    </div>
+
+    <div class="controls">
+        <select id="algo-select">
+            <option value="mark-sweep">Mark & Sweep</option>
+            <option value="ref-count">Reference Counting</option>
+        </select>
+        <button onclick="allocate()">Allocate</button>
+        <button onclick="addRandomRef()">Add Reference</button>
+        <button onclick="removeRandomRef()">Remove Reference</button>
+        <button onclick="runGC()" id="gc-btn">Run GC</button>
+        <span id="status">Idle</span>
+    </div>
+
+    <div class="heap-container" id="heap">
+        <canvas id="canvas-overlay"></canvas>
+    </div>
+</div>
+
+<script>
+    const HEAP_SIZE = 50;
+    const heapEl = document.getElementById('heap');
+    const canvas = document.getElementById('canvas-overlay');
+    const ctx = canvas.getContext('2d');
+    
+    let memory = []; // { id, type: 'free'|'obj', refs: [], marked: false, refCount: 0, isRoot: false }
+    
+    function init() {
+        memory = Array(HEAP_SIZE).fill().map((_, i) => ({ 
+            id: i, type: 'free', refs: [], marked: false, refCount: 0, isRoot: false 
+        }));
+        
+        // Setup initial roots
+        memory[0].type = 'obj'; memory[0].isRoot = true;
+        memory[1].type = 'obj'; memory[1].isRoot = true;
+        
+        render();
+        window.addEventListener('resize', () => { requestAnimationFrame(render); });
+    }
+
+    function render() {
+        // Clear existing DOM except canvas
+        const blocks = Array.from(heapEl.querySelectorAll('.memory-block'));
+        
+        if (blocks.length === 0) {
+            // Initial build
+            memory.forEach(block => {
+                const div = document.createElement('div');
+                div.className = 'memory-block';
+                div.id = `block-${block.id}`;
+                heapEl.appendChild(div);
+            });
+        }
+        
+        // Update classes
+        memory.forEach(block => {
+            const div = document.getElementById(`block-${block.id}`);
+            div.className = 'memory-block';
+            if (block.type === 'obj') div.classList.add('allocated');
+            if (block.isRoot) div.classList.add('root');
+            if (block.marked) div.classList.add('marked');
+            
+            div.textContent = block.type === 'obj' ? (block.refCount > 0 ? `RC:${block.refCount}` : '') : '';
+        });
+
+        drawReferences();
+    }
+
+    function drawReferences() {
+        // Resize canvas
+        canvas.width = heapEl.offsetWidth;
+        canvas.height = heapEl.offsetHeight;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        const rects = memory.map(b => document.getElementById(`block-${b.id}`).getBoundingClientRect());
+        const heapRect = heapEl.getBoundingClientRect();
+        
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.lineWidth = 2;
+
+        memory.forEach(block => {
+            if (block.type !== 'obj') return;
+            
+            const startRect = rects[block.id];
+            const startX = startRect.left - heapRect.left + startRect.width/2;
+            const startY = startRect.top - heapRect.top + startRect.height/2;
+
+            block.refs.forEach(targetId => {
+                const endRect = rects[targetId];
+                const endX = endRect.left - heapRect.left + endRect.width/2;
+                const endY = endRect.top - heapRect.top + endRect.height/2;
+                
+                // Draw arrow
+                ctx.beginPath();
+                ctx.moveTo(startX, startY);
+                ctx.lineTo(endX, endY);
+                ctx.stroke();
+                
+                // Arrowhead?
+                // Simplified for demo
+            });
+        });
+    }
+
+    function allocate() {
+        const freeIdx = memory.findIndex(b => b.type === 'free');
+        if (freeIdx === -1) {
+            alert("Out of memory! Run GC.");
+            return;
+        }
+        memory[freeIdx].type = 'obj';
+        memory[freeIdx].refs = [];
+        memory[freeIdx].refCount = 0; // Will update
+        render();
+    }
+
+    function addRandomRef() {
+        const objs = memory.filter(b => b.type === 'obj');
+        if (objs.length < 2) return;
+        
+        const source = objs[Math.floor(Math.random() * objs.length)];
+        const target = objs[Math.floor(Math.random() * objs.length)];
+        
+        if (source.id !== target.id && !source.refs.includes(target.id)) {
+            source.refs.push(target.id);
+            updateRefCounts();
+            render();
+        }
+    }
+    
+    function removeRandomRef() {
+        const objs = memory.filter(b => b.type === 'obj' && b.refs.length > 0);
+        if (objs.length === 0) return;
+        
+        const source = objs[Math.floor(Math.random() * objs.length)];
+        source.refs.pop(); // Remove last ref
+        updateRefCounts();
+        render();
+    }
+
+    function updateRefCounts() {
+        memory.forEach(b => b.refCount = 0);
+        memory.forEach(b => {
+            if (b.type === 'obj') {
+                b.refs.forEach(targetId => {
+                    memory[targetId].refCount++;
+                });
+            }
+        });
+    }
+
+    async function runGC() {
+        const algo = document.getElementById('algo-select').value;
+        const status = document.getElementById('status');
+        const btn = document.getElementById('gc-btn');
+        btn.disabled = true;
+        
+        if (algo === 'mark-sweep') {
+            status.textContent = "Mark phase...";
+            // Unmark all
+            memory.forEach(b => b.marked = false);
+            render();
+            await sleep(500);
+            
+            // Mark roots and traverse
+            let queue = memory.filter(b => b.isRoot).map(b => b.id);
+            queue.forEach(id => memory[id].marked = true);
+            render();
+            await sleep(500);
+            
+            while (queue.length > 0) {
+                const currId = queue.shift();
+                const block = memory[currId];
+                
+                // Highlight processing?
+                
+                for (let refId of block.refs) {
+                    if (!memory[refId].marked) {
+                        memory[refId].marked = true;
+                        queue.push(refId);
+                        render();
+                        await sleep(300);
+                    }
+                }
+            }
+            
+            status.textContent = "Sweep phase...";
+            await sleep(500);
+            
+            // Sweep
+            let freed = 0;
+            memory.forEach(b => {
+                if (b.type === 'obj' && !b.marked) {
+                    b.type = 'free';
+                    b.refs = [];
+                    freed++;
+                }
+                b.marked = false; // Reset mark
+            });
+            render();
+            status.textContent = `GC Done. Freed ${freed} blocks.`;
+            
+        } else if (algo === 'ref-count') {
+             status.textContent = "Scanning RefCounts...";
+             await sleep(500);
+             
+             // Naive ref count collection (doesn't handle cycles)
+             // In this simulation, we just free anything with RC=0 that isn't a root
+             let changed = true;
+             while (changed) {
+                 changed = false;
+                 updateRefCounts(); // Recalculate based on current pointers
+                 render();
+                 await sleep(500);
+                 
+                 memory.forEach(b => {
+                     if (b.type === 'obj' && !b.isRoot && b.refCount === 0) {
+                         b.type = 'free';
+                         b.refs = [];
+                         changed = true;
+                     }
+                 });
+                 if (changed) {
+                     status.textContent = "Reclaiming zero-ref objects...";
+                     render();
+                     await sleep(500);
+                 }
+             }
+             status.textContent = "GC Done.";
+        }
+        
+        btn.disabled = false;
+        updateRefCounts();
+        render();
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    init();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raft Consensus Simulator - CCAB</title>
+    <link rel="stylesheet" href="../assets/css/gallery-standard.css">
+    <style>
+        body {
+            background: #111827;
+            color: #f3f4f6;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            overflow: hidden; /* Canvas covers screen */
+            padding: 0;
+            margin: 0;
+        }
+
+        .ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            padding: 2rem;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            pointer-events: auto;
+            background: rgba(17, 24, 39, 0.8);
+            backdrop-filter: blur(8px);
+            padding: 1rem;
+            border-radius: 12px;
+            margin-bottom: 1rem;
+            max-width: 600px;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin: 0;
+            color: #60a5fa;
+        }
+
+        p {
+            margin: 0.5rem 0 0;
+            font-size: 0.9rem;
+            color: #9ca3af;
+        }
+
+        .controls {
+            pointer-events: auto;
+            margin-top: auto;
+            background: rgba(17, 24, 39, 0.8);
+            backdrop-filter: blur(8px);
+            padding: 1rem;
+            border-radius: 12px;
+            display: flex;
+            gap: 1rem;
+            width: fit-content;
+        }
+
+        button {
+            background: #374151;
+            border: 1px solid #4b5563;
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: #4b5563;
+        }
+
+        button.action-kill {
+            color: #f87171;
+            border-color: #7f1d1d;
+        }
+
+        button.action-kill:hover {
+            background: #7f1d1d;
+        }
+
+        .legend {
+            position: absolute;
+            top: 2rem;
+            right: 2rem;
+            background: rgba(17, 24, 39, 0.8);
+            padding: 1rem;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.85rem;
+        }
+
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+    </style>
+</head>
+<body>
+
+<canvas id="simCanvas"></canvas>
+
+<div class="ui-layer">
+    <div class="header">
+        <a href="../index.html" style="color: #60a5fa; text-decoration: none; font-size: 0.8rem;">← Back</a>
+        <h1>Raft Consensus Visualization</h1>
+        <p>Simulating Leader Election and Log Replication. Nodes timeout if they don't receive heartbeats, becoming candidates.</p>
+    </div>
+
+    <div class="legend">
+        <div class="legend-item"><div class="dot" style="background: #10b981;"></div> Follower</div>
+        <div class="legend-item"><div class="dot" style="background: #f59e0b;"></div> Candidate</div>
+        <div class="legend-item"><div class="dot" style="background: #ef4444;"></div> Leader</div>
+        <div class="legend-item"><div class="dot" style="background: #6b7280;"></div> Offline</div>
+    </div>
+
+    <div class="controls">
+        <button onclick="addNode()">+ Add Node</button>
+        <button onclick="clientRequest()">Send Client Request</button>
+        <button class="action-kill" onclick="togglePause()">Pause/Resume</button>
+    </div>
+</div>
+
+<script>
+    const canvas = document.getElementById('simCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Constants
+    const NODE_RADIUS = 35;
+    const ELECTION_TIMEOUT_MIN = 2000; // ms
+    const ELECTION_TIMEOUT_MAX = 4000;
+    const HEARTBEAT_INTERVAL = 1000;
+    const MESSAGE_SPEED = 4; // pixels per frame
+
+    // Colors
+    const COLOR_FOLLOWER = '#10b981';
+    const COLOR_CANDIDATE = '#f59e0b';
+    const COLOR_LEADER = '#ef4444';
+    const COLOR_OFFLINE = '#6b7280';
+    const COLOR_MSG_HEARTBEAT = 'rgba(239, 68, 68, 0.5)';
+    const COLOR_MSG_VOTE = '#f59e0b';
+    const COLOR_MSG_APPEND = '#3b82f6';
+
+    // State
+    let nodes = [];
+    let messages = [];
+    let lastTime = 0;
+    let paused = false;
+
+    class Node {
+        constructor(id, x, y) {
+            this.id = id;
+            this.x = x;
+            this.y = y;
+            this.state = 'Follower'; // Follower, Candidate, Leader, Offline
+            this.term = 0;
+            this.votedFor = null;
+            this.log = [];
+            this.commitIndex = 0;
+            
+            // Timers
+            this.electionTimer = 0;
+            this.resetElectionTimer();
+            this.heartbeatTimer = 0;
+            
+            // Leader state
+            this.votesReceived = 0;
+        }
+
+        resetElectionTimer() {
+            this.electionTimer = performance.now() + ELECTION_TIMEOUT_MIN + Math.random() * (ELECTION_TIMEOUT_MAX - ELECTION_TIMEOUT_MIN);
+        }
+
+        update(now) {
+            if (this.state === 'Offline') return;
+
+            // State Machine Logic
+            if (this.state === 'Follower' || this.state === 'Candidate') {
+                if (now > this.electionTimer) {
+                    this.becomeCandidate(now);
+                }
+            } else if (this.state === 'Leader') {
+                if (now > this.heartbeatTimer) {
+                    this.sendHeartbeats(now);
+                    this.heartbeatTimer = now + HEARTBEAT_INTERVAL;
+                }
+            }
+        }
+
+        becomeCandidate(now) {
+            this.state = 'Candidate';
+            this.term++;
+            this.votedFor = this.id;
+            this.votesReceived = 1; // Vote for self
+            this.resetElectionTimer();
+            
+            // Broadcast RequestVote
+            nodes.forEach(n => {
+                if (n.id !== this.id && n.state !== 'Offline') {
+                    messages.push(new Message(this, n, 'RequestVote', { term: this.term }));
+                }
+            });
+        }
+
+        sendHeartbeats(now) {
+            nodes.forEach(n => {
+                if (n.id !== this.id && n.state !== 'Offline') {
+                    messages.push(new Message(this, n, 'Heartbeat', { term: this.term }));
+                }
+            });
+        }
+
+        receiveMessage(msg, now) {
+            if (this.state === 'Offline') return;
+
+            // All servers: If RPC request or response contains term T > currentTerm:
+            // set currentTerm = T, convert to follower
+            if (msg.payload.term > this.term) {
+                this.term = msg.payload.term;
+                this.state = 'Follower';
+                this.votedFor = null;
+                this.resetElectionTimer();
+            }
+
+            switch (msg.type) {
+                case 'RequestVote':
+                    // Simple voting logic
+                    if (msg.payload.term === this.term && (this.votedFor === null || this.votedFor === msg.from.id)) {
+                        this.votedFor = msg.from.id;
+                        this.resetElectionTimer();
+                        // Send vote granted
+                        messages.push(new Message(this, msg.from, 'VoteGranted', { term: this.term }));
+                    }
+                    break;
+
+                case 'VoteGranted':
+                    if (this.state === 'Candidate' && msg.payload.term === this.term) {
+                        this.votesReceived++;
+                        if (this.votesReceived > nodes.length / 2) {
+                            this.becomeLeader(now);
+                        }
+                    }
+                    break;
+
+                case 'Heartbeat':
+                    if (msg.payload.term >= this.term) {
+                        this.state = 'Follower';
+                        this.resetElectionTimer();
+                    }
+                    break;
+            }
+        }
+
+        becomeLeader(now) {
+            this.state = 'Leader';
+            this.heartbeatTimer = 0; // Send immediately
+            this.sendHeartbeats(now);
+        }
+
+        draw() {
+            // Circle
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, NODE_RADIUS, 0, Math.PI * 2);
+            ctx.fillStyle = this.getColor();
+            ctx.fill();
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#fff';
+            ctx.stroke();
+
+            // ID & Term
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 14px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(`S${this.id}`, this.x, this.y - 10);
+            ctx.font = '12px Arial';
+            ctx.fillText(`Term: ${this.term}`, this.x, this.y + 10);
+
+            // Timeout Ring (for followers/candidates)
+            if (this.state !== 'Leader' && this.state !== 'Offline') {
+                const now = performance.now();
+                const timeLeft = Math.max(0, this.electionTimer - now);
+                const progress = timeLeft / ELECTION_TIMEOUT_MAX;
+                
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, NODE_RADIUS + 5, -Math.PI/2, -Math.PI/2 + (Math.PI * 2 * progress));
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        getColor() {
+            if (this.state === 'Follower') return COLOR_FOLLOWER;
+            if (this.state === 'Candidate') return COLOR_CANDIDATE;
+            if (this.state === 'Leader') return COLOR_LEADER;
+            return COLOR_OFFLINE;
+        }
+    }
+
+    class Message {
+        constructor(from, to, type, payload) {
+            this.from = from;
+            this.to = to;
+            this.type = type;
+            this.payload = payload;
+            this.progress = 0;
+            this.distance = Math.hypot(to.x - from.x, to.y - from.y);
+            this.done = false;
+        }
+
+        update() {
+            this.progress += MESSAGE_SPEED;
+            if (this.progress >= this.distance) {
+                this.to.receiveMessage(this, performance.now());
+                this.done = true;
+            }
+        }
+
+        draw() {
+            const ratio = this.progress / this.distance;
+            const cx = this.from.x + (this.to.x - this.from.x) * ratio;
+            const cy = this.from.y + (this.to.y - this.from.y) * ratio;
+
+            ctx.beginPath();
+            ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+            
+            if (this.type === 'Heartbeat') ctx.fillStyle = COLOR_MSG_HEARTBEAT;
+            else if (this.type === 'RequestVote' || this.type === 'VoteGranted') ctx.fillStyle = COLOR_MSG_VOTE;
+            else ctx.fillStyle = COLOR_MSG_APPEND;
+            
+            ctx.fill();
+        }
+    }
+
+    function init() {
+        resize();
+        window.addEventListener('resize', resize);
+        
+        // Initial nodes in a circle
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        const radius = 200;
+        
+        for (let i = 0; i < 5; i++) {
+            const angle = (i / 5) * Math.PI * 2 - Math.PI/2;
+            nodes.push(new Node(i + 1, centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius));
+        }
+
+        // Mouse interaction for killing nodes
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            nodes.forEach(n => {
+                const dist = Math.hypot(n.x - mouseX, n.y - mouseY);
+                if (dist < NODE_RADIUS) {
+                    if (n.state === 'Offline') {
+                        n.state = 'Follower';
+                        n.resetElectionTimer();
+                    } else {
+                        n.state = 'Offline';
+                    }
+                }
+            });
+        });
+
+        requestAnimationFrame(loop);
+    }
+
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+
+    function addNode() {
+        // Find a spot? Just random for now near center
+        const id = nodes.length + 1;
+        nodes.push(new Node(id, Math.random() * canvas.width, Math.random() * canvas.height));
+    }
+
+    function clientRequest() {
+        // Send a request to the leader (if any)
+        const leader = nodes.find(n => n.state === 'Leader');
+        if (leader) {
+            // TODO: Visualize log append
+            // For now just flash the leader
+            const originalColor = COLOR_LEADER;
+            // Visual feedback handled by render loop usually
+        }
+    }
+
+    function togglePause() {
+        paused = !paused;
+    }
+
+    function loop(timestamp) {
+        if (!lastTime) lastTime = timestamp;
+        const dt = timestamp - lastTime;
+        lastTime = timestamp;
+
+        if (!paused) {
+            // Update
+            nodes.forEach(n => n.update(timestamp));
+            messages.forEach(m => m.update());
+            messages = messages.filter(m => !m.done);
+        }
+
+        // Draw
+        ctx.fillStyle = '#111827';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Connections
+        ctx.strokeStyle = '#1f2937';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < nodes.length; i++) {
+            for (let j = i + 1; j < nodes.length; j++) {
+                ctx.beginPath();
+                ctx.moveTo(nodes[i].x, nodes[i].y);
+                ctx.lineTo(nodes[j].x, nodes[j].y);
+                ctx.stroke();
+            }
+        }
+
+        messages.forEach(m => m.draw());
+        nodes.forEach(n => n.draw());
+
+        requestAnimationFrame(loop);
+    }
+
+    init();
+
+</script>
+</body>
+</html>

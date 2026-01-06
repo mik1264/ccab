@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CPU Pipeline Visualizer - CCAB</title>
+    <link rel="stylesheet" href="../assets/css/gallery-standard.css">
+    <style>
+        body {
+            background: #1f2937;
+            color: white;
+            font-family: 'Courier New', monospace;
+            padding: 2rem;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        
+        .code-panel {
+            background: #111827;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 20px;
+        }
+        
+        textarea {
+            background: #000;
+            color: #0f0;
+            border: 1px solid #333;
+            width: 300px;
+            height: 200px;
+            font-family: inherit;
+            padding: 10px;
+        }
+        
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        button {
+            padding: 10px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:disabled { background: #555; }
+        
+        .pipeline-grid {
+            display: grid;
+            grid-template-columns: 100px repeat(10, 1fr); /* Cycle Labels + 10 Cycles */
+            gap: 2px;
+            background: #374151;
+            padding: 10px;
+            overflow-x: auto;
+            border-radius: 8px;
+        }
+        
+        .cell {
+            background: #1f2937;
+            padding: 10px;
+            text-align: center;
+            border: 1px solid #4b5563;
+            min-width: 60px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .header { background: #111827; font-weight: bold; }
+        
+        .stage-IF { background: #3b82f6; color: white; }
+        .stage-ID { background: #10b981; color: white; }
+        .stage-EX { background: #f59e0b; color: white; }
+        .stage-MEM { background: #ef4444; color: white; }
+        .stage-WB { background: #8b5cf6; color: white; }
+        .bubble { background: #ef4444; opacity: 0.5; border: 1px dashed white; }
+        
+        .legend {
+            display: flex; gap: 15px; margin-bottom: 20px;
+        }
+        .legend span { padding: 5px 10px; border-radius: 4px; font-size: 0.8rem; }
+        
+        #registers {
+            margin-top: 20px;
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            gap: 5px;
+        }
+        .reg-box {
+            background: #333;
+            padding: 5px;
+            text-align: center;
+            border: 1px solid #555;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <a href="../index.html" class="gallery-back">← Back to Gallery</a>
+    <h1>5-Stage Pipeline Visualization</h1>
+    
+    <div class="legend">
+        <span class="stage-IF">IF: Fetch</span>
+        <span class="stage-ID">ID: Decode</span>
+        <span class="stage-EX">EX: Execute</span>
+        <span class="stage-MEM">MEM: Memory</span>
+        <span class="stage-WB">WB: WriteBack</span>
+        <span class="bubble">Stall (Bubble)</span>
+    </div>
+
+    <div class="code-panel">
+        <textarea id="asm-code">
+ADD R1, R0, 5
+ADD R2, R0, 10
+ADD R3, R1, R2
+SUB R4, R3, 2
+STR R4, 100
+LDR R5, 100
+        </textarea>
+        <div class="controls">
+            <button onclick="reset()">Reset / Load</button>
+            <button onclick="step()">Step Cycle</button>
+            <button onclick="run()">Run All</button>
+            <label><input type="checkbox" id="forwarding" checked> Enable Forwarding</label>
+            <div id="cycle-count" style="margin-top: auto; font-size: 1.5rem;">Cycle: 0</div>
+        </div>
+    </div>
+
+    <div class="pipeline-grid" id="grid">
+        <!-- Grid injected here -->
+    </div>
+    
+    <h3>Register File</h3>
+    <div id="registers">
+        <!-- Registers R0-R7 -->
+    </div>
+</div>
+
+<script>
+    // Simplified Simulator
+    // Instructions: ADD, SUB, LDR, STR, MOV
+    // Format: OP Dest, Src1, Src2/Imm
+    
+    let instructions = [];
+    let pipeline = []; // List of { inst, stage } active in pipeline
+    let cycle = 0;
+    let completedInstructions = 0;
+    let registers = new Array(8).fill(0);
+    let memory = {};
+    
+    // Dependency tracking
+    // Map of Register -> Cycle when it will be ready
+    let regAvailability = new Array(8).fill(0);
+
+    const STAGES = ['IF', 'ID', 'EX', 'MEM', 'WB'];
+    
+    function init() {
+        renderRegisters();
+    }
+
+    function parseLine(line, index) {
+        const parts = line.replace(/,/g, ' ').trim().split(/\s+/);
+        const op = parts[0];
+        if (!op) return null;
+        
+        return {
+            id: index + 1,
+            text: line,
+            op: op,
+            dest: parseReg(parts[1]),
+            src1: parseReg(parts[2]),
+            src2: parseVal(parts[3]),
+            isImm: !parts[3].startsWith('R')
+        };
+    }
+    
+    function parseReg(str) {
+        if (!str) return null;
+        if (str.startsWith('R')) return parseInt(str.substring(1));
+        return null;
+    }
+    
+    function parseVal(str) {
+        if (!str) return null;
+        if (str.startsWith('R')) return parseInt(str.substring(1));
+        return parseInt(str);
+    }
+
+    function reset() {
+        const code = document.getElementById('asm-code').value;
+        instructions = code.split('\n').map(parseLine).filter(i => i);
+        
+        cycle = 0;
+        pipeline = []; // Active instructions state
+        // Each entry: { inst, stageIdx, stalled: false }
+        
+        completedInstructions = 0;
+        registers.fill(0);
+        regAvailability.fill(0);
+        
+        document.getElementById('grid').innerHTML = '';
+        renderRegisters();
+        updateCycleDisplay();
+        
+        // Prepare grid headers
+        const grid = document.getElementById('grid');
+        grid.style.gridTemplateColumns = `150px repeat(20, 1fr)`; // Expandable
+        
+        const hdr = document.createElement('div');
+        hdr.className = 'cell header';
+        hdr.textContent = 'Instruction';
+        grid.appendChild(hdr);
+        
+        for(let i=1; i<=20; i++) {
+            const h = document.createElement('div');
+            h.className = 'cell header';
+            h.textContent = i;
+            grid.appendChild(h);
+        }
+        
+        // Pre-fill rows for instructions
+        instructions.forEach(inst => {
+            const rowLabel = document.createElement('div');
+            rowLabel.className = 'cell header';
+            rowLabel.style.justifyContent = 'flex-start';
+            rowLabel.style.fontSize = '0.8rem';
+            rowLabel.textContent = inst.text;
+            grid.appendChild(rowLabel);
+            
+            // Cells
+            for(let i=1; i<=20; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                cell.id = `cell-${inst.id}-${i}`;
+                grid.appendChild(cell);
+            }
+        });
+    }
+
+    function step() {
+        cycle++;
+        updateCycleDisplay();
+        
+        const forwardingEnabled = document.getElementById('forwarding').checked;
+        
+        // 1. Advance pipeline stages (backwards to avoid overwriting)
+        // Move WB -> Finish
+        // MEM -> WB
+        // EX -> MEM
+        // ID -> EX
+        // IF -> ID
+        
+        // We iterate active instructions
+        // We need to manage stalls.
+        
+        // Detect hazards first?
+        // Let's just try to advance everyone, check dependencies at ID stage.
+        
+        // Fetch new instruction if IF stage is free?
+        // Simplified: One instruction enters per cycle unless stalled.
+        
+        // Add new instruction to pipeline if we haven't fetched all
+        const nextInstIdx = pipeline.length;
+        if (nextInstIdx < instructions.length) {
+            pipeline.push({
+                inst: instructions[nextInstIdx],
+                stageIdx: -1, // Not started
+                stalled: false
+            });
+        }
+        
+        // Process from oldest to newest
+        for (let i = 0; i < pipeline.length; i++) {
+            const item = pipeline[i];
+            
+            if (item.stageIdx === 4) continue; // Already done (WB finished)
+            
+            // Logic for transitions
+            let canAdvance = true;
+            
+            if (item.stageIdx === -1) {
+                // Entering IF
+                // Can always enter IF if previous is not stalled in IF?
+                // For simplicity, assumed ordered entry 1 per cycle
+                if (cycle >= item.inst.id) { // simple scalar pipeline logic
+                    canAdvance = true;
+                } else {
+                    canAdvance = false;
+                }
+            }
+            
+            else if (item.stageIdx === 1) { // ID Stage - Hazard Check
+                const inst = item.inst;
+                // Check Read-After-Write hazards
+                // If Src1 or Src2 depends on a reg written by a previous instruction
+                // that hasn't reached WB (or Forwarding point)
+                
+                // Find older instructions active in pipeline
+                for (let j = 0; j < i; j++) {
+                    const older = pipeline[j];
+                    if (older.stageIdx > 4) continue; // Finished
+                    
+                    // Does older write to our src?
+                    const dest = older.inst.dest;
+                    if (dest !== null) {
+                        const conflict = (dest === inst.src1) || (!inst.isImm && dest === inst.src2);
+                        if (conflict) {
+                            // Hazard!
+                            // If forwarding: Need data at end of EX (available in MEM)
+                            // older must be past EX?
+                            // If no forwarding: older must be past WB? (available in ID)
+                            
+                            if (forwardingEnabled) {
+                                // Data available after older completes EX (starts MEM)
+                                // We are in ID, going to EX.
+                                // If older is in EX, we stall (need result of ALU)
+                                // If older is in MEM, we can forward to EX start.
+                                
+                                // Actually, standard MIPS forwarding:
+                                // EX/MEM hazard: older in EX/MEM
+                                // MEM/WB hazard: older in MEM/WB
+                                
+                                // Load-Use Hazard:
+                                // If older is LDR and in EX, we must stall even with forwarding
+                                if (older.inst.op === 'LDR' && older.stageIdx === 2) {
+                                    canAdvance = false;
+                                }
+                                
+                                // Regular ALU-ALU is handled by hardware forwarding, no stall logic needed in visualizer
+                                // unless we explicitly show forwarding arrows.
+                                // But wait, in simulator we need values?
+                                // We won't simulate values fully, just timing.
+                            } else {
+                                // No forwarding: Must wait until older writes back (WB finished)
+                                // older must be at stage 4 (WB) or done.
+                                if (older.stageIdx < 4) {
+                                    canAdvance = false;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (item.stalled) {
+                // Try to unstall
+                if (canAdvance) item.stalled = false;
+            }
+            
+            if (!item.stalled && canAdvance) {
+                // If next stage is occupied by a stalled instruction, we must stall too
+                // Pipeline structural hazard (simplified)
+                if (i > 0 && pipeline[i-1].stalled && pipeline[i-1].stageIdx === item.stageIdx + 1) {
+                     item.stalled = true;
+                } else {
+                    item.stageIdx++;
+                }
+            } else {
+                item.stalled = true;
+            }
+            
+            // Draw
+            if (item.stageIdx >= 0 && item.stageIdx < 5) {
+                const stageName = STAGES[item.stageIdx];
+                const cell = document.getElementById(`cell-${item.inst.id}-${cycle}`);
+                if (cell) {
+                    cell.className = `cell stage-${stageName}`;
+                    cell.textContent = stageName;
+                    
+                    if (item.stalled && item.stageIdx > 0) { // Bubble logic visual?
+                        // Actually, if stalled, we stay in same stage.
+                        // But in diagram, time moves x-axis.
+                        // So we print the SAME stage again.
+                        
+                        // If it was a bubble (ID stage stalled), it looks like ID ID ID
+                    }
+                }
+            }
+            
+            // Execute Logic (WB stage)
+            if (item.stageIdx === 4 && !item.executed) {
+                executeInstruction(item.inst);
+                item.executed = true;
+                renderRegisters();
+            }
+        }
+    }
+    
+    function executeInstruction(inst) {
+        // Simple execution
+        const v1 = registers[inst.src1] || 0;
+        const v2 = inst.isImm ? inst.src2 : (registers[inst.src2] || 0);
+        let res = 0;
+        
+        switch(inst.op) {
+            case 'ADD': res = v1 + v2; break;
+            case 'SUB': res = v1 - v2; break;
+            case 'MOV': res = v2; break; // MOV R1, 5 -> R1 = 5
+            case 'STR': memory[inst.src2] = registers[inst.dest]; break; // STR R4, 100 -> mem[100] = R4
+            case 'LDR': res = memory[inst.src2] || 0; break; // LDR R5, 100 -> R5 = mem[100]
+        }
+        
+        if (inst.dest !== null && inst.op !== 'STR') {
+            registers[inst.dest] = res;
+        }
+    }
+
+    function renderRegisters() {
+        const div = document.getElementById('registers');
+        div.innerHTML = '';
+        registers.forEach((val, i) => {
+            const box = document.createElement('div');
+            box.className = 'reg-box';
+            box.innerHTML = `<strong>R${i}</strong><br>${val}`;
+            div.appendChild(box);
+        });
+    }
+    
+    function updateCycleDisplay() {
+        document.getElementById('cycle-count').textContent = `Cycle: ${cycle}`;
+    }
+
+    function run() {
+        const interval = setInterval(() => {
+            step();
+            if (cycle >= 20) clearInterval(interval);
+        }, 500);
+    }
+
+    init();
+    reset(); // Initial load
+</script>
+</body>
+</html>

@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Git Merkle Tree Explorer - CCAB</title>
+    <link rel="stylesheet" href="../assets/css/gallery-standard.css">
+    <style>
+        body {
+            background: #0d1117;
+            color: #c9d1d9;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            padding: 2rem;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .controls {
+            background: #161b22;
+            padding: 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            display: flex;
+            gap: 10px;
+            border: 1px solid #30363d;
+        }
+        button {
+            background: #238636;
+            color: white;
+            border: 1px solid rgba(27,31,35,0.15);
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        button:hover { background: #2ea043; }
+        button.secondary { background: #30363d; }
+        button.secondary:hover { background: #3c444d; }
+        
+        input {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 6px;
+        }
+
+        #viz-area {
+            position: relative;
+            height: 600px;
+            background: #010409;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            overflow: hidden;
+            cursor: grab;
+        }
+        
+        canvas {
+            display: block;
+        }
+
+        .commit-info {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(22, 27, 34, 0.9);
+            padding: 15px;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+            max-width: 300px;
+            pointer-events: none;
+            display: none;
+        }
+        .hash { font-family: monospace; color: #a5d6ff; }
+        .branch-tag {
+            background: #1f6feb;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            margin-left: 5px;
+        }
+        .head-tag {
+            background: #238636;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            margin-left: 5px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <a href="../index.html" class="gallery-back">← Back to Gallery</a>
+    <h1>Git Merkle DAG Visualizer</h1>
+    <p>Visualize how Git constructs a Directed Acyclic Graph of commits using SHA-1 hashes.</p>
+    
+    <div class="controls">
+        <input type="text" id="commit-msg" placeholder="Commit message" value="Update feature">
+        <button onclick="commit()">Commit</button>
+        <button class="secondary" onclick="createBranch()">New Branch</button>
+        <button class="secondary" onclick="checkoutBranch()">Checkout</button>
+        <button class="secondary" onclick="merge()">Merge</button>
+        <span id="current-status" style="margin-left: auto; align-self: center; font-family: monospace;">HEAD -> main</span>
+    </div>
+
+    <div id="viz-area">
+        <canvas id="canvas"></canvas>
+        <div id="info-panel" class="commit-info"></div>
+    </div>
+</div>
+
+<script>
+    // Git Logic
+    
+    // Simple SHA-1 simulation
+    async function sha1(msg) {
+        const msgBuffer = new TextEncoder().encode(msg);
+        const hashBuffer = await crypto.subtle.digest('SHA-1', msgBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        return hashHex.substring(0, 7); // Short hash
+    }
+
+    class Commit {
+        constructor(message, parents, author = "Dev") {
+            this.message = message;
+            this.parents = parents; // Array of Commit objects
+            this.author = author;
+            this.timestamp = new Date();
+            this.hash = null;
+            this.x = 0;
+            this.y = 0;
+            // For layout
+            this.column = 0;
+            this.row = 0;
+        }
+
+        async finalize() {
+            // Hash depends on content + parents
+            const parentHashes = this.parents.map(p => p.hash).join(',');
+            const content = `${this.message}-${parentHashes}-${this.timestamp.toISOString()}`;
+            this.hash = await sha1(content);
+        }
+    }
+
+    const commits = []; // All commits
+    const branches = { 'main': null }; // Name -> Commit
+    let HEAD = 'main'; // Name of branch OR Commit hash (detached)
+    
+    // Visualization State
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const infoPanel = document.getElementById('info-panel');
+    let offsetX = 50;
+    let offsetY = 300;
+    let isDragging = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+    let hoveredCommit = null;
+
+    async function init() {
+        // Initial commit
+        const c0 = new Commit("Initial commit", []);
+        await c0.finalize();
+        commits.push(c0);
+        branches['main'] = c0;
+        
+        // Some history
+        const c1 = new Commit("Add readme", [c0]);
+        await c1.finalize();
+        commits.push(c1);
+        branches['main'] = c1;
+
+        layout();
+        render();
+        
+        // Events
+        window.addEventListener('resize', () => { resize(); render(); });
+        resize();
+        
+        canvas.addEventListener('mousedown', e => {
+            isDragging = true;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+        });
+        window.addEventListener('mouseup', () => isDragging = false);
+        canvas.addEventListener('mousemove', e => {
+            if (isDragging) {
+                offsetX += e.clientX - lastMouseX;
+                offsetY += e.clientY - lastMouseY;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                render();
+            }
+            // Hover check
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            
+            hoveredCommit = null;
+            for (let c of commits) {
+                const cx = c.x + offsetX;
+                const cy = c.y + offsetY;
+                const dist = Math.hypot(cx - mx, cy - my);
+                if (dist < 15) {
+                    hoveredCommit = c;
+                    break;
+                }
+            }
+            updateInfoPanel(mx, my);
+            render();
+        });
+    }
+
+    function resize() {
+        canvas.width = document.getElementById('viz-area').offsetWidth;
+        canvas.height = document.getElementById('viz-area').offsetHeight;
+    }
+
+    function updateInfoPanel(mx, my) {
+        if (hoveredCommit) {
+            infoPanel.style.display = 'block';
+            infoPanel.innerHTML = `
+                <strong style="color:white">${hoveredCommit.message}</strong><br>
+                <span class="hash">${hoveredCommit.hash}</span><br>
+                <small>${hoveredCommit.timestamp.toLocaleTimeString()}</small><br>
+                Parents: ${hoveredCommit.parents.map(p => p.hash).join(', ') || 'None'}
+            `;
+            // infoPanel.style.left = mx + 20 + 'px';
+            // infoPanel.style.top = my - 20 + 'px';
+        } else {
+            infoPanel.style.display = 'none';
+        }
+    }
+
+    function updateStatus() {
+        const statusEl = document.getElementById('current-status');
+        if (typeof HEAD === 'string') {
+            statusEl.textContent = `HEAD -> ${HEAD}`;
+        } else {
+            statusEl.textContent = `HEAD -> ${HEAD.hash.substring(0,7)} (detached)`;
+        }
+    }
+
+    async function commit() {
+        const msg = document.getElementById('commit-msg').value;
+        const parent = getHeadCommit();
+        
+        if (!parent && commits.length > 0) {
+            alert("Detached HEAD state with no commit? Shouldn't happen in this demo.");
+            return;
+        }
+
+        const newCommit = new Commit(msg, parent ? [parent] : []);
+        await newCommit.finalize();
+        commits.push(newCommit);
+        
+        // Move branch pointer
+        if (typeof HEAD === 'string') {
+            branches[HEAD] = newCommit;
+        } else {
+            HEAD = newCommit; // Still detached, but moved? (Git behavior: detached moves head)
+        }
+        
+        document.getElementById('commit-msg').value = '';
+        layout();
+        render();
+    }
+
+    async function createBranch() {
+        const name = prompt("Branch name:");
+        if (name && !branches[name]) {
+            branches[name] = getHeadCommit();
+            // Should we checkout? Git usually doesn't unless -b
+            // checkout(name);
+            render();
+        }
+    }
+
+    function checkoutBranch() {
+        const name = prompt("Checkout branch:", Object.keys(branches).join(', '));
+        if (branches[name]) {
+            HEAD = name;
+            updateStatus();
+            render();
+        }
+    }
+
+    async function merge() {
+        if (typeof HEAD !== 'string') return alert("Checkout a branch to merge into.");
+        
+        const targetName = prompt("Merge branch:", Object.keys(branches).filter(b => b !== HEAD).join(', '));
+        if (!targetName || !branches[targetName]) return;
+        
+        const currentTip = branches[HEAD];
+        const targetTip = branches[targetName];
+        
+        // Naive merge
+        const c = new Commit(`Merge branch '${targetName}'`, [currentTip, targetTip]);
+        await c.finalize();
+        commits.push(c);
+        branches[HEAD] = c;
+        
+        layout();
+        render();
+    }
+
+    function getHeadCommit() {
+        if (typeof HEAD === 'string') return branches[HEAD];
+        return HEAD;
+    }
+
+    // Topological sort + column assignment
+    function layout() {
+        // Simple BFS from initial commit
+        // Assign columns based on branch divergence
+        
+        // Reset
+        commits.forEach(c => { c.column = 0; c.row = 0; });
+        
+        const visited = new Set();
+        const queue = [commits[0]];
+        let maxRow = 0;
+        
+        // Assign rows (time)
+        // Topological sort would be better, but commits array is roughly chronological
+        commits.forEach((c, i) => {
+            c.row = i;
+        });
+
+        // Assign columns (branches)
+        // Heuristic: If a commit has multiple children, they split columns
+        // If a commit has multiple parents (merge), they converge
+        
+        // We'll use a "lane" system
+        const lanes = []; // Array of Commit (tip of lane)
+        
+        commits.forEach(c => {
+            // Find a lane that connects to one of our parents
+            let assignedLane = -1;
+            
+            if (c.parents.length > 0) {
+                const p = c.parents[0];
+                // Try to continue parent's lane
+                if (lanes[p.column] === p) {
+                    assignedLane = p.column;
+                }
+            }
+            
+            if (assignedLane === -1) {
+                // Find empty lane or make new
+                assignedLane = lanes.findIndex(tip => tip === null || !commits.find(future => future.parents.includes(tip)));
+                if (assignedLane === -1) assignedLane = lanes.length;
+            }
+            
+            c.column = assignedLane;
+            lanes[assignedLane] = c;
+            
+            // Coordinates
+            c.x = 50 + (c.row * 60); // Time flows right
+            c.y = (c.column * 50);   // Branches spread down? Or maybe up/down centered.
+        });
+        
+        // Better layout:
+        // X based on index (time)
+        // Y based on "swimlanes"
+        // Let's implement a simple reservoir of lanes
+        
+        const activeLanes = []; // { commit, color }
+        const colors = ['#238636', '#1f6feb', '#d29922', '#da3633', '#a371f7'];
+        
+        // Clear previous calc
+        commits.forEach((c, i) => {
+             c.x = i * 80;
+             c.y = 0;
+        });
+        
+        // This is tricky to get right without a full graph layout lib.
+        // Simplified: Just use simple branching based on parent count.
+        // Actually, just Y = (column * 50).
+        // Let's manually fix overlaps?
+    }
+
+    function render() {
+        updateStatus();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.save();
+        ctx.translate(offsetX, offsetY);
+
+        // Draw edges
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 2;
+        
+        commits.forEach(c => {
+            c.parents.forEach(p => {
+                // Bezier curve
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y);
+                const cp1x = (p.x + c.x) / 2;
+                ctx.bezierCurveTo(cp1x, p.y, cp1x, c.y, c.x, c.y);
+                ctx.stroke();
+            });
+        });
+
+        // Draw nodes
+        commits.forEach(c => {
+            // Shadow
+            ctx.shadowColor = 'black';
+            ctx.shadowBlur = 5;
+            
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, 8, 0, Math.PI * 2);
+            ctx.fillStyle = '#c9d1d9';
+            
+            // Color by lane?
+            const colorIdx = c.column % 5;
+            // ctx.fillStyle = ['#238636', '#1f6feb', '#d29922', '#da3633', '#a371f7'][colorIdx];
+            
+            if (hoveredCommit === c) {
+                ctx.fillStyle = 'white';
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = '#58a6ff';
+                ctx.stroke();
+            }
+            
+            ctx.fill();
+            ctx.shadowBlur = 0;
+
+            // Render refs (Branches/HEAD)
+            let refs = [];
+            Object.entries(branches).forEach(([name, commit]) => {
+                if (commit === c) refs.push(name);
+            });
+            
+            if (refs.length > 0) {
+                ctx.font = '12px monospace';
+                ctx.textAlign = 'left';
+                let tagX = c.x + 15;
+                
+                refs.forEach(ref => {
+                    const isHead = (typeof HEAD === 'string' && HEAD === ref);
+                    const label = isHead ? `HEAD -> ${ref}` : ref;
+                    const width = ctx.measureText(label).width + 10;
+                    
+                    // Label bg
+                    ctx.fillStyle = isHead ? '#238636' : '#1f6feb';
+                    ctx.beginPath();
+                    ctx.roundRect(tagX, c.y - 10, width, 20, 5);
+                    ctx.fill();
+                    
+                    ctx.fillStyle = 'white';
+                    ctx.fillText(label, tagX + 5, c.y + 4);
+                    
+                    tagX += width + 5;
+                });
+            } else if (typeof HEAD !== 'string' && HEAD === c) {
+                // Detached head
+                 ctx.font = '12px monospace';
+                 ctx.fillStyle = '#d29922';
+                 ctx.beginPath();
+                 ctx.roundRect(c.x + 15, c.y - 10, 60, 20, 5);
+                 ctx.fill();
+                 ctx.fillStyle = 'white';
+                 ctx.fillText("HEAD", c.x + 20, c.y + 4);
+            }
+            
+            // Message (short)
+            ctx.fillStyle = '#8b949e';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(c.hash, c.x, c.y + 20);
+        });
+        
+        ctx.restore();
+    }
+
+    init();
+
+</script>
+</body>
+</html>

@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Regex Engine Visualizer - CCAB</title>
+    <link rel="stylesheet" href="../assets/css/gallery-standard.css">
+    <style>
+        body {
+            background: #fff;
+            color: #333;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container { max-width: 1000px; width: 100%; }
+        
+        .input-group {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            justify-content: center;
+        }
+        input { padding: 10px; border: 1px solid #ddd; border-radius: 4px; font-family: monospace; font-size: 1.1rem; }
+        button { padding: 10px 20px; background: #6366f1; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        
+        .viz-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            height: 500px;
+        }
+        
+        .graph-area {
+            border: 1px solid #eee;
+            border-radius: 8px;
+            position: relative;
+            overflow: hidden;
+            background: #fdfdfd;
+        }
+        
+        .tape-area {
+            border: 1px solid #eee;
+            border-radius: 8px;
+            padding: 20px;
+            background: #fafafa;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .tape {
+            display: flex;
+            font-family: monospace;
+            font-size: 1.5rem;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 5px;
+            overflow-x: auto;
+        }
+        .char {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        .char.current { background: #6366f1; color: white; transform: translateY(-5px); }
+        .char.match { background: #10b981; color: white; }
+        
+        /* Node Graph Styles */
+        .node {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: white;
+            border: 2px solid #333;
+            position: absolute;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            z-index: 2;
+            transition: all 0.3s;
+        }
+        .node.active { background: #fcd34d; border-color: #f59e0b; box-shadow: 0 0 15px #fcd34d; }
+        .node.accept { border: 4px double #10b981; }
+        
+        svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            pointer-events: none;
+        }
+        
+        .edge-label {
+            background: white;
+            padding: 2px 5px;
+            border: 1px solid #eee;
+            border-radius: 3px;
+            font-size: 0.8rem;
+        }
+
+        .status-msg { font-weight: bold; height: 30px; margin-top: 20px; }
+        .success { color: #10b981; }
+        .fail { color: #ef4444; }
+
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <a href="../index.html" class="gallery-back">← Back to Gallery</a>
+    <h1>Regex NFA Visualization</h1>
+    
+    <div class="input-group">
+        <label>Pattern (Simple: a, b, *, |, ()):</label>
+        <input type="text" id="pattern" value="(a|b)*c" style="width: 200px">
+        <label>Input String:</label>
+        <input type="text" id="text-input" value="abac" style="width: 200px">
+        <button onclick="compileAndRun()">Run</button>
+        <button onclick="step()" id="step-btn" disabled>Step</button>
+    </div>
+
+    <div class="viz-container">
+        <div class="graph-area" id="graph">
+            <svg id="lines"></svg>
+            <!-- Nodes -->
+        </div>
+        <div class="tape-area">
+            <h3>Input Tape</h3>
+            <div class="tape" id="tape"></div>
+            <div class="status-msg" id="status">Ready</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Thompson's Construction NFA
+    
+    class State {
+        constructor(isAccept = false) {
+            this.id = Math.random().toString(36).substr(2, 5);
+            this.transitions = []; // { char: 'a' or null (epsilon), to: State }
+            this.isAccept = isAccept;
+            this.x = 0;
+            this.y = 0;
+        }
+        
+        addTransition(char, state) {
+            this.transitions.push({ char, to: state });
+        }
+    }
+
+    class NFAFragment {
+        constructor(start, end) {
+            this.start = start;
+            this.end = end;
+        }
+    }
+
+    // Shunting-yard parser for regex -> Postfix
+    function toPostfix(regex) {
+        // Insert explicit concatenation operators '.'
+        // e.g. a b -> a . b
+        let formatted = '';
+        for (let i = 0; i < regex.length; i++) {
+            const c = regex[i];
+            formatted += c;
+            if (i + 1 < regex.length) {
+                const next = regex[i+1];
+                if (c !== '(' && c !== '|' && next !== ')' && next !== '*' && next !== '|') {
+                    formatted += '.';
+                }
+            }
+        }
+        
+        let output = [];
+        let stack = [];
+        const precedence = { '*': 3, '.': 2, '|': 1, '(': 0 };
+        
+        for (let c of formatted) {
+            if (c === '(') stack.push(c);
+            else if (c === ')') {
+                while(stack.length && stack[stack.length-1] !== '(') output.push(stack.pop());
+                stack.pop();
+            } else if (precedence[c]) {
+                while(stack.length && precedence[stack[stack.length-1]] >= precedence[c]) output.push(stack.pop());
+                stack.push(c);
+            } else {
+                output.push(c);
+            }
+        }
+        while(stack.length) output.push(stack.pop());
+        return output.join('');
+    }
+
+    function buildNFA(postfix) {
+        const stack = [];
+        
+        for (let c of postfix) {
+            if (c === '.') {
+                const f2 = stack.pop();
+                const f1 = stack.pop();
+                f1.end.addTransition(null, f2.start);
+                f1.end.isAccept = false;
+                stack.push(new NFAFragment(f1.start, f2.end));
+            } else if (c === '|') {
+                const f2 = stack.pop();
+                const f1 = stack.pop();
+                const start = new State();
+                const end = new State(true);
+                start.addTransition(null, f1.start);
+                start.addTransition(null, f2.start);
+                f1.end.addTransition(null, end);
+                f2.end.addTransition(null, end);
+                f1.end.isAccept = false;
+                f2.end.isAccept = false;
+                stack.push(new NFAFragment(start, end));
+            } else if (c === '*') {
+                const f = stack.pop();
+                const start = new State();
+                const end = new State(true);
+                start.addTransition(null, f.start);
+                start.addTransition(null, end);
+                f.end.addTransition(null, f.start);
+                f.end.addTransition(null, end);
+                f.end.isAccept = false;
+                stack.push(new NFAFragment(start, end));
+            } else {
+                // Literal
+                const start = new State();
+                const end = new State(true);
+                start.addTransition(c, end);
+                stack.push(new NFAFragment(start, end));
+            }
+        }
+        return stack.pop();
+    }
+
+    // Simulation
+    let nfa = null;
+    let currentStates = new Set();
+    let text = '';
+    let cursor = 0;
+    
+    // Viz
+    const graphEl = document.getElementById('graph');
+    const svgLines = document.getElementById('lines');
+    const tapeEl = document.getElementById('tape');
+    const statusEl = document.getElementById('status');
+    const stepBtn = document.getElementById('step-btn');
+    
+    function compileAndRun() {
+        const pattern = document.getElementById('pattern').value;
+        text = document.getElementById('text-input').value;
+        
+        try {
+            const postfix = toPostfix(pattern);
+            const fragment = buildNFA(postfix);
+            nfa = fragment;
+            
+            layoutGraph(nfa.start);
+            renderGraph();
+            
+            // Reset simulation
+            cursor = 0;
+            currentStates = new Set();
+            currentStates.add(nfa.start);
+            resolveEpsilon(currentStates);
+            
+            renderTape();
+            highlightStates();
+            stepBtn.disabled = false;
+            statusEl.textContent = 'Running...';
+            statusEl.className = 'status-msg';
+            
+        } catch(e) {
+            alert('Invalid Regex');
+            console.error(e);
+        }
+    }
+
+    function resolveEpsilon(states) {
+        // Compute epsilon closure
+        let stack = Array.from(states);
+        while(stack.length) {
+            const s = stack.pop();
+            s.transitions.forEach(t => {
+                if (t.char === null && !states.has(t.to)) {
+                    states.add(t.to);
+                    stack.push(t.to);
+                }
+            });
+        }
+    }
+
+    function step() {
+        if (cursor >= text.length) {
+            // Check if any current state is accept
+            let accepted = false;
+            currentStates.forEach(s => { if(s.isAccept) accepted = true; });
+            
+            if (accepted) {
+                statusEl.textContent = 'Match Found!';
+                statusEl.className = 'status-msg success';
+            } else {
+                statusEl.textContent = 'No Match.';
+                statusEl.className = 'status-msg fail';
+            }
+            stepBtn.disabled = true;
+            return;
+        }
+
+        const char = text[cursor];
+        const nextStates = new Set();
+        
+        currentStates.forEach(s => {
+            s.transitions.forEach(t => {
+                if (t.char === char) {
+                    nextStates.add(t.to);
+                }
+            });
+        });
+        
+        resolveEpsilon(nextStates);
+        currentStates = nextStates;
+        
+        cursor++;
+        renderTape();
+        highlightStates();
+        
+        if (currentStates.size === 0) {
+            statusEl.textContent = 'Failed (No valid transitions)';
+            statusEl.className = 'status-msg fail';
+            stepBtn.disabled = true;
+        }
+    }
+
+    function renderTape() {
+        tapeEl.innerHTML = '';
+        for (let i = 0; i < text.length; i++) {
+            const span = document.createElement('div');
+            span.className = `char ${i === cursor ? 'current' : ''} ${i < cursor ? 'match' : ''}`;
+            span.textContent = text[i];
+            tapeEl.appendChild(span);
+        }
+    }
+
+    // Simple Force-directed layout for Graph
+    let allStates = [];
+    
+    function layoutGraph(startNode) {
+        // Collect all states
+        const visited = new Set();
+        const stack = [startNode];
+        allStates = [];
+        
+        while(stack.length) {
+            const s = stack.pop();
+            if(!visited.has(s)) {
+                visited.add(s);
+                allStates.push(s);
+                s.transitions.forEach(t => stack.push(t.to));
+            }
+        }
+        
+        // Simple linear layout based on topology?
+        // Or layered. Let's do layered using BFS levels.
+        const levels = new Map();
+        const queue = [{n: startNode, l: 0}];
+        visited.clear();
+        visited.add(startNode);
+        
+        while(queue.length) {
+            const {n, l} = queue.shift();
+            levels.set(n, l);
+            n.transitions.forEach(t => {
+                if(!visited.has(t.to)) {
+                    visited.add(t.to);
+                    queue.push({n: t.to, l: l+1});
+                }
+            });
+        }
+        
+        const levelGroups = [];
+        levels.forEach((l, n) => {
+            if(!levelGroups[l]) levelGroups[l] = [];
+            levelGroups[l].push(n);
+        });
+        
+        // Assign coords
+        const width = graphEl.offsetWidth || 500;
+        const height = graphEl.offsetHeight || 500;
+        const xStep = width / (levelGroups.length + 1);
+        
+        levelGroups.forEach((nodes, l) => {
+            const yStep = height / (nodes.length + 1);
+            nodes.forEach((n, i) => {
+                n.x = (l + 1) * xStep;
+                n.y = (i + 1) * yStep;
+            });
+        });
+    }
+
+    function renderGraph() {
+        graphEl.querySelectorAll('.node').forEach(e => e.remove());
+        svgLines.innerHTML = '';
+        
+        // Draw Edges first
+        allStates.forEach(s => {
+            s.transitions.forEach(t => {
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                line.setAttribute('x1', s.x + 20);
+                line.setAttribute('y1', s.y + 20);
+                line.setAttribute('x2', t.to.x + 20);
+                line.setAttribute('y2', t.to.y + 20);
+                line.setAttribute('stroke', '#ccc');
+                line.setAttribute('stroke-width', '2');
+                line.setAttribute('marker-end', 'url(#arrow)');
+                svgLines.appendChild(line);
+                
+                // Label
+                const txt = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                txt.setAttribute('x', (s.x + t.to.x)/2 + 20);
+                txt.setAttribute('y', (s.y + t.to.y)/2 + 20);
+                txt.textContent = t.char === null ? 'ε' : t.char;
+                txt.setAttribute('fill', '#666');
+                txt.setAttribute('font-size', '12');
+                svgLines.appendChild(txt);
+            });
+        });
+
+        // Add Arrow Marker
+        if (!document.getElementById('arrow')) {
+             const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+             const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+             marker.setAttribute('id', 'arrow');
+             marker.setAttribute('markerWidth', '10');
+             marker.setAttribute('markerHeight', '10');
+             marker.setAttribute('refX', '30'); // Offset for node radius
+             marker.setAttribute('refY', '3');
+             marker.setAttribute('orient', 'auto');
+             const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+             path.setAttribute('d', 'M0,0 L0,6 L9,3 z');
+             path.setAttribute('fill', '#ccc');
+             marker.appendChild(path);
+             defs.appendChild(marker);
+             svgLines.appendChild(defs);
+        }
+
+        // Draw Nodes
+        allStates.forEach(s => {
+            const div = document.createElement('div');
+            div.className = `node ${s.isAccept ? 'accept' : ''}`;
+            div.id = `state-${s.id}`;
+            div.style.left = s.x + 'px';
+            div.style.top = s.y + 'px';
+            div.textContent = s.isAccept ? '✓' : '';
+            graphEl.appendChild(div);
+        });
+    }
+
+    function highlightStates() {
+        document.querySelectorAll('.node').forEach(n => n.classList.remove('active'));
+        currentStates.forEach(s => {
+            const el = document.getElementById(`state-${s.id}`);
+            if(el) el.classList.add('active');
+        });
+    }
+
+</script>
+</body>
+</html>
