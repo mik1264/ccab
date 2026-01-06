@@ -65,12 +65,12 @@ This check is a strong guard against obvious duplicates in the current demo set.
 45. **[x] Optimizer Shootout (AdaGrad focus)** (`adagrad`) — Compare SGD/AdaGrad/RMSprop/Adam on identical loss landscapes and noisy gradients. Suggested: Canvas 2D.
 46. **[x] SVM Margin & Kernels** (`svm`) — Drag points, fit max-margin separator, and toggle RBF/poly kernels with support vectors highlighted. Suggested: Canvas 2D.
 47. **[x] Baum–Welch HMM Training** (`baumwelch`) — Train a tiny HMM on sequences; visualize forward-backward probabilities per step. Suggested: Canvas 2D.
-48. **BCJR Soft-Decoder Demo** (`bcjr`) — Show trellis, log-likelihood ratios, and compare to hard-decision decoding. Suggested: Canvas 2D.
-49. **ELBO as a Geometry Problem** (`elbo`) — Interactive 1D variational inference showing how ELBO trades fit vs entropy; show KL terms. Suggested: Canvas 2D.
-50. **RealNVP Normalizing Flow** (`realnvp`) — Couple layers transforming a Gaussian into a multimodal target; show invertibility and Jacobians. Suggested: Canvas 2D.
-51. **Word2Vec in 2D (Toy Corpus)** (`word2vec`) — Train embeddings on a tiny text; show cosine neighbors and analogy vectors. Suggested: Canvas 2D.
-52. **Bayesian Optimization Playground** (`bayesopt`) — GP posterior + acquisition function; optimize noisy black-box functions interactively. Suggested: Canvas 2D.
-53. **XGBoost Step-by-Step** (`xgboost`) — Build boosted trees iteratively; visualize residuals and learning rate effects. Suggested: Canvas 2D.
+48. **[x] BCJR Soft-Decoder Demo** (`bcjr`) — Show trellis, log-likelihood ratios, and compare to hard-decision decoding. Suggested: Canvas 2D.
+49. **[x] ELBO as a Geometry Problem** (`elbo`) — Interactive 1D variational inference showing how ELBO trades fit vs entropy; show KL terms. Suggested: Canvas 2D.
+50. **[x] RealNVP Normalizing Flow** (`realnvp`) — Couple layers transforming a Gaussian into a multimodal target; show invertibility and Jacobians. Suggested: Canvas 2D.
+51. **[x] Word2Vec in 2D (Toy Corpus)** (`word2vec`) — Train embeddings on a tiny text; show cosine neighbors and analogy vectors. Suggested: Canvas 2D.
+52. **[x] Bayesian Optimization Playground** (`bayesopt`) — GP posterior + acquisition function; optimize noisy black-box functions interactively. Suggested: Canvas 2D.
+53. **[x] XGBoost Step-by-Step** (`xgboost`) — Build boosted trees iteratively; visualize residuals and learning rate effects. Suggested: Canvas 2D.
 54. **[x] AdaBoost with Stumps** (`adaboost`) — Show weight updates on points, stump selection, and margin evolution. Suggested: Canvas 2D.
 55. **[x] RANSAC Robust Fitting** (`ransac`) — Fit a line/circle with outliers; show inlier sets across iterations and confidence. Suggested: Canvas 2D.
 56. **Autodiff Graph Visualizer** (`autodiff`) — Build a computation graph from an expression and animate forward/reverse mode passes. Suggested: Canvas 2D.
@@ -82,8 +82,8 @@ This check is a strong guard against obvious duplicates in the current demo set.
 ## Physics, Chemistry & Biology (61–80)
 61. **[x] Izhikevich Spiking Neuron Zoo** (`izhikevich`) — Explore bursting, tonic spiking, chattering, etc., via parameter presets and phase-plane traces. Suggested: Canvas 2D.
 62. **[x] Morris–Lecar Neuron Bifurcations** (`morrislecar`) — Nullclines, fixed points, and oscillations; sweep parameters and show transitions. Suggested: Canvas 2D.
-63. **2D FDTD Maxwell Waves** (`fdtd`) — Propagate EM waves, reflect/refract through materials, and build a simple waveguide. Suggested: Canvas 2D (coarse grid) or WebGL.
-64. **Rayleigh–Bénard Convection** (`rayleighbenard`) — Heat-from-below fluid convection with adjustable Rayleigh number; show roll formation. Suggested: Canvas 2D.
+63. **[x] 2D FDTD Maxwell Waves** (`fdtd`) — Propagate EM waves, reflect/refract through materials, and build a simple waveguide. Suggested: Canvas 2D (coarse grid) or WebGL.
+64. **[x] Rayleigh–Bénard Convection** (`rayleighbenard`) — Heat-from-below fluid convection with adjustable Rayleigh number; show roll formation. Suggested: Canvas 2D.
 65. **[x] Ornstein–Uhlenbeck Process** (`ornstein`) — Mean-reverting noise; compare sample paths, stationary distribution, and autocorrelation. Suggested: Canvas 2D.
 66. **[x] Fokker–Planck PDE Visualizer** (`fokker`) — Evolve probability density under drift+diffusion; compare to Monte Carlo sampling. Suggested: Canvas 2D.
 67. **[x] Langevin Dynamics in a Potential** (`langevin`) — Particle in double-well potential; show temperature-driven hopping and energy stats. Suggested: Canvas 2D.
@@ -114,11 +114,11 @@ This check is a strong guard against obvious duplicates in the current demo set.
 90. **[x] Perona–Malik Anisotropic Diffusion** (`perona`) — Edge-preserving smoothing; visualize diffusion coefficients and time steps. Suggested: Canvas 2D.
 91. **[x] CLAHE Contrast Enhancer** (`clahe`) — Tile-based histogram equalization with clip limit; show per-tile histograms. Suggested: Canvas 2D.
 92. **[x] Reinhard Tone Mapping Lab** (`reinhard`) — Exposure, white point, and local vs global tone mapping comparisons. Suggested: Canvas 2D.
-93. **MSDF Font Rendering Zoom Tool** (`msdf`) — Show how multi-channel SDF preserves corners at any scale; render text with zoom/rotation. Suggested: Canvas 2D / WebGL.
+93. **[x] MSDF Font Rendering Zoom Tool** (`msdf`) — Show how multi-channel SDF preserves corners at any scale; render text with zoom/rotation. Suggested: Canvas 2D / WebGL.
 94. **[x] De Casteljau Bezier Construction** (`casteljau`) — Step through interpolation layers and show the curve point construction over time. Suggested: Canvas 2D.
 95. **[x] Catmull–Rom Spline Editor** (`catmull`) — Drag control points; show tangents and tension; compare to Bezier. Suggested: Canvas 2D.
-96. **NURBS Curve Playground** (`nurbs`) — Interactive knot vector + weights; demonstrate how weights pull the curve. Suggested: Canvas 2D.
+96. **[x] NURBS Curve Playground** (`nurbs`) — Interactive knot vector + weights; demonstrate how weights pull the curve. Suggested: Canvas 2D.
 97. **[x] Kintsugi Crack Generator** (`kintsugi`) — Procedural cracks + golden fill; control crack density and "repair" animation. Suggested: Canvas 2D.
-98. **Suminagashi Ink Marbling** (`suminagashi`) — Layered ink rings advected by gentle flow fields to mimic marbling. Suggested: Canvas 2D.
-99. **Cut-and-Project Quasicrystals** (`cutandproject`) — Generate quasiperiodic point sets/tilings from higher-dimensional lattices and projections. Suggested: Canvas 2D.
+98. **[x] Suminagashi Ink Marbling** (`suminagashi`) — Layered ink rings advected by gentle flow fields to mimic marbling. Suggested: Canvas 2D.
+99. **[x] Cut-and-Project Quasicrystals** (`cutandproject`) — Generate quasiperiodic point sets/tilings from higher-dimensional lattices and projections. Suggested: Canvas 2D.
 100. **[x] Seam Carving Resizer** (`seamcarving`) — Content-aware resizing with energy maps; visualize removed seams step-by-step. Suggested: Canvas 2D.
