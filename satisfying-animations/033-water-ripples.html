@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Water Ripples - Satisfying Animations - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0e1a; overflow: hidden; }
+        canvas { display: block; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 10px 20px; background: rgba(254, 250, 224, 0.9); color: #606C38; text-decoration: none; border-radius: 25px; font-family: 'Segoe UI', sans-serif; font-weight: 600; font-size: 14px; z-index: 1000; }
+        .back-link:hover { background: #FEFAE0; transform: translateX(-5px); }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back</a>
+    <canvas id="canvas"></canvas>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const gl = canvas.getContext('webgl2');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const vertexShader = `#version 300 es
+            in vec2 position;
+            void main() {
+                gl_Position = vec4(position, 0.0, 1.0);
+            }
+        `;
+
+        const fragmentShader = `#version 300 es
+            precision highp float;
+            uniform vec2 resolution;
+            uniform float time;
+            out vec4 fragColor;
+
+            #define NUM_DROPS 5
+
+            float hash(float n) {
+                return fract(sin(n) * 43758.5453);
+            }
+
+            // Single ripple
+            float ripple(vec2 uv, vec2 center, float startTime, float t) {
+                float age = t - startTime;
+                if (age < 0.0) return 0.0;
+
+                float dist = length(uv - center);
+                float speed = 0.3;
+                float wavelength = 0.05;
+                float decay = exp(-age * 0.8);
+
+                // Ripple expands outward
+                float radius = age * speed;
+
+                // Wave pattern
+                float wave = sin((dist - radius) / wavelength * 6.28318) * decay;
+
+                // Only show wave near the expanding edge
+                float edgeFade = smoothstep(0.15, 0.0, abs(dist - radius));
+
+                return wave * edgeFade;
+            }
+
+            void main() {
+                vec2 uv = gl_FragCoord.xy / resolution;
+                float aspect = resolution.x / resolution.y;
+                uv.x *= aspect;
+
+                float t = time;
+
+                // Water base color
+                vec3 deepWater = vec3(0.05, 0.15, 0.3);
+                vec3 shallowWater = vec3(0.1, 0.3, 0.45);
+                vec3 waterColor = mix(deepWater, shallowWater, 0.5);
+
+                // Accumulate ripples from multiple drops
+                float totalRipple = 0.0;
+
+                for (int i = 0; i < NUM_DROPS; i++) {
+                    float id = float(i);
+
+                    // Drop timing (staggered)
+                    float dropPeriod = 3.0;
+                    float dropOffset = id * dropPeriod / float(NUM_DROPS);
+                    float dropTime = mod(t + dropOffset, dropPeriod);
+
+                    // Drop position (varies per cycle)
+                    float cycle = floor((t + dropOffset) / dropPeriod);
+                    vec2 dropPos = vec2(
+                        0.3 + hash(id + cycle * 0.1) * 0.4,
+                        0.3 + hash(id * 1.5 + cycle * 0.2) * 0.4
+                    );
+                    dropPos.x *= aspect;
+
+                    // Add ripple
+                    totalRipple += ripple(uv, dropPos, 0.0, dropTime);
+                }
+
+                // Normalize and apply
+                totalRipple = clamp(totalRipple * 0.5, -1.0, 1.0);
+
+                // Create normal from ripple height
+                float eps = 0.005;
+                vec2 uvR = uv + vec2(eps, 0.0);
+                vec2 uvU = uv + vec2(0.0, eps);
+
+                float rippleR = 0.0, rippleU = 0.0;
+                for (int i = 0; i < NUM_DROPS; i++) {
+                    float id = float(i);
+                    float dropPeriod = 3.0;
+                    float dropOffset = id * dropPeriod / float(NUM_DROPS);
+                    float dropTime = mod(t + dropOffset, dropPeriod);
+                    float cycle = floor((t + dropOffset) / dropPeriod);
+                    vec2 dropPos = vec2(
+                        0.3 + hash(id + cycle * 0.1) * 0.4,
+                        0.3 + hash(id * 1.5 + cycle * 0.2) * 0.4
+                    );
+                    dropPos.x *= aspect;
+
+                    rippleR += ripple(uvR, dropPos, 0.0, dropTime);
+                    rippleU += ripple(uvU, dropPos, 0.0, dropTime);
+                }
+
+                // Calculate pseudo-normal
+                vec3 normal = normalize(vec3(
+                    (totalRipple - rippleR) * 10.0,
+                    (totalRipple - rippleU) * 10.0,
+                    1.0
+                ));
+
+                // Light reflection
+                vec3 lightDir = normalize(vec3(0.3, 0.5, 1.0));
+                float diffuse = max(0.0, dot(normal, lightDir));
+
+                // Specular
+                vec3 viewDir = vec3(0.0, 0.0, 1.0);
+                vec3 halfVec = normalize(lightDir + viewDir);
+                float specular = pow(max(0.0, dot(normal, halfVec)), 32.0);
+
+                // Fresnel effect
+                float fresnel = pow(1.0 - abs(normal.z), 3.0);
+
+                // Sky reflection color
+                vec3 skyColor = vec3(0.5, 0.7, 1.0);
+
+                // Combine
+                vec3 color = waterColor;
+                color *= 0.5 + diffuse * 0.5;
+                color = mix(color, skyColor, fresnel * 0.3);
+                color += vec3(1.0, 0.95, 0.9) * specular * 0.5;
+
+                // Subtle caustics
+                float caustic = sin(uv.x * 50.0 + totalRipple * 5.0) *
+                               sin(uv.y * 50.0 + totalRipple * 5.0);
+                caustic = pow(abs(caustic), 2.0) * 0.1;
+                color += vec3(0.2, 0.4, 0.5) * caustic;
+
+                // Vignette
+                float vignette = 1.0 - length((uv / vec2(aspect, 1.0) - 0.5) * 0.8);
+                color *= vignette;
+
+                fragColor = vec4(color, 1.0);
+            }
+        `;
+
+        function createShader(type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            return shader;
+        }
+
+        const program = gl.createProgram();
+        gl.attachShader(program, createShader(gl.VERTEX_SHADER, vertexShader));
+        gl.attachShader(program, createShader(gl.FRAGMENT_SHADER, fragmentShader));
+        gl.linkProgram(program);
+        gl.useProgram(program);
+
+        const vertices = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+        const buffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+        gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+        const positionLoc = gl.getAttribLocation(program, 'position');
+        gl.enableVertexAttribArray(positionLoc);
+        gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+
+        const resolutionLoc = gl.getUniformLocation(program, 'resolution');
+        const timeLoc = gl.getUniformLocation(program, 'time');
+
+        function animate(time) {
+            gl.uniform2f(resolutionLoc, canvas.width, canvas.height);
+            gl.uniform1f(timeLoc, time * 0.001);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            requestAnimationFrame(animate);
+        }
+        animate(0);
+    </script>
+</body>
+</html>
