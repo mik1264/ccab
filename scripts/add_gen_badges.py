@@ -177,7 +177,6 @@ GENERATIONS = {
     # Gen 6 - Astronomy (Dec 2024)
     'cosmology': 6,
     'stellar-evolution': 6,
-    'galaxy-dynamics': 6,
     'cosmology-universe': 6,
     'orbital-flythroughs': 6,
     'earth-space': 6,
