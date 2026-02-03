@@ -128,6 +128,9 @@
         <div class="legend-item"><div class="dot" style="background: #f59e0b;"></div> Candidate</div>
         <div class="legend-item"><div class="dot" style="background: #ef4444;"></div> Leader</div>
         <div class="legend-item"><div class="dot" style="background: #6b7280;"></div> Offline</div>
+        <hr style="border: none; border-top: 1px solid #374151; margin: 8px 0;">
+        <div class="legend-item"><div class="dot" style="background: #3b82f6; border-radius: 2px;"></div> Log Entry</div>
+        <div class="legend-item"><div class="dot" style="background: #22c55e; border-radius: 2px;"></div> Committed</div>
     </div>
 
     <div class="controls">
@@ -173,6 +176,8 @@
             this.votedFor = null;
             this.log = [];
             this.commitIndex = 0;
+            this.nextIndex = {}; // For leader: next log index to send to each follower
+            this.matchIndex = {}; // For leader: highest log index known to be replicated
             
             // Timers
             this.electionTimer = 0;
@@ -264,6 +269,62 @@
                         this.resetElectionTimer();
                     }
                     break;
+
+                case 'AppendEntries':
+                    if (msg.payload.term >= this.term) {
+                        this.state = 'Follower';
+                        this.resetElectionTimer();
+
+                        // Append entries to log
+                        if (msg.payload.entries && msg.payload.entries.length > 0) {
+                            msg.payload.entries.forEach(entry => {
+                                // Check if we already have this entry
+                                if (this.log.length <= entry.index) {
+                                    this.log.push({ ...entry, committed: false });
+                                }
+                            });
+
+                            // Update commit index
+                            if (msg.payload.leaderCommit > this.commitIndex) {
+                                this.commitIndex = Math.min(msg.payload.leaderCommit, this.log.length - 1);
+                                // Mark committed entries
+                                for (let i = 0; i <= this.commitIndex && i < this.log.length; i++) {
+                                    this.log[i].committed = true;
+                                }
+                            }
+
+                            // Send success response
+                            messages.push(new Message(this, msg.from, 'AppendEntriesResponse', {
+                                term: this.term,
+                                success: true,
+                                matchIndex: this.log.length - 1
+                            }));
+                        }
+                    }
+                    break;
+
+                case 'AppendEntriesResponse':
+                    if (this.state === 'Leader' && msg.payload.success) {
+                        // Track replication
+                        const matchIndex = msg.payload.matchIndex;
+
+                        // Count how many nodes have this entry
+                        let replicatedCount = 1; // Leader
+                        nodes.forEach(n => {
+                            if (n.id !== this.id && n.log.length > matchIndex) {
+                                replicatedCount++;
+                            }
+                        });
+
+                        // If majority has entry, commit it
+                        if (replicatedCount > nodes.filter(n => n.state !== 'Offline').length / 2) {
+                            if (matchIndex >= 0 && matchIndex < this.log.length && !this.log[matchIndex].committed) {
+                                this.log[matchIndex].committed = true;
+                                this.commitIndex = Math.max(this.commitIndex, matchIndex);
+                            }
+                        }
+                    }
+                    break;
             }
         }
 
@@ -274,6 +335,19 @@
         }
 
         draw() {
+            const now = performance.now();
+
+            // Pulse effect for leader when receiving client request
+            if (this.pulseTime && now - this.pulseTime < 500) {
+                const pulseProgress = (now - this.pulseTime) / 500;
+                const pulseRadius = NODE_RADIUS + 20 * (1 - pulseProgress);
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, pulseRadius, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(59, 130, 246, ${1 - pulseProgress})`;
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+
             // Circle
             ctx.beginPath();
             ctx.arc(this.x, this.y, NODE_RADIUS, 0, Math.PI * 2);
@@ -294,15 +368,42 @@
 
             // Timeout Ring (for followers/candidates)
             if (this.state !== 'Leader' && this.state !== 'Offline') {
-                const now = performance.now();
                 const timeLeft = Math.max(0, this.electionTimer - now);
                 const progress = timeLeft / ELECTION_TIMEOUT_MAX;
-                
+
                 ctx.beginPath();
                 ctx.arc(this.x, this.y, NODE_RADIUS + 5, -Math.PI/2, -Math.PI/2 + (Math.PI * 2 * progress));
                 ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
                 ctx.lineWidth = 2;
                 ctx.stroke();
+            }
+
+            // Draw log entries below the node
+            if (this.log.length > 0) {
+                const logStartY = this.y + NODE_RADIUS + 15;
+                const entryWidth = 18;
+                const entryHeight = 12;
+                const maxVisible = 5;
+                const startIdx = Math.max(0, this.log.length - maxVisible);
+
+                for (let i = startIdx; i < this.log.length; i++) {
+                    const entry = this.log[i];
+                    const offsetX = (i - startIdx - (Math.min(this.log.length, maxVisible) - 1) / 2) * (entryWidth + 2);
+
+                    ctx.fillStyle = entry.committed ? '#22c55e' : '#3b82f6';
+                    ctx.fillRect(this.x + offsetX - entryWidth/2, logStartY, entryWidth, entryHeight);
+
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '8px Arial';
+                    ctx.fillText(entry.index, this.x + offsetX, logStartY + entryHeight/2 + 3);
+                }
+
+                // Log count indicator
+                if (this.log.length > maxVisible) {
+                    ctx.fillStyle = '#9ca3af';
+                    ctx.font = '10px Arial';
+                    ctx.fillText(`+${this.log.length - maxVisible}`, this.x - 35, logStartY + entryHeight/2 + 3);
+                }
             }
         }
 
@@ -338,14 +439,25 @@
             const cx = this.from.x + (this.to.x - this.from.x) * ratio;
             const cy = this.from.y + (this.to.y - this.from.y) * ratio;
 
-            ctx.beginPath();
-            ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-            
-            if (this.type === 'Heartbeat') ctx.fillStyle = COLOR_MSG_HEARTBEAT;
-            else if (this.type === 'RequestVote' || this.type === 'VoteGranted') ctx.fillStyle = COLOR_MSG_VOTE;
-            else ctx.fillStyle = COLOR_MSG_APPEND;
-            
-            ctx.fill();
+            // Different visualization for different message types
+            if (this.type === 'AppendEntries' || this.type === 'AppendEntriesResponse') {
+                // Log replication messages - draw as small rectangles
+                ctx.fillStyle = this.type === 'AppendEntries' ? '#3b82f6' : '#22c55e';
+                ctx.fillRect(cx - 6, cy - 4, 12, 8);
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(cx - 6, cy - 4, 12, 8);
+            } else {
+                // Other messages - draw as circles
+                ctx.beginPath();
+                ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+
+                if (this.type === 'Heartbeat') ctx.fillStyle = COLOR_MSG_HEARTBEAT;
+                else if (this.type === 'RequestVote' || this.type === 'VoteGranted') ctx.fillStyle = COLOR_MSG_VOTE;
+                else ctx.fillStyle = COLOR_MSG_APPEND;
+
+                ctx.fill();
+            }
         }
     }
 
@@ -400,10 +512,37 @@
         // Send a request to the leader (if any)
         const leader = nodes.find(n => n.state === 'Leader');
         if (leader) {
-            // TODO: Visualize log append
-            // For now just flash the leader
-            const originalColor = COLOR_LEADER;
-            // Visual feedback handled by render loop usually
+            // Add entry to leader's log
+            const entry = {
+                term: leader.term,
+                index: leader.log.length,
+                command: `cmd-${Date.now() % 1000}`,
+                committed: false
+            };
+            leader.log.push(entry);
+
+            // Initialize tracking for this entry
+            let replicationCount = 1; // Leader has it
+
+            // Send AppendEntries to all followers
+            nodes.forEach(n => {
+                if (n.id !== leader.id && n.state !== 'Offline') {
+                    messages.push(new Message(leader, n, 'AppendEntries', {
+                        term: leader.term,
+                        leaderId: leader.id,
+                        prevLogIndex: leader.log.length - 2,
+                        prevLogTerm: leader.log.length > 1 ? leader.log[leader.log.length - 2].term : 0,
+                        entries: [entry],
+                        leaderCommit: leader.commitIndex
+                    }));
+                }
+            });
+
+            // Visual feedback - pulse the leader
+            leader.pulseTime = performance.now();
+        } else {
+            // No leader - show message
+            console.log('No leader available to handle client request');
         }
     }
 
