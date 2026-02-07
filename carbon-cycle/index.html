@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Carbon Cycle Visualization</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title {
+    position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+    color: #fbbf24; font-size: 22px; font-weight: 600;
+    text-shadow: 0 0 20px rgba(251,191,36,0.5); z-index: 10;
+    pointer-events: none; text-align: center;
+}
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.85); border: 1px solid rgba(251,191,36,0.3);
+    border-radius: 12px; padding: 14px 20px; display: flex; gap: 20px;
+    align-items: center; z-index: 10; flex-wrap: wrap; justify-content: center;
+}
+.control-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+label { color: #fbbf24; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+input[type="range"] { width: 130px; accent-color: #fbbf24; }
+.value-display { color: #fff; font-size: 13px; font-weight: bold; }
+button {
+    background: rgba(251,191,36,0.2); color: #fbbf24; border: 1px solid #fbbf24;
+    padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 12px;
+    font-weight: bold; transition: background 0.2s;
+}
+button:hover { background: rgba(251,191,36,0.4); }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title">Carbon Cycle Visualization</div>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <div class="control-group">
+        <label>Fossil Fuel Emissions</label>
+        <input type="range" id="emissionsSlider" min="0" max="200" value="100">
+        <span class="value-display" id="emissionsVal">10 GtC/yr</span>
+    </div>
+    <div class="control-group">
+        <label>Deforestation</label>
+        <input type="range" id="deforestSlider" min="0" max="100" value="20">
+        <span class="value-display" id="deforestVal">20%</span>
+    </div>
+    <div class="control-group">
+        <label>Speed</label>
+        <input type="range" id="speedSlider" min="1" max="20" value="5">
+        <span class="value-display" id="speedVal">5x</span>
+    </div>
+    <button onclick="resetCarbon()">Reset</button>
+</div>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+let emissions = 100;
+let deforestation = 20;
+let simSpeed = 5;
+
+const reservoirs = {
+    atmosphere: { carbon: 870, color: '#88bbff', x: 0.5, y: 0.12, name: 'Atmosphere', unit: 'GtC' },
+    land:       { carbon: 2000, color: '#4a8a3a', x: 0.18, y: 0.55, name: 'Land & Vegetation', unit: 'GtC' },
+    ocean:      { carbon: 38000, color: '#2266aa', x: 0.82, y: 0.55, name: 'Ocean', unit: 'GtC' },
+    fossil:     { carbon: 10000, color: '#8a6a3a', x: 0.5, y: 0.82, name: 'Fossil Fuels', unit: 'GtC' }
+};
+
+let carbonParticles = [];
+let co2History = [];
+let yearCount = 0;
+let ppmValue = 415;
+
+document.getElementById('emissionsSlider').addEventListener('input', e => {
+    emissions = +e.target.value;
+    document.getElementById('emissionsVal').textContent = (emissions / 10).toFixed(1) + ' GtC/yr';
+});
+document.getElementById('deforestSlider').addEventListener('input', e => {
+    deforestation = +e.target.value;
+    document.getElementById('deforestVal').textContent = deforestation + '%';
+});
+document.getElementById('speedSlider').addEventListener('input', e => {
+    simSpeed = +e.target.value;
+    document.getElementById('speedVal').textContent = simSpeed + 'x';
+});
+
+function resetCarbon() {
+    reservoirs.atmosphere.carbon = 870;
+    reservoirs.land.carbon = 2000;
+    reservoirs.ocean.carbon = 38000;
+    reservoirs.fossil.carbon = 10000;
+    carbonParticles = [];
+    co2History = [];
+    yearCount = 0;
+    ppmValue = 415;
+}
+window.resetCarbon = resetCarbon;
+
+const fluxes = [
+    { from: 'atmosphere', to: 'land', name: 'Photosynthesis', baseRate: 120, color: '#4a8a3a' },
+    { from: 'land', to: 'atmosphere', name: 'Respiration', baseRate: 118, color: '#aa6633' },
+    { from: 'atmosphere', to: 'ocean', name: 'Ocean Absorption', baseRate: 92, color: '#2266aa' },
+    { from: 'ocean', to: 'atmosphere', name: 'Ocean Release', baseRate: 90, color: '#44aadd' },
+    { from: 'fossil', to: 'atmosphere', name: 'Fossil Burning', baseRate: 10, color: '#ff6633' },
+    { from: 'land', to: 'atmosphere', name: 'Deforestation', baseRate: 2, color: '#cc4422' }
+];
+
+function spawnParticle(from, to, color) {
+    const r1 = reservoirs[from];
+    const r2 = reservoirs[to];
+    carbonParticles.push({
+        x: r1.x * W, y: r1.y * H,
+        tx: r2.x * W, ty: r2.y * H,
+        progress: 0,
+        speed: 0.3 + Math.random() * 0.4,
+        color: color,
+        ox: (Math.random() - 0.5) * 40,
+        oy: (Math.random() - 0.5) * 20
+    });
+}
+
+function drawReservoir(key) {
+    const r = reservoirs[key];
+    const cx = r.x * W, cy = r.y * H;
+    const w = 140, h = 70;
+
+    ctx.fillStyle = r.color + '22';
+    ctx.strokeStyle = r.color + '88';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(cx - w / 2, cy - h / 2, w, h, 12);
+    ctx.fill();
+    ctx.stroke();
+
+    const pulse = Math.sin(Date.now() / 1000) * 0.5 + 0.5;
+    ctx.strokeStyle = r.color + Math.floor(20 + pulse * 30).toString(16).padStart(2, '0');
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(cx - w / 2 - 4, cy - h / 2 - 4, w + 8, h + 8, 14);
+    ctx.stroke();
+
+    ctx.fillStyle = r.color;
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(r.name, cx, cy - 12);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText(r.carbon.toFixed(0) + ' GtC', cx, cy + 12);
+
+    if (key === 'atmosphere') {
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.fillText(ppmValue.toFixed(0) + ' ppm CO\u2082', cx, cy + 30);
+    }
+}
+
+function drawFluxArrow(from, to, rate, color, label) {
+    const r1 = reservoirs[from];
+    const r2 = reservoirs[to];
+    const x1 = r1.x * W, y1 = r1.y * H;
+    const x2 = r2.x * W, y2 = r2.y * H;
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    const nx = dx / len, ny = dy / len;
+    const sx = x1 + nx * 50, sy = y1 + ny * 40;
+    const ex = x2 - nx * 50, ey = y2 - ny * 40;
+
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    const cpx = mx + ny * 30, cpy = my - nx * 30;
+    ctx.quadraticCurveTo(cpx, cpy, ex, ey);
+    ctx.strokeStyle = color + '44';
+    ctx.lineWidth = Math.max(1, rate / 15);
+    ctx.stroke();
+
+    const lx = cpx * 0.5 + (sx + ex) * 0.25;
+    const ly = cpy * 0.5 + (sy + ey) * 0.25;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    const tw = ctx.measureText(label).width + ctx.measureText(rate.toFixed(1) + ' GtC/yr').width * 0 + 10;
+    ctx.fillStyle = color;
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, lx, ly - 6);
+    ctx.fillStyle = '#ccc';
+    ctx.font = '8px sans-serif';
+    ctx.fillText(rate.toFixed(1) + ' GtC/yr', lx, ly + 5);
+}
+
+function drawCO2Graph(x, y, w, h) {
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.strokeStyle = 'rgba(251,191,36,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Atmospheric CO\u2082 (ppm)', x + w / 2, y + 14);
+    if (co2History.length < 2) return;
+    const gx = x + 35, gy = y + 22, gw = w - 45, gh = h - 34;
+    const minV = Math.min(...co2History) * 0.95;
+    const maxV = Math.max(...co2History) * 1.05;
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    for (let i = 0; i <= 4; i++) {
+        const ly = gy + gh - (i / 4) * gh;
+        ctx.beginPath(); ctx.moveTo(gx, ly); ctx.lineTo(gx + gw, ly); ctx.stroke();
+        ctx.fillStyle = '#555';
+        ctx.font = '8px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText((minV + (maxV - minV) * i / 4).toFixed(0), gx - 3, ly + 3);
+    }
+
+    ctx.beginPath();
+    ctx.strokeStyle = '#f84';
+    ctx.lineWidth = 2;
+    const start = Math.max(0, co2History.length - gw);
+    for (let i = start; i < co2History.length; i++) {
+        const px = gx + gw - (co2History.length - 1 - i);
+        const py = gy + gh - ((co2History[i] - minV) / (maxV - minV)) * gh;
+        if (i === start) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+}
+
+function drawYearCounter() {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.beginPath();
+    ctx.roundRect(W - 130, 80, 110, 40, 8);
+    ctx.fill();
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Year ' + (2024 + Math.floor(yearCount)).toString(), W - 75, 105);
+}
+
+let lastTime = performance.now();
+let particleTimer = 0;
+let histTimer = 0;
+
+function animate(now) {
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+    yearCount += dt * simSpeed * 0.2;
+
+    const forestFraction = 1 - deforestation / 100;
+    const emissionRate = emissions / 10;
+
+    const rates = [
+        120 * forestFraction,
+        118 * (0.9 + deforestation / 500),
+        92 * (1 + (reservoirs.atmosphere.carbon - 870) / 5000),
+        90,
+        emissionRate,
+        deforestation / 10
+    ];
+
+    for (let i = 0; i < fluxes.length; i++) {
+        const flux = fluxes[i];
+        const rate = rates[i];
+        const carbonMove = rate * dt * simSpeed * 0.2;
+        if (reservoirs[flux.from].carbon >= carbonMove) {
+            reservoirs[flux.from].carbon -= carbonMove;
+            reservoirs[flux.to].carbon += carbonMove;
+        }
+    }
+
+    ppmValue = reservoirs.atmosphere.carbon / 870 * 415;
+
+    particleTimer += dt;
+    if (particleTimer > 0.15 / simSpeed) {
+        particleTimer = 0;
+        for (let i = 0; i < fluxes.length; i++) {
+            if (Math.random() < rates[i] / 200) {
+                spawnParticle(fluxes[i].from, fluxes[i].to, fluxes[i].color);
+            }
+        }
+    }
+
+    carbonParticles.forEach(p => {
+        p.progress += p.speed * dt * simSpeed * 0.5;
+        const t = p.progress;
+        const cpx = (p.x + p.tx) / 2 + p.ox;
+        const cpy = (p.y + p.ty) / 2 + p.oy - 30;
+        const it = 1 - t;
+        p.cx = it * it * p.x + 2 * it * t * cpx + t * t * p.tx;
+        p.cy = it * it * p.y + 2 * it * t * cpy + t * t * p.ty;
+    });
+    carbonParticles = carbonParticles.filter(p => p.progress < 1);
+
+    histTimer += dt;
+    if (histTimer > 0.2) {
+        histTimer = 0;
+        co2History.push(ppmValue);
+        if (co2History.length > 500) co2History.shift();
+    }
+
+    ctx.clearRect(0, 0, W, H);
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#0a1428');
+    bg.addColorStop(0.4, '#0a0e1a');
+    bg.addColorStop(1, '#0d1a10');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    for (let i = 0; i < fluxes.length; i++) {
+        drawFluxArrow(fluxes[i].from, fluxes[i].to, rates[i], fluxes[i].color, fluxes[i].name);
+    }
+
+    carbonParticles.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.cx, p.cy, 3, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(p.cx, p.cy, 7, 0, Math.PI * 2);
+        ctx.fillStyle = p.color + '22';
+        ctx.fill();
+    });
+
+    for (const key in reservoirs) drawReservoir(key);
+
+    const gw = Math.min(280, W * 0.25);
+    drawCO2Graph(20, H * 0.15, gw, 130);
+    drawYearCounter();
+
+    if (ppmValue > 600) {
+        ctx.fillStyle = '#f44';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('WARNING: CO\u2082 levels dangerously high!', W / 2, H * 0.06);
+    }
+
+    requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

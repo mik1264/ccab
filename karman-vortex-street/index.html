@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Karman Vortex Street</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+.title-overlay {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+    color: #fbbf24; font-size: 20px; font-weight: bold; z-index: 999;
+    text-shadow: 0 0 10px rgba(0,0,0,0.8); pointer-events: none;
+    font-family: sans-serif;
+}
+.controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 20px; align-items: center; z-index: 999;
+    background: rgba(0,0,0,0.7); padding: 12px 20px; border-radius: 10px;
+}
+.controls label { color: #ccc; font-size: 13px; }
+.controls input[type=range] { width: 120px; cursor: pointer; }
+.controls span { color: #fbbf24; font-size: 13px; min-width: 30px; }
+.info {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.5); font-size: 12px; z-index: 999;
+    pointer-events: none; font-family: sans-serif;
+}
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div class="title-overlay">Karman Vortex Street</div>
+<div class="info">Lattice Boltzmann fluid simulation with vortex shedding</div>
+<div class="controls">
+    <label>Flow Speed</label>
+    <input type="range" id="speedSlider" min="5" max="20" value="10" step="1">
+    <span id="speedVal">10</span>
+    <label>Obstacle Size</label>
+    <input type="range" id="sizeSlider" min="5" max="20" value="10" step="1">
+    <span id="sizeVal">10</span>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H, NX, NY, scale;
+const SCALE = 3;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    NX = Math.floor(W / SCALE);
+    NY = Math.floor(H / SCALE);
+    scale = SCALE;
+    initLBM();
+}
+
+// LBM D2Q9
+const cx = [0, 1, 0, -1, 0, 1, -1, -1, 1];
+const cy = [0, 0, 1, 0, -1, 1, 1, -1, -1];
+const w = [4/9, 1/9, 1/9, 1/9, 1/9, 1/36, 1/36, 1/36, 1/36];
+const opp = [0, 3, 4, 1, 2, 7, 8, 5, 6];
+
+let f, ftemp, rho, ux, uy, barrier;
+let omega = 1.7;
+
+function idx(x, y) { return y * NX + x; }
+
+function initLBM() {
+    const N = NX * NY;
+    f = new Array(9);
+    ftemp = new Array(9);
+    for (let i = 0; i < 9; i++) {
+        f[i] = new Float32Array(N);
+        ftemp[i] = new Float32Array(N);
+    }
+    rho = new Float32Array(N);
+    ux = new Float32Array(N);
+    uy = new Float32Array(N);
+    barrier = new Uint8Array(N);
+
+    const u0 = parseFloat(document.getElementById('speedSlider').value) / 100;
+    for (let y = 0; y < NY; y++) {
+        for (let x = 0; x < NX; x++) {
+            const n = idx(x, y);
+            rho[n] = 1;
+            ux[n] = u0;
+            uy[n] = 0;
+            for (let i = 0; i < 9; i++) {
+                const cu = cx[i] * u0;
+                f[i][n] = w[i] * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * u0 * u0);
+            }
+        }
+    }
+
+    setBarrier();
+}
+
+function setBarrier() {
+    barrier.fill(0);
+    const r = parseFloat(document.getElementById('sizeSlider').value);
+    const obX = Math.floor(NX * 0.2);
+    const obY = Math.floor(NY * 0.5);
+    for (let y = 0; y < NY; y++) {
+        for (let x = 0; x < NX; x++) {
+            const dx = x - obX;
+            const dy = y - obY;
+            if (dx * dx + dy * dy < r * r) {
+                barrier[idx(x, y)] = 1;
+            }
+        }
+    }
+}
+
+function collide() {
+    const u0 = parseFloat(document.getElementById('speedSlider').value) / 100;
+    for (let y = 0; y < NY; y++) {
+        for (let x = 0; x < NX; x++) {
+            const n = idx(x, y);
+            if (barrier[n]) continue;
+
+            let r = 0, vx = 0, vy = 0;
+            for (let i = 0; i < 9; i++) {
+                r += f[i][n];
+                vx += cx[i] * f[i][n];
+                vy += cy[i] * f[i][n];
+            }
+            rho[n] = r;
+            if (r > 0) { vx /= r; vy /= r; }
+            ux[n] = vx;
+            uy[n] = vy;
+
+            const usq = vx * vx + vy * vy;
+            for (let i = 0; i < 9; i++) {
+                const cu = cx[i] * vx + cy[i] * vy;
+                const feq = w[i] * r * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * usq);
+                f[i][n] += omega * (feq - f[i][n]);
+            }
+        }
+    }
+}
+
+function stream() {
+    for (let i = 0; i < 9; i++) {
+        for (let y = 0; y < NY; y++) {
+            for (let x = 0; x < NX; x++) {
+                const nx = x + cx[i];
+                const ny = y + cy[i];
+                if (nx >= 0 && nx < NX && ny >= 0 && ny < NY) {
+                    const src = idx(x, y);
+                    const dst = idx(nx, ny);
+                    if (barrier[dst]) {
+                        ftemp[opp[i]][src] = f[i][src];
+                    } else {
+                        ftemp[i][dst] = f[i][src];
+                    }
+                }
+            }
+        }
+    }
+    // Swap
+    const tmp = f;
+    f = ftemp;
+    ftemp = tmp;
+
+    // Inlet boundary
+    const u0 = parseFloat(document.getElementById('speedSlider').value) / 100;
+    for (let y = 0; y < NY; y++) {
+        const n = idx(0, y);
+        rho[n] = 1;
+        ux[n] = u0;
+        uy[n] = 0;
+        const usq = u0 * u0;
+        for (let i = 0; i < 9; i++) {
+            const cu = cx[i] * u0;
+            f[i][n] = w[i] * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * usq);
+        }
+    }
+}
+
+function curl(x, y) {
+    if (x <= 0 || x >= NX - 1 || y <= 0 || y >= NY - 1) return 0;
+    return (uy[idx(x+1, y)] - uy[idx(x-1, y)]) - (ux[idx(x, y+1)] - ux[idx(x, y-1)]);
+}
+
+let imageData;
+function render() {
+    if (!imageData || imageData.width !== NX || imageData.height !== NY) {
+        imageData = ctx.createImageData(NX, NY);
+    }
+    const data = imageData.data;
+    for (let y = 0; y < NY; y++) {
+        for (let x = 0; x < NX; x++) {
+            const n = idx(x, y);
+            const p = n * 4;
+            if (barrier[n]) {
+                data[p] = 80; data[p+1] = 80; data[p+2] = 80; data[p+3] = 255;
+                continue;
+            }
+            const c = curl(x, y) * 50;
+            let r, g, b;
+            if (c > 0) {
+                r = Math.min(255, c * 5);
+                g = Math.min(255, 50 + c * 2);
+                b = Math.max(0, 255 - c * 3);
+            } else {
+                const ac = -c;
+                r = Math.max(0, 50 - ac * 3);
+                g = Math.min(255, 100 + ac * 3);
+                b = Math.min(255, ac * 5);
+            }
+            const speed = Math.sqrt(ux[n] * ux[n] + uy[n] * uy[n]);
+            const bright = Math.min(1, 0.3 + speed * 8);
+            data[p] = r * bright;
+            data[p+1] = g * bright;
+            data[p+2] = b * bright;
+            data[p+3] = 255;
+        }
+    }
+    ctx.putImageData(imageData, 0, 0);
+    ctx.drawImage(canvas, 0, 0, NX, NY, 0, 0, W, H);
+}
+
+const speedSlider = document.getElementById('speedSlider');
+const sizeSlider = document.getElementById('sizeSlider');
+const speedVal = document.getElementById('speedVal');
+const sizeVal = document.getElementById('sizeVal');
+
+speedSlider.addEventListener('input', () => { speedVal.textContent = speedSlider.value; });
+sizeSlider.addEventListener('input', () => {
+    sizeVal.textContent = sizeSlider.value;
+    setBarrier();
+});
+
+function animate() {
+    for (let s = 0; s < 10; s++) {
+        collide();
+        stream();
+    }
+    render();
+    requestAnimationFrame(animate);
+}
+
+window.addEventListener('resize', resize);
+resize();
+animate();
+</script>
+</body>
+</html>

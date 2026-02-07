@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quarantine Strategy Comparison</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title-overlay { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 20px; font-weight: 700; text-shadow: 0 2px 10px rgba(0,0,0,0.7); z-index: 10; pointer-events: none; }
+#controls { position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.85); padding: 12px 20px; border-radius: 14px; color: #e0e0e0; z-index: 10; display: flex; gap: 16px; align-items: center; border: 1px solid rgba(251,191,36,0.3); font-size: 13px; }
+#controls button { padding: 8px 18px; background: #fbbf24; color: #0a0e1a; border: none; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 13px; }
+#controls button:hover { background: #f59e0b; }
+#controls input[type=range] { width: 100px; accent-color: #fbbf24; }
+.val { color: #fbbf24; font-weight: 700; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title-overlay">Quarantine Strategy Comparison</div>
+<div id="controls">
+    <label>Transmission <input type="range" id="transRate" min="0.02" max="0.25" step="0.01" value="0.1"><span class="val" id="transVal">10%</span></label>
+    <label>Speed <input type="range" id="simSpeed" min="1" max="5" value="2"><span class="val" id="speedVal">2x</span></label>
+    <button id="resetBtn">Reset Simulation</button>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+const N = 120; // per panel
+const RADIUS = 3;
+const SPEED = 0.8;
+const INFECTION_DIST = 12;
+const RECOVERY_TIME = 250;
+const QUARANTINE_DELAY = 40; // frames before quarantine activates
+const LOCKDOWN_RADIUS = 80;
+
+const S = 0, I = 1, R = 2, Q = 3; // Susceptible, Infected, Recovered, Quarantined
+const COLORS = ['#4a9eff', '#ff4a4a', '#4aff88', '#ff8c00'];
+
+const PANELS = [
+    { title: 'No Quarantine', strategy: 'none' },
+    { title: 'Individual Quarantine', strategy: 'individual' },
+    { title: 'Area Lockdown', strategy: 'lockdown' }
+];
+
+let panels = [];
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+
+function createPanel(idx) {
+    const panelW = (W - 40) / 3;
+    const ox = 15 + idx * (panelW + 5);
+    const oy = 50;
+    const ph = H - 180;
+    const simH = ph * 0.6;
+
+    // Use a fixed seed-like approach: same initial positions
+    const rng = seedRng(42);
+    const agents = [];
+    for (let i = 0; i < N; i++) {
+        agents.push({
+            x: ox + 10 + rng() * (panelW - 20),
+            y: oy + 10 + rng() * (simH - 20),
+            vx: (rng() - 0.5) * SPEED * 2,
+            vy: (rng() - 0.5) * SPEED * 2,
+            state: i === 0 ? I : S,
+            infectedTime: i === 0 ? 0 : -1,
+            quarantined: false,
+            origVx: 0, origVy: 0
+        });
+    }
+    // Patient zero in same spot
+    agents[0].x = ox + panelW / 2;
+    agents[0].y = oy + simH / 2;
+
+    return {
+        agents,
+        ox, oy, panelW, simH, ph,
+        history: [],
+        strategy: PANELS[idx].strategy,
+        title: PANELS[idx].title,
+        totalInfected: 1,
+        lockdownCenter: null,
+        lockdownActive: false
+    };
+}
+
+function seedRng(seed) {
+    let s = seed;
+    return function() {
+        s = (s * 1664525 + 1013904223) & 0xFFFFFFFF;
+        return (s >>> 0) / 0xFFFFFFFF;
+    };
+}
+
+function init() {
+    panels = PANELS.map((_, i) => createPanel(i));
+}
+
+function updatePanel(panel) {
+    const trans = parseFloat(document.getElementById('transRate').value);
+    const speed = parseInt(document.getElementById('simSpeed').value);
+
+    for (let step = 0; step < speed; step++) {
+        const { agents, ox, oy, panelW, simH, strategy } = panel;
+
+        for (let a of agents) {
+            if (a.quarantined) {
+                // Quarantined agents don't move
+                continue;
+            }
+
+            a.x += a.vx;
+            a.y += a.vy;
+
+            // Lockdown: constrain movement
+            if (strategy === 'lockdown' && panel.lockdownActive && panel.lockdownCenter) {
+                const lc = panel.lockdownCenter;
+                const dx = a.x - lc.x, dy = a.y - lc.y;
+                const d = Math.sqrt(dx * dx + dy * dy);
+                if (d < LOCKDOWN_RADIUS) {
+                    // Inside lockdown: slow down heavily
+                    a.vx *= 0.92;
+                    a.vy *= 0.92;
+                }
+            }
+
+            // Bounce
+            if (a.x < ox + 5 || a.x > ox + panelW - 5) a.vx *= -1;
+            if (a.y < oy + 5 || a.y > oy + simH - 5) a.vy *= -1;
+            a.x = Math.max(ox + 5, Math.min(ox + panelW - 5, a.x));
+            a.y = Math.max(oy + 5, Math.min(oy + simH - 5, a.y));
+
+            // Random direction
+            if (Math.random() < 0.015) {
+                a.vx += (Math.random() - 0.5) * 0.3;
+                a.vy += (Math.random() - 0.5) * 0.3;
+                const sp = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
+                if (sp > SPEED) { a.vx = (a.vx / sp) * SPEED; a.vy = (a.vy / sp) * SPEED; }
+            }
+
+            if (a.state === I) {
+                a.infectedTime++;
+                if (a.infectedTime > RECOVERY_TIME) {
+                    a.state = R;
+                    a.quarantined = false;
+                }
+
+                // Individual quarantine strategy
+                if (strategy === 'individual' && a.infectedTime > QUARANTINE_DELAY && !a.quarantined) {
+                    if (Math.random() < 0.7) { // 70% detection rate
+                        a.quarantined = true;
+                    }
+                }
+
+                // Lockdown strategy
+                if (strategy === 'lockdown' && !panel.lockdownActive && panel.totalInfected > 3) {
+                    panel.lockdownActive = true;
+                    panel.lockdownCenter = { x: a.x, y: a.y };
+                }
+            }
+        }
+
+        // Infection spread
+        for (let i = 0; i < agents.length; i++) {
+            if (agents[i].state !== I || agents[i].quarantined) continue;
+            for (let j = 0; j < agents.length; j++) {
+                if (agents[j].state !== S) continue;
+                const dx = agents[i].x - agents[j].x, dy = agents[i].y - agents[j].y;
+                if (dx * dx + dy * dy < INFECTION_DIST * INFECTION_DIST) {
+                    if (Math.random() < trans) {
+                        agents[j].state = I;
+                        agents[j].infectedTime = 0;
+                        panel.totalInfected++;
+                    }
+                }
+            }
+        }
+    }
+
+    // History
+    let counts = [0, 0, 0, 0];
+    for (let a of panel.agents) {
+        counts[a.state]++;
+        if (a.quarantined) counts[3]++;
+    }
+    panel.history.push(counts);
+    if (panel.history.length > panel.panelW - 20) panel.history.shift();
+}
+
+function drawPanel(panel, idx) {
+    const { agents, ox, oy, panelW, simH, ph, strategy, title, history, lockdownActive, lockdownCenter } = panel;
+
+    // Panel background
+    ctx.fillStyle = 'rgba(15,20,35,0.6)';
+    ctx.fillRect(ox, oy, panelW, ph);
+    ctx.strokeStyle = 'rgba(251,191,36,0.15)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(ox, oy, panelW, ph);
+
+    // Title
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(title, ox + panelW / 2, oy - 6);
+    ctx.textAlign = 'left';
+
+    // Simulation area border
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.strokeRect(ox, oy, panelW, simH);
+
+    // Lockdown zone
+    if (strategy === 'lockdown' && lockdownActive && lockdownCenter) {
+        ctx.beginPath();
+        ctx.arc(lockdownCenter.x, lockdownCenter.y, LOCKDOWN_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,140,0,0.06)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,140,0,0.3)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#ff8c00';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('LOCKDOWN', lockdownCenter.x, lockdownCenter.y - LOCKDOWN_RADIUS - 4);
+        ctx.textAlign = 'left';
+    }
+
+    // Agents
+    for (let a of agents) {
+        ctx.beginPath();
+        ctx.arc(a.x, a.y, RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = a.quarantined ? COLORS[3] : COLORS[a.state];
+        if (a.state === I) {
+            ctx.shadowBlur = 6;
+            ctx.shadowColor = '#ff4a4a';
+        } else {
+            ctx.shadowBlur = 0;
+        }
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        if (a.quarantined) {
+            ctx.beginPath();
+            ctx.arc(a.x, a.y, RADIUS + 3, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255,140,0,0.4)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    }
+
+    // Graph
+    const graphY = oy + simH + 15;
+    const graphH = ph - simH - 30;
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(ox + 5, graphY, panelW - 10, graphH);
+
+    if (history.length > 1) {
+        const gw = panelW - 10;
+        // Draw infection curve
+        ctx.beginPath();
+        ctx.strokeStyle = '#ff4a4a';
+        ctx.lineWidth = 1.5;
+        for (let i = 0; i < history.length; i++) {
+            const x = ox + 5 + (i / Math.max(history.length - 1, 1)) * gw;
+            const y = graphY + graphH - (history[i][1] / N) * graphH;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Fill under curve
+        ctx.lineTo(ox + 5 + gw, graphY + graphH);
+        ctx.lineTo(ox + 5, graphY + graphH);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(255,74,74,0.15)';
+        ctx.fill();
+
+        // Recovered line
+        ctx.beginPath();
+        ctx.strokeStyle = '#4aff88';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < history.length; i++) {
+            const x = ox + 5 + (i / Math.max(history.length - 1, 1)) * gw;
+            const y = graphY + graphH - (history[i][2] / N) * graphH;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+
+    // Current stats
+    let counts = [0, 0, 0];
+    let qCount = 0;
+    for (let a of agents) {
+        counts[a.state]++;
+        if (a.quarantined) qCount++;
+    }
+
+    ctx.font = '11px sans-serif';
+    const sty = oy + ph + 4;
+    ctx.fillStyle = '#ff4a4a';
+    ctx.textAlign = 'center';
+    ctx.fillText('Infected: ' + counts[1] + '  Total: ' + panel.totalInfected, ox + panelW / 2, sty);
+    ctx.textAlign = 'left';
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Legend at top
+    ctx.font = '11px sans-serif';
+    const legendItems = [
+        { color: '#4a9eff', label: 'Susceptible' },
+        { color: '#ff4a4a', label: 'Infected' },
+        { color: '#4aff88', label: 'Recovered' },
+        { color: '#ff8c00', label: 'Quarantined' }
+    ];
+    let lx = W - 320;
+    const ly = 18;
+    for (let item of legendItems) {
+        ctx.beginPath();
+        ctx.arc(lx, ly, 5, 0, Math.PI * 2);
+        ctx.fillStyle = item.color;
+        ctx.fill();
+        ctx.fillStyle = '#ccc';
+        ctx.fillText(item.label, lx + 10, ly + 4);
+        lx += 80;
+    }
+
+    for (let i = 0; i < panels.length; i++) {
+        updatePanel(panels[i]);
+        drawPanel(panels[i], i);
+    }
+}
+
+document.getElementById('transRate').oninput = function() { document.getElementById('transVal').textContent = Math.round(this.value * 100) + '%'; };
+document.getElementById('simSpeed').oninput = function() { document.getElementById('speedVal').textContent = this.value + 'x'; };
+document.getElementById('resetBtn').onclick = () => { resize(); init(); };
+window.addEventListener('resize', () => { resize(); init(); });
+
+function animate() { draw(); requestAnimationFrame(animate); }
+resize();
+init();
+animate();
+</script>
+</body>
+</html>

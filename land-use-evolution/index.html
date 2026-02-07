@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zoning & Land Use Evolution</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+#title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 18px; font-family: sans-serif; z-index: 999; text-shadow: 0 0 10px rgba(251,191,36,0.5); pointer-events: none; }
+#ui { position: fixed; top: 10px; right: 10px; z-index: 999; }
+.panel { background: rgba(0,0,0,0.75); color: #e0e0e0; padding: 12px 16px; border-radius: 8px; font-size: 13px; min-width: 200px; }
+.panel label { display: block; margin: 6px 0 2px; color: #fbbf24; }
+.panel input[type=range] { width: 100%; }
+.panel button { background: #fbbf24; color: #0a0e1a; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-top: 6px; width: 100%; }
+.panel button:hover { background: #f59e0b; }
+#stats { color: #aaa; margin-top: 8px; line-height: 1.6; }
+.legend { margin-top: 8px; }
+.legend-item { display: flex; align-items: center; gap: 6px; margin: 2px 0; font-size: 11px; }
+.legend-dot { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+.btn-group { display: flex; gap: 4px; margin-top: 6px; }
+.btn-group button { flex: 1; font-size: 11px; padding: 5px 4px; }
+.btn-active { background: #f59e0b !important; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div id="title">Zoning & Land Use Evolution</div>
+<div id="ui">
+    <div class="panel">
+        <label>Speed: <span id="spdVal">3</span> steps/frame</label>
+        <input type="range" id="speed" min="1" max="15" value="3">
+        <label>Economic Growth: <span id="egVal">50</span>%</label>
+        <input type="range" id="econGrowth" min="10" max="100" value="50">
+        <label>Green Space Value: <span id="gsVal">40</span>%</label>
+        <input type="range" id="greenVal" min="0" max="100" value="40">
+        <div class="btn-group">
+            <button id="btnZone" class="btn-active">Zones</button>
+            <button id="btnValue">Land Value</button>
+            <button id="btnDensity">Density</button>
+        </div>
+        <button id="resetBtn">Reset</button>
+        <div class="legend">
+            <div class="legend-item"><span class="legend-dot" style="background:#1e293b;"></span> Undeveloped</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#3b82f6;"></span> Residential</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#f59e0b;"></span> Commercial</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#8b5cf6;"></span> Industrial</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#22c55e;"></span> Green Space</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#64748b;"></span> Mixed Use</div>
+        </div>
+        <div id="stats"></div>
+    </div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function() {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H, gridW, gridH, cellSize;
+
+    const EMPTY = 0, RESIDENTIAL = 1, COMMERCIAL = 2, INDUSTRIAL = 3, GREEN = 4, MIXED = 5;
+    const zoneColors = ['#0f172a', '#3b82f6', '#f59e0b', '#8b5cf6', '#22c55e', '#64748b'];
+
+    let grid, landValue, density, nextGrid;
+    let speed = 3;
+    let econGrowth = 50;
+    let greenValue = 40;
+    let viewMode = 'zone';
+    let generation = 0;
+    let totalPopulation = 0;
+
+    document.getElementById('speed').addEventListener('input', function() {
+        speed = parseInt(this.value); document.getElementById('spdVal').textContent = speed;
+    });
+    document.getElementById('econGrowth').addEventListener('input', function() {
+        econGrowth = parseInt(this.value); document.getElementById('egVal').textContent = econGrowth;
+    });
+    document.getElementById('greenVal').addEventListener('input', function() {
+        greenValue = parseInt(this.value); document.getElementById('gsVal').textContent = greenValue;
+    });
+    document.getElementById('btnZone').addEventListener('click', function() {
+        viewMode = 'zone'; setActive(this);
+    });
+    document.getElementById('btnValue').addEventListener('click', function() {
+        viewMode = 'value'; setActive(this);
+    });
+    document.getElementById('btnDensity').addEventListener('click', function() {
+        viewMode = 'density'; setActive(this);
+    });
+    document.getElementById('resetBtn').addEventListener('click', init);
+
+    function setActive(btn) {
+        document.querySelectorAll('.btn-group button').forEach(b => b.classList.remove('btn-active'));
+        btn.classList.add('btn-active');
+    }
+
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+        cellSize = 6;
+        gridW = Math.floor(W / cellSize);
+        gridH = Math.floor(H / cellSize);
+    }
+
+    function init() {
+        resize();
+        grid = new Uint8Array(gridW * gridH);
+        nextGrid = new Uint8Array(gridW * gridH);
+        landValue = new Float32Array(gridW * gridH);
+        density = new Float32Array(gridW * gridH);
+        generation = 0;
+        totalPopulation = 0;
+
+        const cx = Math.floor(gridW / 2);
+        const cy = Math.floor(gridH / 2);
+
+        // Base land values (higher at center)
+        for (let y = 0; y < gridH; y++) {
+            for (let x = 0; x < gridW; x++) {
+                const dx = x - cx, dy = y - cy;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                landValue[y * gridW + x] = Math.max(0, 1 - dist / (Math.min(gridW, gridH) * 0.5)) + Math.random() * 0.1;
+            }
+        }
+
+        // Seed: initial downtown
+        for (let dy = -4; dy <= 4; dy++) {
+            for (let dx = -4; dx <= 4; dx++) {
+                const idx = (cy + dy) * gridW + (cx + dx);
+                if (Math.abs(dx) <= 2 && Math.abs(dy) <= 2) {
+                    grid[idx] = COMMERCIAL;
+                } else {
+                    grid[idx] = RESIDENTIAL;
+                }
+                density[idx] = 0.8;
+            }
+        }
+
+        // Small parks
+        for (let i = 0; i < 5; i++) {
+            const px = cx + Math.floor((Math.random() - 0.5) * 20);
+            const py = cy + Math.floor((Math.random() - 0.5) * 20);
+            if (py >= 0 && py < gridH && px >= 0 && px < gridW) {
+                grid[py * gridW + px] = GREEN;
+            }
+        }
+    }
+
+    function countNearby(x, y, type, radius) {
+        let count = 0;
+        for (let dy = -radius; dy <= radius; dy++) {
+            for (let dx = -radius; dx <= radius; dx++) {
+                const nx = x + dx, ny = y + dy;
+                if (nx >= 0 && nx < gridW && ny >= 0 && ny < gridH) {
+                    if (grid[ny * gridW + nx] === type) count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    function computeDesirability(x, y, forType) {
+        const res = countNearby(x, y, RESIDENTIAL, 3);
+        const com = countNearby(x, y, COMMERCIAL, 3);
+        const ind = countNearby(x, y, INDUSTRIAL, 3);
+        const grn = countNearby(x, y, GREEN, 4);
+        const val = landValue[y * gridW + x];
+
+        switch (forType) {
+            case RESIDENTIAL:
+                return val * 0.3 + com * 0.08 + grn * (greenValue / 500) - ind * 0.15 + res * 0.02;
+            case COMMERCIAL:
+                return val * 0.5 + res * 0.06 + com * 0.03 - ind * 0.05;
+            case INDUSTRIAL:
+                return (1 - val) * 0.3 - res * 0.05 - grn * 0.02 + ind * 0.04;
+            case GREEN:
+                return res * 0.04 * (greenValue / 100) - com * 0.02 + grn * 0.01;
+            case MIXED:
+                return val * 0.4 + res * 0.04 + com * 0.05;
+            default:
+                return 0;
+        }
+    }
+
+    function simulate() {
+        for (let i = 0; i < grid.length; i++) nextGrid[i] = grid[i];
+
+        for (let y = 1; y < gridH - 1; y++) {
+            for (let x = 1; x < gridW - 1; x++) {
+                const idx = y * gridW + x;
+                const cell = grid[idx];
+
+                if (cell === EMPTY) {
+                    // Growth: check if adjacent to development
+                    let totalDev = 0;
+                    for (let dy = -1; dy <= 1; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            if (grid[(y + dy) * gridW + (x + dx)] > 0) totalDev++;
+                        }
+                    }
+                    if (totalDev === 0) continue;
+                    if (Math.random() * 100 > econGrowth * 0.5) continue;
+
+                    // Choose best zone type
+                    let bestType = EMPTY, bestScore = 0;
+                    for (let t = 1; t <= 5; t++) {
+                        const score = computeDesirability(x, y, t);
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestType = t;
+                        }
+                    }
+                    if (bestScore > 0.1) {
+                        nextGrid[idx] = bestType;
+                        density[idx] = 0.3;
+                    }
+                } else {
+                    // Existing zones can transition
+                    if (Math.random() > 0.001) continue;
+
+                    const currentScore = computeDesirability(x, y, cell);
+                    let bestType = cell, bestScore = currentScore;
+
+                    for (let t = 1; t <= 5; t++) {
+                        if (t === cell) continue;
+                        const score = computeDesirability(x, y, t);
+                        if (score > bestScore + 0.3) {
+                            bestScore = score;
+                            bestType = t;
+                        }
+                    }
+                    nextGrid[idx] = bestType;
+
+                    // Density grows over time
+                    density[idx] = Math.min(1, density[idx] + 0.002);
+                }
+
+                // Update land value based on surroundings
+                const res = countNearby(x, y, RESIDENTIAL, 2);
+                const com = countNearby(x, y, COMMERCIAL, 2);
+                const grn = countNearby(x, y, GREEN, 3);
+                landValue[idx] += (com * 0.001 + grn * greenValue * 0.00005 - 0.0005);
+                landValue[idx] = Math.max(0, Math.min(1, landValue[idx]));
+            }
+        }
+
+        const tmp = grid;
+        grid = nextGrid;
+        nextGrid = tmp;
+        generation++;
+    }
+
+    function draw() {
+        ctx.fillStyle = '#0a0e1a';
+        ctx.fillRect(0, 0, W, H);
+
+        let counts = [0, 0, 0, 0, 0, 0];
+        let maxVal = 0, maxDens = 0;
+
+        for (let i = 0; i < grid.length; i++) {
+            if (landValue[i] > maxVal) maxVal = landValue[i];
+            if (density[i] > maxDens) maxDens = density[i];
+        }
+
+        for (let y = 0; y < gridH; y++) {
+            for (let x = 0; x < gridW; x++) {
+                const idx = y * gridW + x;
+                const cell = grid[idx];
+                counts[cell]++;
+
+                let color;
+                if (viewMode === 'zone') {
+                    if (cell === EMPTY) {
+                        color = '#0f172a';
+                    } else {
+                        const d = density[idx];
+                        const base = zoneColors[cell];
+                        // Brighter with higher density
+                        const brightness = 0.4 + d * 0.6;
+                        color = adjustBrightness(base, brightness);
+                    }
+                } else if (viewMode === 'value') {
+                    const v = landValue[idx];
+                    color = valueColor(v);
+                } else {
+                    const d = density[idx];
+                    color = densityColor(d);
+                }
+
+                ctx.fillStyle = color;
+                ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+            }
+        }
+
+        totalPopulation = counts[RESIDENTIAL] * 8 + counts[MIXED] * 5 + counts[COMMERCIAL] * 2;
+
+        document.getElementById('stats').innerHTML =
+            `Year: ${generation}<br>` +
+            `Population: ~${totalPopulation.toLocaleString()}<br>` +
+            `Residential: ${counts[RESIDENTIAL].toLocaleString()}<br>` +
+            `Commercial: ${counts[COMMERCIAL].toLocaleString()}<br>` +
+            `Industrial: ${counts[INDUSTRIAL].toLocaleString()}<br>` +
+            `Green Space: ${counts[GREEN].toLocaleString()}<br>` +
+            `Mixed Use: ${counts[MIXED].toLocaleString()}<br>` +
+            `Developed: ${((1 - counts[EMPTY] / grid.length) * 100).toFixed(1)}%`;
+    }
+
+    function adjustBrightness(hex, factor) {
+        let r = parseInt(hex.slice(1, 3), 16);
+        let g = parseInt(hex.slice(3, 5), 16);
+        let b = parseInt(hex.slice(5, 7), 16);
+        r = Math.min(255, Math.floor(r * factor));
+        g = Math.min(255, Math.floor(g * factor));
+        b = Math.min(255, Math.floor(b * factor));
+        return `rgb(${r},${g},${b})`;
+    }
+
+    function valueColor(v) {
+        // Low=blue, mid=green, high=red
+        if (v < 0.33) {
+            const t = v / 0.33;
+            return `rgb(${Math.floor(30 + t * 20)},${Math.floor(50 + t * 100)},${Math.floor(180 - t * 50)})`;
+        } else if (v < 0.66) {
+            const t = (v - 0.33) / 0.33;
+            return `rgb(${Math.floor(50 + t * 150)},${Math.floor(150 + t * 50)},${Math.floor(130 - t * 100)})`;
+        } else {
+            const t = (v - 0.66) / 0.34;
+            return `rgb(${Math.floor(200 + t * 55)},${Math.floor(200 - t * 140)},${Math.floor(30)})`;
+        }
+    }
+
+    function densityColor(d) {
+        const r = Math.floor(d * 255);
+        const g = Math.floor(d * 100);
+        const b = Math.floor((1 - d) * 100);
+        return `rgb(${r},${g},${b})`;
+    }
+
+    window.addEventListener('resize', function() {
+        const oldGrid = grid, oldVal = landValue, oldDens = density;
+        const oldW = gridW, oldH = gridH;
+        resize();
+        grid = new Uint8Array(gridW * gridH);
+        nextGrid = new Uint8Array(gridW * gridH);
+        landValue = new Float32Array(gridW * gridH);
+        density = new Float32Array(gridW * gridH);
+        const cW = Math.min(oldW, gridW), cH = Math.min(oldH, gridH);
+        for (let y = 0; y < cH; y++) {
+            for (let x = 0; x < cW; x++) {
+                grid[y * gridW + x] = oldGrid[y * oldW + x];
+                landValue[y * gridW + x] = oldVal[y * oldW + x];
+                density[y * gridW + x] = oldDens[y * oldW + x];
+            }
+        }
+    });
+
+    function animate() {
+        for (let i = 0; i < speed; i++) simulate();
+        draw();
+        requestAnimationFrame(animate);
+    }
+
+    init();
+    animate();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2-Link Robot Arm</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+a.back { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; font-family: sans-serif; }
+a.back:hover { background: rgba(0,0,0,0.9); }
+.title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #e2e8f0; font-size: 22px; font-weight: 700; z-index: 999; text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+.controls { position: fixed; right: 15px; top: 15px; background: rgba(10,14,26,0.92); border: 1px solid rgba(251,191,36,0.25); border-radius: 12px; padding: 18px; z-index: 999; color: #cbd5e1; font-size: 13px; width: 210px; }
+.controls h3 { color: #fbbf24; margin-bottom: 10px; font-size: 15px; }
+.info { font-size: 11px; line-height: 1.8; }
+.info .label { color: #94a3b8; }
+.info .value { color: #fbbf24; font-weight: 600; }
+.btn { display: inline-block; padding: 6px 12px; background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.4); border-radius: 6px; color: #fbbf24; cursor: pointer; font-size: 12px; margin: 3px 2px; }
+.btn:hover { background: rgba(251,191,36,0.3); }
+.hint { color: #64748b; font-size: 10px; margin-top: 8px; line-height: 1.5; border-top: 1px solid rgba(251,191,36,0.1); padding-top: 8px; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back">&#8592; Back to Gallery</a>
+<div class="title">2-Link Robot Arm</div>
+<div class="controls">
+    <h3>Robot Arm IK</h3>
+    <div class="info">
+        <div><span class="label">Joint 1: </span><span class="value" id="j1Stat">0.0&deg;</span></div>
+        <div><span class="label">Joint 2: </span><span class="value" id="j2Stat">0.0&deg;</span></div>
+        <div><span class="label">End Effector: </span><span class="value" id="eeStat">(0, 0)</span></div>
+        <div><span class="label">Target: </span><span class="value" id="tgtStat">(0, 0)</span></div>
+        <div><span class="label">Distance: </span><span class="value" id="distStat">0.0</span></div>
+    </div>
+    <div style="margin-top: 10px;">
+        <span class="btn" id="trailBtn">Toggle Trail</span>
+        <span class="btn" id="wsBtn">Toggle Workspace</span>
+    </div>
+    <div class="hint">Click anywhere to set target position. The arm uses inverse kinematics to reach it.</div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize);
+    resize();
+
+    const L1 = 150; // Link 1 length
+    const L2 = 120; // Link 2 length
+
+    // Joint angles (current and target)
+    let theta1 = -Math.PI/4;
+    let theta2 = Math.PI/3;
+    let targetTheta1 = theta1;
+    let targetTheta2 = theta2;
+
+    let targetX = 0, targetY = 0;
+    let showTrail = true;
+    let showWorkspace = true;
+    let trail = [];
+
+    // Base position
+    function getBase() { return { x: W/2, y: H * 0.55 }; }
+
+    // Forward kinematics
+    function fk(t1, t2) {
+        const base = getBase();
+        const j1x = base.x + L1 * Math.cos(t1);
+        const j1y = base.y + L1 * Math.sin(t1);
+        const eex = j1x + L2 * Math.cos(t1 + t2);
+        const eey = j1y + L2 * Math.sin(t1 + t2);
+        return { j1: {x: j1x, y: j1y}, ee: {x: eex, y: eey} };
+    }
+
+    // Inverse kinematics (analytical)
+    function ik(tx, ty) {
+        const base = getBase();
+        const dx = tx - base.x;
+        const dy = ty - base.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+
+        // Clamp to reachable
+        const maxReach = L1 + L2 - 1;
+        const minReach = Math.abs(L1 - L2) + 1;
+
+        let clampedDist = Math.max(minReach, Math.min(maxReach, dist));
+        const scale = clampedDist / Math.max(dist, 0.001);
+        const cx = dx * scale;
+        const cy = dy * scale;
+
+        // Cosine law for theta2
+        const cosT2 = (cx*cx + cy*cy - L1*L1 - L2*L2) / (2 * L1 * L2);
+        const clampedCos = Math.max(-1, Math.min(1, cosT2));
+        const t2 = -Math.acos(clampedCos); // Elbow up
+
+        const k1 = L1 + L2 * Math.cos(t2);
+        const k2 = L2 * Math.sin(t2);
+        const t1 = Math.atan2(cy, cx) - Math.atan2(k2, k1);
+
+        return { t1, t2 };
+    }
+
+    // Set initial target
+    function initTarget() {
+        const pos = fk(theta1, theta2);
+        targetX = pos.ee.x;
+        targetY = pos.ee.y;
+    }
+    initTarget();
+
+    canvas.addEventListener('click', function(e) {
+        targetX = e.clientX;
+        targetY = e.clientY;
+        const angles = ik(targetX, targetY);
+        targetTheta1 = angles.t1;
+        targetTheta2 = angles.t2;
+    });
+
+    canvas.addEventListener('mousemove', function(e) {
+        if (e.buttons === 1) {
+            targetX = e.clientX;
+            targetY = e.clientY;
+            const angles = ik(targetX, targetY);
+            targetTheta1 = angles.t1;
+            targetTheta2 = angles.t2;
+        }
+    });
+
+    document.getElementById('trailBtn').onclick = function() { showTrail = !showTrail; if (!showTrail) trail = []; };
+    document.getElementById('wsBtn').onclick = function() { showWorkspace = !showWorkspace; };
+
+    function lerpAngle(a, b, t) {
+        let diff = b - a;
+        while (diff > Math.PI) diff -= 2*Math.PI;
+        while (diff < -Math.PI) diff += 2*Math.PI;
+        return a + diff * t;
+    }
+
+    function drawWorkspace() {
+        if (!showWorkspace) return;
+        const base = getBase();
+        const outerR = L1 + L2;
+        const innerR = Math.abs(L1 - L2);
+
+        // Outer boundary
+        ctx.strokeStyle = 'rgba(251,191,36,0.12)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 6]);
+        ctx.beginPath();
+        ctx.arc(base.x, base.y, outerR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Inner boundary
+        if (innerR > 5) {
+            ctx.beginPath();
+            ctx.arc(base.x, base.y, innerR, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        ctx.setLineDash([]);
+
+        // Fill workspace area
+        ctx.globalAlpha = 0.03;
+        ctx.fillStyle = '#fbbf24';
+        ctx.beginPath();
+        ctx.arc(base.x, base.y, outerR, 0, Math.PI * 2);
+        ctx.fill();
+        if (innerR > 5) {
+            ctx.globalCompositeOperation = 'destination-out';
+            ctx.beginPath();
+            ctx.arc(base.x, base.y, innerR, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalCompositeOperation = 'source-over';
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    function drawGrid() {
+        const base = getBase();
+        ctx.strokeStyle = 'rgba(100,120,180,0.06)';
+        ctx.lineWidth = 1;
+        const step = 50;
+        for (let x = base.x % step; x < W; x += step) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+        }
+        for (let y = base.y % step; y < H; y += step) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        }
+    }
+
+    function drawArm() {
+        const base = getBase();
+        const pos = fk(theta1, theta2);
+
+        // Trail
+        trail.push({x: pos.ee.x, y: pos.ee.y});
+        if (trail.length > 500) trail.shift();
+
+        if (showTrail && trail.length > 1) {
+            for (let i = 1; i < trail.length; i++) {
+                const alpha = (i / trail.length) * 0.5;
+                ctx.strokeStyle = `rgba(251,191,36,${alpha})`;
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(trail[i-1].x, trail[i-1].y);
+                ctx.lineTo(trail[i].x, trail[i].y);
+                ctx.stroke();
+            }
+        }
+
+        // Link 1 shadow
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+        ctx.lineWidth = 14;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(base.x + 2, base.y + 2);
+        ctx.lineTo(pos.j1.x + 2, pos.j1.y + 2);
+        ctx.stroke();
+
+        // Link 1
+        const grad1 = ctx.createLinearGradient(base.x, base.y, pos.j1.x, pos.j1.y);
+        grad1.addColorStop(0, '#3b82f6');
+        grad1.addColorStop(1, '#2563eb');
+        ctx.strokeStyle = grad1;
+        ctx.lineWidth = 12;
+        ctx.beginPath();
+        ctx.moveTo(base.x, base.y);
+        ctx.lineTo(pos.j1.x, pos.j1.y);
+        ctx.stroke();
+
+        // Link 2 shadow
+        ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+        ctx.lineWidth = 10;
+        ctx.beginPath();
+        ctx.moveTo(pos.j1.x + 2, pos.j1.y + 2);
+        ctx.lineTo(pos.ee.x + 2, pos.ee.y + 2);
+        ctx.stroke();
+
+        // Link 2
+        const grad2 = ctx.createLinearGradient(pos.j1.x, pos.j1.y, pos.ee.x, pos.ee.y);
+        grad2.addColorStop(0, '#22d3ee');
+        grad2.addColorStop(1, '#06b6d4');
+        ctx.strokeStyle = grad2;
+        ctx.lineWidth = 9;
+        ctx.beginPath();
+        ctx.moveTo(pos.j1.x, pos.j1.y);
+        ctx.lineTo(pos.ee.x, pos.ee.y);
+        ctx.stroke();
+
+        ctx.lineCap = 'butt';
+
+        // Base joint
+        ctx.fillStyle = '#1e293b';
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(base.x, base.y, 10, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Base mount
+        ctx.fillStyle = '#334155';
+        ctx.beginPath();
+        ctx.moveTo(base.x - 25, base.y);
+        ctx.lineTo(base.x + 25, base.y);
+        ctx.lineTo(base.x + 30, base.y + 15);
+        ctx.lineTo(base.x - 30, base.y + 15);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(251,191,36,0.3)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Elbow joint
+        ctx.fillStyle = '#1e293b';
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(pos.j1.x, pos.j1.y, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // End effector
+        const eeGrad = ctx.createRadialGradient(pos.ee.x - 2, pos.ee.y - 2, 1, pos.ee.x, pos.ee.y, 10);
+        eeGrad.addColorStop(0, '#fbbf24');
+        eeGrad.addColorStop(0.7, '#f59e0b');
+        eeGrad.addColorStop(1, '#92400e');
+        ctx.beginPath();
+        ctx.arc(pos.ee.x, pos.ee.y, 8, 0, Math.PI * 2);
+        ctx.fillStyle = eeGrad;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(251,191,36,0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Angle arcs
+        // Joint 1 angle
+        ctx.strokeStyle = 'rgba(59,130,246,0.5)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(base.x, base.y, 25, 0, theta1, theta1 < 0);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(59,130,246,0.7)';
+        ctx.font = '10px sans-serif';
+        ctx.fillText(Math.round(theta1 * 180/Math.PI) + '\u00B0', base.x + 30, base.y - 5);
+
+        // Joint 2 angle
+        ctx.strokeStyle = 'rgba(34,211,238,0.5)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        const j2start = theta1;
+        ctx.arc(pos.j1.x, pos.j1.y, 20, j2start, j2start + theta2, theta2 < 0);
+        ctx.stroke();
+
+        return pos;
+    }
+
+    function drawTarget() {
+        // Target crosshair
+        const t = Date.now() / 1000;
+        const pulse = 0.5 + 0.3 * Math.sin(t * 3);
+
+        ctx.strokeStyle = `rgba(239,68,68,${pulse})`;
+        ctx.lineWidth = 2;
+
+        const s = 12;
+        ctx.beginPath();
+        ctx.moveTo(targetX - s, targetY); ctx.lineTo(targetX + s, targetY);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(targetX, targetY - s); ctx.lineTo(targetX, targetY + s);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(targetX, targetY, 8, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Pulsing ring
+        ctx.strokeStyle = `rgba(239,68,68,${pulse * 0.3})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(targetX, targetY, 8 + Math.sin(t * 4) * 4 + 4, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+
+    function animate() {
+        ctx.clearRect(0, 0, W, H);
+
+        const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.7);
+        bg.addColorStop(0, '#111827');
+        bg.addColorStop(1, '#0a0e1a');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        drawGrid();
+        drawWorkspace();
+
+        // Smoothly interpolate angles
+        theta1 = lerpAngle(theta1, targetTheta1, 0.08);
+        theta2 = lerpAngle(theta2, targetTheta2, 0.08);
+
+        drawTarget();
+        const pos = drawArm();
+
+        // Update stats
+        document.getElementById('j1Stat').textContent = (theta1 * 180/Math.PI).toFixed(1) + '\u00B0';
+        document.getElementById('j2Stat').textContent = (theta2 * 180/Math.PI).toFixed(1) + '\u00B0';
+        document.getElementById('eeStat').textContent = `(${Math.round(pos.ee.x)}, ${Math.round(pos.ee.y)})`;
+        document.getElementById('tgtStat').textContent = `(${Math.round(targetX)}, ${Math.round(targetY)})`;
+        const dist = Math.sqrt((pos.ee.x - targetX)**2 + (pos.ee.y - targetY)**2);
+        document.getElementById('distStat').textContent = dist.toFixed(1) + 'px';
+
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+})();
+</script>
+</body>
+</html>

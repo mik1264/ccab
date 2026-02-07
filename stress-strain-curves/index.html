@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stress-Strain Curves</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+#title {
+    position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+    color: #e879f9; font-size: 20px; font-weight: bold; z-index: 10;
+    text-shadow: 0 0 20px rgba(232,121,249,0.5);
+    pointer-events: none;
+}
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 15px; align-items: center; z-index: 10;
+    background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 10px;
+}
+#controls label { color: #e879f9; font-size: 13px; }
+#controls button {
+    background: rgba(232,121,249,0.2); color: #e879f9; border: 1px solid #e879f9;
+    padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 13px;
+}
+#controls button:hover { background: rgba(232,121,249,0.4); }
+#controls button.active { background: rgba(232,121,249,0.5); }
+#controls input[type=range] { width: 120px; cursor: pointer; }
+#info {
+    position: fixed; top: 80px; right: 20px; color: #94a3b8; font-size: 12px;
+    z-index: 10; text-align: right; line-height: 1.8;
+    background: rgba(0,0,0,0.5); padding: 10px 15px; border-radius: 8px;
+}
+.info-val { color: #e879f9; font-weight: bold; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title">Interactive Stress-Strain Simulator</div>
+<div id="info">
+    Material: <span class="info-val" id="matName">Steel</span><br>
+    Stress: <span class="info-val" id="stressVal">0</span> MPa<br>
+    Strain: <span class="info-val" id="strainVal">0</span> %<br>
+    Region: <span class="info-val" id="regionVal">Elastic</span><br>
+    Young's Modulus: <span class="info-val" id="modulusVal">200</span> GPa
+</div>
+<div id="controls">
+    <button id="steelBtn" class="active" onclick="setMaterial('steel')">Steel</button>
+    <button id="aluminumBtn" onclick="setMaterial('aluminum')">Aluminum</button>
+    <button id="rubberBtn" onclick="setMaterial('rubber')">Rubber</button>
+    <button id="ceramicBtn" onclick="setMaterial('ceramic')">Ceramic</button>
+    <button id="copperBtn" onclick="setMaterial('copper')">Copper</button>
+    <label>Pull Speed: <input type="range" id="pullSpeed" min="1" max="10" value="3"></label>
+    <button id="resetBtn">Reset</button>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+
+const materials = {
+    steel: {
+        name: 'Steel', color: '#60a5fa', youngsModulus: 200,
+        yieldStress: 250, ultimateStress: 400, fractureStrain: 0.25,
+        yieldStrain: 0.00125, ultimateStrain: 0.15,
+        hardeningExponent: 0.5
+    },
+    aluminum: {
+        name: 'Aluminum', color: '#34d399', youngsModulus: 70,
+        yieldStress: 100, ultimateStress: 180, fractureStrain: 0.30,
+        yieldStrain: 0.00143, ultimateStrain: 0.18,
+        hardeningExponent: 0.4
+    },
+    rubber: {
+        name: 'Rubber', color: '#fbbf24', youngsModulus: 0.05,
+        yieldStress: 15, ultimateStress: 25, fractureStrain: 5.0,
+        yieldStrain: 3.0, ultimateStrain: 4.5,
+        hardeningExponent: 0.8
+    },
+    ceramic: {
+        name: 'Ceramic', color: '#f43f5e', youngsModulus: 300,
+        yieldStress: 350, ultimateStress: 360, fractureStrain: 0.002,
+        yieldStrain: 0.00117, ultimateStrain: 0.0018,
+        hardeningExponent: 0.1
+    },
+    copper: {
+        name: 'Copper', color: '#fb923c', youngsModulus: 120,
+        yieldStress: 70, ultimateStress: 220, fractureStrain: 0.45,
+        yieldStrain: 0.000583, ultimateStrain: 0.35,
+        hardeningExponent: 0.6
+    }
+};
+
+let currentMaterial = 'steel';
+let strain = 0;
+let loading = true;
+let fractured = false;
+let pullSpeed = 3;
+let stressHistory = [];
+let strainHistory = [];
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+
+function getStress(s, mat) {
+    if (s < 0) return 0;
+    const m = materials[mat];
+
+    if (s <= m.yieldStrain) {
+        return s * m.youngsModulus * 1000; // GPa to MPa
+    }
+
+    if (s <= m.ultimateStrain) {
+        const plasticStrain = s - m.yieldStrain;
+        const plasticRange = m.ultimateStrain - m.yieldStrain;
+        const t = plasticStrain / plasticRange;
+        const hardenedStress = m.yieldStress + (m.ultimateStress - m.yieldStress) * Math.pow(t, m.hardeningExponent);
+        return hardenedStress;
+    }
+
+    if (s <= m.fractureStrain) {
+        // Necking: stress decreases
+        const neckingStrain = s - m.ultimateStrain;
+        const neckingRange = m.fractureStrain - m.ultimateStrain;
+        const t = neckingStrain / neckingRange;
+        return m.ultimateStress * (1 - t * 0.6);
+    }
+
+    return 0; // Fractured
+}
+
+function getRegion(s, mat) {
+    const m = materials[mat];
+    if (s >= m.fractureStrain) return 'Fractured';
+    if (s > m.ultimateStrain) return 'Necking';
+    if (s > m.yieldStrain) return 'Plastic (Strain Hardening)';
+    return 'Elastic';
+}
+
+function setMaterial(mat) {
+    currentMaterial = mat;
+    strain = 0;
+    fractured = false;
+    loading = true;
+    stressHistory = [];
+    strainHistory = [];
+
+    document.querySelectorAll('#controls button').forEach(b => b.classList.remove('active'));
+    const btn = document.getElementById(mat + 'Btn');
+    if (btn) btn.classList.add('active');
+}
+
+function drawSpecimen() {
+    const mat = materials[currentMaterial];
+    const baseX = W * 0.55;
+    const baseY = H * 0.15;
+    const specW = W * 0.35;
+    const specH = 80;
+
+    // Draw clamps
+    ctx.fillStyle = '#475569';
+    ctx.fillRect(baseX - 15, baseY - 10, 15, specH + 20);
+    ctx.fillRect(baseX + specW, baseY - 10, 15, specH + 20);
+
+    // Draw hatching on clamps
+    ctx.strokeStyle = '#64748b';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 5; i++) {
+        ctx.beginPath();
+        ctx.moveTo(baseX - 15 + i * 3, baseY - 10);
+        ctx.lineTo(baseX - 15 + i * 3 + 10, baseY + specH + 10);
+        ctx.stroke();
+    }
+
+    const strainFactor = Math.min(strain / mat.fractureStrain, 1);
+    const elongation = strainFactor * specW * 0.3;
+
+    if (fractured) {
+        // Draw broken specimen
+        const breakPoint = baseX + specW * 0.45 + Math.random() * 10;
+        ctx.fillStyle = mat.color;
+        ctx.globalAlpha = 0.7;
+
+        // Left piece
+        ctx.beginPath();
+        ctx.moveTo(baseX, baseY);
+        ctx.lineTo(breakPoint - 5, baseY + 10);
+        ctx.lineTo(breakPoint - 8, baseY + specH - 10);
+        ctx.lineTo(baseX, baseY + specH);
+        ctx.closePath();
+        ctx.fill();
+
+        // Right piece
+        ctx.beginPath();
+        ctx.moveTo(baseX + specW + elongation, baseY);
+        ctx.lineTo(breakPoint + 15, baseY + 15);
+        ctx.lineTo(breakPoint + 12, baseY + specH - 15);
+        ctx.lineTo(baseX + specW + elongation, baseY + specH);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.globalAlpha = 1;
+        // Fracture sparks
+        for (let i = 0; i < 8; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const r = 10 + Math.random() * 20;
+            ctx.fillStyle = '#fbbf24';
+            ctx.beginPath();
+            ctx.arc(breakPoint + Math.cos(angle) * r, baseY + specH / 2 + Math.sin(angle) * r, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    } else {
+        // Necking effect
+        let neckAmount = 0;
+        if (strain > mat.ultimateStrain) {
+            neckAmount = ((strain - mat.ultimateStrain) / (mat.fractureStrain - mat.ultimateStrain)) * specH * 0.35;
+        }
+
+        ctx.fillStyle = mat.color;
+        ctx.globalAlpha = 0.8;
+        ctx.beginPath();
+        const midX = baseX + specW / 2 + elongation / 2;
+
+        // Top edge
+        ctx.moveTo(baseX, baseY);
+        ctx.quadraticCurveTo(midX, baseY + neckAmount, baseX + specW + elongation, baseY);
+
+        // Right edge
+        ctx.lineTo(baseX + specW + elongation, baseY + specH);
+
+        // Bottom edge
+        ctx.quadraticCurveTo(midX, baseY + specH - neckAmount, baseX, baseY + specH);
+
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // Draw stress lines
+        if (strain > mat.yieldStrain * 0.5) {
+            ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+            ctx.lineWidth = 0.5;
+            const lineCount = Math.min(Math.floor(strainFactor * 30), 30);
+            for (let i = 0; i < lineCount; i++) {
+                const lx = baseX + 20 + Math.random() * (specW + elongation - 40);
+                ctx.beginPath();
+                ctx.moveTo(lx, baseY + neckAmount * 0.5);
+                ctx.lineTo(lx + (Math.random() - 0.5) * 5, baseY + specH - neckAmount * 0.5);
+                ctx.stroke();
+            }
+        }
+
+        // Force arrows
+        if (strain > 0) {
+            const arrowSize = Math.min(strain / mat.fractureStrain * 30, 30);
+            ctx.fillStyle = '#f43f5e';
+            // Left arrow (pulling left)
+            drawArrow(baseX - 30, baseY + specH / 2, -arrowSize, 0);
+            // Right arrow (pulling right)
+            drawArrow(baseX + specW + elongation + 30, baseY + specH / 2, arrowSize, 0);
+
+            ctx.fillStyle = '#f43f5e';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center';
+            const stress = getStress(strain, currentMaterial);
+            ctx.fillText('F', baseX - 35 - arrowSize, baseY + specH / 2 + 4);
+            ctx.fillText('F', baseX + specW + elongation + 35 + arrowSize, baseY + specH / 2 + 4);
+        }
+    }
+
+    // Label
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Test Specimen - ' + mat.name, baseX + specW / 2, baseY + specH + 30);
+}
+
+function drawArrow(x, y, dx, dy) {
+    const headLen = 8;
+    const angle = Math.atan2(dy, dx);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + dx, y + dy);
+    ctx.lineTo(x + dx - headLen * Math.cos(angle - 0.5), y + dy - headLen * Math.sin(angle - 0.5));
+    ctx.moveTo(x + dx, y + dy);
+    ctx.lineTo(x + dx - headLen * Math.cos(angle + 0.5), y + dy - headLen * Math.sin(angle + 0.5));
+    ctx.strokeStyle = '#f43f5e';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+}
+
+function drawGraph() {
+    const mat = materials[currentMaterial];
+    const gx = 60;
+    const gy = H * 0.4;
+    const gw = W * 0.45;
+    const gh = H * 0.5;
+
+    // Background
+    ctx.fillStyle = 'rgba(15,20,40,0.8)';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(gx - 10, gy - 10, gw + 30, gh + 50, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    // Axes
+    ctx.strokeStyle = '#64748b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy);
+    ctx.lineTo(gx, gy + gh);
+    ctx.lineTo(gx + gw, gy + gh);
+    ctx.stroke();
+
+    // Labels
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Strain (%)', gx + gw / 2, gy + gh + 35);
+
+    ctx.save();
+    ctx.translate(gx - 40, gy + gh / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('Stress (MPa)', 0, 0);
+    ctx.restore();
+
+    // Max scale
+    const maxStrain = mat.fractureStrain * 1.2;
+    const maxStress = mat.ultimateStress * 1.3;
+
+    // Grid
+    ctx.strokeStyle = 'rgba(100,116,139,0.2)';
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 5; i++) {
+        const y = gy + gh - (i / 5) * gh;
+        ctx.beginPath();
+        ctx.moveTo(gx, y);
+        ctx.lineTo(gx + gw, y);
+        ctx.stroke();
+        ctx.fillStyle = '#64748b';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText((maxStress * i / 5).toFixed(0), gx - 5, y + 3);
+    }
+    for (let i = 0; i <= 5; i++) {
+        const x = gx + (i / 5) * gw;
+        ctx.beginPath();
+        ctx.moveTo(x, gy);
+        ctx.lineTo(x, gy + gh);
+        ctx.stroke();
+        ctx.fillStyle = '#64748b';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText((maxStrain * i / 5 * 100).toFixed(1), x, gy + gh + 15);
+    }
+
+    // Draw full theoretical curve (faint)
+    ctx.strokeStyle = 'rgba(148,163,184,0.2)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    let first = true;
+    for (let s = 0; s <= mat.fractureStrain; s += mat.fractureStrain / 200) {
+        const stress = getStress(s, currentMaterial);
+        const px = gx + (s / maxStrain) * gw;
+        const py = gy + gh - (stress / maxStress) * gh;
+        if (first) { ctx.moveTo(px, py); first = false; }
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Draw recorded curve
+    if (strainHistory.length > 1) {
+        ctx.strokeStyle = mat.color;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        for (let i = 0; i < strainHistory.length; i++) {
+            const px = gx + (strainHistory[i] / maxStrain) * gw;
+            const py = gy + gh - (stressHistory[i] / maxStress) * gh;
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+
+        // Current point
+        const cpx = gx + (strainHistory[strainHistory.length - 1] / maxStrain) * gw;
+        const cpy = gy + gh - (stressHistory[stressHistory.length - 1] / maxStress) * gh;
+        ctx.beginPath();
+        ctx.arc(cpx, cpy, 5, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+    }
+
+    // Region markers
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+
+    // Yield point
+    const yieldX = gx + (mat.yieldStrain / maxStrain) * gw;
+    const yieldY = gy + gh - (mat.yieldStress / maxStress) * gh;
+    ctx.strokeStyle = 'rgba(251,191,36,0.5)';
+    ctx.setLineDash([2, 4]);
+    ctx.beginPath();
+    ctx.moveTo(yieldX, gy);
+    ctx.lineTo(yieldX, gy + gh);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#fbbf24';
+    ctx.fillText('Yield', yieldX, gy + 15);
+
+    // Ultimate point
+    const ultX = gx + (mat.ultimateStrain / maxStrain) * gw;
+    ctx.strokeStyle = 'rgba(239,68,68,0.5)';
+    ctx.setLineDash([2, 4]);
+    ctx.beginPath();
+    ctx.moveTo(ultX, gy);
+    ctx.lineTo(ultX, gy + gh);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ef4444';
+    ctx.fillText('UTS', ultX, gy + 15);
+
+    // Fracture point
+    const fracX = gx + (mat.fractureStrain / maxStrain) * gw;
+    ctx.strokeStyle = 'rgba(168,85,247,0.5)';
+    ctx.setLineDash([2, 4]);
+    ctx.beginPath();
+    ctx.moveTo(fracX, gy);
+    ctx.lineTo(fracX, gy + gh);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#a855f7';
+    ctx.fillText('Fracture', fracX, gy + 15);
+
+    // Region labels at top
+    const regions = ['Elastic', 'Strain Hardening', 'Necking'];
+    const regionColors = ['#34d399', '#fbbf24', '#ef4444'];
+    const regionBounds = [0, mat.yieldStrain, mat.ultimateStrain, mat.fractureStrain];
+    for (let i = 0; i < 3; i++) {
+        const rx1 = gx + (regionBounds[i] / maxStrain) * gw;
+        const rx2 = gx + (regionBounds[i + 1] / maxStrain) * gw;
+        if (rx2 - rx1 > 30) {
+            ctx.fillStyle = regionColors[i];
+            ctx.globalAlpha = 0.15;
+            ctx.fillRect(rx1, gy, rx2 - rx1, gh);
+            ctx.globalAlpha = 1;
+        }
+    }
+}
+
+function update() {
+    const mat = materials[currentMaterial];
+    if (!fractured && loading) {
+        strain += pullSpeed * 0.00005 * (mat.fractureStrain / 0.25);
+        if (strain >= mat.fractureStrain) {
+            strain = mat.fractureStrain;
+            fractured = true;
+        }
+        const stress = getStress(strain, currentMaterial);
+        strainHistory.push(strain);
+        stressHistory.push(stress);
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    update();
+    drawSpecimen();
+    drawGraph();
+
+    const mat = materials[currentMaterial];
+    const stress = getStress(strain, currentMaterial);
+    const region = getRegion(strain, currentMaterial);
+
+    document.getElementById('matName').textContent = mat.name;
+    document.getElementById('stressVal').textContent = stress.toFixed(1);
+    document.getElementById('strainVal').textContent = (strain * 100).toFixed(3);
+    document.getElementById('regionVal').textContent = region;
+    document.getElementById('modulusVal').textContent = mat.youngsModulus;
+
+    requestAnimationFrame(draw);
+}
+
+document.getElementById('pullSpeed').addEventListener('input', (e) => {
+    pullSpeed = parseInt(e.target.value);
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+    strain = 0;
+    fractured = false;
+    loading = true;
+    stressHistory = [];
+    strainHistory = [];
+});
+window.addEventListener('resize', resize);
+
+// Make setMaterial global
+window.setMaterial = setMaterial;
+
+resize();
+draw();
+</script>
+</body>
+</html>

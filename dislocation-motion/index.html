@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dislocation Motion in Crystal</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+#title {
+    position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+    color: #f472b6; font-size: 20px; font-weight: bold; z-index: 10;
+    text-shadow: 0 0 20px rgba(244,114,182,0.5);
+    pointer-events: none;
+}
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 15px; align-items: center; z-index: 10;
+    background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 10px;
+    flex-wrap: wrap; justify-content: center;
+}
+#controls label { color: #f472b6; font-size: 13px; }
+#controls input[type=range] { width: 100px; cursor: pointer; }
+#controls button {
+    background: rgba(244,114,182,0.2); color: #f472b6; border: 1px solid #f472b6;
+    padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 13px;
+}
+#controls button:hover { background: rgba(244,114,182,0.4); }
+#info {
+    position: fixed; top: 80px; right: 20px; color: #94a3b8; font-size: 12px;
+    z-index: 10; text-align: right; line-height: 1.8;
+    background: rgba(0,0,0,0.5); padding: 10px 15px; border-radius: 8px;
+}
+#legend {
+    position: fixed; top: 80px; left: 20px; color: #94a3b8; font-size: 11px;
+    z-index: 10; line-height: 2;
+    background: rgba(0,0,0,0.5); padding: 10px 15px; border-radius: 8px;
+}
+.legend-dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    margin-right: 5px; vertical-align: middle;
+}
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title">Edge Dislocation Motion in Crystal Lattice</div>
+<div id="info">
+    Shear Stress: <span style="color:#f472b6" id="stressVal">0</span> MPa<br>
+    Dislocation Position: <span style="color:#f472b6" id="posVal">center</span><br>
+    Glide Steps: <span style="color:#f472b6" id="glideSteps">0</span><br>
+    Plastic Strain: <span style="color:#f472b6" id="plasticStrain">0</span>%
+</div>
+<div id="legend">
+    <span class="legend-dot" style="background:#60a5fa"></span> Regular atoms<br>
+    <span class="legend-dot" style="background:#f43f5e"></span> Dislocation core<br>
+    <span class="legend-dot" style="background:#fbbf24"></span> Extra half-plane<br>
+    <span class="legend-dot" style="background:#a855f7"></span> Slip plane
+</div>
+<div id="controls">
+    <label>Shear Stress: <input type="range" id="stress" min="0" max="100" value="0" step="1"></label>
+    <button id="applyBtn">Apply Stress</button>
+    <button id="stepBtn">Step Forward</button>
+    <button id="autoBtn">Auto Glide</button>
+    <button id="resetBtn">Reset</button>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+const ROWS = 18;
+const COLS = 24;
+let spacing;
+let atoms = [];
+let dislocationCol;
+let dislocationRow;
+let shearStress = 0;
+let glideSteps = 0;
+let autoGliding = false;
+let autoTimer = null;
+let shearOffset = 0;
+let targetShearOffset = 0;
+let animating = false;
+let animProgress = 0;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    spacing = Math.min((W - 200) / (COLS + 2), (H - 250) / (ROWS + 2));
+}
+
+function init() {
+    resize();
+    atoms = [];
+    dislocationCol = Math.floor(COLS / 2);
+    dislocationRow = Math.floor(ROWS / 2);
+    glideSteps = 0;
+    shearOffset = 0;
+    targetShearOffset = 0;
+    animating = false;
+    animProgress = 0;
+
+    const offsetX = (W - COLS * spacing) / 2;
+    const offsetY = (H - ROWS * spacing) / 2 + 20;
+
+    for (let r = 0; r < ROWS; r++) {
+        const row = [];
+        // Extra atom in half-plane
+        const extraCols = (r < dislocationRow) ? COLS + 1 : COLS;
+        for (let c = 0; c < extraCols; c++) {
+            let x, y;
+            y = offsetY + r * spacing;
+
+            if (r < dislocationRow) {
+                // Above slip plane: compressed to fit extra atom
+                x = offsetX + c * (COLS * spacing / extraCols);
+            } else {
+                x = offsetX + c * spacing;
+            }
+
+            row.push({
+                x: x, y: y,
+                restX: x, restY: y,
+                row: r, col: c
+            });
+        }
+        atoms.push(row);
+    }
+
+    buildLattice();
+}
+
+function buildLattice() {
+    const offsetX = (W - COLS * spacing) / 2;
+    const offsetY = (H - ROWS * spacing) / 2 + 20;
+
+    atoms = [];
+    for (let r = 0; r < ROWS; r++) {
+        const row = [];
+        let numCols;
+
+        if (r < dislocationRow) {
+            // Above slip plane: one extra column up to dislocation position
+            numCols = COLS + 1;
+        } else {
+            numCols = COLS;
+        }
+
+        for (let c = 0; c < numCols; c++) {
+            let x = offsetX + c * spacing;
+            let y = offsetY + r * spacing;
+
+            // Compress the extra half-plane region
+            if (r < dislocationRow) {
+                const totalWidth = COLS * spacing;
+                x = offsetX + c * (totalWidth / numCols);
+            }
+
+            // Apply shear offset for rows below slip plane
+            if (r >= dislocationRow) {
+                x += shearOffset;
+            }
+
+            row.push({
+                x: x, y: y,
+                restX: x, restY: y,
+                row: r, col: c
+            });
+        }
+        atoms.push(row);
+    }
+}
+
+function stepDislocation() {
+    if (dislocationCol >= COLS - 1) return; // Already at edge
+
+    dislocationCol++;
+    shearOffset += spacing / COLS;
+    glideSteps++;
+    buildLattice();
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    const offsetX = (W - COLS * spacing) / 2;
+    const offsetY = (H - ROWS * spacing) / 2 + 20;
+
+    // Draw slip plane highlight
+    const slipY = offsetY + (dislocationRow - 0.5) * spacing;
+    ctx.fillStyle = 'rgba(168,85,247,0.08)';
+    ctx.fillRect(offsetX - 30, slipY, COLS * spacing + 60, spacing);
+
+    ctx.strokeStyle = 'rgba(168,85,247,0.4)';
+    ctx.setLineDash([8, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(offsetX - 30, slipY);
+    ctx.lineTo(offsetX + COLS * spacing + 30, slipY);
+    ctx.moveTo(offsetX - 30, slipY + spacing);
+    ctx.lineTo(offsetX + COLS * spacing + 30, slipY + spacing);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = 'rgba(168,85,247,0.5)';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText('Slip Plane', offsetX - 35, slipY + spacing / 2 + 4);
+
+    // Draw bonds
+    for (let r = 0; r < atoms.length; r++) {
+        for (let c = 0; c < atoms[r].length; c++) {
+            const atom = atoms[r][c];
+
+            // Horizontal bond
+            if (c + 1 < atoms[r].length) {
+                const next = atoms[r][c + 1];
+                const dist = Math.abs(next.x - atom.x);
+                const stretch = Math.abs(dist - spacing) / spacing;
+                const alpha = 0.15 + Math.min(stretch * 2, 0.4);
+                ctx.strokeStyle = `rgba(100,150,200,${alpha})`;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(atom.x, atom.y);
+                ctx.lineTo(next.x, next.y);
+                ctx.stroke();
+            }
+
+            // Vertical bond (approximate - connect to nearest in next row)
+            if (r + 1 < atoms.length) {
+                const nextRow = atoms[r + 1];
+                let nearest = nextRow[0];
+                let nearestDist = Infinity;
+                for (const a of nextRow) {
+                    const d = Math.abs(a.x - atom.x);
+                    if (d < nearestDist) {
+                        nearestDist = d;
+                        nearest = a;
+                    }
+                }
+                if (nearestDist < spacing * 1.5) {
+                    const stretch = Math.abs(nearestDist) / spacing;
+                    ctx.strokeStyle = `rgba(100,150,200,${0.1 + Math.min(stretch * 0.2, 0.3)})`;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(atom.x, atom.y);
+                    ctx.lineTo(nearest.x, nearest.y);
+                    ctx.stroke();
+                }
+            }
+        }
+    }
+
+    // Draw atoms
+    for (let r = 0; r < atoms.length; r++) {
+        for (let c = 0; c < atoms[r].length; c++) {
+            const atom = atoms[r][c];
+            const radius = spacing * 0.2;
+
+            let color = '#60a5fa';
+            let glowColor = 'rgba(96,165,250,0.2)';
+
+            // Dislocation core area
+            const isNearCore = r === dislocationRow - 1 &&
+                (c === dislocationCol || c === dislocationCol + 1);
+            const isCoreBelow = r === dislocationRow &&
+                (c === dislocationCol - 1 || c === dislocationCol);
+
+            if (isNearCore || isCoreBelow) {
+                color = '#f43f5e';
+                glowColor = 'rgba(244,63,94,0.3)';
+            }
+
+            // Extra half-plane atoms
+            if (r < dislocationRow && c === dislocationCol) {
+                color = '#fbbf24';
+                glowColor = 'rgba(251,191,36,0.3)';
+            }
+
+            // Draw glow
+            const glow = ctx.createRadialGradient(atom.x, atom.y, 0, atom.x, atom.y, radius * 2.5);
+            glow.addColorStop(0, glowColor);
+            glow.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = glow;
+            ctx.beginPath();
+            ctx.arc(atom.x, atom.y, radius * 2.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Draw atom
+            ctx.beginPath();
+            ctx.arc(atom.x, atom.y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+
+            // Highlight
+            ctx.beginPath();
+            ctx.arc(atom.x - radius * 0.25, atom.y - radius * 0.25, radius * 0.35, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.2)';
+            ctx.fill();
+        }
+    }
+
+    // Draw extra half-plane indicator
+    if (dislocationCol < COLS) {
+        const topAtom = atoms[0][dislocationCol];
+        const bottomAtom = atoms[dislocationRow - 1] ?
+            atoms[dislocationRow - 1][dislocationCol] : null;
+
+        if (topAtom && bottomAtom) {
+            ctx.strokeStyle = 'rgba(251,191,36,0.4)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(topAtom.x, topAtom.y - spacing * 0.5);
+            ctx.lineTo(bottomAtom.x, bottomAtom.y + spacing * 0.3);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // T symbol for dislocation
+            ctx.fillStyle = '#f43f5e';
+            ctx.font = 'bold 24px serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('\u22A5', bottomAtom.x, bottomAtom.y + spacing * 1.2);
+        }
+    }
+
+    // Shear stress arrows
+    if (shearStress > 0) {
+        const arrowLen = shearStress * 0.4;
+        ctx.strokeStyle = '#f472b6';
+        ctx.fillStyle = '#f472b6';
+        ctx.lineWidth = 2;
+
+        // Top: arrow pointing right
+        const topY = offsetY - spacing;
+        for (let i = 0; i < 3; i++) {
+            const ax = offsetX + COLS * spacing * (0.2 + i * 0.3);
+            drawArrow(ax, topY, ax + arrowLen, topY);
+        }
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('\u03C4 (shear)', offsetX + COLS * spacing / 2, topY - 12);
+
+        // Bottom: arrow pointing left
+        const botY = offsetY + ROWS * spacing;
+        for (let i = 0; i < 3; i++) {
+            const ax = offsetX + COLS * spacing * (0.2 + i * 0.3);
+            drawArrow(ax, botY, ax - arrowLen, botY);
+        }
+        ctx.fillText('\u03C4 (shear)', offsetX + COLS * spacing / 2, botY + 20);
+    }
+
+    // Info
+    document.getElementById('stressVal').textContent = shearStress;
+    document.getElementById('posVal').textContent = `col ${dislocationCol}/${COLS}`;
+    document.getElementById('glideSteps').textContent = glideSteps;
+    document.getElementById('plasticStrain').textContent =
+        (glideSteps / COLS * 100).toFixed(1);
+}
+
+function drawArrow(x1, y1, x2, y2) {
+    const headLen = 8;
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - headLen * Math.cos(angle - 0.4), y2 - headLen * Math.sin(angle - 0.4));
+    ctx.lineTo(x2 - headLen * Math.cos(angle + 0.4), y2 - headLen * Math.sin(angle + 0.4));
+    ctx.closePath();
+    ctx.fill();
+}
+
+function animate() {
+    draw();
+    requestAnimationFrame(animate);
+}
+
+document.getElementById('stress').addEventListener('input', (e) => {
+    shearStress = parseInt(e.target.value);
+});
+document.getElementById('applyBtn').addEventListener('click', () => {
+    if (shearStress > 30 && dislocationCol < COLS - 1) {
+        stepDislocation();
+    }
+});
+document.getElementById('stepBtn').addEventListener('click', () => {
+    stepDislocation();
+});
+document.getElementById('autoBtn').addEventListener('click', () => {
+    autoGliding = !autoGliding;
+    document.getElementById('autoBtn').textContent = autoGliding ? 'Stop' : 'Auto Glide';
+    if (autoGliding) {
+        autoTimer = setInterval(() => {
+            if (dislocationCol < COLS - 1) {
+                stepDislocation();
+            } else {
+                autoGliding = false;
+                clearInterval(autoTimer);
+                document.getElementById('autoBtn').textContent = 'Auto Glide';
+            }
+        }, 500);
+    } else {
+        clearInterval(autoTimer);
+    }
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+    autoGliding = false;
+    if (autoTimer) clearInterval(autoTimer);
+    document.getElementById('autoBtn').textContent = 'Auto Glide';
+    dislocationCol = Math.floor(COLS / 2);
+    shearOffset = 0;
+    glideSteps = 0;
+    buildLattice();
+});
+
+window.addEventListener('resize', () => { resize(); buildLattice(); });
+
+resize();
+init();
+animate();
+</script>
+</body>
+</html>

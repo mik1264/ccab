@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Autonomous Vehicle Waypoints</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+a.back { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; font-family: sans-serif; }
+a.back:hover { background: rgba(0,0,0,0.9); }
+.title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #e2e8f0; font-size: 22px; font-weight: 700; z-index: 999; text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+.controls { position: fixed; right: 15px; top: 15px; background: rgba(10,14,26,0.92); border: 1px solid rgba(251,191,36,0.25); border-radius: 12px; padding: 18px; z-index: 999; color: #cbd5e1; font-size: 13px; width: 220px; }
+.controls h3 { color: #fbbf24; margin-bottom: 10px; font-size: 15px; }
+.slider-group { margin-bottom: 10px; }
+.slider-group label { display: flex; justify-content: space-between; margin-bottom: 3px; font-size: 11px; }
+.slider-group label span.val { color: #fbbf24; font-weight: 600; }
+input[type="range"] { width: 100%; accent-color: #fbbf24; cursor: pointer; }
+.btn { display: inline-block; padding: 6px 12px; background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.4); border-radius: 6px; color: #fbbf24; cursor: pointer; font-size: 12px; margin: 3px 2px; }
+.btn:hover { background: rgba(251,191,36,0.3); }
+.info { margin-top: 10px; font-size: 11px; line-height: 1.7; border-top: 1px solid rgba(251,191,36,0.15); padding-top: 8px; }
+.info .label { color: #94a3b8; }
+.info .value { color: #fbbf24; font-weight: 600; }
+.hint { color: #64748b; font-size: 10px; margin-top: 8px; line-height: 1.5; border-top: 1px solid rgba(251,191,36,0.1); padding-top: 6px; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back">&#8592; Back to Gallery</a>
+<div class="title">Autonomous Vehicle Waypoints</div>
+<div class="controls">
+    <h3>Pure Pursuit Control</h3>
+    <div class="slider-group">
+        <label>Lookahead Distance <span class="val" id="laVal">80</span></label>
+        <input type="range" id="laSlider" min="30" max="200" step="5" value="80">
+    </div>
+    <div class="slider-group">
+        <label>Vehicle Speed <span class="val" id="spdVal">2.5</span></label>
+        <input type="range" id="spdSlider" min="0.5" max="6.0" step="0.1" value="2.5">
+    </div>
+    <div class="slider-group">
+        <label>Wheelbase <span class="val" id="wbVal">40</span></label>
+        <input type="range" id="wbSlider" min="20" max="80" step="5" value="40">
+    </div>
+    <div>
+        <span class="btn" id="clearBtn">Clear Path</span>
+        <span class="btn" id="loopBtn">Toggle Loop</span>
+        <span class="btn" id="presetBtn">Preset</span>
+    </div>
+    <div class="info">
+        <div><span class="label">Steering: </span><span class="value" id="steerStat">0.0&deg;</span></div>
+        <div><span class="label">Cross-Track Error: </span><span class="value" id="cteStat">0.0</span></div>
+        <div><span class="label">Waypoints: </span><span class="value" id="wpStat">0</span></div>
+        <div><span class="label">Lap: </span><span class="value" id="lapStat">0</span></div>
+    </div>
+    <div class="hint">Click to place waypoints. Vehicle follows the path using Pure Pursuit steering control.</div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize);
+    resize();
+
+    let lookahead = 80;
+    let vehicleSpeed = 2.5;
+    let wheelbase = 40;
+    let loopPath = true;
+
+    // Vehicle state
+    let vx = W / 2, vy = H / 2;
+    let vAngle = 0; // heading
+    let steeringAngle = 0;
+    let trail = [];
+    let laps = 0;
+
+    let waypoints = [];
+    let pathPoints = []; // Interpolated smooth path
+    let closestPathIdx = 0;
+
+    document.getElementById('laSlider').oninput = function() { lookahead = parseInt(this.value); document.getElementById('laVal').textContent = lookahead; };
+    document.getElementById('spdSlider').oninput = function() { vehicleSpeed = parseFloat(this.value); document.getElementById('spdVal').textContent = vehicleSpeed.toFixed(1); };
+    document.getElementById('wbSlider').oninput = function() { wheelbase = parseInt(this.value); document.getElementById('wbVal').textContent = wheelbase; };
+
+    document.getElementById('clearBtn').onclick = function() {
+        waypoints = [];
+        pathPoints = [];
+        trail = [];
+        laps = 0;
+    };
+
+    document.getElementById('loopBtn').onclick = function() {
+        loopPath = !loopPath;
+        this.textContent = loopPath ? 'Loop: ON' : 'Loop: OFF';
+        generatePath();
+    };
+
+    document.getElementById('presetBtn').onclick = function() {
+        waypoints = [];
+        const cx = W/2, cy = H/2;
+        const r = Math.min(W, H) * 0.3;
+        // Figure-8
+        for (let i = 0; i < 32; i++) {
+            const t = (i / 32) * Math.PI * 2;
+            const x = cx + r * Math.sin(t);
+            const y = cy + r * 0.5 * Math.sin(2 * t);
+            waypoints.push({x, y});
+        }
+        loopPath = true;
+        generatePath();
+        vx = waypoints[0].x;
+        vy = waypoints[0].y;
+        vAngle = Math.atan2(waypoints[1].y - waypoints[0].y, waypoints[1].x - waypoints[0].x);
+        trail = [];
+        laps = 0;
+    };
+
+    canvas.addEventListener('click', function(e) {
+        waypoints.push({ x: e.clientX, y: e.clientY });
+        generatePath();
+        if (waypoints.length === 1) {
+            vx = waypoints[0].x;
+            vy = waypoints[0].y;
+            trail = [];
+        }
+    });
+
+    function generatePath() {
+        if (waypoints.length < 2) { pathPoints = []; return; }
+
+        pathPoints = [];
+        const pts = loopPath ? [...waypoints, waypoints[0]] : [...waypoints];
+
+        // Catmull-Rom spline interpolation
+        for (let i = 0; i < pts.length - 1; i++) {
+            const p0 = pts[Math.max(0, i - 1)];
+            const p1 = pts[i];
+            const p2 = pts[i + 1];
+            const p3 = pts[Math.min(pts.length - 1, i + 2)];
+
+            const segments = 20;
+            for (let j = 0; j < segments; j++) {
+                const t = j / segments;
+                const t2 = t * t;
+                const t3 = t2 * t;
+
+                const x = 0.5 * ((2*p1.x) + (-p0.x+p2.x)*t + (2*p0.x-5*p1.x+4*p2.x-p3.x)*t2 + (-p0.x+3*p1.x-3*p2.x+p3.x)*t3);
+                const y = 0.5 * ((2*p1.y) + (-p0.y+p2.y)*t + (2*p0.y-5*p1.y+4*p2.y-p3.y)*t2 + (-p0.y+3*p1.y-3*p2.y+p3.y)*t3);
+                pathPoints.push({x, y});
+            }
+        }
+    }
+
+    function findClosestPoint() {
+        if (pathPoints.length === 0) return -1;
+        let minDist = Infinity, minIdx = 0;
+        for (let i = 0; i < pathPoints.length; i++) {
+            const d = (pathPoints[i].x - vx)**2 + (pathPoints[i].y - vy)**2;
+            if (d < minDist) { minDist = d; minIdx = i; }
+        }
+        return minIdx;
+    }
+
+    function findLookaheadPoint() {
+        if (pathPoints.length === 0) return null;
+        const closestIdx = findClosestPoint();
+        closestPathIdx = closestIdx;
+
+        // Walk along path from closest point to find lookahead
+        let accumulated = 0;
+        for (let i = closestIdx; i < pathPoints.length - 1; i++) {
+            const dx = pathPoints[i+1].x - pathPoints[i].x;
+            const dy = pathPoints[i+1].y - pathPoints[i].y;
+            const segLen = Math.sqrt(dx*dx + dy*dy);
+            accumulated += segLen;
+            if (accumulated >= lookahead) {
+                return pathPoints[i+1];
+            }
+        }
+
+        // If looping, wrap around
+        if (loopPath && pathPoints.length > 1) {
+            for (let i = 0; i < closestIdx; i++) {
+                const dx = pathPoints[(i+1) % pathPoints.length].x - pathPoints[i].x;
+                const dy = pathPoints[(i+1) % pathPoints.length].y - pathPoints[i].y;
+                accumulated += Math.sqrt(dx*dx + dy*dy);
+                if (accumulated >= lookahead) {
+                    return pathPoints[(i+1) % pathPoints.length];
+                }
+            }
+        }
+
+        return pathPoints[pathPoints.length - 1];
+    }
+
+    function purePursuit() {
+        const target = findLookaheadPoint();
+        if (!target) return;
+
+        // Transform target to vehicle coordinates
+        const dx = target.x - vx;
+        const dy = target.y - vy;
+        const localX = Math.cos(-vAngle) * dx - Math.sin(-vAngle) * dy;
+        const localY = Math.sin(-vAngle) * dx + Math.cos(-vAngle) * dy;
+
+        // Pure pursuit steering
+        const ld = Math.sqrt(dx*dx + dy*dy);
+        if (ld < 1) return;
+
+        // Curvature = 2 * sin(alpha) / ld
+        // where alpha is the angle to the target
+        const curvature = 2 * localY / (ld * ld);
+        steeringAngle = Math.atan(curvature * wheelbase);
+        steeringAngle = Math.max(-Math.PI/4, Math.min(Math.PI/4, steeringAngle));
+
+        // Bicycle model update
+        vAngle += (vehicleSpeed / wheelbase) * Math.tan(steeringAngle);
+        vx += Math.cos(vAngle) * vehicleSpeed;
+        vy += Math.sin(vAngle) * vehicleSpeed;
+
+        // Track laps
+        if (loopPath && pathPoints.length > 10) {
+            if (closestPathIdx < 5 && trail.length > 50) {
+                const lastTrail = trail[trail.length - 50];
+                if (lastTrail) {
+                    const oldClosest = findClosestToPoint(lastTrail.x, lastTrail.y);
+                    if (oldClosest > pathPoints.length * 0.8) {
+                        laps++;
+                    }
+                }
+            }
+        }
+
+        trail.push({x: vx, y: vy});
+        if (trail.length > 1000) trail.shift();
+    }
+
+    function findClosestToPoint(px, py) {
+        let minDist = Infinity, minIdx = 0;
+        for (let i = 0; i < pathPoints.length; i++) {
+            const d = (pathPoints[i].x - px)**2 + (pathPoints[i].y - py)**2;
+            if (d < minDist) { minDist = d; minIdx = i; }
+        }
+        return minIdx;
+    }
+
+    function crossTrackError() {
+        if (pathPoints.length === 0) return 0;
+        const idx = findClosestPoint();
+        const p = pathPoints[idx];
+        return Math.sqrt((p.x - vx)**2 + (p.y - vy)**2);
+    }
+
+    function drawPath() {
+        if (pathPoints.length < 2) return;
+
+        // Road surface
+        ctx.strokeStyle = 'rgba(100,120,180,0.12)';
+        ctx.lineWidth = 30;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
+        for (let i = 1; i < pathPoints.length; i++) {
+            ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+        }
+        ctx.stroke();
+
+        // Center line
+        ctx.strokeStyle = 'rgba(251,191,36,0.3)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([12, 12]);
+        ctx.beginPath();
+        ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
+        for (let i = 1; i < pathPoints.length; i++) {
+            ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineCap = 'butt';
+    }
+
+    function drawWaypoints() {
+        waypoints.forEach((wp, idx) => {
+            ctx.fillStyle = 'rgba(251,191,36,0.2)';
+            ctx.beginPath();
+            ctx.arc(wp.x, wp.y, 12, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#fbbf24';
+            ctx.beginPath();
+            ctx.arc(wp.x, wp.y, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = 'rgba(251,191,36,0.7)';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(idx + 1, wp.x, wp.y - 16);
+            ctx.textAlign = 'left';
+        });
+    }
+
+    function drawVehicle() {
+        // Trail
+        if (trail.length > 1) {
+            for (let i = 1; i < trail.length; i++) {
+                const alpha = (i / trail.length) * 0.4;
+                ctx.strokeStyle = `rgba(96,165,250,${alpha})`;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(trail[i-1].x, trail[i-1].y);
+                ctx.lineTo(trail[i].x, trail[i].y);
+                ctx.stroke();
+            }
+        }
+
+        ctx.save();
+        ctx.translate(vx, vy);
+        ctx.rotate(vAngle);
+
+        const vl = wheelbase * 0.6;
+        const vw = wheelbase * 0.35;
+
+        // Shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(-vl/2 + 2, -vw/2 + 2, vl, vw);
+
+        // Body
+        const grad = ctx.createLinearGradient(-vl/2, 0, vl/2, 0);
+        grad.addColorStop(0, '#2563eb');
+        grad.addColorStop(0.5, '#3b82f6');
+        grad.addColorStop(1, '#1d4ed8');
+        ctx.fillStyle = grad;
+        ctx.fillRect(-vl/2, -vw/2, vl, vw);
+        ctx.strokeStyle = 'rgba(96,165,250,0.5)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(-vl/2, -vw/2, vl, vw);
+
+        // Windshield
+        ctx.fillStyle = 'rgba(147,197,253,0.3)';
+        ctx.fillRect(vl * 0.1, -vw/2 + 2, vl * 0.2, vw - 4);
+
+        // Headlights
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillRect(vl/2 - 3, -vw/2 + 2, 3, 4);
+        ctx.fillRect(vl/2 - 3, vw/2 - 6, 3, 4);
+
+        // Headlight beams
+        ctx.fillStyle = 'rgba(251,191,36,0.05)';
+        ctx.beginPath();
+        ctx.moveTo(vl/2, -vw/2);
+        ctx.lineTo(vl/2 + lookahead * 0.5, -vw * 2);
+        ctx.lineTo(vl/2 + lookahead * 0.5, vw * 2);
+        ctx.lineTo(vl/2, vw/2);
+        ctx.fill();
+
+        // Front wheels (steered)
+        ctx.save();
+        ctx.translate(vl/2 - 5, -vw/2 - 3);
+        ctx.rotate(steeringAngle);
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(-4, -2, 8, 4);
+        ctx.restore();
+
+        ctx.save();
+        ctx.translate(vl/2 - 5, vw/2 + 3);
+        ctx.rotate(steeringAngle);
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(-4, -2, 8, 4);
+        ctx.restore();
+
+        // Rear wheels
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(-vl/2 + 1, -vw/2 - 5, 8, 4);
+        ctx.fillRect(-vl/2 + 1, vw/2 + 1, 8, 4);
+
+        ctx.restore();
+
+        // Lookahead circle
+        const target = findLookaheadPoint();
+        if (target) {
+            ctx.strokeStyle = 'rgba(34,211,238,0.3)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 6]);
+            ctx.beginPath();
+            ctx.arc(vx, vy, lookahead, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Line to lookahead point
+            ctx.strokeStyle = 'rgba(34,211,238,0.4)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(vx, vy);
+            ctx.lineTo(target.x, target.y);
+            ctx.stroke();
+
+            ctx.fillStyle = '#22d3ee';
+            ctx.beginPath();
+            ctx.arc(target.x, target.y, 5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    function animate() {
+        ctx.clearRect(0, 0, W, H);
+
+        const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.7);
+        bg.addColorStop(0, '#111827');
+        bg.addColorStop(1, '#0a0e1a');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        // Grid
+        ctx.strokeStyle = 'rgba(100,120,180,0.04)';
+        ctx.lineWidth = 1;
+        for (let x = 0; x < W; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+        for (let y = 0; y < H; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+        if (pathPoints.length >= 2) {
+            purePursuit();
+        }
+
+        drawPath();
+        drawWaypoints();
+        drawVehicle();
+
+        // Update stats
+        document.getElementById('steerStat').textContent = (steeringAngle * 180/Math.PI).toFixed(1) + '\u00B0';
+        document.getElementById('cteStat').textContent = crossTrackError().toFixed(1) + 'px';
+        document.getElementById('wpStat').textContent = waypoints.length;
+        document.getElementById('lapStat').textContent = laps;
+
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+})();
+</script>
+</body>
+</html>

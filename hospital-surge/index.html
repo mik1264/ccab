@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hospital Capacity Surge</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title-overlay { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 22px; font-weight: 700; text-shadow: 0 2px 10px rgba(0,0,0,0.7); z-index: 10; pointer-events: none; }
+#controls { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.85); padding: 16px 24px; border-radius: 14px; color: #e0e0e0; z-index: 10; display: flex; gap: 20px; align-items: center; border: 1px solid rgba(251,191,36,0.3); font-size: 13px; flex-wrap: wrap; justify-content: center; }
+#controls button { padding: 8px 18px; background: #fbbf24; color: #0a0e1a; border: none; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 13px; }
+#controls button:hover { background: #f59e0b; }
+#controls button.active { background: #4aff88; color: #0a0e1a; }
+#controls input[type=range] { width: 120px; accent-color: #fbbf24; }
+.val { color: #fbbf24; font-weight: 700; }
+#stats { position: fixed; top: 60px; left: 20px; background: rgba(0,0,0,0.85); padding: 14px 18px; border-radius: 10px; color: #e0e0e0; font-size: 13px; z-index: 10; border: 1px solid rgba(251,191,36,0.2); }
+#legend { position: fixed; top: 60px; right: 20px; background: rgba(0,0,0,0.85); padding: 14px 18px; border-radius: 10px; color: #e0e0e0; font-size: 13px; z-index: 10; border: 1px solid rgba(251,191,36,0.2); }
+.legend-item { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+.legend-dot { width: 12px; height: 12px; border-radius: 50%; }
+#hospital-label { position: fixed; color: #ff8c00; font-size: 11px; z-index: 5; pointer-events: none; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title-overlay">Hospital Capacity Surge</div>
+<div id="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#4a9eff;"></div> Healthy</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ff4a4a;"></div> Infected</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ff8c00;"></div> Hospitalized</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#4aff88;"></div> Recovered</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#666;"></div> Deceased</div>
+    <div class="legend-item" style="margin-top:8px;"><div style="width:12px;height:3px;background:#ff4a4a;"></div> Cases</div>
+    <div class="legend-item"><div style="width:12px;height:3px;background:#fbbf24;border-top:1px dashed #fbbf24;"></div> Hospital capacity</div>
+</div>
+<div id="stats">
+    <div>Day: <span id="dayNum" class="val">0</span></div>
+    <div>Active Cases: <span id="activeCases" style="color:#ff4a4a;">0</span></div>
+    <div>Hospitalized: <span id="hospCount" style="color:#ff8c00;">0</span></div>
+    <div>Hospital Capacity: <span id="hospCap" style="color:#fbbf24;">0</span></div>
+    <div>Deceased: <span id="deadCount" style="color:#666;">0</span></div>
+    <div>Mortality Rate: <span id="mortRate" style="color:#ff4a4a;">0%</span></div>
+    <div style="margin-top:6px;" id="overCapMsg"></div>
+</div>
+<div id="controls">
+    <label>Hospital Beds <input type="range" id="bedCount" min="10" max="80" value="30"><span class="val" id="bedVal">30</span></label>
+    <label>Transmission <input type="range" id="transRate" min="0.02" max="0.3" step="0.01" value="0.12"><span class="val" id="transVal">12%</span></label>
+    <button id="interventionBtn">Activate Intervention</button>
+    <button id="resetBtn">Reset</button>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+const N = 350;
+const RADIUS = 3;
+const SPEED = 0.9;
+const INFECTION_DIST = 15;
+const INCUBATION = 60;
+const RECOVERY_TIME = 300;
+const HOSP_RATE = 0.2;
+const BASE_MORTALITY = 0.02;
+const OVERCAP_MORTALITY = 0.08;
+
+const HEALTHY = 0, INFECTED = 1, HOSPITALIZED = 2, RECOVERED = 3, DEAD = 4;
+const COLORS = ['#4a9eff', '#ff4a4a', '#ff8c00', '#4aff88', '#444444'];
+
+let agents = [], history = [], frame = 0, intervention = false, totalDead = 0, totalInfected = 0;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+
+function init() {
+    agents = [];
+    history = [];
+    frame = 0;
+    intervention = false;
+    totalDead = 0;
+    totalInfected = 0;
+    document.getElementById('interventionBtn').classList.remove('active');
+    document.getElementById('interventionBtn').textContent = 'Activate Intervention';
+
+    const simW = W * 0.55, simH = H - 140;
+    for (let i = 0; i < N; i++) {
+        agents.push({
+            x: 30 + Math.random() * (simW - 60),
+            y: 70 + Math.random() * (simH - 20),
+            vx: (Math.random() - 0.5) * SPEED * 2,
+            vy: (Math.random() - 0.5) * SPEED * 2,
+            state: i < 5 ? INFECTED : HEALTHY,
+            infectedTime: 0,
+            hospitalized: false
+        });
+    }
+    totalInfected = 5;
+}
+
+function update() {
+    const trans = parseFloat(document.getElementById('transRate').value);
+    const bedCount = parseInt(document.getElementById('bedCount').value);
+    const effTrans = intervention ? trans * 0.35 : trans;
+    const effSpeed = intervention ? SPEED * 0.4 : SPEED;
+    const simW = W * 0.55, simH = H - 140;
+
+    let hospCount = agents.filter(a => a.state === HOSPITALIZED).length;
+
+    for (let a of agents) {
+        if (a.state === DEAD) continue;
+
+        // Movement (hospitalized don't move)
+        if (a.state !== HOSPITALIZED) {
+            a.x += a.vx;
+            a.y += a.vy;
+            if (a.x < 20 || a.x > simW - 20) a.vx *= -1;
+            if (a.y < 60 || a.y > simH + 40) a.vy *= -1;
+            a.x = Math.max(20, Math.min(simW - 20, a.x));
+            a.y = Math.max(60, Math.min(simH + 40, a.y));
+
+            // Speed adjustment
+            const sp = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
+            if (sp > effSpeed) {
+                a.vx = (a.vx / sp) * effSpeed;
+                a.vy = (a.vy / sp) * effSpeed;
+            }
+        }
+
+        if (a.state === INFECTED || a.state === HOSPITALIZED) {
+            a.infectedTime++;
+
+            // Hospitalization
+            if (a.state === INFECTED && a.infectedTime > INCUBATION && !a.hospitalized) {
+                if (Math.random() < HOSP_RATE) {
+                    if (hospCount < bedCount) {
+                        a.state = HOSPITALIZED;
+                        a.hospitalized = true;
+                        hospCount++;
+                    }
+                }
+            }
+
+            // Recovery or death
+            if (a.infectedTime > RECOVERY_TIME) {
+                const mortality = hospCount > bedCount ? OVERCAP_MORTALITY : BASE_MORTALITY;
+                const adjustedMort = a.state === HOSPITALIZED && hospCount <= bedCount ? mortality * 0.5 : mortality;
+                if (Math.random() < adjustedMort) {
+                    a.state = DEAD;
+                    totalDead++;
+                } else {
+                    a.state = RECOVERED;
+                }
+            }
+        }
+    }
+
+    // Infection spread
+    for (let i = 0; i < agents.length; i++) {
+        if (agents[i].state !== INFECTED) continue;
+        for (let j = 0; j < agents.length; j++) {
+            if (agents[j].state !== HEALTHY) continue;
+            const dx = agents[i].x - agents[j].x, dy = agents[i].y - agents[j].y;
+            if (dx * dx + dy * dy < INFECTION_DIST * INFECTION_DIST) {
+                if (Math.random() < effTrans) {
+                    agents[j].state = INFECTED;
+                    agents[j].infectedTime = 0;
+                    totalInfected++;
+                }
+            }
+        }
+    }
+
+    // History
+    if (frame % 3 === 0) {
+        let counts = [0, 0, 0, 0, 0];
+        for (let a of agents) counts[a.state]++;
+        history.push({ ...counts, hosp: counts[2], active: counts[1] + counts[2] });
+    }
+    frame++;
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    const simW = W * 0.55, simH = H - 140;
+    const bedCount = parseInt(document.getElementById('bedCount').value);
+
+    // Sim border
+    ctx.strokeStyle = 'rgba(251,191,36,0.12)';
+    ctx.strokeRect(10, 55, simW - 10, simH);
+
+    // Hospital zone visual
+    const hospX = simW - 120, hospY = 70, hospW2 = 100, hospH2 = 80;
+    ctx.fillStyle = 'rgba(255,140,0,0.08)';
+    ctx.fillRect(hospX, hospY, hospW2, hospH2);
+    ctx.strokeStyle = 'rgba(255,140,0,0.3)';
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(hospX, hospY, hospW2, hospH2);
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ff8c00';
+    ctx.font = '10px sans-serif';
+    ctx.fillText('HOSPITAL', hospX + 22, hospY - 5);
+
+    // Draw agents
+    for (let a of agents) {
+        if (a.state === DEAD) {
+            ctx.fillStyle = '#444';
+            ctx.fillRect(a.x - 2, a.y - 2, 4, 4);
+            continue;
+        }
+        ctx.beginPath();
+        ctx.arc(a.x, a.y, RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = COLORS[a.state];
+        if (a.state === INFECTED) {
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = '#ff4a4a';
+        } else if (a.state === HOSPITALIZED) {
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = '#ff8c00';
+        } else {
+            ctx.shadowBlur = 0;
+        }
+        ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+
+    // Graph
+    const gx = simW + 30, gy = 80, gw = W - gx - 30, gh = H - 200;
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(gx - 5, gy - 5, gw + 10, gh + 10);
+    ctx.strokeStyle = 'rgba(251,191,36,0.2)';
+    ctx.strokeRect(gx - 5, gy - 5, gw + 10, gh + 10);
+
+    ctx.fillStyle = '#aaa';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Cases vs Hospital Capacity', gx + gw / 2 - 80, gy - 12);
+
+    if (history.length > 1) {
+        const maxActive = Math.max(...history.map(h => h.active), bedCount + 5);
+
+        // Hospital capacity line
+        const capY = gy + gh - (bedCount / maxActive) * gh;
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(gx, capY);
+        ctx.lineTo(gx + gw, capY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = '10px sans-serif';
+        ctx.fillText('Capacity: ' + bedCount, gx + gw - 75, capY - 5);
+
+        // Fill area above capacity
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i < history.length; i++) {
+            const x = gx + (i / Math.max(history.length - 1, 1)) * gw;
+            const y = gy + gh - (history[i].active / maxActive) * gh;
+            if (y < capY) {
+                if (!started) { ctx.moveTo(x, capY); started = true; }
+                ctx.lineTo(x, y);
+            } else if (started) {
+                ctx.lineTo(x, capY);
+                started = false;
+            }
+        }
+        if (started) {
+            const lastX = gx + gw;
+            ctx.lineTo(lastX, capY);
+        }
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(255,74,74,0.15)';
+        ctx.fill();
+
+        // Active cases line
+        ctx.beginPath();
+        ctx.strokeStyle = '#ff4a4a';
+        ctx.lineWidth = 2;
+        for (let i = 0; i < history.length; i++) {
+            const x = gx + (i / Math.max(history.length - 1, 1)) * gw;
+            const y = gy + gh - (history[i].active / maxActive) * gh;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Hospitalized line
+        ctx.beginPath();
+        ctx.strokeStyle = '#ff8c00';
+        ctx.lineWidth = 1.5;
+        for (let i = 0; i < history.length; i++) {
+            const x = gx + (i / Math.max(history.length - 1, 1)) * gw;
+            const y = gy + gh - (history[i].hosp / maxActive) * gh;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Deaths line
+        ctx.beginPath();
+        ctx.strokeStyle = '#666';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < history.length; i++) {
+            const x = gx + (i / Math.max(history.length - 1, 1)) * gw;
+            const val = history[i][4] || 0;
+            const y = gy + gh - (val / maxActive) * gh;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+
+    // Stats
+    let counts = [0, 0, 0, 0, 0];
+    for (let a of agents) counts[a.state]++;
+    document.getElementById('dayNum').textContent = Math.floor(frame / 60);
+    document.getElementById('activeCases').textContent = counts[1] + counts[2];
+    document.getElementById('hospCount').textContent = counts[2];
+    document.getElementById('hospCap').textContent = bedCount;
+    document.getElementById('deadCount').textContent = counts[4];
+    document.getElementById('mortRate').textContent = totalInfected > 0 ? (counts[4] / totalInfected * 100).toFixed(1) + '%' : '0%';
+
+    const msg = document.getElementById('overCapMsg');
+    if (counts[2] >= bedCount) {
+        msg.textContent = 'OVER CAPACITY';
+        msg.style.color = '#ff4a4a';
+    } else if (counts[2] > bedCount * 0.8) {
+        msg.textContent = 'NEAR CAPACITY';
+        msg.style.color = '#ff8c00';
+    } else {
+        msg.textContent = 'Within Capacity';
+        msg.style.color = '#4aff88';
+    }
+}
+
+document.getElementById('bedCount').oninput = function() { document.getElementById('bedVal').textContent = this.value; };
+document.getElementById('transRate').oninput = function() { document.getElementById('transVal').textContent = Math.round(this.value * 100) + '%'; };
+document.getElementById('interventionBtn').onclick = function() {
+    intervention = !intervention;
+    this.textContent = intervention ? 'Intervention Active' : 'Activate Intervention';
+    this.classList.toggle('active', intervention);
+};
+document.getElementById('resetBtn').onclick = init;
+window.addEventListener('resize', () => { resize(); init(); });
+
+function animate() { update(); draw(); requestAnimationFrame(animate); }
+resize();
+init();
+animate();
+</script>
+</body>
+</html>

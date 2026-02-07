@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stock Market Random Walk</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 20px; font-weight: 700; z-index: 999; text-shadow: 0 0 20px rgba(251,191,36,0.5); font-family: sans-serif; }
+#controls { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); display: flex; gap: 16px; z-index: 999; background: rgba(0,0,0,0.75); padding: 12px 20px; border-radius: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+#controls label { color: #ccc; font-size: 12px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+#controls input[type=range] { width: 100px; accent-color: #fbbf24; }
+#controls span { color: #fbbf24; font-size: 11px; }
+#legend { position: fixed; top: 50px; right: 15px; color: #ccc; font-size: 12px; z-index: 999; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; }
+.leg-item { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.leg-color { width: 14px; height: 3px; border-radius: 2px; }
+#controls button { background: rgba(251,191,36,0.2); color: #fbbf24; border: 1px solid #fbbf24; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+#controls button:hover { background: rgba(251,191,36,0.4); }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div id="title">Stock Market Random Walk</div>
+<div id="legend"></div>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <label>Drift (mu) <input type="range" id="drift" min="-0.5" max="0.5" step="0.01" value="0.05"><span id="driftVal">0.05</span></label>
+    <label>Volatility (sigma) <input type="range" id="vol" min="0.05" max="1.0" step="0.01" value="0.20"><span id="volVal">0.20</span></label>
+    <label>Speed <input type="range" id="speed" min="1" max="10" step="1" value="3"><span id="speedVal">3</span></label>
+    <button id="resetBtn">Reset</button>
+    <button id="chartToggle">Line / Candle</button>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const stocks = [
+    { name: 'ALPHA', color: '#4ade80', price: 100, history: [], volatilityMult: 1.0 },
+    { name: 'BETA', color: '#60a5fa', price: 100, history: [], volatilityMult: 1.5 },
+    { name: 'GAMMA', color: '#f472b6', price: 100, history: [], volatilityMult: 0.6 },
+    { name: 'DELTA', color: '#fbbf24', price: 100, history: [], volatilityMult: 2.0 }
+];
+
+let showCandles = false;
+let dt = 1 / 252;
+let maxPoints = 400;
+let frameCount = 0;
+
+const driftSlider = document.getElementById('drift');
+const volSlider = document.getElementById('vol');
+const speedSlider = document.getElementById('speed');
+
+driftSlider.oninput = () => document.getElementById('driftVal').textContent = driftSlider.value;
+volSlider.oninput = () => document.getElementById('volVal').textContent = volSlider.value;
+speedSlider.oninput = () => document.getElementById('speedVal').textContent = speedSlider.value;
+
+document.getElementById('resetBtn').onclick = () => {
+    stocks.forEach(s => { s.price = 100; s.history = []; });
+};
+document.getElementById('chartToggle').onclick = () => { showCandles = !showCandles; };
+
+// Build legend
+const legendEl = document.getElementById('legend');
+stocks.forEach(s => {
+    const div = document.createElement('div');
+    div.className = 'leg-item';
+    div.innerHTML = `<div class="leg-color" style="background:${s.color}"></div>${s.name} (vol x${s.volatilityMult})`;
+    legendEl.appendChild(div);
+});
+const smaLeg1 = document.createElement('div');
+smaLeg1.className = 'leg-item';
+smaLeg1.innerHTML = '<div class="leg-color" style="background:#fff;opacity:0.4"></div>SMA 20';
+legendEl.appendChild(smaLeg1);
+const smaLeg2 = document.createElement('div');
+smaLeg2.className = 'leg-item';
+smaLeg2.innerHTML = '<div class="leg-color" style="background:#ff6b6b;opacity:0.6"></div>SMA 50';
+legendEl.appendChild(smaLeg2);
+
+function gaussianRandom() {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+function sma(arr, period) {
+    const result = [];
+    for (let i = 0; i < arr.length; i++) {
+        if (i < period - 1) { result.push(null); continue; }
+        let sum = 0;
+        for (let j = i - period + 1; j <= i; j++) sum += arr[j].close;
+        result.push(sum / period);
+    }
+    return result;
+}
+
+function simulate() {
+    const mu = parseFloat(driftSlider.value);
+    const sigma = parseFloat(volSlider.value);
+
+    stocks.forEach(stock => {
+        const sv = sigma * stock.volatilityMult;
+        const z = gaussianRandom();
+        const dS = stock.price * (mu * dt + sv * Math.sqrt(dt) * z);
+        const oldPrice = stock.price;
+        stock.price = Math.max(0.01, stock.price + dS);
+
+        // Candle data
+        const open = oldPrice;
+        const close = stock.price;
+        const high = Math.max(open, close) * (1 + Math.random() * 0.005);
+        const low = Math.min(open, close) * (1 - Math.random() * 0.005);
+        stock.history.push({ open, high, low, close });
+
+        if (stock.history.length > maxPoints) stock.history.shift();
+    });
+}
+
+function drawGrid(x, y, w, h, minVal, maxVal) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+    ctx.lineWidth = 1;
+    const steps = 5;
+    for (let i = 0; i <= steps; i++) {
+        const yy = y + (h / steps) * i;
+        ctx.beginPath();
+        ctx.moveTo(x, yy);
+        ctx.lineTo(x + w, yy);
+        ctx.stroke();
+
+        const val = maxVal - (maxVal - minVal) * (i / steps);
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.font = '10px sans-serif';
+        ctx.fillText('$' + val.toFixed(1), x - 45, yy + 3);
+    }
+}
+
+function draw() {
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw faint grid background
+    ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+    for (let x = 0; x < W; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y < H; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+    const chartTop = 80;
+    const chartBottom = H - 90;
+    const chartLeft = 60;
+    const chartRight = W - 20;
+    const chartW = chartRight - chartLeft;
+    const chartH = chartBottom - chartTop;
+
+    // Find price range across all stocks
+    let minP = Infinity, maxP = -Infinity;
+    stocks.forEach(s => {
+        s.history.forEach(h => {
+            if (h.low < minP) minP = h.low;
+            if (h.high > maxP) maxP = h.high;
+        });
+    });
+    if (minP === Infinity) { minP = 90; maxP = 110; }
+    const padding = (maxP - minP) * 0.1;
+    minP -= padding;
+    maxP += padding;
+
+    drawGrid(chartLeft, chartTop, chartW, chartH, minP, maxP);
+
+    const mapY = (val) => chartBottom - ((val - minP) / (maxP - minP)) * chartH;
+
+    stocks.forEach((stock, si) => {
+        const hist = stock.history;
+        if (hist.length < 2) return;
+        const barW = chartW / maxPoints;
+
+        if (showCandles && si === 0) {
+            // Only draw candles for first stock
+            hist.forEach((h, i) => {
+                const x = chartLeft + i * barW;
+                const bullish = h.close >= h.open;
+                ctx.strokeStyle = bullish ? '#4ade80' : '#ef4444';
+                ctx.fillStyle = bullish ? '#4ade80' : '#ef4444';
+
+                // Wick
+                ctx.beginPath();
+                ctx.moveTo(x + barW / 2, mapY(h.high));
+                ctx.lineTo(x + barW / 2, mapY(h.low));
+                ctx.stroke();
+
+                // Body
+                const top = mapY(Math.max(h.open, h.close));
+                const bot = mapY(Math.min(h.open, h.close));
+                const bodyH = Math.max(1, bot - top);
+                if (bullish) {
+                    ctx.fillRect(x + 1, top, Math.max(1, barW - 2), bodyH);
+                } else {
+                    ctx.fillRect(x + 1, top, Math.max(1, barW - 2), bodyH);
+                }
+            });
+        } else {
+            // Line chart
+            ctx.beginPath();
+            ctx.strokeStyle = stock.color;
+            ctx.lineWidth = 1.5;
+            ctx.globalAlpha = 0.9;
+            hist.forEach((h, i) => {
+                const x = chartLeft + i * barW;
+                const y = mapY(h.close);
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+
+            // Glow
+            ctx.beginPath();
+            ctx.strokeStyle = stock.color;
+            ctx.lineWidth = 4;
+            ctx.globalAlpha = 0.15;
+            hist.forEach((h, i) => {
+                const x = chartLeft + i * barW;
+                const y = mapY(h.close);
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }
+
+        // SMAs for all stocks
+        const sma20 = sma(hist, 20);
+        const sma50 = sma(hist, 50);
+
+        // Draw SMA 20
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        let started = false;
+        sma20.forEach((val, i) => {
+            if (val === null) return;
+            const x = chartLeft + i * barW;
+            const y = mapY(val);
+            if (!started) { ctx.moveTo(x, y); started = true; }
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Draw SMA 50
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(255,107,107,0.4)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([6, 3]);
+        started = false;
+        sma50.forEach((val, i) => {
+            if (val === null) return;
+            const x = chartLeft + i * barW;
+            const y = mapY(val);
+            if (!started) { ctx.moveTo(x, y); started = true; }
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Current price label
+        if (hist.length > 0) {
+            const last = hist[hist.length - 1].close;
+            const x = chartLeft + (hist.length - 1) * barW + 5;
+            const y = mapY(last);
+            ctx.fillStyle = stock.color;
+            ctx.font = 'bold 11px sans-serif';
+            ctx.fillText('$' + last.toFixed(2), x, y + si * 14 - 5);
+        }
+    });
+
+    // Axis labels
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = '10px sans-serif';
+    ctx.fillText('Price ($)', chartLeft, chartTop - 10);
+    ctx.fillText('Time', chartRight - 30, chartBottom + 20);
+}
+
+function animate() {
+    frameCount++;
+    const speed = parseInt(speedSlider.value);
+    for (let i = 0; i < speed; i++) simulate();
+    draw();
+    requestAnimationFrame(animate);
+}
+
+// Initialize
+stocks.forEach(s => { s.history.push({ open: 100, high: 100.5, low: 99.5, close: 100 }); });
+animate();
+</script>
+</body>
+</html>

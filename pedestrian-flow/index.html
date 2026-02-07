@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pedestrian Flow Dynamics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+#title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 18px; font-family: sans-serif; z-index: 999; text-shadow: 0 0 10px rgba(251,191,36,0.5); pointer-events: none; }
+#ui { position: fixed; top: 10px; right: 10px; z-index: 999; }
+.panel { background: rgba(0,0,0,0.75); color: #e0e0e0; padding: 12px 16px; border-radius: 8px; font-size: 13px; min-width: 190px; }
+.panel label { display: block; margin: 6px 0 2px; color: #fbbf24; }
+.panel input[type=range] { width: 100%; }
+.panel button { background: #fbbf24; color: #0a0e1a; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-top: 6px; width: 100%; }
+.panel button:hover { background: #f59e0b; }
+#stats { color: #aaa; margin-top: 8px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div id="title">Pedestrian Flow Dynamics</div>
+<div id="ui">
+    <div class="panel">
+        <label>Door Width: <span id="dwVal">80</span>px</label>
+        <input type="range" id="doorWidth" min="20" max="200" value="80">
+        <label>Pedestrian Count: <span id="pcVal">200</span></label>
+        <input type="range" id="pedCount" min="50" max="500" value="200" step="10">
+        <label>Desired Speed: <span id="dsVal">2.0</span></label>
+        <input type="range" id="desSpeed" min="5" max="40" value="20">
+        <label>Personal Space: <span id="psVal">1.0</span></label>
+        <input type="range" id="persSpace" min="3" max="20" value="10">
+        <button id="resetBtn">Reset</button>
+        <div id="stats"></div>
+    </div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function() {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    let doorWidth = 80;
+    let pedCount = 200;
+    let desiredSpeed = 2.0;
+    let personalSpace = 1.0;
+    let pedestrians = [];
+    let walls = [];
+    let passedLeft = 0, passedRight = 0;
+    let frame = 0;
+
+    const dwSlider = document.getElementById('doorWidth');
+    const pcSlider = document.getElementById('pedCount');
+    const dsSlider = document.getElementById('desSpeed');
+    const psSlider = document.getElementById('persSpace');
+
+    dwSlider.addEventListener('input', function() {
+        doorWidth = parseInt(this.value);
+        document.getElementById('dwVal').textContent = doorWidth;
+        buildWalls();
+    });
+    pcSlider.addEventListener('input', function() {
+        pedCount = parseInt(this.value);
+        document.getElementById('pcVal').textContent = pedCount;
+    });
+    dsSlider.addEventListener('input', function() {
+        desiredSpeed = parseInt(this.value) / 10;
+        document.getElementById('dsVal').textContent = desiredSpeed.toFixed(1);
+    });
+    psSlider.addEventListener('input', function() {
+        personalSpace = parseInt(this.value) / 10;
+        document.getElementById('psVal').textContent = personalSpace.toFixed(1);
+    });
+    document.getElementById('resetBtn').addEventListener('click', init);
+
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+    }
+
+    function buildWalls() {
+        walls = [];
+        const wallX = W / 2;
+        const halfDoor = doorWidth / 2;
+        const cy = H / 2;
+        const wallThickness = 8;
+        // Top wall
+        walls.push({ x1: wallX - wallThickness / 2, y1: 0, x2: wallX + wallThickness / 2, y2: cy - halfDoor });
+        // Bottom wall
+        walls.push({ x1: wallX - wallThickness / 2, y1: cy + halfDoor, x2: wallX + wallThickness / 2, y2: H });
+    }
+
+    function init() {
+        resize();
+        buildWalls();
+        pedestrians = [];
+        passedLeft = 0;
+        passedRight = 0;
+        frame = 0;
+
+        for (let i = 0; i < pedCount; i++) {
+            const goingRight = i < pedCount / 2;
+            const radius = 4 + Math.random() * 2;
+            pedestrians.push({
+                x: goingRight ? Math.random() * (W / 2 - 50) + 25 : W / 2 + 50 + Math.random() * (W / 2 - 75),
+                y: 50 + Math.random() * (H - 100),
+                vx: 0, vy: 0,
+                radius: radius,
+                goingRight: goingRight,
+                speed: desiredSpeed * (0.8 + Math.random() * 0.4),
+                passed: false
+            });
+        }
+    }
+
+    function wallForce(p) {
+        let fx = 0, fy = 0;
+        const wallX = W / 2;
+        const halfDoor = doorWidth / 2;
+        const cy = H / 2;
+
+        // Wall repulsion
+        for (const wall of walls) {
+            // Check distance to wall segment
+            const closestX = Math.max(wall.x1, Math.min(wall.x2, p.x));
+            const closestY = Math.max(wall.y1, Math.min(wall.y2, p.y));
+            const dx = p.x - closestX;
+            const dy = p.y - closestY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist < p.radius + 30) {
+                const strength = 50 / (dist * dist + 1);
+                const nx = dist > 0 ? dx / dist : 0;
+                const ny = dist > 0 ? dy / dist : 0;
+                fx += nx * strength;
+                fy += ny * strength;
+            }
+        }
+
+        // Boundary repulsion
+        const margin = 20;
+        if (p.y < margin) fy += 5 / (p.y + 1);
+        if (p.y > H - margin) fy -= 5 / (H - p.y + 1);
+        if (p.x < margin) fx += 3 / (p.x + 1);
+        if (p.x > W - margin) fx -= 3 / (W - p.x + 1);
+
+        return { fx, fy };
+    }
+
+    function update() {
+        const dt = 0.3;
+        const grid = {};
+        const cellSz = 30;
+
+        // Spatial hash
+        for (const p of pedestrians) {
+            const cx = Math.floor(p.x / cellSz);
+            const cy = Math.floor(p.y / cellSz);
+            const key = cx + ',' + cy;
+            if (!grid[key]) grid[key] = [];
+            grid[key].push(p);
+        }
+
+        for (const p of pedestrians) {
+            // Desired direction
+            const doorY = H / 2;
+            const wallX = W / 2;
+            let targetX, targetY;
+
+            // If on the correct side, head to door opening
+            if ((p.goingRight && p.x < wallX - 10) || (!p.goingRight && p.x > wallX + 10)) {
+                targetX = wallX;
+                targetY = doorY;
+            } else {
+                // Through the door, head to far side
+                targetX = p.goingRight ? W + 50 : -50;
+                targetY = p.y;
+            }
+
+            const ddx = targetX - p.x;
+            const ddy = targetY - p.y;
+            const dd = Math.sqrt(ddx * ddx + ddy * ddy) || 1;
+            const desVx = (ddx / dd) * p.speed;
+            const desVy = (ddy / dd) * p.speed;
+
+            // Social force
+            let sfx = (desVx - p.vx) * 2;
+            let sfy = (desVy - p.vy) * 2;
+
+            // Repulsion from other pedestrians
+            const cx = Math.floor(p.x / cellSz);
+            const cy = Math.floor(p.y / cellSz);
+            for (let dx = -1; dx <= 1; dx++) {
+                for (let dy = -1; dy <= 1; dy++) {
+                    const key = (cx + dx) + ',' + (cy + dy);
+                    if (!grid[key]) continue;
+                    for (const q of grid[key]) {
+                        if (q === p) continue;
+                        const px = p.x - q.x;
+                        const py = p.y - q.y;
+                        const dist = Math.sqrt(px * px + py * py);
+                        const minDist = (p.radius + q.radius) * personalSpace;
+
+                        if (dist < minDist * 3 && dist > 0) {
+                            const overlap = minDist - dist;
+                            const strength = overlap > 0 ? 15 + overlap * 5 : 3 * Math.exp(-dist / minDist);
+                            sfx += (px / dist) * strength;
+                            sfy += (py / dist) * strength;
+                        }
+                    }
+                }
+            }
+
+            // Wall force
+            const wf = wallForce(p);
+            sfx += wf.fx;
+            sfy += wf.fy;
+
+            p.vx += sfx * dt;
+            p.vy += sfy * dt;
+
+            // Clamp speed
+            const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+            const maxSpd = p.speed * 1.5;
+            if (spd > maxSpd) {
+                p.vx = (p.vx / spd) * maxSpd;
+                p.vy = (p.vy / spd) * maxSpd;
+            }
+
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+
+            // Track passage
+            if (!p.passed) {
+                if (p.goingRight && p.x > wallX + 20) { p.passed = true; passedRight++; }
+                if (!p.goingRight && p.x < wallX - 20) { p.passed = true; passedLeft++; }
+            }
+
+            // Wrap around if passed through
+            if (p.x < -20 && !p.goingRight) {
+                p.x = W + 10;
+                p.passed = false;
+            }
+            if (p.x > W + 20 && p.goingRight) {
+                p.x = -10;
+                p.passed = false;
+            }
+        }
+    }
+
+    function densityAt(x, y) {
+        let count = 0;
+        const r = 30;
+        for (const p of pedestrians) {
+            const dx = p.x - x, dy = p.y - y;
+            if (dx * dx + dy * dy < r * r) count++;
+        }
+        return count;
+    }
+
+    function draw() {
+        ctx.fillStyle = '#0a0e1a';
+        ctx.fillRect(0, 0, W, H);
+
+        // Draw density field
+        const densityCellSize = 15;
+        for (let x = 0; x < W; x += densityCellSize) {
+            for (let y = 0; y < H; y += densityCellSize) {
+                const d = densityAt(x + densityCellSize / 2, y + densityCellSize / 2);
+                if (d > 0) {
+                    const alpha = Math.min(0.3, d * 0.04);
+                    ctx.fillStyle = d > 5 ? `rgba(239,68,68,${alpha})` : `rgba(59,130,246,${alpha})`;
+                    ctx.fillRect(x, y, densityCellSize, densityCellSize);
+                }
+            }
+        }
+
+        // Draw walls
+        ctx.fillStyle = '#475569';
+        for (const wall of walls) {
+            ctx.fillRect(wall.x1, wall.y1, wall.x2 - wall.x1, wall.y2 - wall.y1);
+            // Wall edge highlight
+            ctx.strokeStyle = '#94a3b8';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(wall.x1, wall.y1, wall.x2 - wall.x1, wall.y2 - wall.y1);
+        }
+
+        // Door opening glow
+        const halfDoor = doorWidth / 2;
+        const cy = H / 2;
+        const wallX = W / 2;
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.1)';
+        ctx.fillRect(wallX - 15, cy - halfDoor, 30, doorWidth);
+
+        // Draw flow arrows
+        ctx.strokeStyle = 'rgba(251,191,36,0.15)';
+        ctx.lineWidth = 1;
+        for (let y = cy - halfDoor + 10; y < cy + halfDoor; y += 15) {
+            const offset = (frame * 2 + y) % 30;
+            // Right arrows
+            ctx.beginPath();
+            ctx.moveTo(wallX - 50 + offset, y - 5);
+            ctx.lineTo(wallX - 50 + offset, y + 5);
+            ctx.lineTo(wallX - 43 + offset, y);
+            ctx.closePath();
+            ctx.stroke();
+            // Left arrows
+            ctx.beginPath();
+            ctx.moveTo(wallX + 50 - offset, y - 5);
+            ctx.lineTo(wallX + 50 - offset, y + 5);
+            ctx.lineTo(wallX + 43 - offset, y);
+            ctx.closePath();
+            ctx.stroke();
+        }
+
+        // Draw pedestrians
+        for (const p of pedestrians) {
+            const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+            const spdNorm = Math.min(1, spd / (desiredSpeed * 1.5));
+
+            // Color: blue=going right, red/orange=going left; brightness by speed
+            let r, g, b;
+            if (p.goingRight) {
+                r = 59; g = Math.floor(130 + spdNorm * 70); b = Math.floor(200 + spdNorm * 55);
+            } else {
+                r = Math.floor(220 + spdNorm * 35); g = Math.floor(80 + spdNorm * 40); b = 60;
+            }
+
+            // Glow
+            ctx.fillStyle = `rgba(${r},${g},${b},0.15)`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius * 2.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Direction indicator
+            if (spd > 0.3) {
+                ctx.strokeStyle = `rgba(${r},${g},${b},0.6)`;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(p.x + (p.vx / spd) * p.radius * 2, p.y + (p.vy / spd) * p.radius * 2);
+                ctx.stroke();
+            }
+        }
+
+        // Stats
+        const avgSpeed = pedestrians.reduce((s, p) => s + Math.sqrt(p.vx * p.vx + p.vy * p.vy), 0) / pedestrians.length;
+        const nearDoor = pedestrians.filter(p => Math.abs(p.x - wallX) < 40 && Math.abs(p.y - cy) < halfDoor + 20).length;
+
+        document.getElementById('stats').innerHTML =
+            `Pedestrians: ${pedestrians.length}<br>` +
+            `Passed →: ${passedRight} | ← : ${passedLeft}<br>` +
+            `Avg Speed: ${avgSpeed.toFixed(2)}<br>` +
+            `Near Door: ${nearDoor}<br>` +
+            `Door Width: ${doorWidth}px`;
+    }
+
+    window.addEventListener('resize', function() { resize(); buildWalls(); });
+
+    function animate() {
+        frame++;
+        update();
+        draw();
+        requestAnimationFrame(animate);
+    }
+
+    init();
+    animate();
+})();
+</script>
+</body>
+</html>
