@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Age-Structured Epidemic</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title-overlay { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 20px; font-weight: 700; text-shadow: 0 2px 10px rgba(0,0,0,0.7); z-index: 10; pointer-events: none; }
+#controls { position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.85); padding: 14px 22px; border-radius: 14px; color: #e0e0e0; z-index: 10; display: flex; gap: 16px; align-items: center; border: 1px solid rgba(251,191,36,0.3); font-size: 12px; flex-wrap: wrap; justify-content: center; }
+#controls button { padding: 7px 14px; background: #fbbf24; color: #0a0e1a; border: none; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 12px; }
+#controls button:hover { background: #f59e0b; }
+#controls button.active { background: #4aff88; color: #0a0e1a; }
+#controls input[type=range] { width: 90px; accent-color: #fbbf24; }
+.val { color: #fbbf24; font-weight: 700; }
+#legend { position: fixed; top: 50px; right: 15px; background: rgba(0,0,0,0.85); padding: 12px 16px; border-radius: 10px; color: #e0e0e0; font-size: 12px; z-index: 10; border: 1px solid rgba(251,191,36,0.2); }
+.legend-item { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+#stats { position: fixed; top: 50px; left: 15px; background: rgba(0,0,0,0.85); padding: 12px 16px; border-radius: 10px; color: #e0e0e0; font-size: 12px; z-index: 10; border: 1px solid rgba(251,191,36,0.2); }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title-overlay">Age-Structured Epidemic Model</div>
+<div id="legend">
+    <div style="font-weight:700;margin-bottom:4px;">Status:</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#4a9eff;"></div> Susceptible</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ff4a4a;"></div> Infected</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#4aff88;"></div> Recovered</div>
+    <div style="font-weight:700;margin-top:8px;margin-bottom:4px;">Age Groups:</div>
+    <div class="legend-item"><span style="font-size:16px;">&#9679;</span> Children (small)</div>
+    <div class="legend-item"><span style="font-size:16px;">&#11044;</span> Adults (medium)</div>
+    <div class="legend-item"><span style="font-size:18px;">&#11044;</span> Elderly (large)</div>
+</div>
+<div id="stats">
+    <div>Day: <span id="dayNum" class="val">0</span></div>
+    <div style="margin-top:6px;font-weight:700;">Children:</div>
+    <div>Infected: <span id="cInf" style="color:#ff4a4a;">0</span> / <span id="cTot">0</span></div>
+    <div style="font-weight:700;">Adults:</div>
+    <div>Infected: <span id="aInf" style="color:#ff4a4a;">0</span> / <span id="aTot">0</span></div>
+    <div style="font-weight:700;">Elderly:</div>
+    <div>Infected: <span id="eInf" style="color:#ff4a4a;">0</span> / <span id="eTot">0</span></div>
+    <div style="margin-top:6px;">Total Infected: <span id="totInf" style="color:#ff4a4a;">0</span></div>
+</div>
+<div id="controls">
+    <label>Transmission <input type="range" id="transRate" min="0.02" max="0.2" step="0.01" value="0.08"><span class="val" id="transVal">8%</span></label>
+    <button id="schoolBtn" onclick="toggleSchool()">Close Schools</button>
+    <button id="elderBtn" onclick="toggleElder()">Isolate Elderly</button>
+    <label>Contact Rate <input type="range" id="contactRate" min="0.5" max="3" step="0.1" value="1.5"><span class="val" id="contactVal">1.5</span></label>
+    <button onclick="initSim()">Reset</button>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+const CHILD = 0, ADULT = 1, ELDER = 2;
+const S = 0, I = 1, R = 2;
+const STATUS_COLORS = ['#4a9eff', '#ff4a4a', '#4aff88'];
+const AGE_SIZES = [3, 4.5, 6];
+const AGE_LABELS = ['Children', 'Adults', 'Elderly'];
+const AGE_COLORS_DIM = ['rgba(100,180,255,0.08)', 'rgba(180,180,255,0.08)', 'rgba(255,180,100,0.08)'];
+
+const COUNTS = [50, 70, 40]; // children, adults, elderly
+const SPEED = [1.2, 0.8, 0.4];
+const RECOVERY = [180, 250, 350];
+const INFECTION_DIST = 14;
+
+// Contact matrix: how much group i contacts group j
+const BASE_CONTACT = [
+    [3.0, 1.0, 0.5], // children -> children, adults, elderly
+    [1.0, 2.0, 1.0], // adults -> ...
+    [0.5, 1.0, 1.5]  // elderly -> ...
+];
+
+let agents = [], history = [], frame = 0;
+let schoolClosed = false, elderIsolated = false;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+
+// Three zones for age groups
+function getZone(ageGroup) {
+    const zoneW = (W - 40) / 3;
+    return {
+        x: 15 + ageGroup * (zoneW + 5),
+        y: 55,
+        w: zoneW,
+        h: (H - 200) * 0.55
+    };
+}
+
+function initSim() {
+    agents = [];
+    history = [];
+    frame = 0;
+    schoolClosed = false;
+    elderIsolated = false;
+    document.getElementById('schoolBtn').classList.remove('active');
+    document.getElementById('schoolBtn').textContent = 'Close Schools';
+    document.getElementById('elderBtn').classList.remove('active');
+    document.getElementById('elderBtn').textContent = 'Isolate Elderly';
+
+    for (let g = 0; g < 3; g++) {
+        const zone = getZone(g);
+        for (let i = 0; i < COUNTS[g]; i++) {
+            agents.push({
+                x: zone.x + 10 + Math.random() * (zone.w - 20),
+                y: zone.y + 10 + Math.random() * (zone.h - 20),
+                vx: (Math.random() - 0.5) * SPEED[g] * 2,
+                vy: (Math.random() - 0.5) * SPEED[g] * 2,
+                ageGroup: g,
+                state: S,
+                infectedTime: 0,
+                homeZone: g
+            });
+        }
+    }
+
+    // Patient zero: an adult
+    const adults = agents.filter(a => a.ageGroup === ADULT);
+    adults[0].state = I;
+    adults[0].infectedTime = 0;
+}
+
+function toggleSchool() {
+    schoolClosed = !schoolClosed;
+    const btn = document.getElementById('schoolBtn');
+    btn.textContent = schoolClosed ? 'Schools Closed' : 'Close Schools';
+    btn.classList.toggle('active', schoolClosed);
+}
+
+function toggleElder() {
+    elderIsolated = !elderIsolated;
+    const btn = document.getElementById('elderBtn');
+    btn.textContent = elderIsolated ? 'Elderly Isolated' : 'Isolate Elderly';
+    btn.classList.toggle('active', elderIsolated);
+}
+
+function update() {
+    const trans = parseFloat(document.getElementById('transRate').value);
+    const contactMult = parseFloat(document.getElementById('contactRate').value);
+
+    for (let a of agents) {
+        const zone = getZone(a.homeZone);
+        let spd = SPEED[a.ageGroup];
+
+        // Interventions
+        if (schoolClosed && a.ageGroup === CHILD) spd *= 0.2;
+        if (elderIsolated && a.ageGroup === ELDER) spd *= 0.15;
+
+        a.x += a.vx;
+        a.y += a.vy;
+
+        // Cross-zone movement (visiting)
+        if (Math.random() < 0.002 * contactMult && !schoolClosed && !elderIsolated) {
+            // Random visit to another zone
+            const visitZone = getZone(Math.floor(Math.random() * 3));
+            a.x = visitZone.x + 10 + Math.random() * (visitZone.w - 20);
+            a.y = visitZone.y + 10 + Math.random() * (visitZone.h - 20);
+        }
+
+        // Return home tendency
+        const homeZone = getZone(a.homeZone);
+        const homeCx = homeZone.x + homeZone.w / 2;
+        const homeCy = homeZone.y + homeZone.h / 2;
+        const dx = homeCx - a.x, dy = homeCy - a.y;
+        const homeDist = Math.sqrt(dx * dx + dy * dy);
+        if (homeDist > homeZone.w * 0.8) {
+            a.vx += (dx / homeDist) * 0.05;
+            a.vy += (dy / homeDist) * 0.05;
+        }
+
+        // Boundary (whole sim area)
+        const simRight = W - 20, simBottom = 55 + (H - 200) * 0.55;
+        if (a.x < 20 || a.x > simRight) a.vx *= -1;
+        if (a.y < 60 || a.y > simBottom) a.vy *= -1;
+        a.x = Math.max(20, Math.min(simRight, a.x));
+        a.y = Math.max(60, Math.min(simBottom, a.y));
+
+        // Speed limit
+        const cspd = Math.sqrt(a.vx * a.vx + a.vy * a.vy);
+        if (cspd > spd) { a.vx = (a.vx / cspd) * spd; a.vy = (a.vy / cspd) * spd; }
+
+        // Random direction
+        if (Math.random() < 0.02) {
+            a.vx += (Math.random() - 0.5) * 0.3;
+            a.vy += (Math.random() - 0.5) * 0.3;
+        }
+
+        if (a.state === I) {
+            a.infectedTime++;
+            if (a.infectedTime > RECOVERY[a.ageGroup]) a.state = R;
+        }
+    }
+
+    // Infection
+    for (let i = 0; i < agents.length; i++) {
+        if (agents[i].state !== I) continue;
+        for (let j = 0; j < agents.length; j++) {
+            if (agents[j].state !== S) continue;
+            const dx = agents[i].x - agents[j].x, dy = agents[i].y - agents[j].y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < INFECTION_DIST * INFECTION_DIST) {
+                const gi = agents[i].ageGroup, gj = agents[j].ageGroup;
+                let contactFactor = BASE_CONTACT[gi][gj] * contactMult;
+                if (schoolClosed && (gi === CHILD || gj === CHILD)) contactFactor *= 0.2;
+                if (elderIsolated && (gi === ELDER || gj === ELDER)) contactFactor *= 0.15;
+                if (Math.random() < trans * contactFactor / 3) {
+                    agents[j].state = I;
+                    agents[j].infectedTime = 0;
+                }
+            }
+        }
+    }
+
+    // History
+    if (frame % 3 === 0) {
+        let data = [[0,0,0],[0,0,0],[0,0,0]]; // [ageGroup][state]
+        for (let a of agents) data[a.ageGroup][a.state]++;
+        history.push(data);
+    }
+    frame++;
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw zones
+    for (let g = 0; g < 3; g++) {
+        const zone = getZone(g);
+        ctx.fillStyle = AGE_COLORS_DIM[g];
+        ctx.fillRect(zone.x, zone.y, zone.w, zone.h);
+        ctx.strokeStyle = 'rgba(251,191,36,0.12)';
+        ctx.strokeRect(zone.x, zone.y, zone.w, zone.h);
+
+        // Zone label
+        ctx.fillStyle = 'rgba(251,191,36,0.6)';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(AGE_LABELS[g], zone.x + zone.w / 2, zone.y - 5);
+
+        // Isolation indicator
+        if ((g === CHILD && schoolClosed) || (g === ELDER && elderIsolated)) {
+            ctx.strokeStyle = 'rgba(255,140,0,0.4)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.strokeRect(zone.x + 2, zone.y + 2, zone.w - 4, zone.h - 4);
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#ff8c00';
+            ctx.font = '10px sans-serif';
+            ctx.fillText(g === CHILD ? 'SCHOOLS CLOSED' : 'ISOLATED', zone.x + zone.w / 2, zone.y + 14);
+        }
+        ctx.textAlign = 'left';
+    }
+
+    // Draw agents
+    for (let a of agents) {
+        ctx.beginPath();
+        ctx.arc(a.x, a.y, AGE_SIZES[a.ageGroup], 0, Math.PI * 2);
+        ctx.fillStyle = STATUS_COLORS[a.state];
+        if (a.state === I) {
+            ctx.shadowBlur = 8;
+            ctx.shadowColor = '#ff4a4a';
+        } else {
+            ctx.shadowBlur = 0;
+        }
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        // Age group subtle ring
+        if (a.ageGroup === ELDER) {
+            ctx.beginPath();
+            ctx.arc(a.x, a.y, AGE_SIZES[a.ageGroup] + 1.5, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+        }
+    }
+
+    // Graph area
+    const graphY = 55 + (H - 200) * 0.55 + 20;
+    const graphH = H - graphY - 80;
+    const graphColors = [['#66b3ff', '#ff6666', '#66ff99'], ['#4488cc', '#cc4444', '#44cc77'], ['#335599', '#993333', '#339955']];
+
+    for (let g = 0; g < 3; g++) {
+        const zone = getZone(g);
+        const gx = zone.x + 5, gw = zone.w - 10;
+
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(gx, graphY, gw, graphH);
+
+        ctx.fillStyle = 'rgba(251,191,36,0.5)';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(AGE_LABELS[g] + ' Infection Curve', zone.x + zone.w / 2, graphY - 3);
+        ctx.textAlign = 'left';
+
+        if (history.length > 1) {
+            // Infected line
+            ctx.beginPath();
+            ctx.strokeStyle = '#ff4a4a';
+            ctx.lineWidth = 1.5;
+            for (let i = 0; i < history.length; i++) {
+                const x = gx + (i / Math.max(history.length - 1, 1)) * gw;
+                const y = graphY + graphH - (history[i][g][1] / COUNTS[g]) * graphH;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Recovered line
+            ctx.beginPath();
+            ctx.strokeStyle = '#4aff88';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < history.length; i++) {
+                const x = gx + (i / Math.max(history.length - 1, 1)) * gw;
+                const y = graphY + graphH - (history[i][g][2] / COUNTS[g]) * graphH;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+    }
+
+    // Stats
+    let byGroup = [[0,0,0],[0,0,0],[0,0,0]];
+    for (let a of agents) byGroup[a.ageGroup][a.state]++;
+    document.getElementById('dayNum').textContent = Math.floor(frame / 60);
+    document.getElementById('cInf').textContent = byGroup[0][1];
+    document.getElementById('cTot').textContent = COUNTS[0];
+    document.getElementById('aInf').textContent = byGroup[1][1];
+    document.getElementById('aTot').textContent = COUNTS[1];
+    document.getElementById('eInf').textContent = byGroup[2][1];
+    document.getElementById('eTot').textContent = COUNTS[2];
+    document.getElementById('totInf').textContent = byGroup[0][1] + byGroup[1][1] + byGroup[2][1];
+}
+
+document.getElementById('transRate').oninput = function() { document.getElementById('transVal').textContent = Math.round(this.value * 100) + '%'; };
+document.getElementById('contactRate').oninput = function() { document.getElementById('contactVal').textContent = parseFloat(this.value).toFixed(1); };
+window.addEventListener('resize', () => { resize(); initSim(); });
+
+function animate() { update(); draw(); requestAnimationFrame(animate); }
+resize();
+initSim();
+animate();
+</script>
+</body>
+</html>

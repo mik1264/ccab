@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forest Fire & Regrowth Cycles</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+#title {
+    position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+    color: #fbbf24; font-size: 22px; font-weight: bold; text-align: center;
+    text-shadow: 0 0 20px rgba(251,191,36,0.3); z-index: 10; pointer-events: none;
+}
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 20px; z-index: 10; background: rgba(0,0,0,0.7);
+    padding: 12px 20px; border-radius: 10px; align-items: center;
+}
+.ctrl { display: flex; flex-direction: column; align-items: center; }
+.ctrl label { color: #ccc; font-size: 11px; margin-bottom: 4px; }
+.ctrl input[type=range] { width: 100px; accent-color: #fbbf24; }
+.ctrl span { color: #fbbf24; font-size: 11px; margin-top: 2px; }
+button {
+    background: rgba(251,191,36,0.2); color: #fbbf24; border: 1px solid #fbbf24;
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px;
+}
+button:hover { background: rgba(251,191,36,0.4); }
+#stats {
+    position: fixed; top: 50px; right: 20px; color: #ccc; font-size: 13px;
+    background: rgba(0,0,0,0.7); padding: 10px 16px; border-radius: 8px; z-index: 10;
+    line-height: 1.8;
+}
+#legend {
+    position: fixed; top: 165px; right: 20px; color: #ccc; font-size: 11px;
+    background: rgba(0,0,0,0.7); padding: 10px 14px; border-radius: 8px; z-index: 10;
+    line-height: 2;
+}
+.leg-item { display: flex; align-items: center; gap: 8px; }
+.leg-dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+#info {
+    position: fixed; top: 85px; left: 50%; transform: translateX(-50%);
+    color: #999; font-size: 12px; z-index: 10; pointer-events: none;
+}
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div id="title">Forest Fire & Regrowth Cycles</div>
+<div id="info">Click to start a fire at any location</div>
+<div id="stats">
+    <span style="color:#4ade80;">Trees: <span id="treeCount">0</span>%</span><br>
+    <span style="color:#f97316;">Burning: <span id="fireCount">0</span>%</span><br>
+    <span style="color:#6b7280;">Empty: <span id="emptyCount">0</span>%</span><br>
+    <span style="color:#fbbf24;">Fires: <span id="totalFires">0</span></span>
+</div>
+<div id="legend">
+    <div class="leg-item"><span class="leg-dot" style="background:#2d1a0e;"></span> Empty/Soil</div>
+    <div class="leg-item"><span class="leg-dot" style="background:#4ade80;"></span> Seedling</div>
+    <div class="leg-item"><span class="leg-dot" style="background:#16a34a;"></span> Young Tree</div>
+    <div class="leg-item"><span class="leg-dot" style="background:#15803d;"></span> Mature Tree</div>
+    <div class="leg-item"><span class="leg-dot" style="background:#166534;"></span> Old Growth</div>
+    <div class="leg-item"><span class="leg-dot" style="background:#f97316;"></span> Burning</div>
+    <div class="leg-item"><span class="leg-dot" style="background:#44403c;"></span> Charred</div>
+</div>
+<div id="controls">
+    <div class="ctrl">
+        <label>Growth Probability</label>
+        <input type="range" id="growProb" min="0.001" max="0.03" step="0.001" value="0.008">
+        <span id="growVal">0.008</span>
+    </div>
+    <div class="ctrl">
+        <label>Lightning Probability</label>
+        <input type="range" id="fireProb" min="0.00001" max="0.0005" step="0.00001" value="0.00008">
+        <span id="fireVal">0.00008</span>
+    </div>
+    <div class="ctrl">
+        <label>Wind Strength</label>
+        <input type="range" id="wind" min="0" max="1" step="0.1" value="0.3">
+        <span id="windVal">0.3</span>
+    </div>
+    <button id="resetBtn">Reset</button>
+    <button id="lightningBtn">Lightning!</button>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+// Cell states
+const EMPTY = 0;      // bare soil
+const SEEDLING = 1;   // small growth
+const YOUNG = 2;      // young tree
+const MATURE = 3;     // mature tree
+const OLD = 4;        // old growth
+const BURNING = 5;    // on fire
+const CHARRED = 6;    // recently burned
+
+let growthProb = 0.008;
+let fireProb = 0.00008;
+let windStrength = 0.3;
+let cellSize, cols, rows;
+let grid, burnTimer;
+let totalFires = 0;
+let treeHistory = [];
+let fireHistory = [];
+const MAX_HISTORY = 400;
+
+document.getElementById('growProb').oninput = function() {
+    growthProb = parseFloat(this.value);
+    document.getElementById('growVal').textContent = this.value;
+};
+document.getElementById('fireProb').oninput = function() {
+    fireProb = parseFloat(this.value);
+    document.getElementById('fireVal').textContent = this.value;
+};
+document.getElementById('wind').oninput = function() {
+    windStrength = parseFloat(this.value);
+    document.getElementById('windVal').textContent = this.value;
+};
+
+function initGrid() {
+    cellSize = Math.max(3, Math.min(7, Math.floor(Math.min(canvas.width, canvas.height) / 150)));
+    cols = Math.floor(canvas.width / cellSize);
+    rows = Math.floor((canvas.height - 110) / cellSize);
+    grid = new Uint8Array(cols * rows);
+    burnTimer = new Uint8Array(cols * rows);
+    totalFires = 0;
+    treeHistory = [];
+    fireHistory = [];
+
+    // Start with a mixed forest
+    for (let i = 0; i < cols * rows; i++) {
+        let r = Math.random();
+        if (r < 0.15) grid[i] = SEEDLING;
+        else if (r < 0.35) grid[i] = YOUNG;
+        else if (r < 0.55) grid[i] = MATURE;
+        else if (r < 0.65) grid[i] = OLD;
+        else grid[i] = EMPTY;
+    }
+}
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    initGrid();
+}
+resize();
+window.addEventListener('resize', resize);
+
+document.getElementById('resetBtn').onclick = initGrid;
+document.getElementById('lightningBtn').onclick = function() {
+    let trees = [];
+    for (let i = 0; i < cols * rows; i++) {
+        if (grid[i] >= SEEDLING && grid[i] <= OLD) trees.push(i);
+    }
+    if (trees.length > 0) {
+        let idx = trees[Math.floor(Math.random() * trees.length)];
+        grid[idx] = BURNING;
+        burnTimer[idx] = 8;
+        totalFires++;
+    }
+};
+
+canvas.addEventListener('click', function(e) {
+    let offsetX = (canvas.width - cols * cellSize) / 2;
+    let offsetY = 95;
+    let gx = Math.floor((e.clientX - offsetX) / cellSize);
+    let gy = Math.floor((e.clientY - offsetY) / cellSize);
+    if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
+        let idx = gy * cols + gx;
+        if (grid[idx] >= SEEDLING && grid[idx] <= OLD) {
+            grid[idx] = BURNING;
+            burnTimer[idx] = 8;
+            totalFires++;
+        }
+    }
+});
+
+// Color palette
+const COLORS = [
+    [45, 26, 14],       // EMPTY - dark soil
+    [74, 222, 128],     // SEEDLING - bright green
+    [22, 163, 74],      // YOUNG - green
+    [21, 128, 61],      // MATURE - dark green
+    [22, 101, 52],      // OLD - deep green
+    [249, 115, 22],     // BURNING - orange (animated)
+    [68, 64, 60],       // CHARRED - dark gray
+];
+
+let frameCount = 0;
+
+function updateGrid() {
+    let newGrid = new Uint8Array(grid);
+    let newBurn = new Uint8Array(burnTimer);
+
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            let idx = y * cols + x;
+            let state = grid[idx];
+
+            switch (state) {
+                case EMPTY:
+                    // Seeds can sprout
+                    if (Math.random() < growthProb * 0.5) {
+                        // Check for nearby trees (seed source)
+                        let hasNeighborTree = false;
+                        for (let dy = -2; dy <= 2; dy++) {
+                            for (let dx = -2; dx <= 2; dx++) {
+                                let nx = x + dx, ny = y + dy;
+                                if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                                    let ns = grid[ny * cols + nx];
+                                    if (ns >= YOUNG && ns <= OLD) hasNeighborTree = true;
+                                }
+                            }
+                        }
+                        if (hasNeighborTree || Math.random() < 0.01) {
+                            newGrid[idx] = SEEDLING;
+                        }
+                    }
+                    break;
+
+                case SEEDLING:
+                    if (Math.random() < growthProb) newGrid[idx] = YOUNG;
+                    break;
+
+                case YOUNG:
+                    if (Math.random() < growthProb * 0.6) newGrid[idx] = MATURE;
+                    // Lightning strike
+                    if (Math.random() < fireProb) {
+                        newGrid[idx] = BURNING;
+                        newBurn[idx] = 6;
+                        totalFires++;
+                    }
+                    break;
+
+                case MATURE:
+                    if (Math.random() < growthProb * 0.3) newGrid[idx] = OLD;
+                    if (Math.random() < fireProb) {
+                        newGrid[idx] = BURNING;
+                        newBurn[idx] = 10;
+                        totalFires++;
+                    }
+                    break;
+
+                case OLD:
+                    // Old trees more susceptible
+                    if (Math.random() < fireProb * 1.5) {
+                        newGrid[idx] = BURNING;
+                        newBurn[idx] = 12;
+                        totalFires++;
+                    }
+                    // Occasionally die of old age
+                    if (Math.random() < 0.0002) {
+                        newGrid[idx] = EMPTY;
+                    }
+                    break;
+
+                case BURNING:
+                    newBurn[idx] = burnTimer[idx] - 1;
+                    if (newBurn[idx] <= 0) {
+                        newGrid[idx] = CHARRED;
+                        newBurn[idx] = 0;
+                    }
+                    // Spread fire to neighbors
+                    for (let dy = -1; dy <= 1; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            if (dx === 0 && dy === 0) continue;
+                            let nx = x + dx, ny = y + dy;
+                            if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                                let nIdx = ny * cols + nx;
+                                let ns = grid[nIdx];
+                                if (ns >= SEEDLING && ns <= OLD) {
+                                    // Wind affects spread direction (wind blows right/down)
+                                    let windBonus = 0;
+                                    if (dx > 0) windBonus += windStrength * 0.03;
+                                    if (dy > 0) windBonus += windStrength * 0.02;
+
+                                    let spreadProb = 0.15 + windBonus;
+                                    // Diagonal spread is less likely
+                                    if (dx !== 0 && dy !== 0) spreadProb *= 0.6;
+                                    // Drier (older) trees burn more easily
+                                    if (ns === OLD) spreadProb *= 1.3;
+                                    if (ns === SEEDLING) spreadProb *= 0.5;
+
+                                    if (Math.random() < spreadProb) {
+                                        newGrid[nIdx] = BURNING;
+                                        newBurn[nIdx] = 4 + ns * 2;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+
+                case CHARRED:
+                    // Slowly recover
+                    if (Math.random() < growthProb * 1.5) {
+                        newGrid[idx] = EMPTY;
+                    }
+                    break;
+            }
+        }
+    }
+
+    grid = newGrid;
+    burnTimer = newBurn;
+}
+
+function update() {
+    frameCount++;
+    updateGrid();
+
+    let treeCnt = 0, fireCnt = 0, emptyCnt = 0;
+    let total = cols * rows;
+    for (let i = 0; i < total; i++) {
+        if (grid[i] >= SEEDLING && grid[i] <= OLD) treeCnt++;
+        else if (grid[i] === BURNING) fireCnt++;
+        else emptyCnt++;
+    }
+
+    document.getElementById('treeCount').textContent = Math.round(treeCnt / total * 100);
+    document.getElementById('fireCount').textContent = Math.round(fireCnt / total * 100);
+    document.getElementById('emptyCount').textContent = Math.round((total - treeCnt - fireCnt) / total * 100);
+    document.getElementById('totalFires').textContent = totalFires;
+
+    if (frameCount % 4 === 0) {
+        treeHistory.push(treeCnt / total);
+        fireHistory.push(fireCnt / total);
+        if (treeHistory.length > MAX_HISTORY) {
+            treeHistory.shift();
+            fireHistory.shift();
+        }
+    }
+}
+
+function drawGrid(ctx) {
+    let offsetX = (canvas.width - cols * cellSize) / 2;
+    let offsetY = 95;
+
+    let imgData = ctx.createImageData(cols, rows);
+    let t = frameCount * 0.15;
+
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            let idx = y * cols + x;
+            let pi = idx * 4;
+            let state = grid[idx];
+            let v = (Math.sin(x * 0.3 + y * 0.2) * 8) | 0;
+
+            if (state === BURNING) {
+                // Animated fire colors
+                let flicker = Math.sin(t + x * 0.5 + y * 0.7) * 0.3 + 0.7;
+                let bt = burnTimer[idx] / 12;
+                imgData.data[pi] = Math.min(255, Math.floor(200 + flicker * 55));
+                imgData.data[pi + 1] = Math.min(255, Math.floor(60 + bt * 100 + flicker * 40));
+                imgData.data[pi + 2] = Math.floor(10 + flicker * 20);
+                imgData.data[pi + 3] = 255;
+            } else {
+                let c = COLORS[state];
+                imgData.data[pi] = Math.max(0, Math.min(255, c[0] + v));
+                imgData.data[pi + 1] = Math.max(0, Math.min(255, c[1] + v));
+                imgData.data[pi + 2] = Math.max(0, Math.min(255, c[2] + v));
+                imgData.data[pi + 3] = 255;
+            }
+        }
+    }
+
+    let tempCanvas = document.createElement('canvas');
+    tempCanvas.width = cols;
+    tempCanvas.height = rows;
+    tempCanvas.getContext('2d').putImageData(imgData, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tempCanvas, offsetX, offsetY, cols * cellSize, rows * cellSize);
+    ctx.imageSmoothingEnabled = true;
+}
+
+function drawGraph(ctx) {
+    let gw = 260, gh = 100;
+    let gx = 20, gy = canvas.height - gh - 80;
+
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.strokeStyle = 'rgba(251,191,36,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(gx - 10, gy - 25, gw + 20, gh + 40, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('Forest Coverage & Fires Over Time', gx + 5, gy - 10);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.beginPath();
+    ctx.moveTo(gx, gy + gh); ctx.lineTo(gx + gw, gy + gh);
+    ctx.moveTo(gx, gy); ctx.lineTo(gx, gy + gh);
+    ctx.stroke();
+
+    if (treeHistory.length > 1) {
+        // Tree coverage - green area
+        ctx.beginPath();
+        for (let i = 0; i < treeHistory.length; i++) {
+            let x = gx + (i / MAX_HISTORY) * gw;
+            let y = gy + gh - treeHistory[i] * gh;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = 'rgba(74, 222, 128, 0.9)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Fill under tree line
+        ctx.lineTo(gx + ((treeHistory.length - 1) / MAX_HISTORY) * gw, gy + gh);
+        ctx.lineTo(gx, gy + gh);
+        ctx.closePath();
+        let grad = ctx.createLinearGradient(0, gy, 0, gy + gh);
+        grad.addColorStop(0, 'rgba(74, 222, 128, 0.2)');
+        grad.addColorStop(1, 'rgba(74, 222, 128, 0)');
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        // Fire activity - red spikes
+        ctx.beginPath();
+        for (let i = 0; i < fireHistory.length; i++) {
+            let x = gx + (i / MAX_HISTORY) * gw;
+            let y = gy + gh - fireHistory[i] * gh * 5;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.strokeStyle = 'rgba(249, 115, 22, 0.8)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+
+    ctx.fillStyle = '#4ade80';
+    ctx.font = '10px sans-serif';
+    ctx.fillText('● Trees', gx + gw - 95, gy - 10);
+    ctx.fillStyle = '#f97316';
+    ctx.fillText('● Fires', gx + gw - 40, gy - 10);
+}
+
+function drawEmbers(ctx) {
+    // Draw floating ember particles above burning cells
+    let offsetX = (canvas.width - cols * cellSize) / 2;
+    let offsetY = 95;
+    let t = frameCount * 0.05;
+
+    for (let y = 0; y < rows; y += 3) {
+        for (let x = 0; x < cols; x += 3) {
+            if (grid[y * cols + x] === BURNING) {
+                for (let e = 0; e < 2; e++) {
+                    let px = offsetX + x * cellSize + Math.sin(t + e * 3.1 + x) * 8;
+                    let py = offsetY + y * cellSize - Math.abs(Math.sin(t * 2 + e * 1.7)) * 15 - 5;
+                    let size = 1 + Math.random();
+                    ctx.beginPath();
+                    ctx.arc(px, py, size, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(255, ${150 + Math.random() * 100}, 0, ${0.3 + Math.random() * 0.4})`;
+                    ctx.fill();
+                }
+            }
+        }
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    drawGrid(ctx);
+    drawEmbers(ctx);
+    drawGraph(ctx);
+}
+
+function animate() {
+    update();
+    draw();
+    requestAnimationFrame(animate);
+}
+animate();
+</script>
+</body>
+</html>

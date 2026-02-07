@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Feedback Control Loop</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+a.back { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; font-family: sans-serif; }
+a.back:hover { background: rgba(0,0,0,0.9); }
+.title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #e2e8f0; font-size: 22px; font-weight: 700; z-index: 999; text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+.controls { position: fixed; right: 15px; bottom: 15px; background: rgba(10,14,26,0.92); border: 1px solid rgba(251,191,36,0.25); border-radius: 12px; padding: 16px; z-index: 999; color: #cbd5e1; font-size: 13px; width: 200px; }
+.controls h3 { color: #fbbf24; margin-bottom: 8px; font-size: 14px; }
+.slider-group { margin-bottom: 10px; }
+.slider-group label { display: flex; justify-content: space-between; margin-bottom: 3px; font-size: 11px; }
+.slider-group label span.val { color: #fbbf24; font-weight: 600; }
+input[type="range"] { width: 100%; accent-color: #fbbf24; cursor: pointer; }
+.btn { display: inline-block; padding: 6px 12px; background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.4); border-radius: 6px; color: #fbbf24; cursor: pointer; font-size: 11px; margin: 2px; }
+.btn:hover { background: rgba(251,191,36,0.3); }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back">&#8592; Back to Gallery</a>
+<div class="title">Feedback Control Loop</div>
+<div class="controls">
+    <h3>Signal Parameters</h3>
+    <div class="slider-group">
+        <label>Reference <span class="val" id="refVal">1.0</span></label>
+        <input type="range" id="refSlider" min="0.2" max="2.0" step="0.1" value="1.0">
+    </div>
+    <div class="slider-group">
+        <label>Controller Gain <span class="val" id="gainVal">2.0</span></label>
+        <input type="range" id="gainSlider" min="0.5" max="5.0" step="0.1" value="2.0">
+    </div>
+    <div class="slider-group">
+        <label>Signal Speed <span class="val" id="spdVal">1.0</span></label>
+        <input type="range" id="spdSlider" min="0.3" max="3.0" step="0.1" value="1.0">
+    </div>
+    <div class="slider-group">
+        <label>Disturbance <span class="val" id="distVal">0.0</span></label>
+        <input type="range" id="distSlider" min="0" max="1.0" step="0.05" value="0">
+    </div>
+    <span class="btn" id="resetBtn">Reset</span>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize);
+    resize();
+
+    let refSignal = 1.0;
+    let ctrlGain = 2.0;
+    let signalSpeed = 1.0;
+    let disturbance = 0.0;
+
+    document.getElementById('refSlider').oninput = function() { refSignal = parseFloat(this.value); document.getElementById('refVal').textContent = refSignal.toFixed(1); };
+    document.getElementById('gainSlider').oninput = function() { ctrlGain = parseFloat(this.value); document.getElementById('gainVal').textContent = ctrlGain.toFixed(1); };
+    document.getElementById('spdSlider').oninput = function() { signalSpeed = parseFloat(this.value); document.getElementById('spdVal').textContent = signalSpeed.toFixed(1); };
+    document.getElementById('distSlider').oninput = function() { disturbance = parseFloat(this.value); document.getElementById('distVal').textContent = disturbance.toFixed(2); };
+    document.getElementById('resetBtn').onclick = function() { dots = []; time = 0; plantOutput = 0; };
+
+    let time = 0;
+    let plantOutput = 0;
+    let dots = [];
+
+    // Block diagram layout
+    function getLayout() {
+        const cx = W / 2;
+        const cy = H * 0.42;
+        const bw = 120, bh = 60; // block width, height
+        const spacing = 80;
+
+        // Main path: Reference -> Summing -> Controller -> Plant -> Output
+        const sumX = cx - 200;
+        const ctrlX = cx - 40;
+        const plantX = cx + 160;
+        const outX = cx + 340;
+        const fbY = cy + 160; // feedback path y
+
+        return {
+            cx, cy, bw, bh,
+            ref: { x: sumX - 130, y: cy },       // Reference input point
+            sum: { x: sumX, y: cy },               // Summing junction
+            ctrl: { x: ctrlX, y: cy, w: bw, h: bh },  // Controller block
+            plant: { x: plantX, y: cy, w: bw, h: bh }, // Plant block
+            out: { x: outX, y: cy },               // Output point
+            fbY: fbY,
+            sensor: { x: plantX, y: fbY, w: bw * 0.8, h: bh * 0.7 }, // Sensor block
+            distPt: { x: (plantX + outX) / 2, y: cy - 80 } // Disturbance point
+        };
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+    }
+
+    function drawBlock(x, y, w, h, label, sublabel, color) {
+        ctx.fillStyle = 'rgba(15,20,40,0.8)';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        roundRect(ctx, x - w/2, y - h/2, w, h, 10);
+        ctx.fill();
+        ctx.stroke();
+
+        // Glow
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 15;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        roundRect(ctx, x - w/2, y - h/2, w, h, 10);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, x, y + (sublabel ? -4 : 5));
+
+        if (sublabel) {
+            ctx.fillStyle = color;
+            ctx.font = '11px sans-serif';
+            ctx.fillText(sublabel, x, y + 14);
+        }
+        ctx.textAlign = 'left';
+    }
+
+    function drawSummingJunction(x, y, radius) {
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(15,20,40,0.8)';
+        ctx.fill();
+
+        // Plus and minus
+        ctx.fillStyle = '#34d399';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('+', x, y - radius - 4);
+
+        ctx.fillStyle = '#f87171';
+        ctx.fillText('\u2013', x - radius - 8, y + 5);
+        ctx.textAlign = 'left';
+
+        // Cross
+        ctx.strokeStyle = 'rgba(251,191,36,0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x - radius + 4, y); ctx.lineTo(x + radius - 4, y);
+        ctx.moveTo(x, y - radius + 4); ctx.lineTo(x, y + radius - 4);
+        ctx.stroke();
+    }
+
+    function drawArrow(x1, y1, x2, y2, color, label) {
+        const dx = x2 - x1, dy = y2 - y1;
+        const len = Math.sqrt(dx*dx + dy*dy);
+        const ux = dx/len, uy = dy/len;
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        // Arrowhead
+        const arrowSize = 8;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(x2, y2);
+        ctx.lineTo(x2 - ux*arrowSize - uy*arrowSize*0.5, y2 - uy*arrowSize + ux*arrowSize*0.5);
+        ctx.lineTo(x2 - ux*arrowSize + uy*arrowSize*0.5, y2 - uy*arrowSize - ux*arrowSize*0.5);
+        ctx.fill();
+
+        if (label) {
+            ctx.fillStyle = 'rgba(203,213,225,0.6)';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            const mx = (x1 + x2) / 2;
+            const my = (y1 + y2) / 2;
+            ctx.fillText(label, mx, my - 8);
+            ctx.textAlign = 'left';
+        }
+    }
+
+    function drawConnectionLine(points, color) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+        for (let i = 1; i < points.length; i++) {
+            ctx.lineTo(points[i].x, points[i].y);
+        }
+        ctx.stroke();
+    }
+
+    // Signal dots
+    class SignalDot {
+        constructor(path, color, value) {
+            this.path = path; // Array of {x, y} waypoints
+            this.color = color;
+            this.value = value;
+            this.progress = 0; // 0 to 1
+            this.totalLen = 0;
+            this.segLens = [];
+
+            for (let i = 1; i < path.length; i++) {
+                const d = Math.sqrt((path[i].x - path[i-1].x)**2 + (path[i].y - path[i-1].y)**2);
+                this.segLens.push(d);
+                this.totalLen += d;
+            }
+        }
+
+        update(dt) {
+            this.progress += (dt * signalSpeed * 120) / this.totalLen;
+            return this.progress <= 1;
+        }
+
+        getPos() {
+            let dist = this.progress * this.totalLen;
+            for (let i = 0; i < this.segLens.length; i++) {
+                if (dist <= this.segLens[i]) {
+                    const t = dist / this.segLens[i];
+                    return {
+                        x: this.path[i].x + (this.path[i+1].x - this.path[i].x) * t,
+                        y: this.path[i].y + (this.path[i+1].y - this.path[i].y) * t
+                    };
+                }
+                dist -= this.segLens[i];
+            }
+            return this.path[this.path.length - 1];
+        }
+
+        draw() {
+            const pos = this.getPos();
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Glow
+            ctx.fillStyle = this.color.replace('1)', '0.25)');
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, 10, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Value label
+            ctx.fillStyle = this.color;
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(this.value.toFixed(2), pos.x, pos.y - 12);
+            ctx.textAlign = 'left';
+        }
+    }
+
+    function spawnDots() {
+        const L = getLayout();
+        const jr = 18; // junction radius
+
+        // Compute current signals
+        const error = refSignal - plantOutput;
+        const ctrlOut = error * ctrlGain;
+        const dist = disturbance * (Math.sin(time * 2) * 0.5 + 0.5);
+        const newPlantOut = ctrlOut * 0.3 + dist; // simple first-order
+        plantOutput = plantOutput * 0.95 + newPlantOut * 0.05; // low pass
+
+        // Forward path dots
+        // Reference -> Summing junction
+        dots.push(new SignalDot([
+            {x: L.ref.x, y: L.ref.y},
+            {x: L.sum.x - jr, y: L.sum.y}
+        ], 'rgba(52,211,153,1)', refSignal));
+
+        // Summing junction -> Controller
+        dots.push(new SignalDot([
+            {x: L.sum.x + jr, y: L.sum.y},
+            {x: L.ctrl.x - L.ctrl.w/2, y: L.ctrl.y}
+        ], 'rgba(96,165,250,1)', error));
+
+        // Controller -> Plant
+        dots.push(new SignalDot([
+            {x: L.ctrl.x + L.ctrl.w/2, y: L.ctrl.y},
+            {x: L.plant.x - L.plant.w/2, y: L.plant.y}
+        ], 'rgba(251,191,36,1)', ctrlOut));
+
+        // Plant -> Output
+        dots.push(new SignalDot([
+            {x: L.plant.x + L.plant.w/2, y: L.plant.y},
+            {x: L.out.x, y: L.out.y}
+        ], 'rgba(168,85,247,1)', plantOutput));
+
+        // Feedback path: output -> sensor -> summing junction
+        dots.push(new SignalDot([
+            {x: L.out.x, y: L.out.y},
+            {x: L.out.x, y: L.fbY},
+            {x: L.sensor.x + L.sensor.w/2, y: L.fbY}
+        ], 'rgba(248,113,113,1)', plantOutput));
+
+        dots.push(new SignalDot([
+            {x: L.sensor.x - L.sensor.w/2, y: L.fbY},
+            {x: L.sum.x, y: L.fbY},
+            {x: L.sum.x, y: L.sum.y + jr}
+        ], 'rgba(248,113,113,1)', plantOutput));
+
+        // Disturbance dot
+        if (disturbance > 0.01) {
+            dots.push(new SignalDot([
+                {x: L.distPt.x, y: L.distPt.y - 40},
+                {x: L.distPt.x, y: L.plant.y}
+            ], 'rgba(239,68,68,1)', dist));
+        }
+    }
+
+    let spawnTimer = 0;
+
+    function drawDiagram() {
+        const L = getLayout();
+        const jr = 18;
+
+        // Connection lines (behind blocks)
+        // Reference arrow
+        drawArrow(L.ref.x, L.ref.y, L.sum.x - jr, L.sum.y, 'rgba(52,211,153,0.5)', 'r(t)');
+
+        // Sum -> Controller
+        drawArrow(L.sum.x + jr, L.sum.y, L.ctrl.x - L.ctrl.w/2, L.ctrl.y, 'rgba(96,165,250,0.5)', 'e(t)');
+
+        // Controller -> Plant
+        drawArrow(L.ctrl.x + L.ctrl.w/2, L.ctrl.y, L.plant.x - L.plant.w/2, L.plant.y, 'rgba(251,191,36,0.5)', 'u(t)');
+
+        // Plant -> Output
+        drawArrow(L.plant.x + L.plant.w/2, L.plant.y, L.out.x, L.out.y, 'rgba(168,85,247,0.5)', 'y(t)');
+
+        // Feedback path
+        ctx.strokeStyle = 'rgba(248,113,113,0.3)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(L.out.x, L.out.y);
+        ctx.lineTo(L.out.x, L.fbY);
+        ctx.lineTo(L.sensor.x + L.sensor.w/2, L.fbY);
+        ctx.stroke();
+
+        // Arrow into sensor
+        drawArrow(L.out.x, L.fbY, L.sensor.x + L.sensor.w/2, L.fbY, 'rgba(248,113,113,0.3)', '');
+
+        // Sensor output to sum
+        ctx.strokeStyle = 'rgba(248,113,113,0.3)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(L.sensor.x - L.sensor.w/2, L.fbY);
+        ctx.lineTo(L.sum.x, L.fbY);
+        ctx.lineTo(L.sum.x, L.sum.y + jr);
+        ctx.stroke();
+
+        // Arrow up to sum
+        drawArrow(L.sum.x, L.fbY, L.sum.x, L.sum.y + jr, 'rgba(248,113,113,0.3)', 'feedback');
+
+        // Disturbance
+        if (disturbance > 0.01) {
+            drawArrow(L.distPt.x, L.distPt.y - 40, L.distPt.x, L.plant.y, 'rgba(239,68,68,0.4)', 'd(t)');
+            ctx.fillStyle = '#ef4444';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Disturbance', L.distPt.x, L.distPt.y - 48);
+            ctx.textAlign = 'left';
+        }
+
+        // Blocks
+        drawBlock(L.ctrl.x, L.ctrl.y, L.ctrl.w, L.ctrl.h, 'Controller', 'G(s) = ' + ctrlGain.toFixed(1), '#60a5fa');
+        drawBlock(L.plant.x, L.plant.y, L.plant.w, L.plant.h, 'Plant', 'P(s) = 1/(s+1)', '#a78bfa');
+        drawBlock(L.sensor.x, L.fbY, L.sensor.w, L.sensor.h, 'Sensor', 'H(s) = 1', '#f87171');
+
+        // Summing junction
+        drawSummingJunction(L.sum.x, L.sum.y, jr);
+
+        // Labels
+        ctx.fillStyle = '#34d399';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.fillText('Reference', L.ref.x - 40, L.ref.y - 15);
+        ctx.fillText('r = ' + refSignal.toFixed(1), L.ref.x - 30, L.ref.y + 20);
+
+        ctx.fillStyle = '#a78bfa';
+        ctx.fillText('Output', L.out.x - 15, L.out.y - 15);
+        ctx.fillText('y = ' + plantOutput.toFixed(3), L.out.x - 25, L.out.y + 20);
+
+        // Signal value displays along paths
+        const error = refSignal - plantOutput;
+        ctx.fillStyle = '#60a5fa';
+        ctx.font = '11px sans-serif';
+    }
+
+    // Output history graph
+    let outputHistory = [];
+    let refHistory = [];
+
+    function drawOutputGraph() {
+        const gx = 40, gy = H - 160, gw = W * 0.5, gh = 130;
+
+        ctx.fillStyle = 'rgba(15,20,40,0.7)';
+        ctx.strokeStyle = 'rgba(251,191,36,0.12)';
+        ctx.lineWidth = 1;
+        roundRect(ctx, gx, gy, gw, gh, 8);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = 'bold 11px sans-serif';
+        ctx.fillText('System Response', gx + 10, gy + 16);
+
+        const px = gx + 10, py = gy + 26, pw = gw - 20, ph = gh - 36;
+
+        // Grid
+        ctx.strokeStyle = 'rgba(100,120,180,0.08)';
+        for (let i = 0; i <= 4; i++) {
+            const ly = py + (i/4) * ph;
+            ctx.beginPath(); ctx.moveTo(px, ly); ctx.lineTo(px + pw, ly); ctx.stroke();
+        }
+
+        outputHistory.push(plantOutput);
+        refHistory.push(refSignal);
+        if (outputHistory.length > 300) { outputHistory.shift(); refHistory.shift(); }
+
+        // Reference line
+        if (refHistory.length > 1) {
+            ctx.strokeStyle = 'rgba(52,211,153,0.4)';
+            ctx.setLineDash([4, 4]);
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let i = 0; i < refHistory.length; i++) {
+                const x = px + (i / 300) * pw;
+                const y = py + ph - (refHistory[i] / 2.5) * ph;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Output line
+        if (outputHistory.length > 1) {
+            ctx.strokeStyle = '#a78bfa';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i < outputHistory.length; i++) {
+                const x = px + (i / 300) * pw;
+                const y = py + ph - (outputHistory[i] / 2.5) * ph;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        // Legend
+        ctx.fillStyle = '#34d399'; ctx.fillRect(px + pw - 120, py, 8, 2);
+        ctx.fillStyle = 'rgba(203,213,225,0.6)'; ctx.font = '9px sans-serif';
+        ctx.fillText('Reference', px + pw - 108, py + 4);
+        ctx.fillStyle = '#a78bfa'; ctx.fillRect(px + pw - 120, py + 12, 8, 2);
+        ctx.fillStyle = 'rgba(203,213,225,0.6)';
+        ctx.fillText('Output', px + pw - 108, py + 16);
+    }
+
+    function animate() {
+        ctx.clearRect(0, 0, W, H);
+
+        const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.7);
+        bg.addColorStop(0, '#111827');
+        bg.addColorStop(1, '#0a0e1a');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        time += 1/60;
+        spawnTimer += 1/60;
+
+        // Spawn new dots periodically
+        if (spawnTimer > 0.8 / signalSpeed) {
+            spawnDots();
+            spawnTimer = 0;
+        }
+
+        drawDiagram();
+
+        // Update and draw dots
+        const dt = 1/60;
+        dots = dots.filter(d => d.update(dt));
+        dots.forEach(d => d.draw());
+
+        drawOutputGraph();
+
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+})();
+</script>
+</body>
+</html>

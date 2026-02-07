@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Navier-Stokes Streamlines</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; cursor: crosshair; }
+.title-overlay {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+    color: #fbbf24; font-size: 20px; font-weight: bold; z-index: 999;
+    text-shadow: 0 0 10px rgba(0,0,0,0.8); pointer-events: none;
+}
+.controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 20px; align-items: center; z-index: 999;
+    background: rgba(0,0,0,0.7); padding: 12px 20px; border-radius: 10px;
+}
+.controls label { color: #ccc; font-size: 13px; }
+.controls input[type=range] { width: 100px; cursor: pointer; }
+.controls span { color: #fbbf24; font-size: 13px; }
+.controls button {
+    padding: 6px 14px; background: #fbbf24; color: #0a0e1a; border: none;
+    border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: bold;
+}
+.info {
+    position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.5); font-size: 12px; z-index: 999;
+    pointer-events: none;
+}
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div class="title-overlay">Navier-Stokes Streamlines</div>
+<div class="info">Click and drag to add velocity to the fluid</div>
+<div class="controls">
+    <label>Viscosity</label>
+    <input type="range" id="viscSlider" min="1" max="30" value="5" step="1">
+    <span id="viscVal">5</span>
+    <label>Particles</label>
+    <input type="range" id="partSlider" min="500" max="8000" value="4000" step="500">
+    <span id="partVal">4000</span>
+    <button id="resetBtn">Clear</button>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+const GRID = 128;
+let N = GRID;
+let u, v, u0, v0, p, div;
+let particles = [];
+let mouseDown = false;
+let prevMX = 0, prevMY = 0, curMX = 0, curMY = 0;
+
+function allocArrays() {
+    const size = (N + 2) * (N + 2);
+    u = new Float32Array(size);
+    v = new Float32Array(size);
+    u0 = new Float32Array(size);
+    v0 = new Float32Array(size);
+    p = new Float32Array(size);
+    div = new Float32Array(size);
+}
+
+function IX(i, j) { return i + (N + 2) * j; }
+
+function setBnd(b, x) {
+    for (let i = 1; i <= N; i++) {
+        x[IX(0, i)]     = b === 1 ? -x[IX(1, i)] : x[IX(1, i)];
+        x[IX(N+1, i)]   = b === 1 ? -x[IX(N, i)] : x[IX(N, i)];
+        x[IX(i, 0)]     = b === 2 ? -x[IX(i, 1)] : x[IX(i, 1)];
+        x[IX(i, N+1)]   = b === 2 ? -x[IX(i, N)] : x[IX(i, N)];
+    }
+    x[IX(0, 0)] = 0.5 * (x[IX(1, 0)] + x[IX(0, 1)]);
+    x[IX(0, N+1)] = 0.5 * (x[IX(1, N+1)] + x[IX(0, N)]);
+    x[IX(N+1, 0)] = 0.5 * (x[IX(N, 0)] + x[IX(N+1, 1)]);
+    x[IX(N+1, N+1)] = 0.5 * (x[IX(N, N+1)] + x[IX(N+1, N)]);
+}
+
+function diffuse(b, x, x0, diff, dt) {
+    const a = dt * diff * N * N;
+    for (let k = 0; k < 4; k++) {
+        for (let j = 1; j <= N; j++) {
+            for (let i = 1; i <= N; i++) {
+                x[IX(i, j)] = (x0[IX(i, j)] + a * (
+                    x[IX(i-1, j)] + x[IX(i+1, j)] +
+                    x[IX(i, j-1)] + x[IX(i, j+1)]
+                )) / (1 + 4 * a);
+            }
+        }
+        setBnd(b, x);
+    }
+}
+
+function advect(b, d, d0, uu, vv, dt) {
+    const dt0 = dt * N;
+    for (let j = 1; j <= N; j++) {
+        for (let i = 1; i <= N; i++) {
+            let x = i - dt0 * uu[IX(i, j)];
+            let y = j - dt0 * vv[IX(i, j)];
+            x = Math.max(0.5, Math.min(N + 0.5, x));
+            y = Math.max(0.5, Math.min(N + 0.5, y));
+            const i0 = Math.floor(x); const i1 = i0 + 1;
+            const j0 = Math.floor(y); const j1 = j0 + 1;
+            const s1 = x - i0; const s0 = 1 - s1;
+            const t1 = y - j0; const t0 = 1 - t1;
+            d[IX(i, j)] = s0 * (t0 * d0[IX(i0, j0)] + t1 * d0[IX(i0, j1)]) +
+                           s1 * (t0 * d0[IX(i1, j0)] + t1 * d0[IX(i1, j1)]);
+        }
+    }
+    setBnd(b, d);
+}
+
+function project(uu, vv, pp, divv) {
+    const h = 1.0 / N;
+    for (let j = 1; j <= N; j++) {
+        for (let i = 1; i <= N; i++) {
+            divv[IX(i, j)] = -0.5 * h * (
+                uu[IX(i+1, j)] - uu[IX(i-1, j)] +
+                vv[IX(i, j+1)] - vv[IX(i, j-1)]
+            );
+            pp[IX(i, j)] = 0;
+        }
+    }
+    setBnd(0, divv);
+    setBnd(0, pp);
+
+    for (let k = 0; k < 20; k++) {
+        for (let j = 1; j <= N; j++) {
+            for (let i = 1; i <= N; i++) {
+                pp[IX(i, j)] = (divv[IX(i, j)] +
+                    pp[IX(i-1, j)] + pp[IX(i+1, j)] +
+                    pp[IX(i, j-1)] + pp[IX(i, j+1)]) / 4;
+            }
+        }
+        setBnd(0, pp);
+    }
+
+    for (let j = 1; j <= N; j++) {
+        for (let i = 1; i <= N; i++) {
+            uu[IX(i, j)] -= 0.5 * (pp[IX(i+1, j)] - pp[IX(i-1, j)]) * N;
+            vv[IX(i, j)] -= 0.5 * (pp[IX(i, j+1)] - pp[IX(i, j-1)]) * N;
+        }
+    }
+    setBnd(1, uu);
+    setBnd(2, vv);
+}
+
+function velStep(dt) {
+    const visc = parseInt(document.getElementById('viscSlider').value) * 0.0001;
+
+    // Add forces from mouse
+    if (mouseDown) {
+        const cellW = W / N;
+        const cellH = H / N;
+        const i = Math.floor(curMX / cellW) + 1;
+        const j = Math.floor(curMY / cellH) + 1;
+        if (i > 0 && i <= N && j > 0 && j <= N) {
+            const force = 10;
+            u[IX(i, j)] += (curMX - prevMX) * force;
+            v[IX(i, j)] += (curMY - prevMY) * force;
+        }
+    }
+
+    u0.set(u); v0.set(v);
+    diffuse(1, u, u0, visc, dt);
+    diffuse(2, v, v0, visc, dt);
+    project(u, v, p, div);
+    u0.set(u); v0.set(v);
+    advect(1, u, u0, u0, v0, dt);
+    advect(2, v, v0, u0, v0, dt);
+    project(u, v, p, div);
+
+    // Damping
+    for (let i = 0; i < u.length; i++) {
+        u[i] *= 0.999;
+        v[i] *= 0.999;
+    }
+}
+
+function initParticles() {
+    const count = parseInt(document.getElementById('partSlider').value);
+    particles = [];
+    for (let i = 0; i < count; i++) {
+        particles.push({
+            x: Math.random() * W,
+            y: Math.random() * H,
+            life: Math.random() * 200 + 50,
+            maxLife: 250,
+            hue: Math.random() * 60 + 180 // Cyan to blue range
+        });
+    }
+}
+
+function getVelocity(px, py) {
+    const cellW = W / N;
+    const cellH = H / N;
+    const fi = px / cellW;
+    const fj = py / cellH;
+    const i = Math.floor(fi);
+    const j = Math.floor(fj);
+    const fx = fi - i;
+    const fy = fj - j;
+
+    if (i < 0 || i >= N || j < 0 || j >= N) return [0, 0];
+
+    const i0 = Math.max(1, Math.min(N, i + 1));
+    const j0 = Math.max(1, Math.min(N, j + 1));
+    const i1 = Math.min(N, i0 + 1);
+    const j1 = Math.min(N, j0 + 1);
+
+    const vxVal = (1-fx)*(1-fy)*u[IX(i0,j0)] + fx*(1-fy)*u[IX(i1,j0)] +
+                  (1-fx)*fy*u[IX(i0,j1)] + fx*fy*u[IX(i1,j1)];
+    const vyVal = (1-fx)*(1-fy)*v[IX(i0,j0)] + fx*(1-fy)*v[IX(i1,j0)] +
+                  (1-fx)*fy*v[IX(i0,j1)] + fx*fy*v[IX(i1,j1)];
+
+    return [vxVal, vyVal];
+}
+
+function updateParticles() {
+    const count = parseInt(document.getElementById('partSlider').value);
+    while (particles.length < count) {
+        particles.push({
+            x: Math.random() * W, y: Math.random() * H,
+            life: Math.random() * 200 + 50, maxLife: 250,
+            hue: Math.random() * 60 + 180
+        });
+    }
+    while (particles.length > count) particles.pop();
+
+    for (let p of particles) {
+        const [vxp, vyp] = getVelocity(p.x, p.y);
+        p.x += vxp * 0.5;
+        p.y += vyp * 0.5;
+        p.life--;
+
+        const speed = Math.sqrt(vxp * vxp + vyp * vyp);
+        p.hue = 200 - Math.min(160, speed * 40); // Blue (slow) to red (fast)
+
+        if (p.life <= 0 || p.x < 0 || p.x > W || p.y < 0 || p.y > H) {
+            p.x = Math.random() * W;
+            p.y = Math.random() * H;
+            p.life = Math.random() * 200 + 50;
+        }
+    }
+}
+
+function render() {
+    // Fade effect
+    ctx.fillStyle = 'rgba(10, 14, 26, 0.08)';
+    ctx.fillRect(0, 0, W, H);
+
+    for (let pt of particles) {
+        const [vxp, vyp] = getVelocity(pt.x, pt.y);
+        const speed = Math.sqrt(vxp * vxp + vyp * vyp);
+        const alpha = Math.min(1, speed * 5) * Math.min(1, pt.life / 30);
+        const size = Math.min(3, 1 + speed * 0.5);
+
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, size, 0, Math.PI * 2);
+        ctx.fillStyle = `hsla(${pt.hue}, 90%, 60%, ${alpha})`;
+        ctx.fill();
+    }
+}
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    allocArrays();
+    initParticles();
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    mouseDown = true;
+    prevMX = curMX = e.clientX;
+    prevMY = curMY = e.clientY;
+});
+canvas.addEventListener('mousemove', (e) => {
+    prevMX = curMX; prevMY = curMY;
+    curMX = e.clientX; curMY = e.clientY;
+});
+canvas.addEventListener('mouseup', () => mouseDown = false);
+canvas.addEventListener('mouseleave', () => mouseDown = false);
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    mouseDown = true;
+    prevMX = curMX = e.touches[0].clientX;
+    prevMY = curMY = e.touches[0].clientY;
+});
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    prevMX = curMX; prevMY = curMY;
+    curMX = e.touches[0].clientX; curMY = e.touches[0].clientY;
+});
+canvas.addEventListener('touchend', () => mouseDown = false);
+
+document.getElementById('viscSlider').addEventListener('input', function() {
+    document.getElementById('viscVal').textContent = this.value;
+});
+document.getElementById('partSlider').addEventListener('input', function() {
+    document.getElementById('partVal').textContent = this.value;
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+    allocArrays();
+    initParticles();
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+});
+
+function animate() {
+    velStep(0.1);
+    updateParticles();
+    render();
+    requestAnimationFrame(animate);
+}
+
+window.addEventListener('resize', resize);
+resize();
+ctx.fillStyle = '#0a0e1a';
+ctx.fillRect(0, 0, W, H);
+animate();
+</script>
+</body>
+</html>

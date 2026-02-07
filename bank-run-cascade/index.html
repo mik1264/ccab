@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bank Run Cascade</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 20px; font-weight: 700; z-index: 999; text-shadow: 0 0 20px rgba(251,191,36,0.5); font-family: sans-serif; }
+#controls { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); display: flex; gap: 14px; z-index: 999; background: rgba(0,0,0,0.75); padding: 12px 20px; border-radius: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+#controls label { color: #ccc; font-size: 11px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+#controls input[type=range] { width: 100px; accent-color: #fbbf24; }
+#controls span { color: #fbbf24; font-size: 11px; }
+#controls button { background: rgba(251,191,36,0.2); color: #fbbf24; border: 1px solid #fbbf24; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+#controls button:hover { background: rgba(251,191,36,0.4); }
+#controls button.danger { border-color: #ef4444; color: #ef4444; }
+#info { position: fixed; top: 50px; right: 15px; color: #ccc; font-size: 12px; z-index: 999; background: rgba(0,0,0,0.7); padding: 12px; border-radius: 8px; line-height: 2; }
+#instructions { position: fixed; top: 50px; left: 15px; color: rgba(255,255,255,0.45); font-size: 11px; z-index: 999; max-width: 180px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div id="title">Bank Run Cascade</div>
+<div id="instructions">Click any bank to trigger a failure. Watch the contagion spread through interbank connections.</div>
+<div id="info">
+    <div>Banks: <span style="color:#4ade80;" id="aliveCount">0</span> / <span id="totalCount">0</span></div>
+    <div>Failed: <span style="color:#ef4444;" id="failedCount">0</span></div>
+    <div>Stressed: <span style="color:#fbbf24;" id="stressedCount">0</span></div>
+    <div>System Health: <span style="color:#60a5fa;" id="sysHealth">100%</span></div>
+    <div style="margin-top:4px;font-size:10px;color:#888;">Reserve Ratio: <span id="rrDisp" style="color:#fbbf24;">10%</span></div>
+</div>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <label>Reserve Ratio <input type="range" id="reserveRatio" min="1" max="30" step="1" value="10"><span id="rrVal">10%</span></label>
+    <label>Connectivity <input type="range" id="connectivity" min="1" max="6" step="1" value="3"><span id="connVal">3</span></label>
+    <label>Num Banks <input type="range" id="numBanks" min="8" max="40" step="1" value="20"><span id="nbVal">20</span></label>
+    <button class="danger" id="btnTrigger">Trigger Random Failure</button>
+    <button id="btnReset">Reset Network</button>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const rrSlider = document.getElementById('reserveRatio');
+const connSlider = document.getElementById('connectivity');
+const nbSlider = document.getElementById('numBanks');
+
+rrSlider.oninput = () => { document.getElementById('rrVal').textContent = rrSlider.value + '%'; document.getElementById('rrDisp').textContent = rrSlider.value + '%'; };
+connSlider.oninput = () => { document.getElementById('connVal').textContent = connSlider.value; generateNetwork(); };
+nbSlider.oninput = () => { document.getElementById('nbVal').textContent = nbSlider.value; generateNetwork(); };
+
+let banks = [];
+let connections = [];
+let cascadeQueue = [];
+let cascadeTimer = 0;
+let shockWaves = [];
+let particles = [];
+
+function generateNetwork() {
+    const n = parseInt(nbSlider.value);
+    const connectivity = parseInt(connSlider.value);
+    const W = canvas.width, H = canvas.height;
+    const cx = W / 2, cy = H * 0.45;
+    const radius = Math.min(W, H) * 0.30;
+
+    banks = [];
+    connections = [];
+    cascadeQueue = [];
+    shockWaves = [];
+    particles = [];
+
+    // Place banks in a rough circle with some randomness
+    for (let i = 0; i < n; i++) {
+        const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
+        const r = radius * (0.7 + Math.random() * 0.5);
+        const x = cx + Math.cos(angle) * r;
+        const y = cy + Math.sin(angle) * r;
+        const deposits = 50 + Math.random() * 200;
+        const size = 15 + (deposits / 250) * 15;
+
+        banks.push({
+            x, y,
+            deposits,
+            reserves: deposits * (parseInt(rrSlider.value) / 100),
+            loans: deposits * (1 - parseInt(rrSlider.value) / 100),
+            size,
+            status: 'healthy', // healthy, stressed, failed
+            confidence: 1.0,
+            failTime: -1,
+            shakeX: 0,
+            shakeY: 0,
+            pulsePhase: Math.random() * Math.PI * 2
+        });
+    }
+
+    // Create interbank connections
+    for (let i = 0; i < n; i++) {
+        const numConns = 1 + Math.floor(Math.random() * connectivity);
+        // Connect to nearest banks
+        const distances = banks.map((b, j) => ({
+            idx: j,
+            dist: j === i ? Infinity : Math.hypot(b.x - banks[i].x, b.y - banks[i].y)
+        })).sort((a, b) => a.dist - b.dist);
+
+        for (let c = 0; c < numConns && c < distances.length; c++) {
+            const j = distances[c].idx;
+            if (j !== i) {
+                const amount = 10 + Math.random() * 40;
+                const existing = connections.find(c => (c.from === i && c.to === j) || (c.from === j && c.to === i));
+                if (!existing) {
+                    connections.push({ from: i, to: j, amount, stress: 0 });
+                }
+            }
+        }
+    }
+}
+
+function triggerFailure(idx) {
+    if (banks[idx].status === 'failed') return;
+    banks[idx].status = 'failed';
+    banks[idx].confidence = 0;
+    banks[idx].failTime = Date.now();
+
+    shockWaves.push({
+        x: banks[idx].x,
+        y: banks[idx].y,
+        radius: 0,
+        maxRadius: 300,
+        alpha: 1
+    });
+
+    // Add connected banks to cascade queue
+    connections.forEach(c => {
+        let affected = -1;
+        if (c.from === idx) affected = c.to;
+        if (c.to === idx) affected = c.from;
+        if (affected >= 0 && banks[affected].status !== 'failed') {
+            c.stress = 1;
+            // Reduce confidence of connected banks
+            const rr = parseInt(rrSlider.value) / 100;
+            const confidenceLoss = (c.amount / banks[affected].deposits) * (1 / rr);
+            banks[affected].confidence -= confidenceLoss;
+
+            if (banks[affected].confidence <= 0.3 && banks[affected].status !== 'failed') {
+                cascadeQueue.push({ idx: affected, delay: 300 + Math.random() * 700, addedTime: Date.now() });
+                banks[affected].status = 'stressed';
+            } else if (banks[affected].confidence <= 0.6) {
+                banks[affected].status = 'stressed';
+            }
+
+            // Spawn stress particles
+            for (let p = 0; p < 5; p++) {
+                particles.push({
+                    x: banks[idx].x,
+                    y: banks[idx].y,
+                    tx: banks[affected].x,
+                    ty: banks[affected].y,
+                    progress: 0,
+                    speed: 0.01 + Math.random() * 0.02
+                });
+            }
+        }
+    });
+}
+
+function processCascade() {
+    const now = Date.now();
+    cascadeQueue = cascadeQueue.filter(item => {
+        if (now - item.addedTime >= item.delay) {
+            if (banks[item.idx].status !== 'failed' && banks[item.idx].confidence <= 0.3) {
+                triggerFailure(item.idx);
+            }
+            return false;
+        }
+        return true;
+    });
+}
+
+canvas.addEventListener('click', (e) => {
+    const mx = e.clientX, my = e.clientY;
+    banks.forEach((b, i) => {
+        if (Math.hypot(mx - b.x, my - b.y) < b.size + 5) {
+            triggerFailure(i);
+        }
+    });
+});
+
+document.getElementById('btnTrigger').onclick = () => {
+    const healthy = banks.map((b, i) => ({ b, i })).filter(x => x.b.status !== 'failed');
+    if (healthy.length > 0) {
+        const target = healthy[Math.floor(Math.random() * healthy.length)];
+        triggerFailure(target.i);
+    }
+};
+
+document.getElementById('btnReset').onclick = generateNetwork;
+
+function draw() {
+    processCascade();
+
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    const now = Date.now();
+
+    // Draw shock waves
+    shockWaves = shockWaves.filter(sw => sw.alpha > 0);
+    shockWaves.forEach(sw => {
+        sw.radius += 3;
+        sw.alpha = 1 - sw.radius / sw.maxRadius;
+        if (sw.alpha > 0) {
+            ctx.beginPath();
+            ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(239,68,68,${sw.alpha * 0.3})`;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+    });
+
+    // Draw connections
+    connections.forEach(c => {
+        const from = banks[c.from], to = banks[c.to];
+        const bothFailed = from.status === 'failed' && to.status === 'failed';
+        const anyFailed = from.status === 'failed' || to.status === 'failed';
+        const anyStressed = from.status === 'stressed' || to.status === 'stressed';
+
+        if (c.stress > 0) c.stress = Math.max(0, c.stress - 0.002);
+
+        let color;
+        if (bothFailed) color = 'rgba(239,68,68,0.15)';
+        else if (anyFailed) color = `rgba(239,68,68,${0.2 + c.stress * 0.5})`;
+        else if (anyStressed) color = 'rgba(251,191,36,0.2)';
+        else color = 'rgba(255,255,255,0.08)';
+
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1 + c.amount / 30;
+        ctx.stroke();
+
+        // Amount label on connection (subtle)
+        if (!bothFailed) {
+            const mx = (from.x + to.x) / 2, my = (from.y + to.y) / 2;
+            ctx.fillStyle = 'rgba(255,255,255,0.1)';
+            ctx.font = '8px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('$' + c.amount.toFixed(0), mx, my);
+        }
+    });
+
+    // Draw particles (contagion)
+    particles = particles.filter(p => p.progress < 1);
+    particles.forEach(p => {
+        p.progress += p.speed;
+        const x = p.x + (p.tx - p.x) * p.progress;
+        const y = p.y + (p.ty - p.y) * p.progress;
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(239,68,68,${1 - p.progress})`;
+        ctx.fill();
+    });
+
+    // Draw banks
+    banks.forEach((bank, i) => {
+        let fillColor, strokeColor, label;
+
+        // Shake effect for stressed/failing
+        bank.shakeX = 0;
+        bank.shakeY = 0;
+        if (bank.status === 'stressed') {
+            bank.shakeX = (Math.random() - 0.5) * 3;
+            bank.shakeY = (Math.random() - 0.5) * 3;
+        }
+
+        const bx = bank.x + bank.shakeX;
+        const by = bank.y + bank.shakeY;
+
+        if (bank.status === 'failed') {
+            fillColor = 'rgba(239,68,68,0.3)';
+            strokeColor = '#ef4444';
+            label = 'FAILED';
+        } else if (bank.status === 'stressed') {
+            fillColor = 'rgba(251,191,36,0.2)';
+            strokeColor = '#fbbf24';
+            label = 'STRESS';
+        } else {
+            fillColor = 'rgba(74,222,128,0.15)';
+            strokeColor = '#4ade80';
+            label = '';
+        }
+
+        // Pulse effect
+        bank.pulsePhase += 0.03;
+        const pulse = bank.status === 'healthy' ? 1 + Math.sin(bank.pulsePhase) * 0.05 : 1;
+
+        // Outer glow
+        if (bank.status !== 'failed') {
+            ctx.beginPath();
+            ctx.arc(bx, by, bank.size * pulse + 5, 0, Math.PI * 2);
+            ctx.fillStyle = bank.status === 'stressed' ? 'rgba(251,191,36,0.05)' : 'rgba(74,222,128,0.03)';
+            ctx.fill();
+        }
+
+        // Bank circle
+        ctx.beginPath();
+        ctx.arc(bx, by, bank.size * pulse, 0, Math.PI * 2);
+        ctx.fillStyle = fillColor;
+        ctx.fill();
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Confidence bar
+        const barW = bank.size * 1.5;
+        const barH = 4;
+        const barX = bx - barW / 2;
+        const barY = by + bank.size + 8;
+
+        ctx.fillStyle = 'rgba(255,255,255,0.1)';
+        ctx.fillRect(barX, barY, barW, barH);
+
+        const confColor = bank.confidence > 0.6 ? '#4ade80' : bank.confidence > 0.3 ? '#fbbf24' : '#ef4444';
+        ctx.fillStyle = confColor;
+        ctx.fillRect(barX, barY, barW * Math.max(0, bank.confidence), barH);
+
+        // Bank number
+        ctx.fillStyle = strokeColor;
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('B' + (i + 1), bx, by + 4);
+
+        // Status label
+        if (label) {
+            ctx.fillStyle = strokeColor;
+            ctx.font = 'bold 8px sans-serif';
+            ctx.fillText(label, bx, by - bank.size - 5);
+        }
+
+        // Deposits
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.font = '8px sans-serif';
+        ctx.fillText('$' + bank.deposits.toFixed(0), bx, by + bank.size + 20);
+    });
+
+    // System health bar at bottom
+    const healthyCount = banks.filter(b => b.status === 'healthy').length;
+    const stressedCount = banks.filter(b => b.status === 'stressed').length;
+    const failedCount = banks.filter(b => b.status === 'failed').length;
+    const health = healthyCount / banks.length;
+
+    const barX = W * 0.1, barY = H * 0.92, barW = W * 0.8, barH = 12;
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    ctx.fillRect(barX, barY, barW, barH);
+
+    // Green portion
+    ctx.fillStyle = 'rgba(74,222,128,0.5)';
+    ctx.fillRect(barX, barY, barW * (healthyCount / banks.length), barH);
+    // Yellow portion
+    ctx.fillStyle = 'rgba(251,191,36,0.5)';
+    ctx.fillRect(barX + barW * (healthyCount / banks.length), barY, barW * (stressedCount / banks.length), barH);
+    // Red portion
+    ctx.fillStyle = 'rgba(239,68,68,0.5)';
+    ctx.fillRect(barX + barW * ((healthyCount + stressedCount) / banks.length), barY, barW * (failedCount / banks.length), barH);
+
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('System Health', W / 2, barY - 4);
+
+    // Update info
+    document.getElementById('aliveCount').textContent = healthyCount;
+    document.getElementById('totalCount').textContent = banks.length;
+    document.getElementById('failedCount').textContent = failedCount;
+    document.getElementById('stressedCount').textContent = stressedCount;
+    document.getElementById('sysHealth').textContent = (health * 100).toFixed(0) + '%';
+
+    requestAnimationFrame(draw);
+}
+
+generateNetwork();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

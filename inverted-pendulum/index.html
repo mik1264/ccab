@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inverted Pendulum Balancing</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+a.back { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; font-family: sans-serif; }
+a.back:hover { background: rgba(0,0,0,0.9); }
+.title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #e2e8f0; font-size: 22px; font-weight: 700; z-index: 999; text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+.controls { position: fixed; right: 15px; top: 15px; background: rgba(10,14,26,0.92); border: 1px solid rgba(251,191,36,0.25); border-radius: 12px; padding: 18px; z-index: 999; color: #cbd5e1; font-size: 13px; width: 210px; }
+.controls h3 { color: #fbbf24; margin-bottom: 10px; font-size: 15px; }
+.btn { display: inline-block; padding: 7px 14px; background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.4); border-radius: 6px; color: #fbbf24; cursor: pointer; font-size: 12px; margin: 3px 2px; }
+.btn:hover { background: rgba(251,191,36,0.3); }
+.btn.active { background: rgba(251,191,36,0.4); border-color: #fbbf24; }
+.info { margin-top: 10px; font-size: 11px; line-height: 1.7; border-top: 1px solid rgba(251,191,36,0.15); padding-top: 8px; }
+.info .label { color: #94a3b8; }
+.info .value { color: #fbbf24; font-weight: 600; }
+.mode-label { color: #94a3b8; font-size: 11px; margin-bottom: 6px; }
+.keys-hint { color: #64748b; font-size: 10px; margin-top: 6px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back">&#8592; Back to Gallery</a>
+<div class="title">Inverted Pendulum Balancing</div>
+<div class="controls">
+    <h3>Controls</h3>
+    <div class="mode-label">Mode:</div>
+    <span class="btn active" id="autoBtn">Auto Balance</span>
+    <span class="btn" id="manualBtn">Manual</span>
+    <br>
+    <span class="btn" id="resetBtn" style="margin-top:8px;">Reset</span>
+    <span class="btn" id="perturbBtn">Perturb</span>
+    <div class="keys-hint" id="keysHint" style="display:none;">Arrow keys ← → to push cart</div>
+    <div class="info">
+        <div><span class="label">Angle: </span><span class="value" id="angleStat">0.0&deg;</span></div>
+        <div><span class="label">Cart Pos: </span><span class="value" id="cartStat">0.0</span></div>
+        <div><span class="label">Force: </span><span class="value" id="forceStat">0.0 N</span></div>
+        <div><span class="label">Energy: </span><span class="value" id="energyStat">0.0</span></div>
+        <div><span class="label">Time: </span><span class="value" id="timeStat">0.0s</span></div>
+    </div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Physics parameters
+    const g = 9.81;
+    const mc = 1.0;   // cart mass
+    const mp = 0.3;   // pendulum mass
+    const L = 2.0;    // pendulum length
+    const mu_c = 0.5; // cart friction
+    const mu_p = 0.002; // pendulum friction
+
+    // State: [x, xdot, theta, thetadot]
+    let x = 0, xdot = 0, theta = 0.05, thetadot = 0;
+    let force = 0;
+    let autoMode = true;
+    let simTime = 0;
+    let keysDown = {};
+    let trail = [];
+
+    function resetSim() {
+        x = 0; xdot = 0;
+        theta = 0.05 + (Math.random() - 0.5) * 0.04;
+        thetadot = 0;
+        force = 0;
+        simTime = 0;
+        trail = [];
+    }
+
+    document.getElementById('autoBtn').onclick = function() {
+        autoMode = true;
+        this.classList.add('active');
+        document.getElementById('manualBtn').classList.remove('active');
+        document.getElementById('keysHint').style.display = 'none';
+    };
+    document.getElementById('manualBtn').onclick = function() {
+        autoMode = false;
+        this.classList.add('active');
+        document.getElementById('autoBtn').classList.remove('active');
+        document.getElementById('keysHint').style.display = 'block';
+    };
+    document.getElementById('resetBtn').onclick = resetSim;
+    document.getElementById('perturbBtn').onclick = function() {
+        thetadot += (Math.random() - 0.5) * 6;
+    };
+
+    window.addEventListener('keydown', function(e) { keysDown[e.key] = true; });
+    window.addEventListener('keyup', function(e) { keysDown[e.key] = false; });
+
+    // LQR-like controller gains (pre-computed)
+    const K = [-1.0, -2.2, -35.0, -8.5];
+
+    function controlForce() {
+        if (autoMode) {
+            // State feedback control
+            const u = -(K[0]*x + K[1]*xdot + K[2]*theta + K[3]*thetadot);
+            return Math.max(-30, Math.min(30, u));
+        } else {
+            let f = 0;
+            if (keysDown['ArrowLeft']) f -= 15;
+            if (keysDown['ArrowRight']) f += 15;
+            return f;
+        }
+    }
+
+    function step(dt) {
+        force = controlForce();
+        const sint = Math.sin(theta);
+        const cost = Math.cos(theta);
+
+        // Equations of motion for cart-pole system
+        const denom = mc + mp * sint * sint;
+
+        const xddot = (force + mp * sint * (L * thetadot * thetadot + g * cost) - mu_c * xdot) / denom;
+        const thetaddot = (-force * cost - mp * L * thetadot * thetadot * sint * cost - (mc + mp) * g * sint + mu_c * xdot * cost) / (L * denom) - mu_p * thetadot / (mp * L * L);
+
+        xdot += xddot * dt;
+        thetadot += thetaddot * dt;
+        x += xdot * dt;
+        theta += thetadot * dt;
+
+        // Wrap theta
+        while (theta > Math.PI) theta -= 2 * Math.PI;
+        while (theta < -Math.PI) theta += 2 * Math.PI;
+
+        // Soft walls
+        if (x > 5) { x = 5; xdot *= -0.5; }
+        if (x < -5) { x = -5; xdot *= -0.5; }
+
+        simTime += dt;
+    }
+
+    const scale = 80; // pixels per meter
+
+    function drawRail(cx, cy) {
+        const railLen = 10 * scale;
+        ctx.strokeStyle = 'rgba(100,120,180,0.3)';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(cx - railLen/2, cy);
+        ctx.lineTo(cx + railLen/2, cy);
+        ctx.stroke();
+
+        // Tick marks
+        ctx.fillStyle = 'rgba(100,120,180,0.2)';
+        for (let i = -5; i <= 5; i++) {
+            const tx = cx + i * scale;
+            ctx.fillRect(tx - 0.5, cy - 6, 1, 12);
+        }
+    }
+
+    function drawCart(cx, cy) {
+        const cartX = cx + x * scale;
+        const cartW = 60, cartH = 30;
+
+        // Shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        roundRect(ctx, cartX - cartW/2 + 3, cy - cartH/2 + 3, cartW, cartH, 6);
+        ctx.fill();
+
+        // Cart body
+        const grad = ctx.createLinearGradient(cartX - cartW/2, cy - cartH/2, cartX - cartW/2, cy + cartH/2);
+        grad.addColorStop(0, '#475569');
+        grad.addColorStop(1, '#1e293b');
+        ctx.fillStyle = grad;
+        roundRect(ctx, cartX - cartW/2, cy - cartH/2, cartW, cartH, 6);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(251,191,36,0.4)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Wheels
+        ctx.fillStyle = '#334155';
+        ctx.strokeStyle = 'rgba(251,191,36,0.3)';
+        ctx.lineWidth = 1;
+        [cartX - 18, cartX + 18].forEach(wx => {
+            ctx.beginPath();
+            ctx.arc(wx, cy + cartH/2, 6, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+        });
+
+        // Force arrow
+        if (Math.abs(force) > 0.5) {
+            const arrowDir = force > 0 ? 1 : -1;
+            const arrowLen = Math.min(Math.abs(force) / 30 * 50, 50);
+            const ax = cartX + arrowDir * (cartW/2 + 5);
+            const ay = cy;
+
+            ctx.strokeStyle = '#f87171';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(ax + arrowDir * arrowLen, ay);
+            ctx.stroke();
+
+            ctx.fillStyle = '#f87171';
+            ctx.beginPath();
+            ctx.moveTo(ax + arrowDir * arrowLen, ay - 6);
+            ctx.lineTo(ax + arrowDir * (arrowLen + 10), ay);
+            ctx.lineTo(ax + arrowDir * arrowLen, ay + 6);
+            ctx.fill();
+        }
+
+        return cartX;
+    }
+
+    function drawPendulum(cartX, cy) {
+        const pivotX = cartX;
+        const pivotY = cy - 15;
+        const pendLen = L * scale;
+        const bobX = pivotX + Math.sin(theta) * pendLen;
+        const bobY = pivotY - Math.cos(theta) * pendLen;
+
+        // Trail
+        trail.push({x: bobX, y: bobY, t: simTime});
+        if (trail.length > 150) trail.shift();
+
+        // Draw trail
+        for (let i = 1; i < trail.length; i++) {
+            const alpha = i / trail.length * 0.4;
+            ctx.strokeStyle = `rgba(251,191,36,${alpha})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(trail[i-1].x, trail[i-1].y);
+            ctx.lineTo(trail[i].x, trail[i].y);
+            ctx.stroke();
+        }
+
+        // Rod
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(pivotX, pivotY);
+        ctx.lineTo(bobX, bobY);
+        ctx.stroke();
+
+        // Pivot
+        ctx.fillStyle = '#fbbf24';
+        ctx.beginPath();
+        ctx.arc(pivotX, pivotY, 5, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Bob
+        const bobGrad = ctx.createRadialGradient(bobX - 3, bobY - 3, 2, bobX, bobY, 14);
+        bobGrad.addColorStop(0, '#fbbf24');
+        bobGrad.addColorStop(0.7, '#f59e0b');
+        bobGrad.addColorStop(1, '#92400e');
+        ctx.beginPath();
+        ctx.arc(bobX, bobY, 14, 0, Math.PI * 2);
+        ctx.fillStyle = bobGrad;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(251,191,36,0.5)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Angle indicator
+        if (Math.abs(theta) > 0.02) {
+            ctx.strokeStyle = 'rgba(34,211,238,0.4)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(pivotX, pivotY);
+            ctx.lineTo(pivotX, pivotY - pendLen * 0.6);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Arc
+            ctx.strokeStyle = 'rgba(34,211,238,0.5)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            const arcR = 30;
+            const startAngle = -Math.PI/2;
+            const endAngle = -Math.PI/2 + theta;
+            ctx.arc(pivotX, pivotY, arcR, startAngle, endAngle, theta < 0);
+            ctx.stroke();
+        }
+    }
+
+    function drawAngleGraph() {
+        // Small angle vs time graph at bottom
+        const gx = 40, gy = H - 130, gw = W - 320, gh = 100;
+
+        ctx.fillStyle = 'rgba(15,20,40,0.6)';
+        ctx.strokeStyle = 'rgba(251,191,36,0.1)';
+        ctx.lineWidth = 1;
+        roundRect(ctx, gx, gy, gw, gh, 8);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '11px sans-serif';
+        ctx.fillText('Angle History', gx + 10, gy + 15);
+
+        // Zero line
+        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        ctx.beginPath();
+        ctx.moveTo(gx + 10, gy + gh/2);
+        ctx.lineTo(gx + gw - 10, gy + gh/2);
+        ctx.stroke();
+
+        if (trail.length > 2) {
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            const startI = Math.max(0, trail.length - Math.floor(gw));
+            for (let i = startI; i < trail.length; i++) {
+                const px = gx + 10 + ((i - startI) / (trail.length - startI)) * (gw - 20);
+                // Use angle history - recompute from trail isn't ideal, so we store angles
+                const angle = trail[i].angle || 0;
+                const py = gy + gh/2 - (angle / (Math.PI/4)) * (gh/2 - 10);
+                if (i === startI) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+        }
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+    }
+
+    // Angle history for graph
+    let angleHistory = [];
+
+    function animate() {
+        ctx.clearRect(0, 0, W, H);
+
+        const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H)*0.7);
+        bg.addColorStop(0, '#111827');
+        bg.addColorStop(1, '#0a0e1a');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        // Physics steps (substeps for stability)
+        const substeps = 4;
+        const dt = 1/60 / substeps;
+        for (let i = 0; i < substeps; i++) step(dt);
+
+        // Store angle in trail
+        if (trail.length > 0) {
+            trail[trail.length-1].angle = theta;
+        }
+
+        const cy = H * 0.5;
+        const cx = W / 2;
+
+        drawRail(cx, cy);
+        const cartX = drawCart(cx, cy);
+        drawPendulum(cartX, cy);
+
+        // Draw angle graph
+        drawAngleGraph();
+
+        // Update stats
+        const angleDeg = (theta * 180 / Math.PI);
+        document.getElementById('angleStat').textContent = angleDeg.toFixed(1) + '\u00B0';
+        document.getElementById('cartStat').textContent = x.toFixed(2) + ' m';
+        document.getElementById('forceStat').textContent = force.toFixed(1) + ' N';
+
+        const energy = 0.5 * mc * xdot*xdot + 0.5 * mp * (xdot*xdot + L*L*thetadot*thetadot) + mp * g * L * Math.cos(theta);
+        document.getElementById('energyStat').textContent = energy.toFixed(2);
+        document.getElementById('timeStat').textContent = simTime.toFixed(1) + 's';
+
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+})();
+</script>
+</body>
+</html>

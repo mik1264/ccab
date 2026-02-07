@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Solar Panel Angle Optimizer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.8); border: 1px solid rgba(251,191,36,0.3);
+    border-radius: 12px; padding: 16px 24px; display: flex; gap: 24px;
+    align-items: center; z-index: 10; flex-wrap: wrap; justify-content: center;
+}
+.control-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+label { color: #fbbf24; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+input[type="range"] { width: 140px; accent-color: #fbbf24; }
+.value-display { color: #fff; font-size: 14px; font-weight: bold; }
+button {
+    background: rgba(251,191,36,0.2); color: #fbbf24; border: 1px solid #fbbf24;
+    padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    transition: background 0.2s;
+}
+button:hover { background: rgba(251,191,36,0.4); }
+button.active { background: rgba(251,191,36,0.5); }
+#title {
+    position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+    color: #fbbf24; font-size: 22px; font-weight: 600;
+    text-shadow: 0 0 20px rgba(251,191,36,0.5); z-index: 10;
+    pointer-events: none; text-align: center;
+}
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title">Solar Panel Angle Optimizer</div>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <div class="control-group">
+        <label>Panel Angle</label>
+        <input type="range" id="panelAngle" min="0" max="90" value="35">
+        <span class="value-display" id="angleVal">35&deg;</span>
+    </div>
+    <div class="control-group">
+        <label>Time Speed</label>
+        <input type="range" id="timeSpeed" min="1" max="20" value="5">
+        <span class="value-display" id="speedVal">5x</span>
+    </div>
+    <div class="control-group">
+        <label>Latitude</label>
+        <input type="range" id="latitude" min="0" max="66" value="40">
+        <span class="value-display" id="latVal">40&deg;N</span>
+    </div>
+    <div class="control-group">
+        <button id="trackBtn">Sun Tracking: OFF</button>
+    </div>
+    <div class="control-group">
+        <button id="resetBtn">Reset</button>
+    </div>
+</div>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const panelAngleSlider = document.getElementById('panelAngle');
+const timeSpeedSlider = document.getElementById('timeSpeed');
+const latitudeSlider = document.getElementById('latitude');
+const trackBtn = document.getElementById('trackBtn');
+const resetBtn = document.getElementById('resetBtn');
+const angleVal = document.getElementById('angleVal');
+const speedVal = document.getElementById('speedVal');
+const latVal = document.getElementById('latVal');
+
+let panelAngle = 35;
+let timeSpeed = 5;
+let latitude = 40;
+let sunTracking = false;
+let timeOfDay = 6;
+let fixedHistory = [];
+let trackingHistory = [];
+let dayCount = 0;
+let totalFixedEnergy = 0;
+let totalTrackingEnergy = 0;
+
+panelAngleSlider.addEventListener('input', e => { panelAngle = +e.target.value; angleVal.textContent = panelAngle + '\u00b0'; });
+timeSpeedSlider.addEventListener('input', e => { timeSpeed = +e.target.value; speedVal.textContent = timeSpeed + 'x'; });
+latitudeSlider.addEventListener('input', e => { latitude = +e.target.value; latVal.textContent = latitude + '\u00b0N'; });
+trackBtn.addEventListener('click', () => { sunTracking = !sunTracking; trackBtn.textContent = 'Sun Tracking: ' + (sunTracking ? 'ON' : 'OFF'); trackBtn.classList.toggle('active', sunTracking); });
+resetBtn.addEventListener('click', () => { timeOfDay = 6; fixedHistory = []; trackingHistory = []; dayCount = 0; totalFixedEnergy = 0; totalTrackingEnergy = 0; });
+
+function getSunPosition(time) {
+    const hourAngle = (time - 12) * 15 * Math.PI / 180;
+    const decl = 23.45 * Math.PI / 180 * Math.sin(2 * Math.PI * (284 + 172) / 365);
+    const latRad = latitude * Math.PI / 180;
+    const altitude = Math.asin(Math.sin(latRad) * Math.sin(decl) + Math.cos(latRad) * Math.cos(decl) * Math.cos(hourAngle));
+    const azimuth = Math.atan2(-Math.sin(hourAngle), Math.tan(decl) * Math.cos(latRad) - Math.sin(latRad) * Math.cos(hourAngle));
+    return { altitude: Math.max(0, altitude), azimuth };
+}
+
+function getPowerOutput(sunAlt, pAngle) {
+    if (sunAlt <= 0) return 0;
+    const pAngleRad = pAngle * Math.PI / 180;
+    const cosIncidence = Math.sin(sunAlt) * Math.cos(pAngleRad) + Math.cos(sunAlt) * Math.sin(pAngleRad);
+    const airMass = sunAlt > 0.01 ? 1 / Math.sin(sunAlt) : 40;
+    const atmosphericLoss = Math.pow(0.7, Math.pow(airMass, 0.678));
+    return Math.max(0, cosIncidence * atmosphericLoss * 1000);
+}
+
+function getOptimalAngle(sunAlt) {
+    return Math.max(0, Math.min(90, 90 - sunAlt * 180 / Math.PI));
+}
+
+function drawSky(sun) {
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.6);
+    const dayness = Math.max(0, sun.altitude / (Math.PI / 2));
+    if (dayness > 0.05) {
+        skyGrad.addColorStop(0, `rgba(${30 + dayness * 70}, ${50 + dayness * 120}, ${120 + dayness * 135}, 1)`);
+        skyGrad.addColorStop(1, `rgba(${60 + dayness * 140}, ${80 + dayness * 140}, ${130 + dayness * 70}, 1)`);
+    } else {
+        skyGrad.addColorStop(0, '#0a0e1a');
+        skyGrad.addColorStop(1, '#151a2e');
+    }
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, H * 0.6);
+}
+
+function drawSun(sun) {
+    if (sun.altitude <= 0) return;
+    const sx = W * 0.5 + Math.sin(sun.azimuth) * W * 0.35;
+    const sy = H * 0.55 - Math.sin(sun.altitude) * H * 0.45;
+    const brightness = Math.min(1, sun.altitude / 0.3);
+    const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, 80);
+    glow.addColorStop(0, `rgba(255, 230, 80, ${brightness})`);
+    glow.addColorStop(0.3, `rgba(255, 200, 50, ${brightness * 0.5})`);
+    glow.addColorStop(1, 'rgba(255, 200, 50, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(sx - 80, sy - 80, 160, 160);
+    ctx.beginPath();
+    ctx.arc(sx, sy, 20, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255, 240, 100, ${brightness})`;
+    ctx.fill();
+    return { x: sx, y: sy };
+}
+
+function drawGround() {
+    const grd = ctx.createLinearGradient(0, H * 0.55, 0, H);
+    grd.addColorStop(0, '#1a3a1a');
+    grd.addColorStop(1, '#0d1f0d');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, H * 0.55, W, H * 0.45);
+}
+
+function drawPanel(angle, power, sunPos, x, label) {
+    const baseX = x;
+    const baseY = H * 0.58;
+    const panelLen = 120;
+    const angleRad = angle * Math.PI / 180;
+    const topX = baseX - Math.cos(angleRad) * panelLen;
+    const topY = baseY - Math.sin(angleRad) * panelLen;
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(baseX, baseY);
+    ctx.lineTo(baseX, baseY + 30);
+    ctx.stroke();
+    ctx.strokeStyle = '#667';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(baseX - 20, baseY + 30);
+    ctx.lineTo(baseX + 20, baseY + 30);
+    ctx.stroke();
+    const pw = 8;
+    ctx.save();
+    ctx.translate(baseX, baseY);
+    ctx.rotate(-angleRad);
+    const panelColor = power > 0 ? `rgba(50, 80, 200, ${0.5 + power / 2000})` : 'rgba(30, 40, 80, 0.8)';
+    ctx.fillStyle = panelColor;
+    ctx.fillRect(-panelLen, -pw / 2, panelLen, pw);
+    ctx.strokeStyle = '#8af';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-panelLen, -pw / 2, panelLen, pw);
+    for (let i = 1; i < 6; i++) {
+        ctx.beginPath();
+        ctx.moveTo(-panelLen + i * panelLen / 6, -pw / 2);
+        ctx.lineTo(-panelLen + i * panelLen / 6, pw / 2);
+        ctx.strokeStyle = 'rgba(100,150,255,0.3)';
+        ctx.stroke();
+    }
+    if (power > 10 && sunPos) {
+        ctx.restore();
+        ctx.save();
+        for (let i = 0; i < 5; i++) {
+            const t = (Date.now() / 1000 + i * 0.3) % 1.5;
+            if (t < 1) {
+                const midX = baseX - Math.cos(angleRad) * panelLen * 0.5;
+                const midY = baseY - Math.sin(angleRad) * panelLen * 0.5;
+                const rx = sunPos.x + (midX - sunPos.x) * t;
+                const ry = sunPos.y + (midY - sunPos.y) * t;
+                ctx.beginPath();
+                ctx.arc(rx, ry, 2, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(255, 230, 80, ${1 - t})`;
+                ctx.fill();
+            }
+        }
+        ctx.restore();
+    } else {
+        ctx.restore();
+    }
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, baseX - 30, baseY + 55);
+    ctx.fillStyle = '#fff';
+    ctx.font = '13px sans-serif';
+    ctx.fillText(power.toFixed(0) + ' W/m\u00b2', baseX - 30, baseY + 72);
+    ctx.fillText(angle.toFixed(1) + '\u00b0', baseX - 30, baseY + 88);
+}
+
+function drawGraph(data1, data2, x, y, w, h, label) {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.strokeStyle = 'rgba(251,191,36,0.3)';
+    ctx.lineWidth = 1;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, x + w / 2, y - 5);
+    ctx.font = '9px sans-serif';
+    ctx.fillStyle = '#888';
+    ctx.textAlign = 'left';
+    ctx.fillText('6h', x, y + h + 12);
+    ctx.textAlign = 'center';
+    ctx.fillText('12h', x + w / 2, y + h + 12);
+    ctx.textAlign = 'right';
+    ctx.fillText('20h', x + w, y + h + 12);
+    const maxVal = 1000;
+    function drawLine(data, color) {
+        if (data.length < 2) return;
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        for (let i = 0; i < data.length; i++) {
+            const px = x + (data[i].t - 6) / 14 * w;
+            const py = y + h - (data[i].v / maxVal) * h;
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+    }
+    drawLine(data1, '#4af');
+    drawLine(data2, '#f84');
+    ctx.fillStyle = '#4af';
+    ctx.fillRect(x + 5, y + 5, 8, 8);
+    ctx.fillStyle = '#aaa';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Fixed', x + 16, y + 13);
+    ctx.fillStyle = '#f84';
+    ctx.fillRect(x + 55, y + 5, 8, 8);
+    ctx.fillStyle = '#aaa';
+    ctx.fillText('Tracking', x + 66, y + 13);
+}
+
+function drawStats() {
+    const x = W - 220, y = 60;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.strokeStyle = 'rgba(251,191,36,0.2)';
+    ctx.lineWidth = 1;
+    const rh = 140;
+    ctx.beginPath();
+    ctx.roundRect(x, y, 200, rh, 10);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Statistics', x + 12, y + 22);
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#ccc';
+    const hour = Math.floor(timeOfDay);
+    const min = Math.floor((timeOfDay - hour) * 60);
+    ctx.fillText(`Time: ${hour.toString().padStart(2,'0')}:${min.toString().padStart(2,'0')}`, x + 12, y + 44);
+    ctx.fillText(`Day: ${dayCount + 1}`, x + 12, y + 62);
+    ctx.fillStyle = '#4af';
+    ctx.fillText(`Fixed Total: ${totalFixedEnergy.toFixed(1)} Wh`, x + 12, y + 82);
+    ctx.fillStyle = '#f84';
+    ctx.fillText(`Tracking Total: ${totalTrackingEnergy.toFixed(1)} Wh`, x + 12, y + 100);
+    const gain = totalFixedEnergy > 0 ? ((totalTrackingEnergy / totalFixedEnergy - 1) * 100).toFixed(1) : '0.0';
+    ctx.fillStyle = '#4f8';
+    ctx.fillText(`Tracking Gain: +${gain}%`, x + 12, y + 120);
+}
+
+let lastTime = performance.now();
+function animate(now) {
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+    timeOfDay += dt * timeSpeed * 0.1;
+    if (timeOfDay >= 20) {
+        timeOfDay = 6;
+        dayCount++;
+        fixedHistory = [];
+        trackingHistory = [];
+    }
+    const sun = getSunPosition(timeOfDay);
+    const fixedPower = getPowerOutput(sun.altitude, panelAngle);
+    const optAngle = getOptimalAngle(sun.altitude);
+    const trackingPower = getPowerOutput(sun.altitude, optAngle);
+    totalFixedEnergy += fixedPower * dt * timeSpeed * 0.1 / 3600;
+    totalTrackingEnergy += trackingPower * dt * timeSpeed * 0.1 / 3600;
+    if (sunTracking) {
+        panelAngle = optAngle;
+        panelAngleSlider.value = panelAngle;
+        angleVal.textContent = panelAngle.toFixed(0) + '\u00b0';
+    }
+    if (fixedHistory.length === 0 || timeOfDay - fixedHistory[fixedHistory.length - 1].t > 0.05) {
+        fixedHistory.push({ t: timeOfDay, v: fixedPower });
+        trackingHistory.push({ t: timeOfDay, v: trackingPower });
+    }
+
+    ctx.clearRect(0, 0, W, H);
+    drawSky(sun);
+    drawGround();
+    const sunPos = drawSun(sun);
+    const cx = W * 0.35;
+    drawPanel(panelAngle, fixedPower, sunPos, cx, 'Fixed Panel');
+    drawPanel(optAngle, trackingPower, sunPos, cx + 250, 'Sun Tracker');
+    const gw = Math.min(350, W * 0.35);
+    const gh = 140;
+    const gx = W * 0.55;
+    const gy = H * 0.62;
+    drawGraph(fixedHistory, trackingHistory, gx, gy, gw, gh, 'Power Output (W/m\u00b2)');
+    drawStats();
+
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#8af';
+    const optText = `Optimal angle now: ${optAngle.toFixed(1)}\u00b0`;
+    ctx.fillText(optText, cx + 125, H * 0.55 - 10);
+
+    requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

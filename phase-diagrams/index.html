@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phase Diagram Explorer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+#title {
+    position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+    color: #34d399; font-size: 20px; font-weight: bold; z-index: 10;
+    text-shadow: 0 0 20px rgba(52,211,153,0.5);
+    pointer-events: none;
+}
+#phase-display {
+    position: fixed; top: 85px; left: 50%; transform: translateX(-50%);
+    color: #a7f3d0; font-size: 16px; z-index: 10; pointer-events: none;
+    text-shadow: 0 0 10px rgba(167,243,208,0.4);
+}
+#instructions {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    color: #64748b; font-size: 13px; z-index: 10;
+    background: rgba(0,0,0,0.7); padding: 8px 16px; border-radius: 8px;
+}
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title">Phase Diagram Explorer - Water (H&#8322;O)</div>
+<div id="phase-display">Current Phase: <span id="currentPhase">Liquid</span></div>
+<div id="instructions">Click and drag the point on the diagram to explore phases. The right panel shows a real-time phase transition animation.</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+let diagramX, diagramY, diagramW, diagramH;
+let vizX, vizY, vizW, vizH;
+
+// State point (temperature in K, pressure in Pa on log scale)
+let stateT = 300; // Kelvin
+let stateP = 5;   // log10(Pa), so 10^5 Pa = 1 atm
+let dragging = false;
+let currentPhase = 'liquid';
+let prevPhase = 'liquid';
+let transitionTime = 0;
+let particles = [];
+
+// Phase boundary functions (simplified for water)
+// Solid-liquid (Clausius-Clapeyron, negative slope for water)
+function solidLiquidP(T) {
+    // Ice has negative slope: P increases as T decreases
+    return 5 + (273.15 - T) * 0.04;
+}
+
+// Liquid-gas (Clausius-Clapeyron)
+function liquidGasP(T) {
+    // Antoine-like equation
+    return 5 + (T - 373.15) * 0.025;
+}
+
+// Solid-gas (sublimation)
+function solidGasP(T) {
+    return 5 + (T - 273.15) * 0.035;
+}
+
+// Triple point: 273.16 K, ~611 Pa (log10 = 2.79)
+const tripleT = 273.16;
+const tripleP = 2.79;
+
+// Critical point: 647 K, 22.064 MPa (log10 = 7.34)
+const critT = 647;
+const critP = 7.34;
+
+function getPhase(T, P) {
+    // Below triple point pressure: solid or gas
+    if (P < tripleP) {
+        // Sublimation curve
+        const sublT = tripleT + (P - tripleP) / 0.035;
+        return T < sublT ? 'solid' : 'gas';
+    }
+    // Above critical point
+    if (T > critT && P < critP) return 'gas';
+    if (T > critT && P >= critP) return 'supercritical';
+
+    // Between triple and critical pressure
+    // Check solid-liquid boundary
+    const slP = solidLiquidP(T);
+    if (P > slP && T < tripleT + 20) return 'solid';
+
+    // Check liquid-gas boundary
+    const lgT = 373.15 + (P - 5) / 0.025;
+    if (T < lgT && T > 200) return 'liquid';
+    if (T >= lgT) return 'gas';
+
+    // Check if solid
+    if (T < tripleT - 10) return 'solid';
+
+    return 'liquid';
+}
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+
+    const margin = 80;
+    diagramW = Math.min(W * 0.5, W - 400);
+    diagramH = H - 200;
+    diagramX = margin;
+    diagramY = 110;
+
+    vizW = W - diagramW - margin * 3;
+    vizH = diagramH;
+    vizX = diagramX + diagramW + margin;
+    vizY = diagramY;
+}
+
+// Map temperature/pressure to diagram coordinates
+const Tmin = 200, Tmax = 700;
+const Pmin = 0, Pmax = 9; // log10(Pa)
+
+function tToX(T) { return diagramX + (T - Tmin) / (Tmax - Tmin) * diagramW; }
+function pToY(P) { return diagramY + diagramH - (P - Pmin) / (Pmax - Pmin) * diagramH; }
+function xToT(x) { return Tmin + (x - diagramX) / diagramW * (Tmax - Tmin); }
+function yToP(y) { return Pmin + (diagramH - (y - diagramY)) / diagramH * (Pmax - Pmin); }
+
+function initParticles() {
+    particles = [];
+    for (let i = 0; i < 120; i++) {
+        particles.push({
+            x: vizX + Math.random() * vizW,
+            y: vizY + Math.random() * vizH,
+            vx: (Math.random() - 0.5) * 2,
+            vy: (Math.random() - 0.5) * 2,
+            r: 4 + Math.random() * 3,
+            phase: 'liquid'
+        });
+    }
+}
+
+function updateParticles() {
+    const phase = currentPhase;
+    let speedMult, attraction, jitter;
+
+    switch (phase) {
+        case 'solid':
+            speedMult = 0.02; attraction = 0.1; jitter = 0.3;
+            break;
+        case 'liquid':
+            speedMult = 0.3; attraction = 0.01; jitter = 1.5;
+            break;
+        case 'gas':
+            speedMult = 1.0; attraction = -0.005; jitter = 3;
+            break;
+        case 'supercritical':
+            speedMult = 0.8; attraction = -0.002; jitter = 2.5;
+            break;
+        default:
+            speedMult = 0.3; attraction = 0.01; jitter = 1.5;
+    }
+
+    const centerX = vizX + vizW / 2;
+    const centerY = vizY + vizH / 2;
+
+    for (const p of particles) {
+        // Jitter
+        p.vx += (Math.random() - 0.5) * jitter;
+        p.vy += (Math.random() - 0.5) * jitter;
+
+        // Attraction/repulsion to center
+        const dx = centerX - p.x;
+        const dy = centerY - p.y;
+        p.vx += dx * attraction * 0.001;
+        p.vy += dy * attraction * 0.001;
+
+        // Damping
+        p.vx *= 0.95;
+        p.vy *= 0.95;
+
+        // Speed limit
+        const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+        const maxSpeed = speedMult * 5;
+        if (speed > maxSpeed) {
+            p.vx = (p.vx / speed) * maxSpeed;
+            p.vy = (p.vy / speed) * maxSpeed;
+        }
+
+        p.x += p.vx;
+        p.y += p.vy;
+
+        // Bounce off viz boundaries
+        if (p.x < vizX + p.r) { p.x = vizX + p.r; p.vx *= -0.8; }
+        if (p.x > vizX + vizW - p.r) { p.x = vizX + vizW - p.r; p.vx *= -0.8; }
+        if (p.y < vizY + p.r) { p.y = vizY + p.r; p.vy *= -0.8; }
+        if (p.y > vizY + vizH - p.r) { p.y = vizY + vizH - p.r; p.vy *= -0.8; }
+
+        // For solid: grid arrangement
+        if (phase === 'solid') {
+            const cols = 12;
+            const rows = 10;
+            const idx = particles.indexOf(p);
+            const targetX = vizX + 30 + (idx % cols) * ((vizW - 60) / cols);
+            const targetY = vizY + 30 + Math.floor(idx / cols) * ((vizH - 60) / rows);
+            p.x += (targetX - p.x) * 0.05;
+            p.y += (targetY - p.y) * 0.05;
+        }
+    }
+
+    // Simple particle-particle repulsion
+    for (let i = 0; i < particles.length; i++) {
+        for (let j = i + 1; j < particles.length; j++) {
+            const dx = particles[j].x - particles[i].x;
+            const dy = particles[j].y - particles[i].y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const minDist = particles[i].r + particles[j].r + (phase === 'gas' ? 2 : phase === 'solid' ? 0 : 1);
+            if (dist < minDist && dist > 0) {
+                const force = (minDist - dist) / dist * 0.3;
+                particles[i].x -= dx * force;
+                particles[i].y -= dy * force;
+                particles[j].x += dx * force;
+                particles[j].y += dy * force;
+            }
+        }
+    }
+}
+
+function drawDiagram() {
+    // Background for diagram area
+    ctx.fillStyle = 'rgba(15,20,40,0.9)';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(diagramX - 20, diagramY - 15, diagramW + 40, diagramH + 60, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    // Fill phase regions with colors
+    for (let px = 0; px < diagramW; px += 3) {
+        for (let py = 0; py < diagramH; py += 3) {
+            const T = xToT(diagramX + px);
+            const P = yToP(diagramY + py);
+            const phase = getPhase(T, P);
+            let color;
+            switch (phase) {
+                case 'solid': color = 'rgba(96,165,250,0.15)'; break;
+                case 'liquid': color = 'rgba(52,211,153,0.15)'; break;
+                case 'gas': color = 'rgba(251,146,60,0.12)'; break;
+                case 'supercritical': color = 'rgba(168,85,247,0.12)'; break;
+            }
+            ctx.fillStyle = color;
+            ctx.fillRect(diagramX + px, diagramY + py, 3, 3);
+        }
+    }
+
+    // Draw phase boundaries
+    ctx.lineWidth = 2;
+
+    // Solid-Liquid line (from triple point upward)
+    ctx.strokeStyle = '#60a5fa';
+    ctx.beginPath();
+    for (let P = tripleP; P <= Pmax; P += 0.1) {
+        const T = tripleT - (P - tripleP) / 0.04;
+        const x = tToX(T);
+        const y = pToY(P);
+        if (P === tripleP) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Liquid-Gas line (from triple point to critical point)
+    ctx.strokeStyle = '#34d399';
+    ctx.beginPath();
+    let first = true;
+    for (let T = tripleT; T <= critT; T += 1) {
+        const P = 5 + (T - 373.15) * 0.025;
+        if (P < tripleP) continue;
+        const x = tToX(T);
+        const y = pToY(P);
+        if (first) { ctx.moveTo(x, y); first = false; }
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Solid-Gas line (sublimation, from low T to triple point)
+    ctx.strokeStyle = '#fb923c';
+    ctx.beginPath();
+    first = true;
+    for (let T = Tmin; T <= tripleT; T += 1) {
+        const P = tripleP + (T - tripleT) * 0.035;
+        if (P < Pmin) continue;
+        const x = tToX(T);
+        const y = pToY(P);
+        if (first) { ctx.moveTo(x, y); first = false; }
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Triple point
+    ctx.beginPath();
+    ctx.arc(tToX(tripleT), pToY(tripleP), 6, 0, Math.PI * 2);
+    ctx.fillStyle = '#fbbf24';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('Triple Point', tToX(tripleT) + 10, pToY(tripleP) - 8);
+    ctx.fillText('(273.16 K, 611 Pa)', tToX(tripleT) + 10, pToY(tripleP) + 6);
+
+    // Critical point
+    ctx.beginPath();
+    ctx.arc(tToX(critT), pToY(critP), 6, 0, Math.PI * 2);
+    ctx.fillStyle = '#a855f7';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+    ctx.fillStyle = '#a855f7';
+    ctx.fillText('Critical Point', tToX(critT) + 10, pToY(critP) - 8);
+    ctx.fillText('(647 K, 22 MPa)', tToX(critT) + 10, pToY(critP) + 6);
+
+    // Phase labels
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillStyle = 'rgba(96,165,250,0.7)';
+    ctx.fillText('SOLID', tToX(230), pToY(6));
+    ctx.fillStyle = 'rgba(52,211,153,0.7)';
+    ctx.fillText('LIQUID', tToX(380), pToY(6.5));
+    ctx.fillStyle = 'rgba(251,146,60,0.7)';
+    ctx.fillText('GAS', tToX(500), pToY(2.5));
+    ctx.fillStyle = 'rgba(168,85,247,0.5)';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Supercritical', tToX(660), pToY(8));
+
+    // Axes
+    ctx.strokeStyle = '#64748b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(diagramX, diagramY);
+    ctx.lineTo(diagramX, diagramY + diagramH);
+    ctx.lineTo(diagramX + diagramW, diagramY + diagramH);
+    ctx.stroke();
+
+    // Axis labels
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Temperature (K)', diagramX + diagramW / 2, diagramY + diagramH + 40);
+
+    ctx.save();
+    ctx.translate(diagramX - 50, diagramY + diagramH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('Pressure (log\u2081\u2080 Pa)', 0, 0);
+    ctx.restore();
+
+    // Tick marks
+    ctx.textAlign = 'center';
+    ctx.font = '10px sans-serif';
+    for (let T = 200; T <= 700; T += 100) {
+        const x = tToX(T);
+        ctx.beginPath();
+        ctx.moveTo(x, diagramY + diagramH);
+        ctx.lineTo(x, diagramY + diagramH + 5);
+        ctx.stroke();
+        ctx.fillText(T + '', x, diagramY + diagramH + 18);
+    }
+    ctx.textAlign = 'right';
+    for (let P = 0; P <= 9; P += 1) {
+        const y = pToY(P);
+        ctx.beginPath();
+        ctx.moveTo(diagramX - 5, y);
+        ctx.lineTo(diagramX, y);
+        ctx.stroke();
+        ctx.fillText('10^' + P, diagramX - 10, y + 4);
+    }
+
+    // State point
+    const sx = tToX(stateT);
+    const sy = pToY(stateP);
+
+    // Crosshairs
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(sx, diagramY);
+    ctx.lineTo(sx, diagramY + diagramH);
+    ctx.moveTo(diagramX, sy);
+    ctx.lineTo(diagramX + diagramW, sy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Point
+    ctx.beginPath();
+    ctx.arc(sx, sy, 8, 0, Math.PI * 2);
+    ctx.fillStyle = '#f43f5e';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Point label
+    ctx.fillStyle = '#f43f5e';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`T=${stateT.toFixed(0)}K, P=10^${stateP.toFixed(1)}Pa`, sx + 12, sy - 5);
+}
+
+function drawVisualization() {
+    // Background for viz area
+    ctx.fillStyle = 'rgba(15,20,40,0.9)';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(vizX - 10, vizY - 15, vizW + 20, vizH + 35, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    // Title
+    let phaseColor;
+    switch (currentPhase) {
+        case 'solid': phaseColor = '#60a5fa'; break;
+        case 'liquid': phaseColor = '#34d399'; break;
+        case 'gas': phaseColor = '#fb923c'; break;
+        case 'supercritical': phaseColor = '#a855f7'; break;
+    }
+    ctx.fillStyle = phaseColor;
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(currentPhase.charAt(0).toUpperCase() + currentPhase.slice(1) + ' Phase', vizX + vizW / 2, vizY + vizH + 15);
+
+    // Draw particles
+    for (const p of particles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = phaseColor;
+        ctx.globalAlpha = currentPhase === 'gas' ? 0.6 : 0.85;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+
+        // Bonds for solid
+        if (currentPhase === 'solid') {
+            for (const p2 of particles) {
+                if (p === p2) continue;
+                const dx = p2.x - p.x;
+                const dy = p2.y - p.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 40) {
+                    ctx.strokeStyle = 'rgba(96,165,250,0.2)';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(p.x, p.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    ctx.stroke();
+                }
+            }
+        }
+        // Looser bonds for liquid
+        if (currentPhase === 'liquid') {
+            for (const p2 of particles) {
+                if (p === p2) continue;
+                const dx = p2.x - p.x;
+                const dy = p2.y - p.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 25) {
+                    ctx.strokeStyle = 'rgba(52,211,153,0.1)';
+                    ctx.lineWidth = 0.5;
+                    ctx.beginPath();
+                    ctx.moveTo(p.x, p.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    ctx.stroke();
+                }
+            }
+        }
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    drawDiagram();
+    updateParticles();
+    drawVisualization();
+
+    document.getElementById('currentPhase').textContent =
+        currentPhase.charAt(0).toUpperCase() + currentPhase.slice(1);
+    document.getElementById('currentPhase').style.color =
+        currentPhase === 'solid' ? '#60a5fa' :
+        currentPhase === 'liquid' ? '#34d399' :
+        currentPhase === 'gas' ? '#fb923c' : '#a855f7';
+}
+
+function animate() {
+    draw();
+    requestAnimationFrame(animate);
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    const sx = tToX(stateT);
+    const sy = pToY(stateP);
+    const dx = e.clientX - sx;
+    const dy = e.clientY - sy;
+    if (dx * dx + dy * dy < 400) {
+        dragging = true;
+    }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (dragging) {
+        stateT = Math.max(Tmin, Math.min(Tmax, xToT(e.clientX)));
+        stateP = Math.max(Pmin, Math.min(Pmax, yToP(e.clientY)));
+        const newPhase = getPhase(stateT, stateP);
+        if (newPhase !== currentPhase) {
+            prevPhase = currentPhase;
+            currentPhase = newPhase;
+            transitionTime = Date.now();
+        }
+    }
+});
+
+canvas.addEventListener('mouseup', () => { dragging = false; });
+canvas.addEventListener('mouseleave', () => { dragging = false; });
+
+// Touch support
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    const sx = tToX(stateT);
+    const sy = pToY(stateP);
+    const dx = touch.clientX - sx;
+    const dy = touch.clientY - sy;
+    if (dx * dx + dy * dy < 1600) {
+        dragging = true;
+    }
+});
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (dragging) {
+        const touch = e.touches[0];
+        stateT = Math.max(Tmin, Math.min(Tmax, xToT(touch.clientX)));
+        stateP = Math.max(Pmin, Math.min(Pmax, yToP(touch.clientY)));
+        const newPhase = getPhase(stateT, stateP);
+        if (newPhase !== currentPhase) {
+            prevPhase = currentPhase;
+            currentPhase = newPhase;
+        }
+    }
+});
+canvas.addEventListener('touchend', () => { dragging = false; });
+
+window.addEventListener('resize', () => { resize(); initParticles(); });
+
+resize();
+initParticles();
+currentPhase = getPhase(stateT, stateP);
+animate();
+</script>
+</body>
+</html>

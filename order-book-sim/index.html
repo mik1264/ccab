@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Market Microstructure Order Book</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 20px; font-weight: 700; z-index: 999; text-shadow: 0 0 20px rgba(251,191,36,0.5); font-family: sans-serif; }
+#controls { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; z-index: 999; background: rgba(0,0,0,0.75); padding: 12px 16px; border-radius: 10px; flex-wrap: wrap; justify-content: center; align-items: center; }
+#controls button { background: rgba(251,191,36,0.15); color: #fbbf24; border: 1px solid rgba(251,191,36,0.4); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+#controls button:hover { background: rgba(251,191,36,0.3); }
+#controls button.buy { border-color: #4ade80; color: #4ade80; }
+#controls button.sell { border-color: #ef4444; color: #ef4444; }
+#controls label { color: #ccc; font-size: 11px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+#controls input[type=range] { width: 80px; accent-color: #fbbf24; }
+#controls span { color: #fbbf24; font-size: 10px; }
+#info { position: fixed; top: 50px; right: 15px; color: #ccc; font-size: 12px; z-index: 999; background: rgba(0,0,0,0.7); padding: 12px; border-radius: 8px; line-height: 2; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div id="title">Market Microstructure Order Book</div>
+<div id="info">
+    <div>Mid Price: <span style="color:#fbbf24;font-weight:bold;" id="midPrice">$100.00</span></div>
+    <div>Spread: <span style="color:#fbbf24;" id="spread">$0.00</span></div>
+    <div>Best Bid: <span style="color:#4ade80;" id="bestBid">--</span></div>
+    <div>Best Ask: <span style="color:#ef4444;" id="bestAsk">--</span></div>
+    <div>Trades: <span style="color:#60a5fa;" id="tradeCount">0</span></div>
+    <div>Last Trade: <span style="color:#fbbf24;" id="lastTrade">--</span></div>
+</div>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <button class="buy" id="btnMarketBuy">Market Buy</button>
+    <button class="sell" id="btnMarketSell">Market Sell</button>
+    <button class="buy" id="btnBigBuy">Big Buy (100)</button>
+    <button class="sell" id="btnBigSell">Big Sell (100)</button>
+    <label>Order Rate <input type="range" id="orderRate" min="1" max="20" value="8"><span id="rateVal">8</span></label>
+    <button id="btnReset">Reset</button>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const rateSlider = document.getElementById('orderRate');
+rateSlider.oninput = () => document.getElementById('rateVal').textContent = rateSlider.value;
+
+// Order book structure
+let bids = {}; // price -> quantity (buy orders)
+let asks = {}; // price -> quantity (sell orders)
+let trades = [];
+let tradeHistory = []; // price, time
+let midPrice = 100;
+let priceHistory = [];
+let tickSize = 0.05;
+let frameCount = 0;
+let recentTrades = []; // for animation
+
+function roundPrice(p) {
+    return Math.round(p / tickSize) * tickSize;
+}
+
+function getBestBid() {
+    const prices = Object.keys(bids).map(Number).filter(p => bids[p] > 0);
+    return prices.length > 0 ? Math.max(...prices) : null;
+}
+
+function getBestAsk() {
+    const prices = Object.keys(asks).map(Number).filter(p => asks[p] > 0);
+    return prices.length > 0 ? Math.min(...prices) : null;
+}
+
+function addLimitOrder(side, price, qty) {
+    price = roundPrice(price);
+    if (side === 'buy') {
+        // Try to match with asks
+        let remaining = qty;
+        const askPrices = Object.keys(asks).map(Number).filter(p => asks[p] > 0).sort((a, b) => a - b);
+        for (const ap of askPrices) {
+            if (ap <= price && remaining > 0) {
+                const filled = Math.min(remaining, asks[ap]);
+                asks[ap] -= filled;
+                remaining -= filled;
+                if (asks[ap] <= 0) delete asks[ap];
+                executeTrade(ap, filled);
+            }
+        }
+        if (remaining > 0) {
+            bids[price] = (bids[price] || 0) + remaining;
+        }
+    } else {
+        let remaining = qty;
+        const bidPrices = Object.keys(bids).map(Number).filter(p => bids[p] > 0).sort((a, b) => b - a);
+        for (const bp of bidPrices) {
+            if (bp >= price && remaining > 0) {
+                const filled = Math.min(remaining, bids[bp]);
+                bids[bp] -= filled;
+                remaining -= filled;
+                if (bids[bp] <= 0) delete bids[bp];
+                executeTrade(bp, filled);
+            }
+        }
+        if (remaining > 0) {
+            asks[price] = (asks[price] || 0) + remaining;
+        }
+    }
+}
+
+function marketOrder(side, qty) {
+    let remaining = qty;
+    if (side === 'buy') {
+        const askPrices = Object.keys(asks).map(Number).filter(p => asks[p] > 0).sort((a, b) => a - b);
+        for (const ap of askPrices) {
+            if (remaining <= 0) break;
+            const filled = Math.min(remaining, asks[ap]);
+            asks[ap] -= filled;
+            remaining -= filled;
+            if (asks[ap] <= 0) delete asks[ap];
+            executeTrade(ap, filled);
+        }
+    } else {
+        const bidPrices = Object.keys(bids).map(Number).filter(p => bids[p] > 0).sort((a, b) => b - a);
+        for (const bp of bidPrices) {
+            if (remaining <= 0) break;
+            const filled = Math.min(remaining, bids[bp]);
+            bids[bp] -= filled;
+            remaining -= filled;
+            if (bids[bp] <= 0) delete bids[bp];
+            executeTrade(bp, filled);
+        }
+    }
+}
+
+function executeTrade(price, qty) {
+    trades.push({ price, qty, time: frameCount });
+    tradeHistory.push(price);
+    if (tradeHistory.length > 500) tradeHistory.shift();
+    midPrice = price;
+    recentTrades.push({ price, qty, time: frameCount, alpha: 1 });
+}
+
+function initBook() {
+    bids = {};
+    asks = {};
+    trades = [];
+    tradeHistory = [];
+    priceHistory = [];
+    recentTrades = [];
+    midPrice = 100;
+
+    // Seed the book
+    for (let i = 1; i <= 20; i++) {
+        const bp = roundPrice(100 - i * 0.1 - Math.random() * 0.2);
+        bids[bp] = Math.floor(5 + Math.random() * 30);
+        const ap = roundPrice(100 + i * 0.1 + Math.random() * 0.2);
+        asks[ap] = Math.floor(5 + Math.random() * 30);
+    }
+}
+
+function generateRandomOrders() {
+    const rate = parseInt(rateSlider.value);
+    if (Math.random() < rate / 60) {
+        const bb = getBestBid() || midPrice - 1;
+        const ba = getBestAsk() || midPrice + 1;
+        const mid = (bb + ba) / 2;
+
+        if (Math.random() < 0.15) {
+            // Market order
+            if (Math.random() < 0.5) {
+                marketOrder('buy', 1 + Math.floor(Math.random() * 5));
+            } else {
+                marketOrder('sell', 1 + Math.floor(Math.random() * 5));
+            }
+        } else {
+            // Limit order
+            if (Math.random() < 0.5) {
+                const price = mid - Math.random() * 3;
+                addLimitOrder('buy', price, 1 + Math.floor(Math.random() * 15));
+            } else {
+                const price = mid + Math.random() * 3;
+                addLimitOrder('sell', price, 1 + Math.floor(Math.random() * 15));
+            }
+        }
+
+        // Occasionally cancel old orders
+        if (Math.random() < 0.3) {
+            const bidKeys = Object.keys(bids).map(Number);
+            if (bidKeys.length > 0) {
+                const rk = bidKeys[Math.floor(Math.random() * bidKeys.length)];
+                bids[rk] = Math.max(0, bids[rk] - Math.floor(Math.random() * 5));
+                if (bids[rk] <= 0) delete bids[rk];
+            }
+        }
+        if (Math.random() < 0.3) {
+            const askKeys = Object.keys(asks).map(Number);
+            if (askKeys.length > 0) {
+                const rk = askKeys[Math.floor(Math.random() * askKeys.length)];
+                asks[rk] = Math.max(0, asks[rk] - Math.floor(Math.random() * 5));
+                if (asks[rk] <= 0) delete asks[rk];
+            }
+        }
+    }
+}
+
+document.getElementById('btnMarketBuy').onclick = () => marketOrder('buy', 5);
+document.getElementById('btnMarketSell').onclick = () => marketOrder('sell', 5);
+document.getElementById('btnBigBuy').onclick = () => marketOrder('buy', 100);
+document.getElementById('btnBigSell').onclick = () => marketOrder('sell', 100);
+document.getElementById('btnReset').onclick = initBook;
+
+function draw() {
+    frameCount++;
+    generateRandomOrders();
+
+    const bb = getBestBid();
+    const ba = getBestAsk();
+    if (bb && ba) {
+        midPrice = (bb + ba) / 2;
+    }
+    priceHistory.push(midPrice);
+    if (priceHistory.length > 300) priceHistory.shift();
+
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Layout
+    const bookLeft = W * 0.05, bookRight = W * 0.50;
+    const bookTop = H * 0.08, bookBottom = H * 0.70;
+    const depthLeft = W * 0.55, depthRight = W * 0.95;
+    const depthTop = H * 0.08, depthBottom = H * 0.45;
+    const priceChartTop = H * 0.50, priceChartBottom = H * 0.83;
+
+    // Order book visualization
+    const bookW = bookRight - bookLeft;
+    const bookH = bookBottom - bookTop;
+    const bookMidY = bookTop + bookH / 2;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Order Book', bookLeft, bookTop - 5);
+
+    // Get sorted bid/ask levels
+    const bidLevels = Object.entries(bids).map(([p, q]) => ({ price: Number(p), qty: q })).filter(l => l.qty > 0).sort((a, b) => b.price - a.price).slice(0, 20);
+    const askLevels = Object.entries(asks).map(([p, q]) => ({ price: Number(p), qty: q })).filter(l => l.qty > 0).sort((a, b) => a.price - b.price).slice(0, 20);
+
+    const maxQty = Math.max(1, ...bidLevels.map(l => l.qty), ...askLevels.map(l => l.qty));
+    const rowH = Math.min(18, bookH / 42);
+
+    // Spread line
+    ctx.strokeStyle = 'rgba(251,191,36,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(bookLeft, bookMidY);
+    ctx.lineTo(bookRight, bookMidY);
+    ctx.stroke();
+
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    if (bb && ba) {
+        ctx.fillText('Spread: $' + (ba - bb).toFixed(2), bookLeft + bookW / 2, bookMidY - 3);
+    }
+
+    // Ask levels (above midline, red)
+    askLevels.forEach((level, i) => {
+        const y = bookMidY - (i + 1) * rowH - 5;
+        const barW = (level.qty / maxQty) * bookW * 0.5;
+
+        // Bar
+        ctx.fillStyle = 'rgba(239,68,68,0.25)';
+        ctx.fillRect(bookLeft + bookW * 0.35, y, barW, rowH - 2);
+        ctx.strokeStyle = 'rgba(239,68,68,0.5)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bookLeft + bookW * 0.35, y, barW, rowH - 2);
+
+        // Price text
+        ctx.fillStyle = '#ef4444';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText('$' + level.price.toFixed(2), bookLeft + bookW * 0.33, y + rowH - 5);
+
+        // Qty text
+        ctx.textAlign = 'left';
+        ctx.fillText(level.qty.toString(), bookLeft + bookW * 0.35 + barW + 5, y + rowH - 5);
+    });
+
+    // Bid levels (below midline, green)
+    bidLevels.forEach((level, i) => {
+        const y = bookMidY + i * rowH + 8;
+        const barW = (level.qty / maxQty) * bookW * 0.5;
+
+        ctx.fillStyle = 'rgba(74,222,128,0.25)';
+        ctx.fillRect(bookLeft + bookW * 0.35, y, barW, rowH - 2);
+        ctx.strokeStyle = 'rgba(74,222,128,0.5)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bookLeft + bookW * 0.35, y, barW, rowH - 2);
+
+        ctx.fillStyle = '#4ade80';
+        ctx.font = '10px monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText('$' + level.price.toFixed(2), bookLeft + bookW * 0.33, y + rowH - 5);
+
+        ctx.textAlign = 'left';
+        ctx.fillText(level.qty.toString(), bookLeft + bookW * 0.35 + barW + 5, y + rowH - 5);
+    });
+
+    // Depth chart
+    const dW = depthRight - depthLeft;
+    const dH = depthBottom - depthTop;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Depth Chart', depthLeft, depthTop - 5);
+
+    // Compute cumulative depth
+    const cumBids = [];
+    let cumBidQty = 0;
+    bidLevels.forEach(l => {
+        cumBidQty += l.qty;
+        cumBids.push({ price: l.price, cum: cumBidQty });
+    });
+
+    const cumAsks = [];
+    let cumAskQty = 0;
+    askLevels.forEach(l => {
+        cumAskQty += l.qty;
+        cumAsks.push({ price: l.price, cum: cumAskQty });
+    });
+
+    const maxCum = Math.max(1, cumBidQty, cumAskQty);
+    const allPrices = [...cumBids.map(l => l.price), ...cumAsks.map(l => l.price)];
+    const minDepthP = allPrices.length > 0 ? Math.min(...allPrices) : midPrice - 5;
+    const maxDepthP = allPrices.length > 0 ? Math.max(...allPrices) : midPrice + 5;
+    const depthPRange = maxDepthP - minDepthP || 1;
+
+    const dMapX = (price) => depthLeft + ((price - minDepthP) / depthPRange) * dW;
+    const dMapY = (cum) => depthBottom - (cum / maxCum) * dH * 0.9;
+
+    // Bid depth (green, left side)
+    if (cumBids.length > 0) {
+        ctx.beginPath();
+        ctx.moveTo(dMapX(cumBids[0].price), depthBottom);
+        cumBids.forEach(l => {
+            ctx.lineTo(dMapX(l.price), dMapY(l.cum));
+        });
+        ctx.lineTo(dMapX(cumBids[cumBids.length - 1].price), depthBottom);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(74,222,128,0.15)';
+        ctx.fill();
+        ctx.strokeStyle = '#4ade80';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        cumBids.forEach((l, i) => {
+            const x = dMapX(l.price), y = dMapY(l.cum);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+    }
+
+    // Ask depth (red, right side)
+    if (cumAsks.length > 0) {
+        ctx.beginPath();
+        ctx.moveTo(dMapX(cumAsks[0].price), depthBottom);
+        cumAsks.forEach(l => {
+            ctx.lineTo(dMapX(l.price), dMapY(l.cum));
+        });
+        ctx.lineTo(dMapX(cumAsks[cumAsks.length - 1].price), depthBottom);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(239,68,68,0.15)';
+        ctx.fill();
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        cumAsks.forEach((l, i) => {
+            const x = dMapX(l.price), y = dMapY(l.cum);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+    }
+
+    // Mid price line on depth chart
+    ctx.strokeStyle = 'rgba(251,191,36,0.4)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(dMapX(midPrice), depthTop);
+    ctx.lineTo(dMapX(midPrice), depthBottom);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Price chart
+    const pcLeft = depthLeft, pcRight = depthRight;
+    const pcW = pcRight - pcLeft;
+    const pcH = priceChartBottom - priceChartTop;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Price History', pcLeft, priceChartTop - 5);
+
+    if (priceHistory.length > 1) {
+        const minPH = Math.min(...priceHistory) * 0.998;
+        const maxPH = Math.max(...priceHistory) * 1.002;
+
+        ctx.beginPath();
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        priceHistory.forEach((p, i) => {
+            const x = pcLeft + (i / (priceHistory.length - 1)) * pcW;
+            const y = priceChartBottom - ((p - minPH) / (maxPH - minPH)) * pcH;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+
+        // Trade ticks
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText('$' + priceHistory[priceHistory.length - 1].toFixed(2), pcRight, priceChartTop + 15);
+    }
+
+    // Animate recent trades
+    recentTrades = recentTrades.filter(t => t.alpha > 0);
+    recentTrades.forEach(t => {
+        t.alpha -= 0.01;
+        // Flash on order book
+        ctx.fillStyle = `rgba(251,191,36,${t.alpha * 0.5})`;
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('TRADE $' + t.price.toFixed(2) + ' x' + t.qty, W / 2, H * 0.88 + (1 - t.alpha) * 20);
+    });
+
+    // Update info
+    document.getElementById('midPrice').textContent = '$' + midPrice.toFixed(2);
+    document.getElementById('bestBid').textContent = bb ? '$' + bb.toFixed(2) : '--';
+    document.getElementById('bestAsk').textContent = ba ? '$' + ba.toFixed(2) : '--';
+    document.getElementById('spread').textContent = (bb && ba) ? '$' + (ba - bb).toFixed(2) : '--';
+    document.getElementById('tradeCount').textContent = trades.length;
+    if (trades.length > 0) {
+        const lt = trades[trades.length - 1];
+        document.getElementById('lastTrade').textContent = '$' + lt.price.toFixed(2) + ' x' + lt.qty;
+    }
+
+    requestAnimationFrame(draw);
+}
+
+initBook();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RRT Path Planning</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+a.back { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; font-family: sans-serif; }
+a.back:hover { background: rgba(0,0,0,0.9); }
+.title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #e2e8f0; font-size: 22px; font-weight: 700; z-index: 999; text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+.controls { position: fixed; right: 15px; top: 15px; background: rgba(10,14,26,0.92); border: 1px solid rgba(251,191,36,0.25); border-radius: 12px; padding: 18px; z-index: 999; color: #cbd5e1; font-size: 13px; width: 220px; }
+.controls h3 { color: #fbbf24; margin-bottom: 10px; font-size: 15px; }
+.btn { display: inline-block; padding: 7px 12px; background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.4); border-radius: 6px; color: #fbbf24; cursor: pointer; font-size: 12px; margin: 3px 2px; }
+.btn:hover { background: rgba(251,191,36,0.3); }
+.btn.active { background: rgba(251,191,36,0.4); border-color: #fbbf24; }
+.slider-group { margin-bottom: 10px; }
+.slider-group label { display: flex; justify-content: space-between; margin-bottom: 3px; }
+.slider-group label span.val { color: #fbbf24; font-weight: 600; }
+input[type="range"] { width: 100%; accent-color: #fbbf24; cursor: pointer; }
+.info { margin-top: 10px; font-size: 11px; line-height: 1.7; border-top: 1px solid rgba(251,191,36,0.15); padding-top: 8px; }
+.info .label { color: #94a3b8; }
+.info .value { color: #fbbf24; font-weight: 600; }
+.mode-label { color: #94a3b8; font-size: 11px; margin-bottom: 4px; margin-top: 6px; }
+.hint { color: #64748b; font-size: 10px; margin-top: 8px; line-height: 1.5; border-top: 1px solid rgba(251,191,36,0.1); padding-top: 6px; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back">&#8592; Back to Gallery</a>
+<div class="title">RRT Path Planning</div>
+<div class="controls">
+    <h3>RRT Explorer</h3>
+    <div class="slider-group">
+        <label>Step Size <span class="val" id="stepVal">25</span></label>
+        <input type="range" id="stepSlider" min="10" max="60" step="1" value="25">
+    </div>
+    <div class="slider-group">
+        <label>Goal Bias <span class="val" id="biasVal">10%</span></label>
+        <input type="range" id="biasSlider" min="0" max="30" step="1" value="10">
+    </div>
+    <div class="mode-label">Click Mode:</div>
+    <span class="btn active" id="obsBtn">Add Obstacle</span>
+    <span class="btn" id="startBtn">Set Start</span>
+    <span class="btn" id="goalBtn">Set Goal</span>
+    <br>
+    <span class="btn" id="runBtn" style="margin-top:8px;">Run RRT</span>
+    <span class="btn" id="clearBtn">Clear All</span>
+    <span class="btn" id="presetBtn">Preset</span>
+    <div class="info">
+        <div><span class="label">Nodes: </span><span class="value" id="nodesStat">0</span></div>
+        <div><span class="label">Status: </span><span class="value" id="statusStat">Ready</span></div>
+        <div><span class="label">Path Length: </span><span class="value" id="pathStat">-</span></div>
+    </div>
+    <div class="hint">Click to add obstacles. Set start (green) and goal (red), then Run RRT to find a path.</div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize);
+    resize();
+
+    let stepSize = 25;
+    let goalBias = 0.1;
+    let clickMode = 'obstacle'; // 'obstacle', 'start', 'goal'
+
+    let startPos = { x: 80, y: H / 2 };
+    let goalPos = { x: W - 300, y: H / 2 };
+    let obstacles = [];
+    let nodes = [];
+    let edges = [];
+    let path = [];
+    let running = false;
+    let found = false;
+    let animatingPath = false;
+    let pathAnimProgress = 0;
+    let nodesPerFrame = 5;
+
+    // Sliders
+    document.getElementById('stepSlider').oninput = function() { stepSize = parseInt(this.value); document.getElementById('stepVal').textContent = stepSize; };
+    document.getElementById('biasSlider').oninput = function() { goalBias = parseInt(this.value) / 100; document.getElementById('biasVal').textContent = Math.round(goalBias*100)+'%'; };
+
+    function setMode(mode) {
+        clickMode = mode;
+        document.querySelectorAll('.controls .btn').forEach(b => b.classList.remove('active'));
+        document.getElementById(mode === 'obstacle' ? 'obsBtn' : mode === 'start' ? 'startBtn' : 'goalBtn').classList.add('active');
+    }
+    document.getElementById('obsBtn').onclick = () => setMode('obstacle');
+    document.getElementById('startBtn').onclick = () => setMode('start');
+    document.getElementById('goalBtn').onclick = () => setMode('goal');
+
+    document.getElementById('runBtn').onclick = function() {
+        if (running) { running = false; this.textContent = 'Run RRT'; return; }
+        resetRRT();
+        running = true;
+        found = false;
+        this.textContent = 'Stop';
+        document.getElementById('statusStat').textContent = 'Exploring...';
+    };
+
+    document.getElementById('clearBtn').onclick = function() {
+        obstacles = [];
+        resetRRT();
+        running = false;
+        found = false;
+        document.getElementById('runBtn').textContent = 'Run RRT';
+        document.getElementById('statusStat').textContent = 'Ready';
+        document.getElementById('pathStat').textContent = '-';
+    };
+
+    document.getElementById('presetBtn').onclick = function() {
+        obstacles = [];
+        const margin = 100;
+        // Create a maze-like environment
+        obstacles.push({ x: W*0.3, y: 50, w: 40, h: H*0.6 });
+        obstacles.push({ x: W*0.5, y: H*0.3, w: 40, h: H*0.65 });
+        obstacles.push({ x: W*0.7, y: 50, w: 40, h: H*0.5 });
+        obstacles.push({ x: W*0.15, y: H*0.5, w: W*0.12, h: 40 });
+        obstacles.push({ x: W*0.6, y: H*0.2, w: W*0.12, h: 40 });
+        startPos = { x: 80, y: H/2 };
+        goalPos = { x: W - 300, y: H/2 };
+        resetRRT();
+    };
+
+    let dragStart = null;
+    canvas.addEventListener('mousedown', function(e) {
+        const x = e.clientX, y = e.clientY;
+        if (clickMode === 'start') {
+            startPos = { x, y };
+            resetRRT();
+        } else if (clickMode === 'goal') {
+            goalPos = { x, y };
+            resetRRT();
+        } else {
+            dragStart = { x, y };
+        }
+    });
+
+    canvas.addEventListener('mouseup', function(e) {
+        if (dragStart && clickMode === 'obstacle') {
+            const x = Math.min(dragStart.x, e.clientX);
+            const y = Math.min(dragStart.y, e.clientY);
+            const w = Math.max(30, Math.abs(e.clientX - dragStart.x));
+            const h = Math.max(30, Math.abs(e.clientY - dragStart.y));
+            obstacles.push({ x, y, w, h });
+            resetRRT();
+        }
+        dragStart = null;
+    });
+
+    function resetRRT() {
+        nodes = [{ x: startPos.x, y: startPos.y, parent: -1 }];
+        edges = [];
+        path = [];
+        found = false;
+        animatingPath = false;
+        pathAnimProgress = 0;
+    }
+
+    function isCollision(x1, y1, x2, y2) {
+        // Check line segment against all obstacles
+        const steps = Math.ceil(Math.sqrt((x2-x1)**2 + (y2-y1)**2) / 5);
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const px = x1 + (x2 - x1) * t;
+            const py = y1 + (y2 - y1) * t;
+            for (const obs of obstacles) {
+                if (px >= obs.x && px <= obs.x + obs.w && py >= obs.y && py <= obs.y + obs.h) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    function pointInObstacle(x, y) {
+        for (const obs of obstacles) {
+            if (x >= obs.x && x <= obs.x + obs.w && y >= obs.y && y <= obs.y + obs.h) return true;
+        }
+        return false;
+    }
+
+    function nearest(x, y) {
+        let minDist = Infinity, minIdx = 0;
+        for (let i = 0; i < nodes.length; i++) {
+            const d = (nodes[i].x - x)**2 + (nodes[i].y - y)**2;
+            if (d < minDist) { minDist = d; minIdx = i; }
+        }
+        return minIdx;
+    }
+
+    function rrtStep() {
+        // Sample random point (with goal bias)
+        let rx, ry;
+        if (Math.random() < goalBias) {
+            rx = goalPos.x;
+            ry = goalPos.y;
+        } else {
+            rx = Math.random() * W;
+            ry = Math.random() * H;
+        }
+
+        if (pointInObstacle(rx, ry)) return;
+
+        // Find nearest node
+        const nIdx = nearest(rx, ry);
+        const n = nodes[nIdx];
+
+        // Steer toward random point
+        const dx = rx - n.x;
+        const dy = ry - n.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        const nx = n.x + (dx / dist) * Math.min(stepSize, dist);
+        const ny = n.y + (dy / dist) * Math.min(stepSize, dist);
+
+        // Check collision
+        if (isCollision(n.x, n.y, nx, ny)) return;
+        if (pointInObstacle(nx, ny)) return;
+
+        // Add node
+        const newIdx = nodes.length;
+        nodes.push({ x: nx, y: ny, parent: nIdx });
+        edges.push({ from: nIdx, to: newIdx });
+
+        // Check if near goal
+        const goalDist = Math.sqrt((nx - goalPos.x)**2 + (ny - goalPos.y)**2);
+        if (goalDist < stepSize * 1.5 && !isCollision(nx, ny, goalPos.x, goalPos.y)) {
+            const goalIdx = nodes.length;
+            nodes.push({ x: goalPos.x, y: goalPos.y, parent: newIdx });
+            edges.push({ from: newIdx, to: goalIdx });
+
+            // Extract path
+            path = [];
+            let idx = goalIdx;
+            while (idx !== -1) {
+                path.unshift(nodes[idx]);
+                idx = nodes[idx].parent;
+            }
+            found = true;
+            running = false;
+            animatingPath = true;
+            pathAnimProgress = 0;
+            document.getElementById('runBtn').textContent = 'Run RRT';
+            document.getElementById('statusStat').textContent = 'Path Found!';
+
+            let pathLen = 0;
+            for (let i = 1; i < path.length; i++) {
+                pathLen += Math.sqrt((path[i].x - path[i-1].x)**2 + (path[i].y - path[i-1].y)**2);
+            }
+            document.getElementById('pathStat').textContent = Math.round(pathLen) + 'px';
+        }
+    }
+
+    function drawObstacles() {
+        obstacles.forEach(obs => {
+            ctx.fillStyle = 'rgba(239,68,68,0.15)';
+            ctx.strokeStyle = 'rgba(239,68,68,0.5)';
+            ctx.lineWidth = 1.5;
+            ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+            ctx.strokeRect(obs.x, obs.y, obs.w, obs.h);
+
+            // Hatching
+            ctx.strokeStyle = 'rgba(239,68,68,0.1)';
+            ctx.lineWidth = 1;
+            for (let d = -obs.h; d < obs.w; d += 12) {
+                ctx.beginPath();
+                ctx.moveTo(obs.x + Math.max(0, d), obs.y + Math.max(0, -d));
+                ctx.lineTo(obs.x + Math.min(obs.w, d + obs.h), obs.y + Math.min(obs.h, obs.h - d + obs.w - obs.w));
+                const x1 = obs.x + d;
+                const y1 = obs.y;
+                const x2 = x1 + obs.h;
+                const y2 = obs.y + obs.h;
+                ctx.moveTo(Math.max(obs.x, x1), y1 + Math.max(0, obs.x - x1));
+                ctx.lineTo(Math.min(obs.x + obs.w, x2), y2 - Math.max(0, x2 - obs.x - obs.w));
+                ctx.stroke();
+            }
+        });
+
+        // Drag preview
+        if (dragStart && clickMode === 'obstacle') {
+            // We'll show it via mouse position tracking
+        }
+    }
+
+    function drawTree() {
+        // Edges
+        ctx.strokeStyle = 'rgba(100,120,200,0.2)';
+        ctx.lineWidth = 1;
+        edges.forEach(e => {
+            ctx.beginPath();
+            ctx.moveTo(nodes[e.from].x, nodes[e.from].y);
+            ctx.lineTo(nodes[e.to].x, nodes[e.to].y);
+            ctx.stroke();
+        });
+
+        // Nodes
+        ctx.fillStyle = 'rgba(100,120,200,0.3)';
+        nodes.forEach(n => {
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, 2, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    }
+
+    function drawPath() {
+        if (path.length < 2) return;
+
+        const progress = animatingPath ? Math.min(pathAnimProgress, 1) : 1;
+        const totalLen = path.length - 1;
+        const drawUpTo = Math.floor(progress * totalLen);
+        const frac = (progress * totalLen) - drawUpTo;
+
+        // Path glow
+        ctx.strokeStyle = 'rgba(251,191,36,0.15)';
+        ctx.lineWidth = 8;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        for (let i = 0; i <= drawUpTo && i < path.length; i++) {
+            if (i === 0) ctx.moveTo(path[i].x, path[i].y);
+            else ctx.lineTo(path[i].x, path[i].y);
+        }
+        if (drawUpTo < totalLen && frac > 0) {
+            const nx = path[drawUpTo].x + (path[drawUpTo+1].x - path[drawUpTo].x) * frac;
+            const ny = path[drawUpTo].y + (path[drawUpTo+1].y - path[drawUpTo].y) * frac;
+            ctx.lineTo(nx, ny);
+        }
+        ctx.stroke();
+
+        // Path line
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        for (let i = 0; i <= drawUpTo && i < path.length; i++) {
+            if (i === 0) ctx.moveTo(path[i].x, path[i].y);
+            else ctx.lineTo(path[i].x, path[i].y);
+        }
+        if (drawUpTo < totalLen && frac > 0) {
+            const nx = path[drawUpTo].x + (path[drawUpTo+1].x - path[drawUpTo].x) * frac;
+            const ny = path[drawUpTo].y + (path[drawUpTo+1].y - path[drawUpTo].y) * frac;
+            ctx.lineTo(nx, ny);
+        }
+        ctx.stroke();
+        ctx.lineCap = 'butt';
+
+        // Animated dot along path
+        if (found && !animatingPath) {
+            const t = (Date.now() / 2000) % 1;
+            const idx = Math.floor(t * totalLen);
+            const f = (t * totalLen) - idx;
+            if (idx < totalLen) {
+                const dx = path[idx].x + (path[idx+1].x - path[idx].x) * f;
+                const dy = path[idx].y + (path[idx+1].y - path[idx].y) * f;
+                ctx.fillStyle = '#fbbf24';
+                ctx.beginPath();
+                ctx.arc(dx, dy, 5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = 'rgba(251,191,36,0.3)';
+                ctx.beginPath();
+                ctx.arc(dx, dy, 10, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+
+    function drawStartGoal() {
+        // Start
+        const pulse = 0.6 + 0.3 * Math.sin(Date.now() / 400);
+        ctx.fillStyle = `rgba(52,211,153,${pulse})`;
+        ctx.beginPath();
+        ctx.arc(startPos.x, startPos.y, 12, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#34d399';
+        ctx.beginPath();
+        ctx.arc(startPos.x, startPos.y, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('S', startPos.x, startPos.y + 3.5);
+
+        // Goal
+        ctx.fillStyle = `rgba(239,68,68,${pulse})`;
+        ctx.beginPath();
+        ctx.arc(goalPos.x, goalPos.y, 12, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath();
+        ctx.arc(goalPos.x, goalPos.y, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.fillText('G', goalPos.x, goalPos.y + 3.5);
+        ctx.textAlign = 'left';
+    }
+
+    function animate() {
+        ctx.clearRect(0, 0, W, H);
+
+        const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.7);
+        bg.addColorStop(0, '#111827');
+        bg.addColorStop(1, '#0a0e1a');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        // Grid
+        ctx.strokeStyle = 'rgba(100,120,180,0.05)';
+        ctx.lineWidth = 1;
+        for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+        for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+        if (running && !found) {
+            for (let i = 0; i < nodesPerFrame; i++) rrtStep();
+            if (nodes.length > 10000) {
+                running = false;
+                document.getElementById('statusStat').textContent = 'Max nodes reached';
+                document.getElementById('runBtn').textContent = 'Run RRT';
+            }
+        }
+
+        if (animatingPath) {
+            pathAnimProgress += 0.02;
+            if (pathAnimProgress >= 1) animatingPath = false;
+        }
+
+        drawObstacles();
+        drawTree();
+        drawPath();
+        drawStartGoal();
+
+        document.getElementById('nodesStat').textContent = nodes.length;
+
+        requestAnimationFrame(animate);
+    }
+
+    resetRRT();
+    animate();
+})();
+</script>
+</body>
+</html>

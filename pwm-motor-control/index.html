@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PWM Motor Speed Control</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+a.back { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; font-family: sans-serif; }
+a.back:hover { background: rgba(0,0,0,0.9); }
+.title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #e2e8f0; font-size: 22px; font-weight: 700; z-index: 999; text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+.controls { position: fixed; right: 15px; top: 15px; background: rgba(10,14,26,0.92); border: 1px solid rgba(251,191,36,0.25); border-radius: 12px; padding: 18px; z-index: 999; color: #cbd5e1; font-size: 13px; width: 220px; }
+.controls h3 { color: #fbbf24; margin-bottom: 10px; font-size: 15px; }
+.slider-group { margin-bottom: 12px; }
+.slider-group label { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.slider-group label span.val { color: #fbbf24; font-weight: 600; }
+input[type="range"] { width: 100%; accent-color: #fbbf24; cursor: pointer; }
+.info { margin-top: 10px; font-size: 11px; line-height: 1.8; border-top: 1px solid rgba(251,191,36,0.15); padding-top: 8px; }
+.info .label { color: #94a3b8; }
+.info .value { color: #fbbf24; font-weight: 600; }
+.rpm-display { text-align: center; margin: 10px 0; padding: 12px; background: rgba(0,0,0,0.3); border-radius: 8px; border: 1px solid rgba(251,191,36,0.15); }
+.rpm-number { font-size: 28px; font-weight: 700; color: #fbbf24; }
+.rpm-label { font-size: 10px; color: #94a3b8; margin-top: 2px; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back">&#8592; Back to Gallery</a>
+<div class="title">PWM Motor Speed Control</div>
+<div class="controls">
+    <h3>Motor Control</h3>
+    <div class="slider-group">
+        <label>Duty Cycle <span class="val" id="dutyVal">50%</span></label>
+        <input type="range" id="dutySlider" min="0" max="100" step="1" value="50">
+    </div>
+    <div class="slider-group">
+        <label>PWM Frequency <span class="val" id="freqVal">50 Hz</span></label>
+        <input type="range" id="freqSlider" min="10" max="200" step="10" value="50">
+    </div>
+    <div class="slider-group">
+        <label>Load <span class="val" id="loadVal">0.3</span></label>
+        <input type="range" id="loadSlider" min="0" max="1.0" step="0.05" value="0.3">
+    </div>
+    <div class="rpm-display">
+        <div class="rpm-number" id="rpmDisplay">0</div>
+        <div class="rpm-label">RPM</div>
+    </div>
+    <div class="info">
+        <div><span class="label">Avg Voltage: </span><span class="value" id="avgVStat">0.0 V</span></div>
+        <div><span class="label">Current: </span><span class="value" id="currStat">0.0 A</span></div>
+        <div><span class="label">Power: </span><span class="value" id="pwrStat">0.0 W</span></div>
+        <div><span class="label">Efficiency: </span><span class="value" id="effStat">0%</span></div>
+    </div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize);
+    resize();
+
+    let dutyCycle = 0.5;
+    let pwmFreq = 50;
+    let load = 0.3;
+    let motorAngle = 0;
+    let motorSpeed = 0; // rad/s
+    let time = 0;
+    const maxRPM = 3000;
+    const supplyVoltage = 12;
+
+    // PWM and voltage history
+    const histLen = 400;
+    let pwmHistory = [];
+    let voltHistory = []; // filtered
+    let rpmHistory = [];
+
+    document.getElementById('dutySlider').oninput = function() { dutyCycle = parseInt(this.value) / 100; document.getElementById('dutyVal').textContent = Math.round(dutyCycle*100)+'%'; };
+    document.getElementById('freqSlider').oninput = function() { pwmFreq = parseInt(this.value); document.getElementById('freqVal').textContent = pwmFreq+' Hz'; };
+    document.getElementById('loadSlider').oninput = function() { load = parseFloat(this.value); document.getElementById('loadVal').textContent = load.toFixed(2); };
+
+    function getPWMValue(t) {
+        const period = 1 / pwmFreq;
+        const phase = (t % period) / period;
+        return phase < dutyCycle ? 1 : 0;
+    }
+
+    function updateMotor(dt) {
+        const pwm = getPWMValue(time);
+        const voltage = pwm * supplyVoltage;
+
+        // Motor dynamics (first-order + inertia)
+        const targetSpeed = dutyCycle * maxRPM * (1 - load * 0.7);
+        const timeConstant = 0.3 + load * 0.5; // slower with load
+        motorSpeed += (targetSpeed - motorSpeed) * dt / timeConstant;
+        motorSpeed = Math.max(0, motorSpeed);
+
+        motorAngle += (motorSpeed / 60) * Math.PI * 2 * dt;
+
+        // Filtered voltage (RC filter effect)
+        const filteredV = dutyCycle * supplyVoltage;
+
+        pwmHistory.push(pwm * supplyVoltage);
+        voltHistory.push(filteredV);
+        rpmHistory.push(motorSpeed);
+        if (pwmHistory.length > histLen) { pwmHistory.shift(); voltHistory.shift(); rpmHistory.shift(); }
+
+        time += dt;
+    }
+
+    function drawMotor(cx, cy, radius) {
+        // Motor housing
+        ctx.save();
+
+        // Outer casing shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.arc(cx + 3, cy + 3, radius + 8, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Outer casing
+        const casingGrad = ctx.createRadialGradient(cx - radius*0.3, cy - radius*0.3, 0, cx, cy, radius + 8);
+        casingGrad.addColorStop(0, '#475569');
+        casingGrad.addColorStop(0.7, '#334155');
+        casingGrad.addColorStop(1, '#1e293b');
+        ctx.fillStyle = casingGrad;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius + 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(251,191,36,0.2)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Inner ring
+        ctx.strokeStyle = 'rgba(100,120,180,0.3)';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius - 5, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Rotor
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(motorAngle);
+
+        // Rotor arms
+        const numArms = 6;
+        for (let i = 0; i < numArms; i++) {
+            const angle = (i / numArms) * Math.PI * 2;
+            ctx.save();
+            ctx.rotate(angle);
+
+            // Copper coil
+            const coilGrad = ctx.createLinearGradient(0, -8, radius - 15, -8);
+            coilGrad.addColorStop(0, '#b45309');
+            coilGrad.addColorStop(0.5, '#f59e0b');
+            coilGrad.addColorStop(1, '#92400e');
+            ctx.fillStyle = coilGrad;
+            ctx.fillRect(8, -6, radius - 25, 12);
+            ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+            ctx.lineWidth = 0.5;
+            ctx.strokeRect(8, -6, radius - 25, 12);
+
+            ctx.restore();
+        }
+
+        // Center hub
+        const hubGrad = ctx.createRadialGradient(-3, -3, 0, 0, 0, 12);
+        hubGrad.addColorStop(0, '#94a3b8');
+        hubGrad.addColorStop(1, '#475569');
+        ctx.fillStyle = hubGrad;
+        ctx.beginPath();
+        ctx.arc(0, 0, 12, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#64748b';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Shaft indicator
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillRect(0, -2, 14, 4);
+
+        ctx.restore();
+
+        // Speed indicator ring
+        const speedFrac = motorSpeed / maxRPM;
+        if (speedFrac > 0.01) {
+            ctx.strokeStyle = `rgba(251,191,36,${Math.min(0.6, speedFrac)})`;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius + 15, -Math.PI/2, -Math.PI/2 + speedFrac * Math.PI * 2);
+            ctx.stroke();
+        }
+
+        // Motion blur effect
+        if (motorSpeed > 500) {
+            const blur = Math.min(0.15, motorSpeed / maxRPM * 0.2);
+            ctx.fillStyle = `rgba(245,158,11,${blur})`;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius - 5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.restore();
+
+        // Labels
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('DC Motor', cx, cy + radius + 35);
+        ctx.textAlign = 'left';
+    }
+
+    function drawPWMWaveform(x, y, w, h) {
+        ctx.fillStyle = 'rgba(15,20,40,0.7)';
+        ctx.strokeStyle = 'rgba(251,191,36,0.12)';
+        ctx.lineWidth = 1;
+        roundRect(ctx, x, y, w, h, 10);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.fillText('PWM Signal', x + 10, y + 18);
+
+        const gx = x + 10, gy = y + 28, gw = w - 20, gh = h - 40;
+
+        // Grid
+        ctx.strokeStyle = 'rgba(100,120,180,0.08)';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(gx, gy + gh); ctx.lineTo(gx + gw, gy + gh);
+        ctx.moveTo(gx, gy); ctx.lineTo(gx + gw, gy);
+        ctx.stroke();
+
+        // Zero line label
+        ctx.fillStyle = 'rgba(148,163,184,0.4)';
+        ctx.font = '9px sans-serif';
+        ctx.fillText('12V', gx - 2, gy + 4);
+        ctx.fillText('0V', gx - 2, gy + gh + 4);
+
+        // Draw PWM waveform
+        if (pwmHistory.length > 1) {
+            ctx.strokeStyle = '#34d399';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i < pwmHistory.length; i++) {
+                const px = gx + (i / histLen) * gw;
+                const py = gy + gh - (pwmHistory[i] / supplyVoltage) * gh;
+                if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // Glow
+            ctx.globalAlpha = 0.1;
+            ctx.lineWidth = 6;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }
+
+        // Filtered voltage
+        if (voltHistory.length > 1) {
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+            ctx.beginPath();
+            for (let i = 0; i < voltHistory.length; i++) {
+                const px = gx + (i / histLen) * gw;
+                const py = gy + gh - (voltHistory[i] / supplyVoltage) * gh;
+                if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Duty cycle annotation
+        ctx.fillStyle = '#34d399';
+        ctx.font = '10px sans-serif';
+        ctx.fillText('PWM', gx + gw - 80, gy + 12);
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillText('Avg: ' + (dutyCycle * supplyVoltage).toFixed(1) + 'V', gx + gw - 80, gy + 24);
+    }
+
+    function drawRPMGraph(x, y, w, h) {
+        ctx.fillStyle = 'rgba(15,20,40,0.7)';
+        ctx.strokeStyle = 'rgba(251,191,36,0.12)';
+        ctx.lineWidth = 1;
+        roundRect(ctx, x, y, w, h, 10);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.fillText('Motor Speed (RPM)', x + 10, y + 18);
+
+        const gx = x + 10, gy = y + 28, gw = w - 20, gh = h - 40;
+
+        // Grid
+        ctx.strokeStyle = 'rgba(100,120,180,0.08)';
+        ctx.lineWidth = 0.5;
+        for (let i = 0; i <= 4; i++) {
+            const ly = gy + (i / 4) * gh;
+            ctx.beginPath(); ctx.moveTo(gx, ly); ctx.lineTo(gx + gw, ly); ctx.stroke();
+        }
+
+        ctx.fillStyle = 'rgba(148,163,184,0.4)';
+        ctx.font = '9px sans-serif';
+        ctx.fillText(maxRPM, gx - 2, gy + 4);
+        ctx.fillText('0', gx - 2, gy + gh + 4);
+
+        if (rpmHistory.length > 1) {
+            ctx.strokeStyle = '#60a5fa';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i < rpmHistory.length; i++) {
+                const px = gx + (i / histLen) * gw;
+                const py = gy + gh - (rpmHistory[i] / maxRPM) * gh;
+                if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            ctx.globalAlpha = 0.1;
+            ctx.lineWidth = 6;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }
+
+        // Target RPM line
+        const targetRPM = dutyCycle * maxRPM * (1 - load * 0.7);
+        const targetY = gy + gh - (targetRPM / maxRPM) * gh;
+        ctx.strokeStyle = 'rgba(251,191,36,0.3)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(gx, targetY); ctx.lineTo(gx + gw, targetY); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(251,191,36,0.5)';
+        ctx.font = '9px sans-serif';
+        ctx.fillText('Target: ' + Math.round(targetRPM), gx + gw - 70, targetY - 4);
+    }
+
+    function drawDutyCycleGauge(cx, cy, radius) {
+        // Background arc
+        const startAngle = Math.PI * 0.75;
+        const endAngle = Math.PI * 2.25;
+        const range = endAngle - startAngle;
+
+        ctx.strokeStyle = 'rgba(100,120,180,0.15)';
+        ctx.lineWidth = 12;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, startAngle, endAngle);
+        ctx.stroke();
+
+        // Fill arc
+        const fillAngle = startAngle + dutyCycle * range;
+        const gaugeGrad = ctx.createLinearGradient(cx - radius, cy, cx + radius, cy);
+        gaugeGrad.addColorStop(0, '#22d3ee');
+        gaugeGrad.addColorStop(0.5, '#fbbf24');
+        gaugeGrad.addColorStop(1, '#ef4444');
+        ctx.strokeStyle = gaugeGrad;
+        ctx.lineWidth = 12;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, startAngle, fillAngle);
+        ctx.stroke();
+        ctx.lineCap = 'butt';
+
+        // Tick marks
+        for (let i = 0; i <= 10; i++) {
+            const angle = startAngle + (i / 10) * range;
+            const inner = radius - 20;
+            const outer = radius - 14;
+            ctx.strokeStyle = 'rgba(203,213,225,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(cx + Math.cos(angle) * inner, cy + Math.sin(angle) * inner);
+            ctx.lineTo(cx + Math.cos(angle) * outer, cy + Math.sin(angle) * outer);
+            ctx.stroke();
+
+            if (i % 2 === 0) {
+                ctx.fillStyle = 'rgba(203,213,225,0.4)';
+                ctx.font = '9px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText((i * 10) + '%', cx + Math.cos(angle) * (radius - 28), cy + Math.sin(angle) * (radius - 28) + 3);
+            }
+        }
+
+        // Needle
+        const needleAngle = startAngle + dutyCycle * range;
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + Math.cos(needleAngle) * (radius - 6), cy + Math.sin(needleAngle) * (radius - 6));
+        ctx.stroke();
+
+        ctx.fillStyle = '#fbbf24';
+        ctx.beginPath();
+        ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Label
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Duty Cycle', cx, cy + radius + 20);
+        ctx.textAlign = 'left';
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+    }
+
+    function animate() {
+        ctx.clearRect(0, 0, W, H);
+
+        const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.7);
+        bg.addColorStop(0, '#111827');
+        bg.addColorStop(1, '#0a0e1a');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        // Multiple physics steps per frame for smoother PWM waveform
+        for (let i = 0; i < 4; i++) {
+            updateMotor(1/240);
+        }
+
+        // Layout
+        const motorCX = W * 0.2;
+        const motorCY = H * 0.4;
+        const motorR = Math.min(100, W * 0.1);
+
+        drawMotor(motorCX, motorCY, motorR);
+        drawDutyCycleGauge(motorCX, motorCY + motorR + 80, 50);
+
+        // Graphs
+        const graphX = W * 0.38;
+        const graphW = W * 0.58 - 240;
+        const graphH = (H - 100) / 2 - 15;
+
+        drawPWMWaveform(graphX, 60, graphW, graphH);
+        drawRPMGraph(graphX, 60 + graphH + 15, graphW, graphH);
+
+        // Connection diagram: PWM -> Motor
+        ctx.strokeStyle = 'rgba(251,191,36,0.15)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 6]);
+        ctx.beginPath();
+        ctx.moveTo(motorCX + motorR + 20, motorCY);
+        ctx.lineTo(graphX - 10, motorCY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Update stats
+        const avgV = dutyCycle * supplyVoltage;
+        const current = (avgV / 5) * (1 - load * 0.3); // simplified
+        const power = avgV * current;
+        const efficiency = motorSpeed > 10 ? Math.min(95, 60 + dutyCycle * 30 - load * 20) : 0;
+
+        document.getElementById('rpmDisplay').textContent = Math.round(motorSpeed);
+        document.getElementById('avgVStat').textContent = avgV.toFixed(1) + ' V';
+        document.getElementById('currStat').textContent = current.toFixed(2) + ' A';
+        document.getElementById('pwrStat').textContent = power.toFixed(1) + ' W';
+        document.getElementById('effStat').textContent = efficiency.toFixed(0) + '%';
+
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+})();
+</script>
+</body>
+</html>

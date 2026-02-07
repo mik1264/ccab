@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kalman Filter State Estimation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+a.back { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; font-family: sans-serif; }
+a.back:hover { background: rgba(0,0,0,0.9); }
+.title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #e2e8f0; font-size: 22px; font-weight: 700; z-index: 999; text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+.controls { position: fixed; right: 15px; top: 15px; background: rgba(10,14,26,0.92); border: 1px solid rgba(251,191,36,0.25); border-radius: 12px; padding: 18px; z-index: 999; color: #cbd5e1; font-size: 13px; width: 230px; }
+.controls h3 { color: #fbbf24; margin-bottom: 10px; font-size: 15px; }
+.slider-group { margin-bottom: 12px; }
+.slider-group label { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.slider-group label span.val { color: #fbbf24; font-weight: 600; }
+input[type="range"] { width: 100%; accent-color: #fbbf24; cursor: pointer; }
+.btn { display: inline-block; padding: 6px 12px; background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.4); border-radius: 6px; color: #fbbf24; cursor: pointer; font-size: 12px; margin: 3px 2px; }
+.btn:hover { background: rgba(251,191,36,0.3); }
+.legend { margin-top: 10px; font-size: 11px; line-height: 1.8; border-top: 1px solid rgba(251,191,36,0.15); padding-top: 8px; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.info { margin-top: 8px; font-size: 11px; line-height: 1.7; }
+.info .label { color: #94a3b8; }
+.info .value { color: #fbbf24; font-weight: 600; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back">&#8592; Back to Gallery</a>
+<div class="title">Kalman Filter State Estimation</div>
+<div class="controls">
+    <h3>Kalman Filter</h3>
+    <div class="slider-group">
+        <label>Process Noise (Q) <span class="val" id="qVal">0.1</span></label>
+        <input type="range" id="qSlider" min="0.01" max="2.0" step="0.01" value="0.1">
+    </div>
+    <div class="slider-group">
+        <label>Measurement Noise (R) <span class="val" id="rVal">1.0</span></label>
+        <input type="range" id="rSlider" min="0.1" max="5.0" step="0.1" value="1.0">
+    </div>
+    <div class="slider-group">
+        <label>Speed <span class="val" id="speedVal">1.0</span></label>
+        <input type="range" id="speedSlider" min="0.2" max="3.0" step="0.1" value="1.0">
+    </div>
+    <div>
+        <span class="btn" id="resetBtn">Reset</span>
+        <span class="btn" id="pathBtn">New Path</span>
+    </div>
+    <div class="legend">
+        <div class="legend-item"><span class="legend-dot" style="background:#34d399;"></span> True Position</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#f87171;"></span> Noisy Measurements</div>
+        <div class="legend-item"><span class="legend-dot" style="background:#60a5fa;"></span> Kalman Estimate</div>
+        <div class="legend-item"><span class="legend-dot" style="background:rgba(96,165,250,0.2); border:1px solid #60a5fa;"></span> Uncertainty (P)</div>
+    </div>
+    <div class="info">
+        <div><span class="label">Kalman Gain: </span><span class="value" id="kgStat">0.0</span></div>
+        <div><span class="label">Estimate Error: </span><span class="value" id="eeStat">0.0</span></div>
+        <div><span class="label">Measurement Error: </span><span class="value" id="meStat">0.0</span></div>
+    </div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize);
+    resize();
+
+    let Q = 0.1;   // Process noise
+    let R = 1.0;   // Measurement noise
+    let speed = 1.0;
+
+    // 2D Kalman filter state
+    let x_est = [0, 0];       // Estimated state [x, y]
+    let P = [[5, 0], [0, 5]]; // Covariance matrix
+    let time = 0;
+
+    // Path generation
+    let pathPoints = [];
+    let pathIndex = 0;
+    let trueX = 0, trueY = 0;
+    let trueVx = 0, trueVy = 0;
+
+    // History for drawing
+    const maxHistory = 600;
+    let trueHistory = [];
+    let measHistory = [];
+    let estHistory = [];
+    let covHistory = [];
+
+    function generatePath() {
+        pathPoints = [];
+        const cx = W / 2, cy = H / 2;
+        const numPoints = 8 + Math.floor(Math.random() * 5);
+        for (let i = 0; i < numPoints; i++) {
+            const angle = (i / numPoints) * Math.PI * 2;
+            const r = 100 + Math.random() * Math.min(W, H) * 0.25;
+            pathPoints.push({
+                x: cx + Math.cos(angle) * r * (0.6 + Math.random() * 0.8),
+                y: cy + Math.sin(angle) * r * (0.6 + Math.random() * 0.8)
+            });
+        }
+        pathIndex = 0;
+    }
+
+    function resetSim() {
+        generatePath();
+        trueX = pathPoints[0].x;
+        trueY = pathPoints[0].y;
+        trueVx = 0;
+        trueVy = 0;
+        x_est = [trueX, trueY];
+        P = [[5, 0], [0, 5]];
+        time = 0;
+        trueHistory = [];
+        measHistory = [];
+        estHistory = [];
+        covHistory = [];
+    }
+
+    function gaussianRandom() {
+        let u = 0, v = 0;
+        while (u === 0) u = Math.random();
+        while (v === 0) v = Math.random();
+        return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    }
+
+    // Sliders
+    document.getElementById('qSlider').oninput = function() { Q = parseFloat(this.value); document.getElementById('qVal').textContent = Q.toFixed(2); };
+    document.getElementById('rSlider').oninput = function() { R = parseFloat(this.value); document.getElementById('rVal').textContent = R.toFixed(1); };
+    document.getElementById('speedSlider').oninput = function() { speed = parseFloat(this.value); document.getElementById('speedVal').textContent = speed.toFixed(1); };
+    document.getElementById('resetBtn').onclick = resetSim;
+    document.getElementById('pathBtn').onclick = resetSim;
+
+    resetSim();
+
+    function updateTrue() {
+        // Move toward next waypoint
+        if (pathPoints.length === 0) return;
+        const target = pathPoints[pathIndex];
+        const dx = target.x - trueX;
+        const dy = target.y - trueY;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+
+        if (dist < 10) {
+            pathIndex = (pathIndex + 1) % pathPoints.length;
+        }
+
+        const spd = 2.0 * speed;
+        trueVx = (dx / Math.max(dist, 1)) * spd + gaussianRandom() * Math.sqrt(Q) * 0.5;
+        trueVy = (dy / Math.max(dist, 1)) * spd + gaussianRandom() * Math.sqrt(Q) * 0.5;
+
+        trueX += trueVx;
+        trueY += trueVy;
+    }
+
+    function getMeasurement() {
+        return [
+            trueX + gaussianRandom() * R * 30,
+            trueY + gaussianRandom() * R * 30
+        ];
+    }
+
+    function kalmanUpdate(z) {
+        // Predict
+        // State transition: x_k = x_{k-1} (simple position model)
+        // P_predict = P + Q*I
+        const Q_mat = Q * 10;
+        P[0][0] += Q_mat;
+        P[1][1] += Q_mat;
+
+        // Update
+        // K = P / (P + R)
+        const R_mat = R * 900; // R scaled
+        const S00 = P[0][0] + R_mat;
+        const S11 = P[1][1] + R_mat;
+
+        const K0 = P[0][0] / S00;
+        const K1 = P[1][1] / S11;
+
+        // x_est = x_est + K * (z - x_est)
+        x_est[0] = x_est[0] + K0 * (z[0] - x_est[0]);
+        x_est[1] = x_est[1] + K1 * (z[1] - x_est[1]);
+
+        // P = (I - K) * P
+        P[0][0] = (1 - K0) * P[0][0];
+        P[1][1] = (1 - K1) * P[1][1];
+
+        return (K0 + K1) / 2; // Average Kalman gain for display
+    }
+
+    let kalmanGain = 0;
+
+    function step() {
+        updateTrue();
+
+        // Get noisy measurement every few frames
+        time++;
+        if (time % 3 === 0) {
+            const z = getMeasurement();
+            measHistory.push({x: z[0], y: z[1], t: time});
+            if (measHistory.length > maxHistory) measHistory.shift();
+            kalmanGain = kalmanUpdate(z);
+        } else {
+            // Predict only
+            P[0][0] += Q * 10;
+            P[1][1] += Q * 10;
+        }
+
+        trueHistory.push({x: trueX, y: trueY});
+        estHistory.push({x: x_est[0], y: x_est[1]});
+        covHistory.push({p0: P[0][0], p1: P[1][1]});
+
+        if (trueHistory.length > maxHistory) trueHistory.shift();
+        if (estHistory.length > maxHistory) estHistory.shift();
+        if (covHistory.length > maxHistory) covHistory.shift();
+    }
+
+    function drawPath(history, color, lineWidth, dashed) {
+        if (history.length < 2) return;
+        if (dashed) ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineWidth;
+        ctx.beginPath();
+        for (let i = 0; i < history.length; i++) {
+            const alpha = i / history.length;
+            if (i === 0) ctx.moveTo(history[i].x, history[i].y);
+            else ctx.lineTo(history[i].x, history[i].y);
+        }
+        ctx.stroke();
+        if (dashed) ctx.setLineDash([]);
+    }
+
+    function drawUncertaintyBand() {
+        if (estHistory.length < 2 || covHistory.length < 2) return;
+        ctx.fillStyle = 'rgba(96,165,250,0.08)';
+        ctx.beginPath();
+        // Upper band
+        for (let i = 0; i < estHistory.length; i++) {
+            const r = Math.sqrt(covHistory[i].p0) * 2;
+            const x = estHistory[i].x;
+            const y = estHistory[i].y - r;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        // Lower band (reverse)
+        for (let i = estHistory.length - 1; i >= 0; i--) {
+            const r = Math.sqrt(covHistory[i].p1) * 2;
+            const x = estHistory[i].x;
+            const y = estHistory[i].y + r;
+            ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    function drawCurrentPositions() {
+        // True position
+        ctx.fillStyle = '#34d399';
+        ctx.strokeStyle = 'rgba(52,211,153,0.4)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(trueX, trueY, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Glow
+        ctx.fillStyle = 'rgba(52,211,153,0.15)';
+        ctx.beginPath();
+        ctx.arc(trueX, trueY, 16, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Estimate position
+        ctx.fillStyle = '#60a5fa';
+        ctx.strokeStyle = 'rgba(96,165,250,0.4)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x_est[0], x_est[1], 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Uncertainty ellipse
+        const rx = Math.sqrt(P[0][0]) * 3;
+        const ry = Math.sqrt(P[1][1]) * 3;
+        ctx.strokeStyle = 'rgba(96,165,250,0.3)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.ellipse(x_est[0], x_est[1], Math.max(rx, 2), Math.max(ry, 2), 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Label
+        ctx.font = '10px sans-serif';
+        ctx.fillStyle = '#34d399';
+        ctx.fillText('True', trueX + 12, trueY - 5);
+        ctx.fillStyle = '#60a5fa';
+        ctx.fillText('Estimate', x_est[0] + 12, x_est[1] - 5);
+    }
+
+    function drawMeasurements() {
+        const recent = measHistory.slice(-100);
+        for (let i = 0; i < recent.length; i++) {
+            const alpha = (i / recent.length) * 0.6 + 0.1;
+            ctx.fillStyle = `rgba(248,113,113,${alpha})`;
+            ctx.beginPath();
+            ctx.arc(recent[i].x, recent[i].y, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    function drawWaypoints() {
+        ctx.strokeStyle = 'rgba(251,191,36,0.08)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 6]);
+        ctx.beginPath();
+        for (let i = 0; i < pathPoints.length; i++) {
+            if (i === 0) ctx.moveTo(pathPoints[i].x, pathPoints[i].y);
+            else ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        pathPoints.forEach((p, idx) => {
+            ctx.fillStyle = idx === pathIndex ? 'rgba(251,191,36,0.4)' : 'rgba(251,191,36,0.1)';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    }
+
+    function animate() {
+        ctx.clearRect(0, 0, W, H);
+
+        const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.7);
+        bg.addColorStop(0, '#111827');
+        bg.addColorStop(1, '#0a0e1a');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        step();
+
+        drawWaypoints();
+        drawUncertaintyBand();
+        drawMeasurements();
+
+        // Draw trails
+        drawPath(trueHistory, '#34d399', 2, false);
+        drawPath(estHistory, '#60a5fa', 2.5, false);
+
+        drawCurrentPositions();
+
+        // Update stats
+        document.getElementById('kgStat').textContent = kalmanGain.toFixed(3);
+        const estErr = Math.sqrt((x_est[0]-trueX)**2 + (x_est[1]-trueY)**2);
+        document.getElementById('eeStat').textContent = estErr.toFixed(1) + 'px';
+        if (measHistory.length > 0) {
+            const lastM = measHistory[measHistory.length - 1];
+            const measErr = Math.sqrt((lastM.x-trueX)**2 + (lastM.y-trueY)**2);
+            document.getElementById('meStat').textContent = measErr.toFixed(1) + 'px';
+        }
+
+        requestAnimationFrame(animate);
+    }
+
+    animate();
+})();
+</script>
+</body>
+</html>

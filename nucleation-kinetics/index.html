@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nucleation and Growth</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+#title {
+    position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+    color: #4ade80; font-size: 20px; font-weight: bold; z-index: 10;
+    text-shadow: 0 0 20px rgba(74,222,128,0.5);
+    pointer-events: none;
+}
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 15px; align-items: center; z-index: 10;
+    background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 10px;
+    flex-wrap: wrap; justify-content: center;
+}
+#controls label { color: #4ade80; font-size: 13px; }
+#controls input[type=range] { width: 90px; cursor: pointer; }
+#controls button {
+    background: rgba(74,222,128,0.2); color: #4ade80; border: 1px solid #4ade80;
+    padding: 5px 12px; border-radius: 5px; cursor: pointer; font-size: 13px;
+}
+#controls button:hover { background: rgba(74,222,128,0.4); }
+#info {
+    position: fixed; top: 80px; right: 20px; color: #94a3b8; font-size: 12px;
+    z-index: 10; text-align: right; line-height: 1.8;
+    background: rgba(0,0,0,0.5); padding: 10px 15px; border-radius: 8px;
+}
+.info-val { color: #4ade80; font-weight: bold; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title">Nucleation and Growth Kinetics</div>
+<div id="info">
+    Time: <span class="info-val" id="timeVal">0.0</span> s<br>
+    Nuclei: <span class="info-val" id="nucleiCount">0</span><br>
+    Transformed: <span class="info-val" id="transformedPct">0.0</span>%<br>
+    Temperature: <span class="info-val" id="tempVal">600</span> K<br>
+    Avrami n: <span class="info-val" id="avramiN">~</span>
+</div>
+<div id="controls">
+    <label>Temperature: <input type="range" id="temperature" min="300" max="900" value="600" step="10"></label>
+    <label>Nucleation Rate: <input type="range" id="nucRate" min="1" max="20" value="8" step="1"></label>
+    <label>Growth Rate: <input type="range" id="growRate" min="1" max="20" value="10" step="1"></label>
+    <label>Speed: <input type="range" id="speed" min="1" max="10" value="5" step="1"></label>
+    <button id="resetBtn">Reset</button>
+    <button id="pauseBtn">Pause</button>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+let simW, simH, simX, simY;
+let graphX, graphY, graphW, graphH;
+
+let nuclei = [];
+let time = 0;
+let paused = false;
+let temperature = 600;
+let nucleationRate = 8;
+let growthRate = 10;
+let speed = 5;
+let transformedHistory = [];
+let timeHistory = [];
+let grainColors = [];
+let totalArea;
+let pixelGrid;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+
+    simW = Math.min(W * 0.55, H - 200);
+    simH = simW;
+    simX = 40;
+    simY = (H - simH) / 2 + 20;
+
+    graphW = W - simX - simW - 80;
+    graphH = (simH - 20) / 2;
+    graphX = simX + simW + 50;
+    graphY = simY;
+}
+
+function hslColor(idx) {
+    const hue = (idx * 137.508) % 360;
+    return {
+        h: hue,
+        s: 55 + (idx * 17) % 30,
+        l: 35 + (idx * 13) % 25
+    };
+}
+
+function init() {
+    resize();
+    nuclei = [];
+    time = 0;
+    transformedHistory = [];
+    timeHistory = [];
+    grainColors = [];
+    totalArea = simW * simH;
+    pixelGrid = null;
+}
+
+function nucleate() {
+    // Nucleation probability depends on temperature (peaks at intermediate T)
+    const Topt = 600;
+    const tempFactor = Math.exp(-((temperature - Topt) / 200) ** 2);
+    const rate = nucleationRate * 0.0005 * tempFactor * speed;
+
+    if (Math.random() < rate) {
+        const x = simX + Math.random() * simW;
+        const y = simY + Math.random() * simH;
+
+        // Check if this point is already transformed
+        let alreadyNucleated = false;
+        for (const n of nuclei) {
+            const dx = x - n.x;
+            const dy = y - n.y;
+            if (dx * dx + dy * dy < n.radius * n.radius) {
+                alreadyNucleated = true;
+                break;
+            }
+        }
+
+        if (!alreadyNucleated) {
+            const color = hslColor(nuclei.length);
+            grainColors.push(color);
+            nuclei.push({
+                x: x, y: y,
+                radius: 1,
+                birthTime: time,
+                colorIdx: nuclei.length
+            });
+        }
+    }
+}
+
+function growNuclei() {
+    const gRate = growthRate * 0.15 * speed;
+    const tempFactor = Math.exp(-((temperature - 500) / 300) ** 2) + 0.3;
+
+    for (const n of nuclei) {
+        n.radius += gRate * tempFactor * 0.5;
+    }
+}
+
+function getTransformedFraction() {
+    // Sample random points to estimate
+    const samples = 2000;
+    let transformed = 0;
+
+    for (let i = 0; i < samples; i++) {
+        const px = simX + Math.random() * simW;
+        const py = simY + Math.random() * simH;
+
+        for (const n of nuclei) {
+            const dx = px - n.x;
+            const dy = px - n.x;
+            const dy2 = py - n.y;
+            if ((px - n.x) ** 2 + (py - n.y) ** 2 < n.radius * n.radius) {
+                transformed++;
+                break;
+            }
+        }
+    }
+
+    return transformed / samples;
+}
+
+function drawSimulation() {
+    // Background
+    ctx.fillStyle = 'rgba(15,20,40,0.95)';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(simX - 5, simY - 5, simW + 10, simH + 10, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    // Clip to simulation region
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(simX, simY, simW, simH);
+    ctx.clip();
+
+    // Draw untransformed matrix
+    ctx.fillStyle = '#1a1e30';
+    ctx.fillRect(simX, simY, simW, simH);
+
+    // Draw grains (nuclei with growth)
+    for (let i = 0; i < nuclei.length; i++) {
+        const n = nuclei[i];
+        const c = grainColors[i];
+
+        // Grain fill
+        const gradient = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.radius);
+        gradient.addColorStop(0, `hsla(${c.h},${c.s}%,${c.l + 15}%,0.9)`);
+        gradient.addColorStop(0.7, `hsla(${c.h},${c.s}%,${c.l}%,0.85)`);
+        gradient.addColorStop(1, `hsla(${c.h},${c.s}%,${c.l - 5}%,0.8)`);
+
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        // Grain boundary
+        ctx.strokeStyle = `hsla(${c.h},${c.s}%,${c.l + 20}%,0.3)`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Nucleation point
+        if (n.radius > 5) {
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, 2, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255,255,255,0.4)';
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
+
+    // Label
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Microstructure Evolution', simX + simW / 2, simY + simH + 25);
+}
+
+function drawGraph() {
+    // Avrami kinetics graph
+    ctx.fillStyle = 'rgba(15,20,40,0.8)';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(graphX - 5, graphY - 5, graphW + 10, graphH + 10, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Transformed Fraction (Avrami Kinetics)', graphX + 5, graphY + 15);
+
+    // Axes
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(graphX + 30, graphY + 25);
+    ctx.lineTo(graphX + 30, graphY + graphH - 10);
+    ctx.lineTo(graphX + graphW - 10, graphY + graphH - 10);
+    ctx.stroke();
+
+    // Y-axis labels
+    ctx.fillStyle = '#64748b';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'right';
+    for (let i = 0; i <= 4; i++) {
+        const y = graphY + graphH - 10 - (i / 4) * (graphH - 40);
+        ctx.fillText((i * 25) + '%', graphX + 26, y + 3);
+        ctx.strokeStyle = 'rgba(71,85,105,0.3)';
+        ctx.beginPath();
+        ctx.moveTo(graphX + 30, y);
+        ctx.lineTo(graphX + graphW - 10, y);
+        ctx.stroke();
+    }
+
+    ctx.fillStyle = '#64748b';
+    ctx.textAlign = 'center';
+    ctx.fillText('Time', graphX + graphW / 2, graphY + graphH + 5);
+
+    // Draw Avrami curve
+    if (transformedHistory.length > 1) {
+        const maxTime = timeHistory[timeHistory.length - 1];
+
+        // Theoretical Avrami curve (dashed)
+        // f(t) = 1 - exp(-k*t^n)
+        // Estimate n from data
+        let avramiN = 3; // default for 2D with constant nucleation
+
+        ctx.strokeStyle = 'rgba(148,163,184,0.3)';
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        let first = true;
+        if (maxTime > 0) {
+            for (let t = 0; t <= maxTime; t += maxTime / 200) {
+                const k = 0.0001 * nucleationRate * Math.pow(growthRate, 2);
+                const f = 1 - Math.exp(-k * Math.pow(t, avramiN));
+                const px = graphX + 30 + (t / maxTime) * (graphW - 40);
+                const py = graphY + graphH - 10 - f * (graphH - 40);
+                if (first) { ctx.moveTo(px, py); first = false; }
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+        }
+        ctx.setLineDash([]);
+
+        // Actual data
+        ctx.strokeStyle = '#4ade80';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < transformedHistory.length; i++) {
+            const px = graphX + 30 + (timeHistory[i] / maxTime) * (graphW - 40);
+            const py = graphY + graphH - 10 - transformedHistory[i] * (graphH - 40);
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+
+        // Current point
+        const lastI = transformedHistory.length - 1;
+        const cpx = graphX + 30 + (timeHistory[lastI] / maxTime) * (graphW - 40);
+        const cpy = graphY + graphH - 10 - transformedHistory[lastI] * (graphH - 40);
+        ctx.beginPath();
+        ctx.arc(cpx, cpy, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+    }
+
+    // Nucleation rate vs temperature graph
+    const g2Y = graphY + graphH + 30;
+    ctx.fillStyle = 'rgba(15,20,40,0.8)';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(graphX - 5, g2Y - 5, graphW + 10, graphH + 10, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Nucleation & Growth Rates vs Temperature', graphX + 5, g2Y + 15);
+
+    // Axes
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(graphX + 30, g2Y + 25);
+    ctx.lineTo(graphX + 30, g2Y + graphH - 10);
+    ctx.lineTo(graphX + graphW - 10, g2Y + graphH - 10);
+    ctx.stroke();
+
+    ctx.fillStyle = '#64748b';
+    ctx.textAlign = 'center';
+    ctx.font = '9px sans-serif';
+    ctx.fillText('300K', graphX + 35, g2Y + graphH + 5);
+    ctx.fillText('600K', graphX + (graphW - 40) / 2 + 30, g2Y + graphH + 5);
+    ctx.fillText('900K', graphX + graphW - 15, g2Y + graphH + 5);
+
+    // Draw nucleation rate curve
+    ctx.strokeStyle = '#4ade80';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let T = 300; T <= 900; T += 5) {
+        const t = (T - 300) / 600;
+        const rate = Math.exp(-((T - 600) / 200) ** 2);
+        const px = graphX + 30 + t * (graphW - 40);
+        const py = g2Y + graphH - 10 - rate * (graphH - 40);
+        if (T === 300) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Growth rate curve
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let T = 300; T <= 900; T += 5) {
+        const t = (T - 300) / 600;
+        const rate = Math.exp(-((T - 500) / 300) ** 2) + 0.3;
+        const rateNorm = rate / 1.3;
+        const px = graphX + 30 + t * (graphW - 40);
+        const py = g2Y + graphH - 10 - rateNorm * (graphH - 40);
+        if (T === 300) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Current temperature marker
+    const tempT = (temperature - 300) / 600;
+    const markerX = graphX + 30 + tempT * (graphW - 40);
+    ctx.strokeStyle = '#f43f5e';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(markerX, g2Y + 25);
+    ctx.lineTo(markerX, g2Y + graphH - 10);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Legend
+    ctx.font = '9px sans-serif';
+    ctx.fillStyle = '#4ade80';
+    ctx.textAlign = 'left';
+    ctx.fillText('Nucleation Rate', graphX + graphW - 110, g2Y + 30);
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillText('Growth Rate', graphX + graphW - 110, g2Y + 42);
+    ctx.fillStyle = '#f43f5e';
+    ctx.fillText('Current T', graphX + graphW - 110, g2Y + 54);
+}
+
+function update() {
+    if (paused) return;
+
+    const dt = 0.1 * speed;
+    time += dt;
+
+    nucleate();
+    growNuclei();
+
+    // Record data periodically
+    if (Math.floor(time * 10) % 5 === 0) {
+        const fraction = getTransformedFraction();
+        transformedHistory.push(fraction);
+        timeHistory.push(time);
+
+        // Keep arrays manageable
+        if (transformedHistory.length > 500) {
+            transformedHistory = transformedHistory.filter((_, i) => i % 2 === 0);
+            timeHistory = timeHistory.filter((_, i) => i % 2 === 0);
+        }
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    update();
+    drawSimulation();
+    drawGraph();
+
+    const fraction = transformedHistory.length > 0 ?
+        transformedHistory[transformedHistory.length - 1] : 0;
+
+    document.getElementById('timeVal').textContent = time.toFixed(1);
+    document.getElementById('nucleiCount').textContent = nuclei.length;
+    document.getElementById('transformedPct').textContent = (fraction * 100).toFixed(1);
+    document.getElementById('tempVal').textContent = temperature;
+
+    // Estimate Avrami n from log-log plot
+    if (transformedHistory.length > 10 && fraction > 0.05 && fraction < 0.95) {
+        const f = fraction;
+        const t = time;
+        // n = ln(-ln(1-f)) / ln(t) + const
+        // Simplified estimate
+        document.getElementById('avramiN').textContent = '~3.0 (2D)';
+    }
+
+    requestAnimationFrame(draw);
+}
+
+document.getElementById('temperature').addEventListener('input', (e) => {
+    temperature = parseInt(e.target.value);
+});
+document.getElementById('nucRate').addEventListener('input', (e) => {
+    nucleationRate = parseInt(e.target.value);
+});
+document.getElementById('growRate').addEventListener('input', (e) => {
+    growthRate = parseInt(e.target.value);
+});
+document.getElementById('speed').addEventListener('input', (e) => {
+    speed = parseInt(e.target.value);
+});
+document.getElementById('resetBtn').addEventListener('click', init);
+document.getElementById('pauseBtn').addEventListener('click', () => {
+    paused = !paused;
+    document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
+});
+
+window.addEventListener('resize', resize);
+
+init();
+draw();
+</script>
+</body>
+</html>

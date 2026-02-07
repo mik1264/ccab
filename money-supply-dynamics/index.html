@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Money Supply & Inflation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 20px; font-weight: 700; z-index: 999; text-shadow: 0 0 20px rgba(251,191,36,0.5); font-family: sans-serif; }
+#controls { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); display: flex; gap: 16px; z-index: 999; background: rgba(0,0,0,0.75); padding: 12px 20px; border-radius: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+#controls label { color: #ccc; font-size: 11px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+#controls input[type=range] { width: 100px; accent-color: #fbbf24; }
+#controls span { color: #fbbf24; font-size: 11px; font-weight: bold; }
+#controls button { background: rgba(251,191,36,0.2); color: #fbbf24; border: 1px solid #fbbf24; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+#controls button:hover { background: rgba(251,191,36,0.4); }
+#info { position: fixed; top: 50px; right: 15px; color: #ccc; font-size: 12px; z-index: 999; background: rgba(0,0,0,0.7); padding: 12px; border-radius: 8px; line-height: 2; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div id="title">Money Supply & Inflation Dynamics</div>
+<div id="info">
+    <div>Base Money: <span style="color:#4ade80;" id="baseMoney">$1000</span></div>
+    <div>Total M2: <span style="color:#60a5fa;" id="totalM2">--</span></div>
+    <div>Multiplier: <span style="color:#fbbf24;" id="multiplier">--</span></div>
+    <div>Inflation: <span style="color:#f472b6;" id="inflation">--</span></div>
+    <div>Purchasing Power: <span style="color:#a78bfa;" id="purchasing">--</span></div>
+    <div style="margin-top:4px;font-size:10px;color:#888;">Velocity: <span id="velDisp" style="color:#fbbf24;">--</span></div>
+</div>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <label>Base Money ($) <input type="range" id="baseMoney_ctrl" min="100" max="5000" step="100" value="1000"><span id="bmVal">$1000</span></label>
+    <label>Reserve Ratio (%) <input type="range" id="reserveRatio" min="1" max="50" step="1" value="10"><span id="rrVal">10%</span></label>
+    <label>Velocity <input type="range" id="velocity" min="0.5" max="5" step="0.1" value="2"><span id="velVal">2.0</span></label>
+    <button id="btnInject">Inject $500</button>
+    <button id="btnWithdraw">Withdraw $300</button>
+    <button id="btnReset">Reset</button>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const bmSlider = document.getElementById('baseMoney_ctrl');
+const rrSlider = document.getElementById('reserveRatio');
+const velSlider = document.getElementById('velocity');
+
+bmSlider.oninput = () => document.getElementById('bmVal').textContent = '$' + bmSlider.value;
+rrSlider.oninput = () => document.getElementById('rrVal').textContent = rrSlider.value + '%';
+velSlider.oninput = () => document.getElementById('velVal').textContent = velSlider.value;
+
+let baseMoney = 1000;
+let targetBase = 1000;
+let reserveRatio = 0.10;
+let velocity = 2;
+
+let moneyHistory = [];
+let inflationHistory = [];
+let purchasingHistory = [];
+let m2History = [];
+const maxHistory = 200;
+let time = 0;
+
+// Bank chain for visual
+let bankChain = [];
+const NUM_BANKS = 8;
+
+// Money particles
+let moneyParticles = [];
+
+function initBankChain() {
+    bankChain = [];
+    const W = canvas.width, H = canvas.height;
+    const startX = W * 0.10, endX = W * 0.90;
+    const y = H * 0.28;
+
+    // Central bank
+    bankChain.push({
+        x: startX, y: y,
+        type: 'central',
+        deposits: baseMoney,
+        reserves: baseMoney,
+        loans: 0,
+        label: 'Central\nBank'
+    });
+
+    // Commercial banks
+    const spacing = (endX - startX - 80) / (NUM_BANKS - 1);
+    for (let i = 1; i < NUM_BANKS; i++) {
+        bankChain.push({
+            x: startX + 80 + (i - 1) * spacing,
+            y: y + (i % 2 === 0 ? -20 : 20),
+            type: 'commercial',
+            deposits: 0,
+            reserves: 0,
+            loans: 0,
+            label: 'Bank ' + i
+        });
+    }
+}
+
+function calculateMoneyMultiplier() {
+    const rr = parseInt(rrSlider.value) / 100;
+    return 1 / rr;
+}
+
+function updateBankChain() {
+    const rr = parseInt(rrSlider.value) / 100;
+    let remaining = baseMoney;
+
+    bankChain[0].deposits = baseMoney;
+    bankChain[0].reserves = baseMoney;
+    bankChain[0].loans = 0;
+
+    for (let i = 1; i < bankChain.length; i++) {
+        const deposited = remaining * (1 - rr);
+        const reserved = deposited * rr;
+        const loaned = deposited - reserved;
+
+        bankChain[i].deposits = deposited;
+        bankChain[i].reserves = reserved;
+        bankChain[i].loans = loaned;
+
+        remaining = loaned;
+    }
+}
+
+function spawnMoneyParticle(fromIdx, toIdx) {
+    if (fromIdx >= bankChain.length || toIdx >= bankChain.length) return;
+    const from = bankChain[fromIdx];
+    const to = bankChain[toIdx];
+    moneyParticles.push({
+        x: from.x, y: from.y,
+        tx: to.x, ty: to.y,
+        progress: 0,
+        speed: 0.005 + Math.random() * 0.01,
+        size: 3 + Math.random() * 3
+    });
+}
+
+document.getElementById('btnInject').onclick = () => {
+    targetBase += 500;
+    bmSlider.value = targetBase;
+    document.getElementById('bmVal').textContent = '$' + targetBase;
+    for (let i = 0; i < 10; i++) spawnMoneyParticle(0, 1 + Math.floor(Math.random() * (NUM_BANKS - 1)));
+};
+document.getElementById('btnWithdraw').onclick = () => {
+    targetBase = Math.max(100, targetBase - 300);
+    bmSlider.value = targetBase;
+    document.getElementById('bmVal').textContent = '$' + targetBase;
+};
+document.getElementById('btnReset').onclick = () => {
+    targetBase = 1000;
+    baseMoney = 1000;
+    bmSlider.value = 1000;
+    document.getElementById('bmVal').textContent = '$1000';
+    moneyHistory = [];
+    inflationHistory = [];
+    purchasingHistory = [];
+    m2History = [];
+    time = 0;
+    moneyParticles = [];
+};
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function drawBank(bank, idx) {
+    const x = bank.x, y = bank.y;
+    const isCentral = bank.type === 'central';
+    const size = isCentral ? 35 : 25;
+
+    // Glow
+    const gradient = ctx.createRadialGradient(x, y, 0, x, y, size + 15);
+    gradient.addColorStop(0, isCentral ? 'rgba(251,191,36,0.15)' : 'rgba(74,222,128,0.1)');
+    gradient.addColorStop(1, 'transparent');
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(x, y, size + 15, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Bank shape (rectangle with columns)
+    ctx.fillStyle = isCentral ? 'rgba(251,191,36,0.2)' : 'rgba(74,222,128,0.12)';
+    ctx.fillRect(x - size, y - size * 0.7, size * 2, size * 1.4);
+    ctx.strokeStyle = isCentral ? '#fbbf24' : '#4ade80';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x - size, y - size * 0.7, size * 2, size * 1.4);
+
+    // Roof triangle
+    ctx.beginPath();
+    ctx.moveTo(x - size - 5, y - size * 0.7);
+    ctx.lineTo(x, y - size * 1.2);
+    ctx.lineTo(x + size + 5, y - size * 0.7);
+    ctx.closePath();
+    ctx.fillStyle = isCentral ? 'rgba(251,191,36,0.15)' : 'rgba(74,222,128,0.08)';
+    ctx.fill();
+    ctx.stroke();
+
+    // Columns
+    for (let c = -1; c <= 1; c++) {
+        ctx.fillStyle = isCentral ? 'rgba(251,191,36,0.3)' : 'rgba(74,222,128,0.2)';
+        ctx.fillRect(x + c * (size * 0.6) - 2, y - size * 0.5, 4, size);
+    }
+
+    // Label
+    ctx.fillStyle = isCentral ? '#fbbf24' : '#4ade80';
+    ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'center';
+    const lines = bank.label.split('\n');
+    lines.forEach((line, li) => {
+        ctx.fillText(line, x, y + size * 0.7 + 14 + li * 11);
+    });
+
+    // Deposits amount
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '8px sans-serif';
+    ctx.fillText('$' + bank.deposits.toFixed(0), x, y + size * 0.7 + 14 + lines.length * 11 + 2);
+
+    // Reserve/Loan split bar
+    if (!isCentral && bank.deposits > 0) {
+        const barW = size * 1.6;
+        const barH = 5;
+        const barX = x - barW / 2;
+        const barY = y + size * 0.8;
+        const resPct = bank.reserves / bank.deposits;
+
+        ctx.fillStyle = 'rgba(96,165,250,0.5)';
+        ctx.fillRect(barX, barY, barW * resPct, barH);
+        ctx.fillStyle = 'rgba(244,114,182,0.4)';
+        ctx.fillRect(barX + barW * resPct, barY, barW * (1 - resPct), barH);
+    }
+}
+
+function drawChart(data, x, y, w, h, color, label, formatFn) {
+    if (data.length < 2) return;
+
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = 'bold 10px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(label, x, y - 5);
+
+    const min = Math.min(...data);
+    const max = Math.max(...data);
+    const range = max - min || 1;
+
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    data.forEach((v, i) => {
+        const px = x + (i / (data.length - 1)) * w;
+        const py = y + h - ((v - min) / range) * h;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+
+    // Fill below
+    ctx.lineTo(x + w, y + h);
+    ctx.lineTo(x, y + h);
+    ctx.closePath();
+    ctx.fillStyle = color.replace(')', ',0.05)').replace('rgb', 'rgba');
+    ctx.fill();
+
+    // Current value
+    const current = data[data.length - 1];
+    ctx.fillStyle = color;
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(formatFn(current), x + w, y - 5);
+}
+
+function draw() {
+    time++;
+
+    // Animate base money
+    targetBase = parseFloat(bmSlider.value);
+    baseMoney = lerp(baseMoney, targetBase, 0.05);
+    reserveRatio = parseInt(rrSlider.value) / 100;
+    velocity = parseFloat(velSlider.value);
+
+    updateBankChain();
+
+    // Calculate macro variables
+    const multiplier = calculateMoneyMultiplier();
+    const m2 = baseMoney * multiplier;
+    const nominalGDP = m2 * velocity;
+
+    // Simple inflation model: MV = PY (quantity theory of money)
+    const realGDP = 10000; // Assumed constant
+    const priceLevel = nominalGDP / realGDP;
+    const baselinePrice = (1000 / reserveRatio * velocity * 1000) / realGDP;
+    const inflation = ((priceLevel / baselinePrice) - 1) * 100;
+    const purchasingPower = 1 / priceLevel * 100;
+
+    // Record history
+    if (time % 3 === 0) {
+        moneyHistory.push(baseMoney);
+        m2History.push(m2);
+        inflationHistory.push(inflation);
+        purchasingHistory.push(purchasingPower);
+        if (moneyHistory.length > maxHistory) {
+            moneyHistory.shift();
+            m2History.shift();
+            inflationHistory.shift();
+            purchasingHistory.shift();
+        }
+    }
+
+    // Randomly spawn particles
+    if (time % 20 === 0 && bankChain.length > 2) {
+        const from = Math.floor(Math.random() * (bankChain.length - 1));
+        spawnMoneyParticle(from, from + 1);
+    }
+
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw connections between banks
+    for (let i = 0; i < bankChain.length - 1; i++) {
+        const from = bankChain[i], to = bankChain[i + 1];
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+        ctx.lineWidth = 1 + (bankChain[i].loans / baseMoney) * 3;
+        ctx.stroke();
+
+        // Arrow
+        const angle = Math.atan2(to.y - from.y, to.x - from.x);
+        const midX = (from.x + to.x) / 2;
+        const midY = (from.y + to.y) / 2;
+        ctx.beginPath();
+        ctx.moveTo(midX + Math.cos(angle) * 8, midY + Math.sin(angle) * 8);
+        ctx.lineTo(midX + Math.cos(angle + 2.5) * 6, midY + Math.sin(angle + 2.5) * 6);
+        ctx.lineTo(midX + Math.cos(angle - 2.5) * 6, midY + Math.sin(angle - 2.5) * 6);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(251,191,36,0.3)';
+        ctx.fill();
+
+        // Loan amount
+        ctx.fillStyle = 'rgba(244,114,182,0.4)';
+        ctx.font = '8px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('$' + bankChain[i].loans.toFixed(0) + ' lent', midX, midY - 10);
+    }
+
+    // Draw banks
+    bankChain.forEach((bank, i) => drawBank(bank, i));
+
+    // Draw money particles
+    moneyParticles = moneyParticles.filter(p => p.progress < 1);
+    moneyParticles.forEach(p => {
+        p.progress += p.speed;
+        const x = p.x + (p.tx - p.x) * p.progress;
+        const y = p.y + (p.ty - p.y) * p.progress + Math.sin(p.progress * Math.PI * 4) * 8;
+
+        ctx.beginPath();
+        ctx.arc(x, y, p.size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(251,191,36,${0.8 * (1 - p.progress)})`;
+        ctx.fill();
+
+        // $ symbol
+        ctx.fillStyle = `rgba(10,14,26,${0.8 * (1 - p.progress)})`;
+        ctx.font = `bold ${p.size + 2}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('$', x, y + p.size * 0.35);
+    });
+
+    // Money multiplier cascade visualization
+    const cascadeY = H * 0.42;
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Fractional Reserve Money Multiplier Chain', W / 2, cascadeY);
+
+    const rr = reserveRatio;
+    let deposit = baseMoney;
+    const cascadeLeft = W * 0.08;
+    const cascadeW = W * 0.84;
+    const barMaxH = H * 0.08;
+    const numSteps = Math.min(10, bankChain.length);
+
+    for (let i = 0; i < numSteps; i++) {
+        const barX = cascadeLeft + (i / numSteps) * cascadeW;
+        const barW = cascadeW / numSteps - 4;
+        const ratio = deposit / baseMoney;
+        const barH = ratio * barMaxH;
+        const y = cascadeY + 10;
+
+        // Reserve portion
+        const resH = barH * rr;
+        ctx.fillStyle = 'rgba(96,165,250,0.4)';
+        ctx.fillRect(barX, y + barMaxH - barH, barW, resH);
+
+        // Loan portion
+        ctx.fillStyle = 'rgba(74,222,128,0.3)';
+        ctx.fillRect(barX, y + barMaxH - barH + resH, barW, barH - resH);
+
+        ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(barX, y + barMaxH - barH, barW, barH);
+
+        // Label
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.font = '8px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('$' + deposit.toFixed(0), barX + barW / 2, y + barMaxH + 12);
+        ctx.fillText('Round ' + (i + 1), barX + barW / 2, y + barMaxH + 22);
+
+        deposit *= (1 - rr);
+    }
+
+    // Charts area
+    const chartAreaTop = H * 0.57;
+    const chartH = (H * 0.80 - chartAreaTop - 20) / 2;
+    const chartLeftX = W * 0.08;
+    const chartRightX = W * 0.48;
+    const chart2Left = W * 0.55;
+    const chart2Right = W * 0.92;
+    const cW1 = chartRightX - chartLeftX;
+    const cW2 = chart2Right - chart2Left;
+
+    // M2 chart
+    drawChart(m2History, chartLeftX, chartAreaTop, cW1, chartH, '#60a5fa', 'Money Supply (M2)', v => '$' + v.toFixed(0));
+
+    // Base money chart
+    drawChart(moneyHistory, chart2Left, chartAreaTop, cW2, chartH, '#4ade80', 'Base Money (M0)', v => '$' + v.toFixed(0));
+
+    // Inflation chart
+    drawChart(inflationHistory, chartLeftX, chartAreaTop + chartH + 15, cW1, chartH, '#f472b6', 'Inflation Rate', v => v.toFixed(1) + '%');
+
+    // Purchasing power
+    drawChart(purchasingHistory, chart2Left, chartAreaTop + chartH + 15, cW2, chartH, '#a78bfa', 'Purchasing Power', v => v.toFixed(1));
+
+    // Update info
+    document.getElementById('baseMoney').textContent = '$' + baseMoney.toFixed(0);
+    document.getElementById('totalM2').textContent = '$' + m2.toFixed(0);
+    document.getElementById('multiplier').textContent = multiplier.toFixed(1) + 'x';
+    document.getElementById('inflation').textContent = inflation.toFixed(1) + '%';
+    document.getElementById('purchasing').textContent = purchasingPower.toFixed(1);
+    document.getElementById('velDisp').textContent = velocity.toFixed(1);
+
+    requestAnimationFrame(draw);
+}
+
+initBankChain();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

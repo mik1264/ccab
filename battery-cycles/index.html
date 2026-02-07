@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Battery Charge-Discharge Cycles</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title {
+    position: fixed; top: 50px; left: 50%; transform: translateX(-50%);
+    color: #fbbf24; font-size: 22px; font-weight: 600;
+    text-shadow: 0 0 20px rgba(251,191,36,0.5); z-index: 10;
+    pointer-events: none; text-align: center;
+}
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.85); border: 1px solid rgba(251,191,36,0.3);
+    border-radius: 12px; padding: 14px 20px; display: flex; gap: 18px;
+    align-items: center; z-index: 10; flex-wrap: wrap; justify-content: center;
+}
+button {
+    background: rgba(251,191,36,0.2); color: #fbbf24; border: 1px solid #fbbf24;
+    padding: 10px 18px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    font-weight: bold; transition: background 0.2s;
+}
+button:hover { background: rgba(251,191,36,0.4); }
+button.active { background: rgba(251,191,36,0.5); }
+button.charge { color: #4f8; border-color: #4f8; background: rgba(68,255,136,0.15); }
+button.charge:hover { background: rgba(68,255,136,0.3); }
+button.charge.active { background: rgba(68,255,136,0.4); }
+button.discharge { color: #f84; border-color: #f84; background: rgba(255,136,68,0.15); }
+button.discharge:hover { background: rgba(255,136,68,0.3); }
+button.discharge.active { background: rgba(255,136,68,0.4); }
+.control-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+label { color: #fbbf24; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+input[type="range"] { width: 120px; accent-color: #fbbf24; }
+.value-display { color: #fff; font-size: 13px; font-weight: bold; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">&#8592; Back to Gallery</a>
+<div id="title">Battery Charge-Discharge Cycles</div>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <button class="charge" id="chargeBtn" onclick="setMode('charge')">Charge</button>
+    <button class="discharge active" id="dischargeBtn" onclick="setMode('discharge')">Discharge</button>
+    <button id="pauseBtn" onclick="setMode('pause')">Pause</button>
+    <div class="control-group">
+        <label>Current Rate</label>
+        <input type="range" id="currentRate" min="0.5" max="5" value="1" step="0.1">
+        <span class="value-display" id="rateVal">1.0 C</span>
+    </div>
+    <div class="control-group">
+        <label>Speed</label>
+        <input type="range" id="simSpeed" min="1" max="50" value="10">
+        <span class="value-display" id="speedVal">10x</span>
+    </div>
+    <button onclick="resetBattery()">Reset</button>
+</div>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+let mode = 'discharge';
+let chargeLevel = 0.8;
+let voltage = 3.7;
+let cycleCount = 0;
+let health = 100;
+let maxCapacity = 1;
+let currentRate = 1;
+let simSpeed = 10;
+let ions = [];
+let voltageHistory = [];
+let capacityHistory = [];
+let lastChargeLevel = chargeLevel;
+let totalTime = 0;
+
+document.getElementById('currentRate').addEventListener('input', e => { currentRate = +e.target.value; document.getElementById('rateVal').textContent = currentRate.toFixed(1) + ' C'; });
+document.getElementById('simSpeed').addEventListener('input', e => { simSpeed = +e.target.value; document.getElementById('speedVal').textContent = simSpeed + 'x'; });
+
+function setMode(m) {
+    mode = m;
+    document.getElementById('chargeBtn').classList.toggle('active', m === 'charge');
+    document.getElementById('dischargeBtn').classList.toggle('active', m === 'discharge');
+    document.getElementById('pauseBtn').classList.toggle('active', m === 'pause');
+}
+window.setMode = setMode;
+
+function resetBattery() {
+    chargeLevel = 0.8;
+    voltage = 3.7;
+    cycleCount = 0;
+    health = 100;
+    maxCapacity = 1;
+    voltageHistory = [];
+    capacityHistory = [];
+    ions = [];
+    totalTime = 0;
+}
+window.resetBattery = resetBattery;
+
+function getVoltage(soc) {
+    if (soc > 0.9) return 4.2 - (1 - soc) * 2;
+    if (soc > 0.1) return 3.6 + soc * 0.4;
+    return 3.0 + soc * 6;
+}
+
+function initIons() {
+    ions = [];
+    for (let i = 0; i < 60; i++) {
+        ions.push({
+            x: 0, y: 0,
+            tx: 0, ty: 0,
+            phase: Math.random() * Math.PI * 2,
+            speed: 0.5 + Math.random() * 1.5,
+            side: Math.random() > chargeLevel ? 'anode' : 'cathode'
+        });
+    }
+}
+initIons();
+
+function drawBatteryCrossSection(bx, by, bw, bh) {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#555';
+    ctx.fillRect(bx + bw * 0.4, by - 8, bw * 0.2, 10);
+
+    const anodeX = bx + 10;
+    const anodeW = bw * 0.35;
+    const cathodeX = bx + bw * 0.55;
+    const cathodeW = bw * 0.35;
+    const electrodeY = by + 15;
+    const electrodeH = bh - 30;
+
+    const anodeGrad = ctx.createLinearGradient(anodeX, 0, anodeX + anodeW, 0);
+    anodeGrad.addColorStop(0, '#2a2a2a');
+    anodeGrad.addColorStop(1, '#3a3a3a');
+    ctx.fillStyle = anodeGrad;
+    ctx.fillRect(anodeX, electrodeY, anodeW, electrodeH);
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(anodeX, electrodeY, anodeW, electrodeH);
+
+    const cathodeGrad = ctx.createLinearGradient(cathodeX, 0, cathodeX + cathodeW, 0);
+    cathodeGrad.addColorStop(0, '#1a3a5a');
+    cathodeGrad.addColorStop(1, '#2a4a6a');
+    ctx.fillStyle = cathodeGrad;
+    ctx.fillRect(cathodeX, electrodeY, cathodeW, electrodeH);
+    ctx.strokeStyle = '#4a6a8a';
+    ctx.strokeRect(cathodeX, electrodeY, cathodeW, electrodeH);
+
+    const sepX = bx + bw * 0.4;
+    const sepW = bw * 0.15;
+    ctx.fillStyle = 'rgba(200,200,200,0.1)';
+    ctx.fillRect(sepX, electrodeY, sepW, electrodeH);
+    for (let i = 0; i < electrodeH; i += 6) {
+        ctx.fillStyle = 'rgba(200,200,200,0.05)';
+        ctx.fillRect(sepX, electrodeY + i, sepW, 3);
+    }
+
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#aaa';
+    ctx.fillText('Anode (-)', anodeX + anodeW / 2, by + bh + 16);
+    ctx.fillText('Cathode (+)', cathodeX + cathodeW / 2, by + bh + 16);
+    ctx.fillStyle = '#666';
+    ctx.fillText('Separator', sepX + sepW / 2, by + bh + 16);
+
+    const ionTargetAnode = { xMin: anodeX + 5, xMax: anodeX + anodeW - 5, yMin: electrodeY + 5, yMax: electrodeY + electrodeH - 5 };
+    const ionTargetCathode = { xMin: cathodeX + 5, xMax: cathodeX + cathodeW - 5, yMin: electrodeY + 5, yMax: electrodeY + electrodeH - 5 };
+
+    ions.forEach(ion => {
+        let target;
+        if (mode === 'charge') {
+            target = ion.side === 'cathode' ? ionTargetAnode : (ion.side === 'anode' ? ionTargetAnode : ionTargetCathode);
+        } else {
+            target = ion.side === 'anode' ? ionTargetCathode : (ion.side === 'cathode' ? ionTargetCathode : ionTargetAnode);
+        }
+        if (ion.tx === 0) {
+            ion.tx = target.xMin + Math.random() * (target.xMax - target.xMin);
+            ion.ty = target.yMin + Math.random() * (target.yMax - target.yMin);
+            ion.x = ion.tx;
+            ion.y = ion.ty;
+        }
+        if (mode !== 'pause') {
+            ion.tx = target.xMin + Math.random() * (target.xMax - target.xMin);
+            ion.ty = target.yMin + Math.random() * (target.yMax - target.yMin);
+        }
+        ion.x += (ion.tx - ion.x) * 0.02 * ion.speed;
+        ion.y += (ion.ty - ion.y) * 0.02 * ion.speed;
+        ion.phase += 0.05;
+        const wobble = Math.sin(ion.phase) * 2;
+
+        ctx.beginPath();
+        ctx.arc(ion.x + wobble, ion.y, 3, 0, Math.PI * 2);
+        ctx.fillStyle = mode === 'charge' ? 'rgba(100,255,150,0.8)' : 'rgba(255,150,80,0.8)';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(ion.x + wobble, ion.y, 6, 0, Math.PI * 2);
+        ctx.fillStyle = mode === 'charge' ? 'rgba(100,255,150,0.1)' : 'rgba(255,150,80,0.1)';
+        ctx.fill();
+    });
+
+    const chargeBar = electrodeH * chargeLevel;
+    const chGrad = ctx.createLinearGradient(0, electrodeY + electrodeH - chargeBar, 0, electrodeY + electrodeH);
+    if (chargeLevel > 0.5) { chGrad.addColorStop(0, '#4f8'); chGrad.addColorStop(1, '#2a6'); }
+    else if (chargeLevel > 0.2) { chGrad.addColorStop(0, '#fb4'); chGrad.addColorStop(1, '#a72'); }
+    else { chGrad.addColorStop(0, '#f44'); chGrad.addColorStop(1, '#a22'); }
+    ctx.fillStyle = chGrad;
+    ctx.globalAlpha = 0.3;
+    ctx.fillRect(cathodeX + 2, electrodeY + electrodeH - chargeBar, cathodeW - 4, chargeBar);
+    ctx.globalAlpha = 1;
+}
+
+function drawVoltageGraph(x, y, w, h) {
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.strokeStyle = 'rgba(251,191,36,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Voltage (V)', x + w / 2, y + 14);
+    if (voltageHistory.length < 2) return;
+    const gx = x + 30, gy = y + 22, gw = w - 40, gh = h - 34;
+    const minV = 2.8, maxV = 4.4;
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    for (let v = 3.0; v <= 4.2; v += 0.3) {
+        const ly = gy + gh - ((v - minV) / (maxV - minV)) * gh;
+        ctx.beginPath(); ctx.moveTo(gx, ly); ctx.lineTo(gx + gw, ly); ctx.stroke();
+        ctx.fillStyle = '#555';
+        ctx.font = '8px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(v.toFixed(1), gx - 3, ly + 3);
+    }
+    ctx.beginPath();
+    ctx.strokeStyle = '#4af';
+    ctx.lineWidth = 1.5;
+    const start = Math.max(0, voltageHistory.length - gw);
+    for (let i = start; i < voltageHistory.length; i++) {
+        const px = gx + gw - (voltageHistory.length - 1 - i);
+        const py = gy + gh - ((voltageHistory[i] - minV) / (maxV - minV)) * gh;
+        if (i === start) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+}
+
+function drawCapacityGraph(x, y, w, h) {
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.strokeStyle = 'rgba(251,191,36,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Capacity Fade', x + w / 2, y + 14);
+    if (capacityHistory.length < 2) return;
+    const gx = x + 30, gy = y + 22, gw = w - 40, gh = h - 34;
+    ctx.beginPath();
+    ctx.strokeStyle = '#f84';
+    ctx.lineWidth = 1.5;
+    const maxCycles = Math.max(10, capacityHistory[capacityHistory.length - 1].c);
+    for (let i = 0; i < capacityHistory.length; i++) {
+        const px = gx + (capacityHistory[i].c / maxCycles) * gw;
+        const py = gy + gh - (capacityHistory[i].cap) * gh;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.fillStyle = '#555';
+    ctx.font = '8px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText('100%', gx - 3, gy + 3);
+    ctx.fillText('80%', gx - 3, gy + gh * 0.2 + 3);
+    ctx.fillText('0%', gx - 3, gy + gh + 3);
+    ctx.textAlign = 'center';
+    ctx.fillText('Cycles', gx + gw / 2, gy + gh + 12);
+}
+
+function drawStats(x, y) {
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.strokeStyle = 'rgba(251,191,36,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, 200, 160, 10);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Battery Status', x + 12, y + 22);
+    const lines = [
+        ['State of Charge', (chargeLevel * 100).toFixed(1) + '%', chargeLevel > 0.5 ? '#4f8' : chargeLevel > 0.2 ? '#fb4' : '#f44'],
+        ['Voltage', voltage.toFixed(3) + ' V', '#4af'],
+        ['Mode', mode.charAt(0).toUpperCase() + mode.slice(1), mode === 'charge' ? '#4f8' : mode === 'discharge' ? '#f84' : '#888'],
+        ['Cycle Count', cycleCount.toString(), '#fbbf24'],
+        ['Health', health.toFixed(1) + '%', health > 80 ? '#4f8' : health > 50 ? '#fb4' : '#f44'],
+        ['Max Capacity', (maxCapacity * 100).toFixed(1) + '%', '#aaf'],
+        ['C-Rate', currentRate.toFixed(1) + ' C', '#fff']
+    ];
+    lines.forEach((l, i) => {
+        ctx.fillStyle = '#888';
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(l[0], x + 12, y + 44 + i * 17);
+        ctx.fillStyle = l[2];
+        ctx.textAlign = 'right';
+        ctx.fillText(l[1], x + 188, y + 44 + i * 17);
+    });
+}
+
+function drawBatteryIcon(x, y) {
+    const w = 60, h = 100;
+    ctx.strokeStyle = '#666';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 4);
+    ctx.stroke();
+    ctx.fillStyle = '#555';
+    ctx.fillRect(x + w * 0.3, y - 5, w * 0.4, 7);
+    const fillH = h * chargeLevel * 0.9;
+    const fillColor = chargeLevel > 0.5 ? '#4f8' : chargeLevel > 0.2 ? '#fb4' : '#f44';
+    ctx.fillStyle = fillColor + '88';
+    ctx.fillRect(x + 4, y + h - 4 - fillH, w - 8, fillH);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(Math.round(chargeLevel * 100) + '%', x + w / 2, y + h / 2 + 6);
+}
+
+let lastTime = performance.now();
+function animate(now) {
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+
+    if (mode !== 'pause') {
+        const rate = currentRate * simSpeed * 0.001 * dt;
+        if (mode === 'charge') {
+            chargeLevel = Math.min(maxCapacity, chargeLevel + rate);
+            if (chargeLevel >= maxCapacity) {
+                if (lastChargeLevel < maxCapacity) {
+                    cycleCount++;
+                    health = Math.max(0, health - 0.3 * currentRate);
+                    maxCapacity = health / 100;
+                    capacityHistory.push({ c: cycleCount, cap: maxCapacity });
+                }
+            }
+        } else {
+            chargeLevel = Math.max(0, chargeLevel - rate);
+            if (chargeLevel <= 0.01) {
+                if (lastChargeLevel > 0.01) {
+                    cycleCount++;
+                    health = Math.max(0, health - 0.3 * currentRate);
+                    maxCapacity = health / 100;
+                    capacityHistory.push({ c: cycleCount, cap: maxCapacity });
+                }
+            }
+        }
+        lastChargeLevel = chargeLevel;
+    }
+
+    voltage = getVoltage(chargeLevel / maxCapacity);
+    if (mode === 'discharge') voltage -= currentRate * 0.05;
+    else if (mode === 'charge') voltage += currentRate * 0.03;
+
+    totalTime += dt * simSpeed;
+    if (voltageHistory.length === 0 || now - (voltageHistory._lastPush || 0) > 30) {
+        voltageHistory.push(voltage);
+        voltageHistory._lastPush = now;
+        if (voltageHistory.length > 500) voltageHistory.shift();
+    }
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    const bw = Math.min(350, W * 0.3);
+    const bh = Math.min(280, H * 0.4);
+    const bx = W * 0.08;
+    const by = H * 0.2;
+    drawBatteryCrossSection(bx, by, bw, bh);
+    drawBatteryIcon(bx + bw + 30, by + 20);
+
+    const rightX = W * 0.55;
+    drawStats(rightX, 80);
+    drawVoltageGraph(rightX, 260, Math.min(280, W * 0.35), 130);
+    drawCapacityGraph(rightX, 410, Math.min(280, W * 0.35), 130);
+
+    if (mode === 'charge') {
+        ctx.fillStyle = 'rgba(68,255,136,0.15)';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#4f8';
+        ctx.fillText('Li+ ions moving to Anode', bx + bw / 2, by - 10);
+    } else if (mode === 'discharge') {
+        ctx.fillStyle = '#f84';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Li+ ions moving to Cathode', bx + bw / 2, by - 10);
+    }
+
+    requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

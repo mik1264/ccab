@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Public Transit Network</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+#title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 18px; font-family: sans-serif; z-index: 999; text-shadow: 0 0 10px rgba(251,191,36,0.5); pointer-events: none; }
+#ui { position: fixed; top: 10px; right: 10px; z-index: 999; }
+.panel { background: rgba(0,0,0,0.75); color: #e0e0e0; padding: 12px 16px; border-radius: 8px; font-size: 13px; min-width: 200px; }
+.panel label { display: block; margin: 6px 0 2px; color: #fbbf24; }
+.panel input[type=range] { width: 100%; }
+.panel button { background: #fbbf24; color: #0a0e1a; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; margin-top: 6px; width: 100%; }
+.panel button:hover { background: #f59e0b; }
+#stats { color: #aaa; margin-top: 8px; line-height: 1.6; }
+.legend { margin-top: 8px; }
+.legend-item { display: flex; align-items: center; gap: 6px; margin: 3px 0; font-size: 12px; }
+.legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div id="title">Public Transit Network</div>
+<div id="ui">
+    <div class="panel">
+        <label>Passenger Spawn Rate: <span id="srVal">3</span></label>
+        <input type="range" id="spawnRate" min="1" max="10" value="3">
+        <label>Simulation Speed: <span id="speedVal">1</span>x</label>
+        <input type="range" id="speed" min="1" max="5" value="1">
+        <button id="addRoute">Add Random Route</button>
+        <button id="resetBtn">Reset</button>
+        <div class="legend">
+            <div class="legend-item"><span class="legend-dot" style="background:#4ade80;"></span> Station</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#60a5fa;"></span> Passenger (waiting)</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#fbbf24;"></span> Passenger (riding)</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#f87171;"></span> Route Lines</div>
+        </div>
+        <div id="stats"></div>
+    </div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function() {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+
+    const routeColors = ['#f87171','#60a5fa','#a78bfa','#34d399','#fbbf24','#fb923c','#e879f9','#22d3ee'];
+    let stations = [];
+    let routes = [];
+    let passengers = [];
+    let vehicles = [];
+    let spawnRate = 3;
+    let simSpeed = 1;
+    let totalServed = 0;
+    let totalWaitTime = 0;
+    let servedCount = 0;
+    let dragStation = null;
+    let frame = 0;
+
+    document.getElementById('spawnRate').addEventListener('input', function() {
+        spawnRate = parseInt(this.value);
+        document.getElementById('srVal').textContent = spawnRate;
+    });
+    document.getElementById('speed').addEventListener('input', function() {
+        simSpeed = parseInt(this.value);
+        document.getElementById('speedVal').textContent = simSpeed;
+    });
+    document.getElementById('addRoute').addEventListener('click', addRandomRoute);
+    document.getElementById('resetBtn').addEventListener('click', init);
+
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+    }
+
+    function dist(a, b) {
+        return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+    }
+
+    function init() {
+        resize();
+        stations = [];
+        routes = [];
+        passengers = [];
+        vehicles = [];
+        totalServed = 0;
+        totalWaitTime = 0;
+        servedCount = 0;
+        frame = 0;
+
+        // Generate stations in a realistic pattern
+        const cx = W / 2, cy = H / 2;
+        // Central hub
+        stations.push({ x: cx, y: cy, name: 'Central', passengers: [], id: 0 });
+        // Ring of stations
+        for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2;
+            const r = Math.min(W, H) * 0.2;
+            stations.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, name: 'S' + (i + 1), passengers: [], id: i + 1 });
+        }
+        // Outer ring
+        for (let i = 0; i < 12; i++) {
+            const a = (i / 12) * Math.PI * 2 + 0.15;
+            const r = Math.min(W, H) * 0.35;
+            stations.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, name: 'O' + (i + 1), passengers: [], id: i + 9 });
+        }
+
+        // Create initial routes
+        // Central loop
+        addRoute([0, 1, 2, 3, 4, 5, 6, 7, 8, 1], 0);
+        // Cross routes
+        addRoute([9, 1, 0, 5, 15], 1);
+        addRoute([12, 3, 0, 7, 18], 2);
+        addRoute([11, 2, 0, 6, 17], 3);
+    }
+
+    function addRoute(stationIds, colorIdx) {
+        const route = {
+            stations: stationIds,
+            color: routeColors[colorIdx % routeColors.length],
+            id: routes.length
+        };
+        routes.push(route);
+
+        // Add vehicle for this route
+        vehicles.push({
+            route: route,
+            routeIdx: 0,
+            progress: 0,
+            passengers: [],
+            capacity: 20,
+            speed: 2,
+            x: stations[stationIds[0]].x,
+            y: stations[stationIds[0]].y
+        });
+    }
+
+    function addRandomRoute() {
+        // Pick random stations to connect
+        const count = 3 + Math.floor(Math.random() * 4);
+        const picked = [Math.floor(Math.random() * stations.length)];
+        while (picked.length < count) {
+            let best = -1, bestD = Infinity;
+            const last = picked[picked.length - 1];
+            for (let i = 0; i < stations.length; i++) {
+                if (picked.includes(i)) continue;
+                const d = dist(stations[last], stations[i]);
+                if (d < bestD && d > 50) {
+                    bestD = d;
+                    best = i;
+                }
+            }
+            if (best === -1) break;
+            picked.push(best);
+        }
+        addRoute(picked, routes.length);
+    }
+
+    function spawnPassenger() {
+        if (stations.length < 2) return;
+        const from = Math.floor(Math.random() * stations.length);
+        let to = from;
+        while (to === from) to = Math.floor(Math.random() * stations.length);
+        const p = {
+            from: from,
+            to: to,
+            x: stations[from].x + (Math.random() - 0.5) * 20,
+            y: stations[from].y + (Math.random() - 0.5) * 20,
+            spawnTime: frame,
+            riding: false
+        };
+        stations[from].passengers.push(p);
+        passengers.push(p);
+    }
+
+    function updateVehicles() {
+        for (const v of vehicles) {
+            const route = v.route.stations;
+            if (route.length < 2) continue;
+            const fromIdx = route[v.routeIdx % route.length];
+            const toIdx = route[(v.routeIdx + 1) % route.length];
+            const from = stations[fromIdx];
+            const to = stations[toIdx];
+            const d = dist(from, to);
+
+            v.progress += v.speed * simSpeed / Math.max(d, 1);
+
+            if (v.progress >= 1) {
+                v.progress = 0;
+                v.routeIdx = (v.routeIdx + 1) % route.length;
+                const currentStation = stations[route[v.routeIdx % route.length]];
+
+                // Drop off passengers
+                v.passengers = v.passengers.filter(p => {
+                    if (p.to === route[v.routeIdx % route.length]) {
+                        p.riding = false;
+                        totalWaitTime += frame - p.spawnTime;
+                        servedCount++;
+                        totalServed++;
+                        // Remove from passengers list
+                        const idx = passengers.indexOf(p);
+                        if (idx >= 0) passengers.splice(idx, 1);
+                        return false;
+                    }
+                    return true;
+                });
+
+                // Pick up passengers
+                const stIdx = route[v.routeIdx % route.length];
+                currentStation.passengers = currentStation.passengers.filter(p => {
+                    if (v.passengers.length < v.capacity) {
+                        p.riding = true;
+                        v.passengers.push(p);
+                        return false;
+                    }
+                    return true;
+                });
+            }
+
+            // Interpolate position
+            const nextFrom = stations[route[v.routeIdx % route.length]];
+            const nextTo = stations[route[(v.routeIdx + 1) % route.length]];
+            v.x = nextFrom.x + (nextTo.x - nextFrom.x) * v.progress;
+            v.y = nextFrom.y + (nextTo.y - nextFrom.y) * v.progress;
+        }
+    }
+
+    function draw() {
+        ctx.fillStyle = '#0a0e1a';
+        ctx.fillRect(0, 0, W, H);
+
+        // Draw grid (subtle)
+        ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+        ctx.lineWidth = 1;
+        for (let x = 0; x < W; x += 50) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+        }
+        for (let y = 0; y < H; y += 50) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+        }
+
+        // Draw routes
+        for (const route of routes) {
+            ctx.strokeStyle = route.color;
+            ctx.lineWidth = 3;
+            ctx.globalAlpha = 0.5;
+            ctx.beginPath();
+            for (let i = 0; i < route.stations.length; i++) {
+                const s = stations[route.stations[i]];
+                if (i === 0) ctx.moveTo(s.x, s.y);
+                else ctx.lineTo(s.x, s.y);
+            }
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }
+
+        // Draw stations
+        for (const s of stations) {
+            // Glow
+            const grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, 25);
+            grad.addColorStop(0, 'rgba(74,222,128,0.2)');
+            grad.addColorStop(1, 'rgba(74,222,128,0)');
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, 25, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#4ade80';
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, 6, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.strokeStyle = '#166534';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Waiting passengers count
+            if (s.passengers.length > 0) {
+                ctx.fillStyle = '#60a5fa';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(s.passengers.length, s.x, s.y - 14);
+            }
+        }
+
+        // Draw waiting passengers
+        for (const p of passengers) {
+            if (!p.riding) {
+                ctx.fillStyle = '#60a5fa';
+                ctx.globalAlpha = 0.7;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+        }
+
+        // Draw vehicles
+        for (const v of vehicles) {
+            // Vehicle glow
+            ctx.fillStyle = v.route.color;
+            ctx.globalAlpha = 0.3;
+            ctx.beginPath();
+            ctx.arc(v.x, v.y, 12, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            ctx.fillStyle = v.route.color;
+            ctx.beginPath();
+            ctx.arc(v.x, v.y, 7, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 8px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(v.passengers.length, v.x, v.y);
+        }
+
+        // Stats
+        const waiting = passengers.filter(p => !p.riding).length;
+        const riding = passengers.filter(p => p.riding).length;
+        const avgWait = servedCount > 0 ? (totalWaitTime / servedCount / 60).toFixed(1) : '0.0';
+
+        // Coverage: percentage of stations with at least one route
+        const coveredStations = new Set();
+        for (const r of routes) {
+            for (const s of r.stations) coveredStations.add(s);
+        }
+        const coverage = ((coveredStations.size / stations.length) * 100).toFixed(0);
+
+        document.getElementById('stats').innerHTML =
+            `Waiting: ${waiting} | Riding: ${riding}<br>` +
+            `Served: ${totalServed}<br>` +
+            `Avg Wait: ${avgWait}s<br>` +
+            `Routes: ${routes.length} | Coverage: ${coverage}%<br>` +
+            `Stations: ${stations.length}`;
+    }
+
+    // Drag stations
+    canvas.addEventListener('mousedown', function(e) {
+        for (const s of stations) {
+            if (dist(s, { x: e.clientX, y: e.clientY }) < 15) {
+                dragStation = s;
+                break;
+            }
+        }
+    });
+    canvas.addEventListener('mousemove', function(e) {
+        if (dragStation) {
+            dragStation.x = e.clientX;
+            dragStation.y = e.clientY;
+        }
+    });
+    canvas.addEventListener('mouseup', function() { dragStation = null; });
+
+    window.addEventListener('resize', resize);
+
+    function animate() {
+        frame++;
+        for (let i = 0; i < simSpeed; i++) {
+            if (frame % Math.max(1, 11 - spawnRate) === 0) {
+                spawnPassenger();
+            }
+            updateVehicles();
+        }
+
+        // Remove old unserved passengers
+        passengers = passengers.filter(p => {
+            if (!p.riding && frame - p.spawnTime > 1800) {
+                const st = stations[p.from];
+                const idx = st.passengers.indexOf(p);
+                if (idx >= 0) st.passengers.splice(idx, 1);
+                return false;
+            }
+            return true;
+        });
+
+        draw();
+        requestAnimationFrame(animate);
+    }
+
+    init();
+    animate();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dam Break - Shallow Water Equations</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: sans-serif; }
+canvas { display: block; }
+.title-overlay {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+    color: #fbbf24; font-size: 20px; font-weight: bold; z-index: 999;
+    text-shadow: 0 0 10px rgba(0,0,0,0.8); pointer-events: none;
+}
+.controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 16px; align-items: center; z-index: 999;
+    background: rgba(0,0,0,0.7); padding: 12px 20px; border-radius: 10px;
+    flex-wrap: wrap; justify-content: center;
+}
+.controls label { color: #ccc; font-size: 13px; }
+.controls input[type=range] { width: 90px; cursor: pointer; }
+.controls span { color: #fbbf24; font-size: 13px; min-width: 30px; }
+.controls button {
+    padding: 6px 14px; background: #fbbf24; color: #0a0e1a; border: none;
+    border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: bold;
+}
+.info {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    color: rgba(255,255,255,0.5); font-size: 12px; z-index: 999;
+    pointer-events: none; text-align: center;
+}
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div class="title-overlay">Dam Break - Shallow Water Equations</div>
+<div class="info">1D Saint-Venant equations: &part;h/&part;t + &part;(hu)/&part;x = 0</div>
+<div class="controls">
+    <label>Dam Position</label>
+    <input type="range" id="damSlider" min="2" max="8" value="4" step="1">
+    <span id="damVal">40%</span>
+    <label>Left Level</label>
+    <input type="range" id="leftSlider" min="3" max="10" value="8" step="1">
+    <span id="leftVal">8</span>
+    <label>Right Level</label>
+    <input type="range" id="rightSlider" min="0" max="5" value="2" step="1">
+    <span id="rightVal">2</span>
+    <label>Gravity</label>
+    <input type="range" id="gravSlider" min="2" max="20" value="10" step="1">
+    <span id="gravVal">10</span>
+    <button id="breakBtn">Break Dam!</button>
+    <button id="resetBtn">Reset</button>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+const N = 800; // Grid cells
+let h, hu; // Conservative variables: height and momentum
+let h_new, hu_new;
+let damBroken = false;
+let time = 0;
+let particles = [];
+let splashParticles = [];
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    reset();
+}
+
+function reset() {
+    h = new Float64Array(N);
+    hu = new Float64Array(N);
+    h_new = new Float64Array(N);
+    hu_new = new Float64Array(N);
+
+    const damPos = parseInt(document.getElementById('damSlider').value) / 10;
+    const leftH = parseInt(document.getElementById('leftSlider').value) * 0.1;
+    const rightH = parseInt(document.getElementById('rightSlider').value) * 0.1;
+    const damIdx = Math.floor(N * damPos);
+
+    for (let i = 0; i < N; i++) {
+        h[i] = i < damIdx ? leftH : rightH;
+        hu[i] = 0;
+    }
+
+    damBroken = false;
+    time = 0;
+    particles = [];
+    splashParticles = [];
+
+    // Add water particles
+    for (let i = 0; i < 200; i++) {
+        particles.push({
+            x: Math.random() * N,
+            y: Math.random(),
+            vx: 0, vy: 0,
+            size: 1 + Math.random() * 2
+        });
+    }
+}
+
+function breakDam() {
+    damBroken = true;
+    time = 0;
+    // Add splash particles at dam position
+    const damPos = parseInt(document.getElementById('damSlider').value) / 10;
+    const damIdx = Math.floor(N * damPos);
+    for (let i = 0; i < 30; i++) {
+        splashParticles.push({
+            x: damIdx,
+            y: h[damIdx],
+            vx: (Math.random() - 0.5) * 5,
+            vy: Math.random() * 3 + 1,
+            life: 60 + Math.random() * 40,
+            size: 1 + Math.random() * 3
+        });
+    }
+}
+
+function step() {
+    if (!damBroken) return;
+
+    const g = parseInt(document.getElementById('gravSlider').value) * 0.1;
+    const dx = 1.0 / N;
+    const dt = 0.0002;
+    const friction = 0.001;
+
+    // Lax-Friedrichs scheme
+    for (let iter = 0; iter < 20; iter++) {
+        for (let i = 1; i < N - 1; i++) {
+            const hL = h[i-1], hR = h[i+1], hC = h[i];
+            const huL = hu[i-1], huR = hu[i+1], huC = hu[i];
+
+            // Fluxes F(U) = [hu, hu^2/h + 0.5*g*h^2]
+            const uL = hL > 0.001 ? huL / hL : 0;
+            const uR = hR > 0.001 ? huR / hR : 0;
+            const uC = hC > 0.001 ? huC / hC : 0;
+
+            const fh_L = huL;
+            const fh_R = huR;
+            const fhu_L = (hL > 0.001 ? huL * huL / hL : 0) + 0.5 * g * hL * hL;
+            const fhu_R = (hR > 0.001 ? huR * huR / hR : 0) + 0.5 * g * hR * hR;
+
+            // Lax-Friedrichs
+            h_new[i] = 0.5 * (hL + hR) - dt / (2 * dx) * (fh_R - fh_L);
+            hu_new[i] = 0.5 * (huL + huR) - dt / (2 * dx) * (fhu_R - fhu_L);
+
+            // Friction
+            if (h_new[i] > 0.001) {
+                hu_new[i] -= friction * hu_new[i];
+            }
+
+            // Ensure non-negative height
+            h_new[i] = Math.max(0, h_new[i]);
+        }
+
+        // Boundary: reflective
+        h_new[0] = h_new[1];
+        hu_new[0] = -hu_new[1];
+        h_new[N-1] = h_new[N-2];
+        hu_new[N-1] = -hu_new[N-2];
+
+        // Swap
+        const tmph = h; h = h_new; h_new = tmph;
+        const tmphu = hu; hu = hu_new; hu_new = tmphu;
+    }
+
+    time += 0.02;
+}
+
+function updateParticles() {
+    const g = parseInt(document.getElementById('gravSlider').value) * 0.1;
+
+    for (let p of particles) {
+        const idx = Math.floor(p.x);
+        if (idx >= 0 && idx < N) {
+            const hVal = h[idx];
+            const vel = hVal > 0.001 ? hu[idx] / hVal : 0;
+            p.x += vel * 2;
+            p.y = Math.random() * hVal * 0.8;
+        }
+        if (p.x < 0) p.x = N - 1;
+        if (p.x >= N) p.x = 0;
+    }
+
+    // Splash particles
+    for (let i = splashParticles.length - 1; i >= 0; i--) {
+        const sp = splashParticles[i];
+        sp.x += sp.vx;
+        sp.y += sp.vy;
+        sp.vy -= g * 0.05;
+        sp.life--;
+        if (sp.life <= 0) splashParticles.splice(i, 1);
+    }
+}
+
+function render() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    const baseY = H * 0.75;
+    const scaleX = W / N;
+    const scaleY = H * 0.5;
+    const damPos = parseInt(document.getElementById('damSlider').value) / 10;
+    const damIdx = Math.floor(N * damPos);
+
+    // Ground
+    const groundGrad = ctx.createLinearGradient(0, baseY, 0, H);
+    groundGrad.addColorStop(0, '#2a1f14');
+    groundGrad.addColorStop(0.5, '#1a1208');
+    groundGrad.addColorStop(1, '#0a0e1a');
+    ctx.fillStyle = groundGrad;
+    ctx.fillRect(0, baseY, W, H - baseY);
+
+    // Ground line
+    ctx.strokeStyle = '#554433';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, baseY);
+    ctx.lineTo(W, baseY);
+    ctx.stroke();
+
+    // Water body
+    ctx.beginPath();
+    ctx.moveTo(0, baseY);
+
+    for (let i = 0; i < N; i++) {
+        const x = i * scaleX;
+        const y = baseY - h[i] * scaleY;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+
+    ctx.lineTo(W, baseY);
+    ctx.lineTo(0, baseY);
+    ctx.closePath();
+
+    // Water gradient
+    const waterGrad = ctx.createLinearGradient(0, baseY - scaleY, 0, baseY);
+    waterGrad.addColorStop(0, 'rgba(30, 120, 220, 0.9)');
+    waterGrad.addColorStop(0.3, 'rgba(25, 90, 200, 0.85)');
+    waterGrad.addColorStop(0.7, 'rgba(15, 60, 150, 0.8)');
+    waterGrad.addColorStop(1, 'rgba(10, 40, 120, 0.7)');
+    ctx.fillStyle = waterGrad;
+    ctx.fill();
+
+    // Water surface line
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+        const x = i * scaleX;
+        const y = baseY - h[i] * scaleY;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = 'rgba(100, 200, 255, 0.8)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Surface highlight
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+        const x = i * scaleX;
+        const y = baseY - h[i] * scaleY - 2;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = 'rgba(180, 230, 255, 0.4)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Water particles
+    for (let p of particles) {
+        const idx = Math.floor(p.x);
+        if (idx >= 0 && idx < N && h[idx] > 0.01) {
+            const px = p.x * scaleX;
+            const py = baseY - p.y * scaleY;
+            if (py < baseY && py > baseY - h[idx] * scaleY) {
+                ctx.beginPath();
+                ctx.arc(px, py, p.size, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(100, 180, 255, 0.15)';
+                ctx.fill();
+            }
+        }
+    }
+
+    // Splash particles
+    for (let sp of splashParticles) {
+        const px = sp.x * scaleX;
+        const py = baseY - sp.y * scaleY;
+        const alpha = sp.life / 100;
+        ctx.beginPath();
+        ctx.arc(px, py, sp.size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(150, 210, 255, ${alpha})`;
+        ctx.fill();
+    }
+
+    // Dam (if not broken)
+    if (!damBroken) {
+        const damX = damIdx * scaleX;
+        const leftH = parseInt(document.getElementById('leftSlider').value) * 0.1;
+        const damHeight = leftH * scaleY + 20;
+
+        ctx.fillStyle = '#665544';
+        ctx.fillRect(damX - 4, baseY - damHeight, 8, damHeight);
+
+        // Dam texture
+        ctx.strokeStyle = '#887766';
+        ctx.lineWidth = 1;
+        for (let y = baseY; y > baseY - damHeight; y -= 12) {
+            ctx.beginPath();
+            ctx.moveTo(damX - 4, y);
+            ctx.lineTo(damX + 4, y);
+            ctx.stroke();
+        }
+
+        // Label
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('DAM', damX, baseY - damHeight - 8);
+        ctx.textAlign = 'left';
+    }
+
+    // Velocity vectors (every few cells)
+    if (damBroken) {
+        for (let i = 10; i < N; i += 20) {
+            const hVal = h[i];
+            if (hVal > 0.01) {
+                const vel = hu[i] / hVal;
+                const x = i * scaleX;
+                const y = baseY - hVal * scaleY * 0.5;
+                const len = vel * scaleX * 15;
+
+                if (Math.abs(len) > 2) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, y);
+                    ctx.lineTo(x + len, y);
+                    ctx.strokeStyle = 'rgba(251, 191, 36, 0.5)';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+
+                    // Arrowhead
+                    const dir = len > 0 ? 1 : -1;
+                    ctx.beginPath();
+                    ctx.moveTo(x + len, y);
+                    ctx.lineTo(x + len - dir * 5, y - 3);
+                    ctx.moveTo(x + len, y);
+                    ctx.lineTo(x + len - dir * 5, y + 3);
+                    ctx.stroke();
+                }
+            }
+        }
+    }
+
+    // Time and energy display
+    if (damBroken) {
+        let totalE = 0;
+        const g = parseInt(document.getElementById('gravSlider').value) * 0.1;
+        for (let i = 0; i < N; i++) {
+            const vel = h[i] > 0.001 ? hu[i] / h[i] : 0;
+            totalE += 0.5 * h[i] * vel * vel + 0.5 * g * h[i] * h[i];
+        }
+
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(W - 160, 50, 140, 50);
+        ctx.fillStyle = '#aaa';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('t = ' + time.toFixed(2) + 's', W - 145, 70);
+        ctx.fillText('E = ' + totalE.toFixed(3), W - 145, 88);
+    }
+
+    // Equation display
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(W / 2 - 180, 50, 360, 40);
+    ctx.strokeStyle = 'rgba(251,191,36,0.3)';
+    ctx.strokeRect(W / 2 - 180, 50, 360, 40);
+    ctx.fillStyle = '#eee';
+    ctx.font = '13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('\u2202h/\u2202t + \u2202(hu)/\u2202x = 0,   \u2202(hu)/\u2202t + \u2202(hu\u00B2 + \u00BDgh\u00B2)/\u2202x = 0', W / 2, 75);
+    ctx.textAlign = 'left';
+}
+
+// Event listeners
+document.getElementById('damSlider').addEventListener('input', function() {
+    document.getElementById('damVal').textContent = (this.value * 10) + '%';
+    if (!damBroken) reset();
+});
+document.getElementById('leftSlider').addEventListener('input', function() {
+    document.getElementById('leftVal').textContent = this.value;
+    if (!damBroken) reset();
+});
+document.getElementById('rightSlider').addEventListener('input', function() {
+    document.getElementById('rightVal').textContent = this.value;
+    if (!damBroken) reset();
+});
+document.getElementById('gravSlider').addEventListener('input', function() {
+    document.getElementById('gravVal').textContent = this.value;
+});
+document.getElementById('breakBtn').addEventListener('click', breakDam);
+document.getElementById('resetBtn').addEventListener('click', reset);
+
+function animate() {
+    step();
+    updateParticles();
+    render();
+    requestAnimationFrame(animate);
+}
+
+window.addEventListener('resize', resize);
+resize();
+animate();
+</script>
+</body>
+</html>

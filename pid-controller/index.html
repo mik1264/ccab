@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PID Controller Tuning</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+a.back { position: fixed; top: 10px; left: 10px; padding: 8px 16px; background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none; border-radius: 6px; font-size: 14px; z-index: 999; font-family: sans-serif; }
+a.back:hover { background: rgba(0,0,0,0.9); }
+.title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #e2e8f0; font-size: 22px; font-weight: 700; z-index: 999; text-shadow: 0 2px 8px rgba(0,0,0,0.8); pointer-events: none; }
+.controls { position: fixed; right: 15px; top: 15px; background: rgba(10,14,26,0.92); border: 1px solid rgba(251,191,36,0.25); border-radius: 12px; padding: 18px; z-index: 999; color: #cbd5e1; font-size: 13px; width: 220px; }
+.controls h3 { color: #fbbf24; margin-bottom: 12px; font-size: 15px; }
+.slider-group { margin-bottom: 12px; }
+.slider-group label { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.slider-group label span.val { color: #fbbf24; font-weight: 600; }
+input[type="range"] { width: 100%; accent-color: #fbbf24; cursor: pointer; }
+.btn { display: inline-block; padding: 6px 14px; background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.4); border-radius: 6px; color: #fbbf24; cursor: pointer; font-size: 12px; margin-top: 4px; margin-right: 4px; }
+.btn:hover { background: rgba(251,191,36,0.3); }
+.stats { margin-top: 10px; font-size: 11px; line-height: 1.7; border-top: 1px solid rgba(251,191,36,0.15); padding-top: 8px; }
+.stats .label { color: #94a3b8; }
+.stats .value { color: #fbbf24; font-weight: 600; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back">&#8592; Back to Gallery</a>
+<div class="title">PID Controller Tuning</div>
+<div class="controls">
+    <h3>PID Gains</h3>
+    <div class="slider-group">
+        <label>Proportional (Kp) <span class="val" id="kpVal">2.0</span></label>
+        <input type="range" id="kpSlider" min="0" max="10" step="0.1" value="2.0">
+    </div>
+    <div class="slider-group">
+        <label>Integral (Ki) <span class="val" id="kiVal">0.5</span></label>
+        <input type="range" id="kiSlider" min="0" max="5" step="0.05" value="0.5">
+    </div>
+    <div class="slider-group">
+        <label>Derivative (Kd) <span class="val" id="kdVal">1.0</span></label>
+        <input type="range" id="kdSlider" min="0" max="10" step="0.1" value="1.0">
+    </div>
+    <div class="slider-group">
+        <label>Setpoint <span class="val" id="spVal">50%</span></label>
+        <input type="range" id="spSlider" min="10" max="90" step="1" value="50">
+    </div>
+    <div style="margin-top:8px;">
+        <span class="btn" id="resetBtn">Reset</span>
+        <span class="btn" id="disturbBtn">Disturb</span>
+    </div>
+    <div class="stats">
+        <div><span class="label">Error: </span><span class="value" id="errStat">0.00</span></div>
+        <div><span class="label">Output: </span><span class="value" id="outStat">0.00</span></div>
+        <div><span class="label">Overshoot: </span><span class="value" id="overshootStat">0%</span></div>
+    </div>
+</div>
+<canvas id="canvas"></canvas>
+<script>
+(function(){
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // PID state
+    let Kp = 2.0, Ki = 0.5, Kd = 1.0;
+    let setpoint = 0.5;
+    let position = 0.1;
+    let velocity = 0;
+    let integral = 0;
+    let prevError = 0;
+    let pidOutput = 0;
+    let maxOvershoot = 0;
+    let time = 0;
+
+    const historyLen = 400;
+    let posHistory = [];
+    let errHistory = [];
+    let outHistory = [];
+    let setpointHistory = [];
+
+    function resetSim() {
+        position = 0.1;
+        velocity = 0;
+        integral = 0;
+        prevError = 0;
+        pidOutput = 0;
+        maxOvershoot = 0;
+        time = 0;
+        posHistory = [];
+        errHistory = [];
+        outHistory = [];
+        setpointHistory = [];
+    }
+
+    // Sliders
+    const kpSlider = document.getElementById('kpSlider');
+    const kiSlider = document.getElementById('kiSlider');
+    const kdSlider = document.getElementById('kdSlider');
+    const spSlider = document.getElementById('spSlider');
+
+    kpSlider.oninput = function() { Kp = parseFloat(this.value); document.getElementById('kpVal').textContent = Kp.toFixed(1); };
+    kiSlider.oninput = function() { Ki = parseFloat(this.value); document.getElementById('kiVal').textContent = Ki.toFixed(2); };
+    kdSlider.oninput = function() { Kd = parseFloat(this.value); document.getElementById('kdVal').textContent = Kd.toFixed(1); };
+    spSlider.oninput = function() { setpoint = parseFloat(this.value) / 100; document.getElementById('spVal').textContent = Math.round(setpoint*100)+'%'; };
+
+    document.getElementById('resetBtn').onclick = resetSim;
+    document.getElementById('disturbBtn').onclick = function() {
+        velocity += (Math.random() - 0.5) * 0.15;
+    };
+
+    const dt = 1/60;
+    const gravity = 0.3;
+    const damping = 0.97;
+    const mass = 1.0;
+
+    function updatePID() {
+        const error = setpoint - position;
+        integral += error * dt;
+        integral = Math.max(-2, Math.min(2, integral));
+        const derivative = (error - prevError) / dt;
+        pidOutput = Kp * error + Ki * integral + Kd * derivative;
+        pidOutput = Math.max(-5, Math.min(5, pidOutput));
+        prevError = error;
+
+        const force = pidOutput - gravity;
+        velocity += (force / mass) * dt;
+        velocity *= damping;
+        position += velocity * dt;
+        position = Math.max(0.02, Math.min(0.98, position));
+
+        // Track overshoot
+        if (position > setpoint && (position - setpoint) > maxOvershoot) {
+            maxOvershoot = position - setpoint;
+        }
+
+        posHistory.push(position);
+        errHistory.push(error);
+        outHistory.push(pidOutput / 5);
+        setpointHistory.push(setpoint);
+        if (posHistory.length > historyLen) {
+            posHistory.shift();
+            errHistory.shift();
+            outHistory.shift();
+            setpointHistory.shift();
+        }
+
+        time += dt;
+    }
+
+    function drawBall() {
+        const simX = W * 0.12;
+        const simW = W * 0.22;
+        const simTop = H * 0.12;
+        const simBot = H * 0.88;
+        const simH = simBot - simTop;
+
+        // Background panel
+        ctx.fillStyle = 'rgba(15,20,40,0.7)';
+        ctx.strokeStyle = 'rgba(251,191,36,0.15)';
+        ctx.lineWidth = 1;
+        roundRect(ctx, simX - 30, simTop - 20, simW + 60, simH + 40, 12);
+        ctx.fill();
+        ctx.stroke();
+
+        // Setpoint line
+        const spY = simBot - setpoint * simH;
+        ctx.setLineDash([8, 6]);
+        ctx.strokeStyle = '#22d3ee';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(simX - 20, spY);
+        ctx.lineTo(simX + simW + 20, spY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = '#22d3ee';
+        ctx.font = '12px sans-serif';
+        ctx.fillText('Setpoint', simX + simW + 6, spY + 4);
+
+        // Tube
+        const tubeX = simX + simW / 2 - 20;
+        const tubeW = 40;
+        ctx.fillStyle = 'rgba(100,120,180,0.08)';
+        ctx.strokeStyle = 'rgba(100,120,180,0.25)';
+        ctx.lineWidth = 1;
+        ctx.fillRect(tubeX, simTop, tubeW, simH);
+        ctx.strokeRect(tubeX, simTop, tubeW, simH);
+
+        // Ball
+        const ballY = simBot - position * simH;
+        const ballR = 16;
+        const grad = ctx.createRadialGradient(tubeX + tubeW/2 - 3, ballY - 3, 2, tubeX + tubeW/2, ballY, ballR);
+        grad.addColorStop(0, '#fbbf24');
+        grad.addColorStop(0.6, '#f59e0b');
+        grad.addColorStop(1, '#b45309');
+        ctx.beginPath();
+        ctx.arc(tubeX + tubeW/2, ballY, ballR, 0, Math.PI * 2);
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(251,191,36,0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Thrust visualization
+        if (pidOutput > 0.1) {
+            const thrustH = Math.min(pidOutput / 5 * 50, 50);
+            const tgrad = ctx.createLinearGradient(tubeX + tubeW/2, ballY + ballR, tubeX + tubeW/2, ballY + ballR + thrustH);
+            tgrad.addColorStop(0, 'rgba(251,146,36,0.7)');
+            tgrad.addColorStop(1, 'rgba(251,146,36,0)');
+            ctx.beginPath();
+            ctx.moveTo(tubeX + tubeW/2 - 8, ballY + ballR);
+            ctx.lineTo(tubeX + tubeW/2, ballY + ballR + thrustH);
+            ctx.lineTo(tubeX + tubeW/2 + 8, ballY + ballR);
+            ctx.fillStyle = tgrad;
+            ctx.fill();
+        }
+
+        // Scale markers
+        ctx.fillStyle = 'rgba(203,213,225,0.3)';
+        ctx.font = '10px sans-serif';
+        for (let i = 0; i <= 10; i++) {
+            const y = simBot - (i / 10) * simH;
+            ctx.fillRect(tubeX - 8, y, 6, 1);
+            if (i % 2 === 0) ctx.fillText((i * 10) + '%', tubeX - 35, y + 4);
+        }
+    }
+
+    function drawGraph(x, y, w, h, data, spData, color, label, rangeMin, rangeMax) {
+        ctx.fillStyle = 'rgba(15,20,40,0.7)';
+        ctx.strokeStyle = 'rgba(251,191,36,0.12)';
+        ctx.lineWidth = 1;
+        roundRect(ctx, x, y, w, h, 10);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.fillText(label, x + 10, y + 18);
+
+        const gx = x + 10, gy = y + 28, gw = w - 20, gh = h - 40;
+
+        // Grid
+        ctx.strokeStyle = 'rgba(100,120,180,0.12)';
+        ctx.lineWidth = 0.5;
+        for (let i = 0; i <= 4; i++) {
+            const ly = gy + (i / 4) * gh;
+            ctx.beginPath(); ctx.moveTo(gx, ly); ctx.lineTo(gx + gw, ly); ctx.stroke();
+        }
+
+        // Zero/center line
+        if (rangeMin < 0) {
+            const zeroY = gy + (-rangeMin / (rangeMax - rangeMin)) * gh;
+            ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath(); ctx.moveTo(gx, zeroY); ctx.lineTo(gx + gw, zeroY); ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Setpoint line on position graph
+        if (spData) {
+            ctx.strokeStyle = 'rgba(34,211,238,0.4)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            for (let i = 0; i < spData.length; i++) {
+                const px = gx + (i / historyLen) * gw;
+                const py = gy + gh - ((spData[i] - rangeMin) / (rangeMax - rangeMin)) * gh;
+                if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Data
+        if (data.length > 1) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i < data.length; i++) {
+                const px = gx + (i / historyLen) * gw;
+                const val = Math.max(rangeMin, Math.min(rangeMax, data[i]));
+                const py = gy + gh - ((val - rangeMin) / (rangeMax - rangeMin)) * gh;
+                if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // Glow
+            ctx.strokeStyle = color;
+            ctx.globalAlpha = 0.15;
+            ctx.lineWidth = 6;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }
+
+        // Range labels
+        ctx.fillStyle = 'rgba(148,163,184,0.5)';
+        ctx.font = '9px sans-serif';
+        ctx.fillText(rangeMax.toFixed(1), gx + gw + 2, gy + 8);
+        ctx.fillText(rangeMin.toFixed(1), gx + gw + 2, gy + gh);
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, W, H);
+
+        // Background gradient
+        const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * 0.7);
+        bg.addColorStop(0, '#111827');
+        bg.addColorStop(1, '#0a0e1a');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, W, H);
+
+        updatePID();
+        drawBall();
+
+        // Graphs
+        const graphX = W * 0.38;
+        const graphW = W * 0.58 - 240;
+        const graphH = (H - 100) / 3 - 10;
+
+        drawGraph(graphX, 60, graphW, graphH, posHistory, setpointHistory, '#fbbf24', 'Position', 0, 1);
+        drawGraph(graphX, 60 + graphH + 15, graphW, graphH, errHistory, null, '#f87171', 'Error', -1, 1);
+        drawGraph(graphX, 60 + (graphH + 15) * 2, graphW, graphH, outHistory, null, '#34d399', 'Control Output', -1, 1);
+
+        // Update stats
+        document.getElementById('errStat').textContent = prevError.toFixed(3);
+        document.getElementById('outStat').textContent = pidOutput.toFixed(3);
+        document.getElementById('overshootStat').textContent = (maxOvershoot * 100).toFixed(1) + '%';
+
+        requestAnimationFrame(draw);
+    }
+
+    draw();
+})();
+</script>
+</body>
+</html>

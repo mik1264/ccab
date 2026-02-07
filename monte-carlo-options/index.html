@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monte Carlo Option Pricing</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+canvas { display: block; }
+#title { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); color: #fbbf24; font-size: 20px; font-weight: 700; z-index: 999; text-shadow: 0 0 20px rgba(251,191,36,0.5); font-family: sans-serif; }
+#controls { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); display: flex; gap: 14px; z-index: 999; background: rgba(0,0,0,0.75); padding: 12px 20px; border-radius: 10px; align-items: center; flex-wrap: wrap; justify-content: center; }
+#controls label { color: #ccc; font-size: 11px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+#controls input[type=range] { width: 90px; accent-color: #fbbf24; }
+#controls span { color: #fbbf24; font-size: 11px; }
+#controls button { background: rgba(251,191,36,0.2); color: #fbbf24; border: 1px solid #fbbf24; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+#controls button:hover { background: rgba(251,191,36,0.4); }
+#info { position: fixed; top: 50px; right: 15px; color: #ccc; font-size: 12px; z-index: 999; background: rgba(0,0,0,0.7); padding: 12px; border-radius: 8px; line-height: 2; }
+.mc { color: #4ade80; font-weight: bold; }
+.bs { color: #60a5fa; font-weight: bold; }
+.err { color: #f472b6; }
+</style>
+</head>
+<body>
+<a href="../index.html" style="position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:#fbbf24;text-decoration:none;border-radius:6px;font-size:14px;z-index:999;font-family:sans-serif;">← Back to Gallery</a>
+<div id="title">Monte Carlo Option Pricing</div>
+<div id="info">
+    <div>Paths: <span class="mc" id="pathCount">0</span></div>
+    <div>MC Price: <span class="mc" id="mcPrice">--</span></div>
+    <div>Black-Scholes: <span class="bs" id="bsPrice">--</span></div>
+    <div>Error: <span class="err" id="errVal">--</span></div>
+    <div style="margin-top:4px;font-size:10px;color:#888;">Strike: <span id="strikeDisp" style="color:#fbbf24;">$100</span></div>
+</div>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <label>S0 ($) <input type="range" id="s0" min="50" max="200" step="1" value="100"><span id="s0Val">100</span></label>
+    <label>Strike ($) <input type="range" id="strike" min="50" max="200" step="1" value="100"><span id="strikeVal">100</span></label>
+    <label>Vol (%) <input type="range" id="vol" min="5" max="80" step="1" value="25"><span id="volVal">25</span></label>
+    <label>Rate (%) <input type="range" id="rate" min="0" max="15" step="0.5" value="5"><span id="rateVal">5</span></label>
+    <label>Time (yr) <input type="range" id="time" min="0.1" max="3" step="0.1" value="1"><span id="timeVal">1.0</span></label>
+    <button id="runBtn">Run 100 Paths</button>
+    <button id="resetBtn">Reset</button>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const sliders = {
+    s0: document.getElementById('s0'),
+    strike: document.getElementById('strike'),
+    vol: document.getElementById('vol'),
+    rate: document.getElementById('rate'),
+    time: document.getElementById('time')
+};
+
+sliders.s0.oninput = () => { document.getElementById('s0Val').textContent = sliders.s0.value; reset(); };
+sliders.strike.oninput = () => { document.getElementById('strikeVal').textContent = sliders.strike.value; document.getElementById('strikeDisp').textContent = '$' + sliders.strike.value; reset(); };
+sliders.vol.oninput = () => { document.getElementById('volVal').textContent = sliders.vol.value; reset(); };
+sliders.rate.oninput = () => { document.getElementById('rateVal').textContent = sliders.rate.value; reset(); };
+sliders.time.oninput = () => { document.getElementById('timeVal').textContent = sliders.time.value; reset(); };
+
+let paths = [];
+let payoffs = [];
+let mcPriceHistory = [];
+const maxPathsDisplay = 500;
+const steps = 100;
+
+function gaussianRandom() {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+function normalCDF(x) {
+    const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429;
+    const p = 0.3275911;
+    const sign = x < 0 ? -1 : 1;
+    x = Math.abs(x) / Math.sqrt(2);
+    const t = 1 / (1 + p * x);
+    const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+    return 0.5 * (1 + sign * y);
+}
+
+function blackScholes(S, K, T, r, sigma) {
+    const d1 = (Math.log(S / K) + (r + sigma * sigma / 2) * T) / (sigma * Math.sqrt(T));
+    const d2 = d1 - sigma * Math.sqrt(T);
+    return S * normalCDF(d1) - K * Math.exp(-r * T) * normalCDF(d2);
+}
+
+function generatePath(S0, mu, sigma, T) {
+    const dt = T / steps;
+    const path = [S0];
+    let S = S0;
+    for (let i = 0; i < steps; i++) {
+        const z = gaussianRandom();
+        S = S * Math.exp((mu - 0.5 * sigma * sigma) * dt + sigma * Math.sqrt(dt) * z);
+        path.push(S);
+    }
+    return path;
+}
+
+function addPaths(count) {
+    const S0 = parseFloat(sliders.s0.value);
+    const K = parseFloat(sliders.strike.value);
+    const sigma = parseFloat(sliders.vol.value) / 100;
+    const r = parseFloat(sliders.rate.value) / 100;
+    const T = parseFloat(sliders.time.value);
+
+    for (let i = 0; i < count; i++) {
+        const path = generatePath(S0, r, sigma, T);
+        paths.push(path);
+        const finalPrice = path[path.length - 1];
+        const payoff = Math.max(0, finalPrice - K);
+        payoffs.push(payoff);
+
+        // Running MC estimate
+        const avgPayoff = payoffs.reduce((a, b) => a + b, 0) / payoffs.length;
+        const mcPrice = Math.exp(-r * T) * avgPayoff;
+        mcPriceHistory.push(mcPrice);
+    }
+}
+
+function reset() {
+    paths = [];
+    payoffs = [];
+    mcPriceHistory = [];
+}
+
+document.getElementById('runBtn').onclick = () => addPaths(100);
+document.getElementById('resetBtn').onclick = reset;
+
+// Auto-add paths slowly
+let autoTimer = 0;
+
+function draw() {
+    autoTimer++;
+    if (autoTimer % 3 === 0 && paths.length < 2000) {
+        addPaths(5);
+    }
+
+    const W = canvas.width, H = canvas.height;
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    const S0 = parseFloat(sliders.s0.value);
+    const K = parseFloat(sliders.strike.value);
+    const sigma = parseFloat(sliders.vol.value) / 100;
+    const r = parseFloat(sliders.rate.value) / 100;
+    const T = parseFloat(sliders.time.value);
+    const bsPrice = blackScholes(S0, K, T, r, sigma);
+
+    // Layout: paths on left, payoff distribution on right, convergence at bottom
+    const pathArea = { left: W * 0.06, right: W * 0.60, top: H * 0.10, bottom: H * 0.55 };
+    const distArea = { left: W * 0.65, right: W * 0.95, top: H * 0.10, bottom: H * 0.55 };
+    const convArea = { left: W * 0.06, right: W * 0.95, top: H * 0.62, bottom: H * 0.85 };
+
+    // Find price range
+    let minP = S0 * 0.3, maxP = S0 * 2.5;
+    paths.forEach(p => {
+        p.forEach(v => {
+            if (v < minP) minP = v * 0.9;
+            if (v > maxP) maxP = v * 1.1;
+        });
+    });
+
+    // Draw paths
+    const pW = pathArea.right - pathArea.left;
+    const pH = pathArea.bottom - pathArea.top;
+    const mapX = (step) => pathArea.left + (step / steps) * pW;
+    const mapY = (price) => pathArea.bottom - ((price - minP) / (maxP - minP)) * pH;
+
+    // Grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 5; i++) {
+        const y = pathArea.top + (pH / 5) * i;
+        ctx.beginPath(); ctx.moveTo(pathArea.left, y); ctx.lineTo(pathArea.right, y); ctx.stroke();
+    }
+
+    // Strike line
+    if (K >= minP && K <= maxP) {
+        ctx.strokeStyle = 'rgba(251,191,36,0.5)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(pathArea.left, mapY(K));
+        ctx.lineTo(pathArea.right, mapY(K));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = '11px sans-serif';
+        ctx.fillText('Strike $' + K, pathArea.right - 70, mapY(K) - 5);
+    }
+
+    // Draw paths (most recent ones more opaque)
+    const displayPaths = paths.slice(-maxPathsDisplay);
+    displayPaths.forEach((path, idx) => {
+        const itm = path[path.length - 1] > K; // in the money
+        const alpha = 0.02 + (idx / displayPaths.length) * 0.08;
+        ctx.beginPath();
+        ctx.strokeStyle = itm ? `rgba(74,222,128,${alpha})` : `rgba(239,68,68,${alpha})`;
+        ctx.lineWidth = 1;
+        path.forEach((p, i) => {
+            const x = mapX(i), y = mapY(p);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+    });
+
+    // Section labels
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Price Paths (GBM)', pathArea.left, pathArea.top - 5);
+
+    // Price axis labels
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'right';
+    for (let i = 0; i <= 5; i++) {
+        const val = minP + ((maxP - minP) / 5) * (5 - i);
+        const y = pathArea.top + (pH / 5) * i;
+        ctx.fillText('$' + val.toFixed(0), pathArea.left - 5, y + 3);
+    }
+
+    // Payoff distribution (histogram)
+    if (payoffs.length > 0) {
+        const maxPayoff = Math.max(...payoffs, 1);
+        const bins = 40;
+        const binWidth = maxPayoff / bins;
+        const histogram = new Array(bins).fill(0);
+        payoffs.forEach(p => {
+            const bin = Math.min(bins - 1, Math.floor(p / binWidth));
+            histogram[bin]++;
+        });
+        const maxBin = Math.max(...histogram);
+
+        const dW = distArea.right - distArea.left;
+        const dH = distArea.bottom - distArea.top;
+
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('Payoff Distribution', distArea.left, distArea.top - 5);
+
+        histogram.forEach((count, i) => {
+            const barH = (count / maxBin) * dH * 0.9;
+            const x = distArea.left + (i / bins) * dW;
+            const w = dW / bins - 1;
+            const grad = ctx.createLinearGradient(0, distArea.bottom - barH, 0, distArea.bottom);
+            grad.addColorStop(0, 'rgba(74,222,128,0.7)');
+            grad.addColorStop(1, 'rgba(74,222,128,0.1)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(x, distArea.bottom - barH, w, barH);
+        });
+
+        // Zero payoff count
+        const zeroCount = payoffs.filter(p => p === 0).length;
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(`OTM: ${zeroCount} (${(zeroCount/payoffs.length*100).toFixed(1)}%)`, distArea.left, distArea.bottom + 14);
+    }
+
+    // Convergence chart
+    if (mcPriceHistory.length > 1) {
+        const cW = convArea.right - convArea.left;
+        const cH = convArea.bottom - convArea.top;
+
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('MC Price Convergence', convArea.left, convArea.top - 5);
+
+        const mcMin = Math.min(...mcPriceHistory, bsPrice) * 0.8;
+        const mcMax = Math.max(...mcPriceHistory, bsPrice) * 1.2;
+
+        const cMapX = (i) => convArea.left + (i / mcPriceHistory.length) * cW;
+        const cMapY = (v) => convArea.bottom - ((v - mcMin) / (mcMax - mcMin)) * cH;
+
+        // BS reference line
+        ctx.strokeStyle = 'rgba(96,165,250,0.6)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 3]);
+        ctx.beginPath();
+        ctx.moveTo(convArea.left, cMapY(bsPrice));
+        ctx.lineTo(convArea.right, cMapY(bsPrice));
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = '#60a5fa';
+        ctx.font = '10px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText('BS: $' + bsPrice.toFixed(2), convArea.right, cMapY(bsPrice) - 5);
+
+        // MC convergence line
+        ctx.beginPath();
+        ctx.strokeStyle = '#4ade80';
+        ctx.lineWidth = 2;
+        mcPriceHistory.forEach((v, i) => {
+            const x = cMapX(i), y = cMapY(v);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+
+        // Current MC price
+        const currentMC = mcPriceHistory[mcPriceHistory.length - 1];
+        ctx.beginPath();
+        ctx.arc(cMapX(mcPriceHistory.length - 1), cMapY(currentMC), 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#4ade80';
+        ctx.fill();
+    }
+
+    // Update info
+    document.getElementById('pathCount').textContent = paths.length;
+    if (mcPriceHistory.length > 0) {
+        const mc = mcPriceHistory[mcPriceHistory.length - 1];
+        document.getElementById('mcPrice').textContent = '$' + mc.toFixed(2);
+        document.getElementById('bsPrice').textContent = '$' + bsPrice.toFixed(2);
+        document.getElementById('errVal').textContent = ((mc - bsPrice) / bsPrice * 100).toFixed(2) + '%';
+    }
+
+    requestAnimationFrame(draw);
+}
+
+addPaths(50);
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
