@@ -1,0 +1,1362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boids Flocking Ecosystem</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0e1c;
+            overflow: hidden;
+            font-family: monospace;
+        }
+        canvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        #trail { z-index: 0; }
+        #main { z-index: 1; }
+        #grain { z-index: 4; pointer-events: none; }
+        .vignette {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: radial-gradient(ellipse at center, transparent 35%, rgba(0,0,0,0.7) 100%);
+            pointer-events: none;
+            z-index: 5;
+        }
+        a.back-link {
+            position: fixed;
+            top: 1rem;
+            left: 1rem;
+            color: rgba(100, 200, 255, 0.6);
+            text-decoration: none;
+            font-family: monospace;
+            font-size: 0.85rem;
+            z-index: 20;
+            transition: color 0.3s;
+        }
+        a.back-link:hover { color: rgba(100, 200, 255, 1); }
+        .info {
+            position: fixed;
+            bottom: 1rem;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(100, 200, 255, 0.4);
+            font-family: monospace;
+            font-size: 0.7rem;
+            z-index: 20;
+            text-align: center;
+            pointer-events: none;
+            transition: opacity 0.5s;
+            max-width: 90%;
+        }
+        .stats-panel {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            background: rgba(10, 14, 28, 0.75);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(100, 200, 255, 0.15);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: rgba(200, 220, 255, 0.7);
+            font-family: monospace;
+            font-size: 0.65rem;
+            z-index: 20;
+            line-height: 1.6;
+            min-width: 170px;
+            pointer-events: none;
+        }
+        .stats-panel .label { color: rgba(100, 200, 255, 0.5); }
+        .stats-panel .val-blue { color: rgba(80, 160, 255, 0.9); }
+        .stats-panel .val-green { color: rgba(80, 220, 120, 0.9); }
+        .stats-panel .val-gold { color: rgba(255, 200, 60, 0.9); }
+        .stats-panel .val-red { color: rgba(255, 80, 60, 0.9); }
+        .stats-panel .val-white { color: rgba(200, 220, 255, 0.8); }
+        .controls-hint {
+            position: fixed;
+            bottom: 3rem;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(100, 200, 255, 0.3);
+            font-family: monospace;
+            font-size: 0.6rem;
+            z-index: 20;
+            text-align: center;
+            pointer-events: none;
+            transition: opacity 0.5s;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to Gallery</a>
+    <div class="vignette"></div>
+    <canvas id="trail"></canvas>
+    <canvas id="main"></canvas>
+    <canvas id="grain"></canvas>
+    <div class="stats-panel" id="statsPanel">
+        <div><span class="label">BLUE:</span> <span class="val-blue" id="sBlue">0</span></div>
+        <div><span class="label">GREEN:</span> <span class="val-green" id="sGreen">0</span></div>
+        <div><span class="label">GOLD:</span> <span class="val-gold" id="sGold">0</span></div>
+        <div><span class="label">PREDATORS:</span> <span class="val-red" id="sPred">0</span></div>
+        <div><span class="label">FOOD:</span> <span class="val-green" id="sFood">0</span></div>
+        <div style="border-top: 1px solid rgba(100,200,255,0.1); margin-top: 4px; padding-top: 4px;">
+            <div><span class="label">AVG SPEED:</span> <span class="val-white" id="sSpeed">0</span></div>
+            <div><span class="label">COHESION:</span> <span class="val-white" id="sCoh">0</span></div>
+            <div><span class="label">CYCLE:</span> <span class="val-white" id="sCycle">-</span></div>
+        </div>
+    </div>
+    <div class="info" id="infoText">Click to place obstacles &middot; W=wind &middot; G=grid &middot; V=perception &middot; Move mouse to interact</div>
+    <div class="controls-hint" id="controlsHint">Hold SHIFT+click to remove obstacles</div>
+
+    <script>
+    (function() {
+        'use strict';
+
+        // --- Canvas setup ---
+        const trailCanvas = document.getElementById('trail');
+        const mainCanvas = document.getElementById('main');
+        const grainCanvas = document.getElementById('grain');
+        const trailCtx = trailCanvas.getContext('2d');
+        const ctx = mainCanvas.getContext('2d');
+        const grainCtx = grainCanvas.getContext('2d');
+
+        let W, H;
+
+        function resize() {
+            W = window.innerWidth;
+            H = window.innerHeight;
+            trailCanvas.width = mainCanvas.width = grainCanvas.width = W;
+            trailCanvas.height = mainCanvas.height = grainCanvas.height = H;
+            initGrid();
+            generateGrainTexture();
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // --- Film grain texture ---
+        let grainImageData;
+        function generateGrainTexture() {
+            grainImageData = grainCtx.createImageData(W, H);
+        }
+
+        function renderGrain() {
+            const data = grainImageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                const v = (Math.random() * 25) | 0;
+                data[i] = v;
+                data[i + 1] = v;
+                data[i + 2] = v;
+                data[i + 3] = 18;
+            }
+            grainCtx.putImageData(grainImageData, 0, 0);
+        }
+
+        // --- Configuration ---
+        const BOID_SIZE = 5;
+        const MAX_SPEED = 3.5;
+        const MIN_SPEED = 0.5;
+        const MAX_FORCE = 0.12;
+        const PERCEPTION_RADIUS = 55;
+        const SEPARATION_RADIUS = 25;
+        const SEPARATION_WEIGHT = 1.8;
+        const ALIGNMENT_WEIGHT = 1.0;
+        const COHESION_WEIGHT = 1.0;
+        const INTER_SPECIES_AVOID = 2.5;
+        const INTER_SPECIES_RADIUS = 35;
+
+        const PREDATOR_SIZE = 14;
+        const PREDATOR_FEAR_RADIUS = 130;
+        const PREDATOR_FEAR_WEIGHT = 4.5;
+
+        const FOOD_COUNT = 40;
+        const FOOD_RADIUS = 4;
+        const FOOD_SEEK_RADIUS = 120;
+        const FOOD_SEEK_WEIGHT = 1.2;
+        const FOOD_RESPAWN_TIME = 300;
+        const FOOD_ENERGY = 40;
+
+        const ENERGY_MAX = 100;
+        const ENERGY_DRAIN = 0.04;
+        const ENERGY_STARVE = 0;
+        const ENERGY_REPRODUCE = 85;
+        const REPRODUCE_COST = 40;
+        const REPRODUCE_CHANCE = 0.003;
+        const MAX_BOIDS_PER_SPECIES = 220;
+
+        const OBSTACLE_RADIUS = 35;
+        const OBSTACLE_AVOID_RADIUS = 60;
+        const OBSTACLE_AVOID_WEIGHT = 3.5;
+
+        const TRAIL_FADE = 0.065;
+
+        const WIND_FORCE = 0.025;
+
+        // --- Species definitions ---
+        const SPECIES = [
+            { name: 'blue', hueBase: 210, hueDelta: 30, sat: 75, count: 180 },
+            { name: 'green', hueBase: 140, hueDelta: 25, sat: 65, count: 170 },
+            { name: 'gold', hueBase: 42, hueDelta: 15, sat: 80, count: 160 }
+        ];
+
+        // --- Predator types ---
+        const PREDATOR_TYPES = [
+            { strategy: 'chase', speed: 3.3, force: 0.09, perception: 220, color: [255, 60, 40] },
+            { strategy: 'ambush', speed: 4.5, force: 0.15, perception: 160, color: [255, 40, 80] },
+            { strategy: 'patrol', speed: 2.8, force: 0.07, perception: 250, color: [200, 30, 30] }
+        ];
+
+        // --- State ---
+        let boids = [];
+        let predators = [];
+        let foods = [];
+        let obstacles = [];
+        let showWind = false;
+        let showGrid = false;
+        let showPerception = false;
+        let selectedBoid = null;
+        let dayNightPhase = 0;
+        let frameCount = 0;
+
+        // --- Wind field ---
+        const WIND_COLS = 12;
+        const WIND_ROWS = 8;
+        let windField = [];
+
+        function initWind() {
+            windField = [];
+            for (let r = 0; r < WIND_ROWS; r++) {
+                for (let c = 0; c < WIND_COLS; c++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    windField.push({
+                        angle: angle,
+                        strength: 0.3 + Math.random() * 0.7,
+                        phase: Math.random() * Math.PI * 2
+                    });
+                }
+            }
+        }
+
+        function getWind(x, y) {
+            const c = Math.floor(x / W * WIND_COLS);
+            const r = Math.floor(y / H * WIND_ROWS);
+            const ci = Math.max(0, Math.min(WIND_COLS - 1, c));
+            const ri = Math.max(0, Math.min(WIND_ROWS - 1, r));
+            const w = windField[ri * WIND_COLS + ci];
+            if (!w) return [0, 0];
+            const t = frameCount * 0.002;
+            const a = w.angle + Math.sin(t + w.phase) * 0.5;
+            const s = w.strength * (0.7 + Math.sin(t * 0.7 + w.phase) * 0.3);
+            return [Math.cos(a) * s * WIND_FORCE, Math.sin(a) * s * WIND_FORCE];
+        }
+
+        function updateWind() {
+            const t = frameCount * 0.0008;
+            for (let i = 0; i < windField.length; i++) {
+                windField[i].angle += Math.sin(t + windField[i].phase) * 0.01;
+            }
+        }
+
+        // --- Mouse state ---
+        let mouseX = -1000, mouseY = -1000;
+        let mouseActive = false;
+
+        mainCanvas.addEventListener('mousemove', function(e) {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+            mouseActive = true;
+        });
+        mainCanvas.addEventListener('mouseleave', function() {
+            mouseActive = false;
+        });
+        mainCanvas.addEventListener('click', function(e) {
+            if (e.shiftKey) {
+                // Remove obstacle near click
+                for (let i = obstacles.length - 1; i >= 0; i--) {
+                    const dx = obstacles[i].x - e.clientX;
+                    const dy = obstacles[i].y - e.clientY;
+                    if (dx * dx + dy * dy < OBSTACLE_RADIUS * OBSTACLE_RADIUS * 4) {
+                        obstacles.splice(i, 1);
+                        break;
+                    }
+                }
+            } else {
+                // Place obstacle
+                obstacles.push({ x: e.clientX, y: e.clientY, r: OBSTACLE_RADIUS });
+                // Select nearest boid for perception view
+                let minD = Infinity;
+                selectedBoid = null;
+                for (let i = 0; i < boids.length; i++) {
+                    const dx = boids[i].x - e.clientX;
+                    const dy = boids[i].y - e.clientY;
+                    const d = dx * dx + dy * dy;
+                    if (d < minD && d < 2500) {
+                        minD = d;
+                        selectedBoid = boids[i];
+                    }
+                }
+            }
+        });
+
+        // Touch support
+        mainCanvas.addEventListener('touchstart', function(e) {
+            e.preventDefault();
+            const t = e.touches[0];
+            mouseX = t.clientX;
+            mouseY = t.clientY;
+            mouseActive = true;
+            obstacles.push({ x: t.clientX, y: t.clientY, r: OBSTACLE_RADIUS });
+        });
+        mainCanvas.addEventListener('touchmove', function(e) {
+            e.preventDefault();
+            const t = e.touches[0];
+            mouseX = t.clientX;
+            mouseY = t.clientY;
+        });
+        mainCanvas.addEventListener('touchend', function() {
+            mouseActive = false;
+        });
+
+        // Keyboard controls
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'w' || e.key === 'W') showWind = !showWind;
+            if (e.key === 'g' || e.key === 'G') showGrid = !showGrid;
+            if (e.key === 'v' || e.key === 'V') showPerception = !showPerception;
+        });
+
+        // --- Spatial grid ---
+        const CELL_SIZE = PERCEPTION_RADIUS;
+        let gridCols, gridRows, grid;
+
+        function initGrid() {
+            gridCols = Math.ceil(W / CELL_SIZE) + 1;
+            gridRows = Math.ceil(H / CELL_SIZE) + 1;
+            grid = new Array(gridCols * gridRows);
+        }
+
+        function clearGrid() {
+            for (let i = 0; i < grid.length; i++) grid[i] = null;
+        }
+
+        function gridKey(cx, cy) {
+            return cy * gridCols + cx;
+        }
+
+        function insertBoid(boid) {
+            const cx = Math.floor(boid.x / CELL_SIZE);
+            const cy = Math.floor(boid.y / CELL_SIZE);
+            if (cx < 0 || cx >= gridCols || cy < 0 || cy >= gridRows) return;
+            const key = gridKey(cx, cy);
+            boid.gridNext = grid[key];
+            grid[key] = boid;
+        }
+
+        function getNeighbors(boid, radius, sameSpeciesOnly) {
+            const neighbors = [];
+            const cx = Math.floor(boid.x / CELL_SIZE);
+            const cy = Math.floor(boid.y / CELL_SIZE);
+            const cellRange = Math.ceil(radius / CELL_SIZE);
+            const r2 = radius * radius;
+
+            for (let dy = -cellRange; dy <= cellRange; dy++) {
+                for (let dx = -cellRange; dx <= cellRange; dx++) {
+                    const nx = cx + dx;
+                    const ny = cy + dy;
+                    if (nx < 0 || nx >= gridCols || ny < 0 || ny >= gridRows) continue;
+                    let b = grid[gridKey(nx, ny)];
+                    while (b) {
+                        if (b !== boid) {
+                            if (!sameSpeciesOnly || b.species === boid.species) {
+                                const ddx = b.x - boid.x;
+                                const ddy = b.y - boid.y;
+                                if (ddx * ddx + ddy * ddy < r2) {
+                                    neighbors.push(b);
+                                }
+                            }
+                        }
+                        b = b.gridNext;
+                    }
+                }
+            }
+            return neighbors;
+        }
+
+        function getOtherSpeciesNear(boid, radius) {
+            const others = [];
+            const cx = Math.floor(boid.x / CELL_SIZE);
+            const cy = Math.floor(boid.y / CELL_SIZE);
+            const cellRange = Math.ceil(radius / CELL_SIZE);
+            const r2 = radius * radius;
+
+            for (let dy = -cellRange; dy <= cellRange; dy++) {
+                for (let dx = -cellRange; dx <= cellRange; dx++) {
+                    const nx = cx + dx;
+                    const ny = cy + dy;
+                    if (nx < 0 || nx >= gridCols || ny < 0 || ny >= gridRows) continue;
+                    let b = grid[gridKey(nx, ny)];
+                    while (b) {
+                        if (b !== boid && b.species !== boid.species) {
+                            const ddx = b.x - boid.x;
+                            const ddy = b.y - boid.y;
+                            if (ddx * ddx + ddy * ddy < r2) {
+                                others.push(b);
+                            }
+                        }
+                        b = b.gridNext;
+                    }
+                }
+            }
+            return others;
+        }
+
+        // --- Vector helpers ---
+        function limit(vx, vy, max) {
+            const mag2 = vx * vx + vy * vy;
+            if (mag2 > max * max) {
+                const mag = Math.sqrt(mag2);
+                return [vx / mag * max, vy / mag * max];
+            }
+            return [vx, vy];
+        }
+
+        function setMag(vx, vy, mag) {
+            const m = Math.sqrt(vx * vx + vy * vy);
+            if (m === 0) return [0, 0];
+            return [vx / m * mag, vy / m * mag];
+        }
+
+        function dist2(ax, ay, bx, by) {
+            const dx = ax - bx;
+            const dy = ay - by;
+            return dx * dx + dy * dy;
+        }
+
+        // --- Create boid ---
+        function createBoid(x, y, speciesIdx) {
+            const sp = SPECIES[speciesIdx];
+            const angle = Math.random() * Math.PI * 2;
+            const speed = MAX_SPEED * (0.5 + Math.random() * 0.5);
+            return {
+                x: x,
+                y: y,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                ax: 0,
+                ay: 0,
+                hue: sp.hueBase + (Math.random() - 0.5) * sp.hueDelta,
+                sat: sp.sat,
+                species: speciesIdx,
+                energy: ENERGY_MAX * (0.5 + Math.random() * 0.5),
+                alive: true,
+                gridNext: null
+            };
+        }
+
+        // --- Create predator ---
+        function createPredator(x, y, typeIdx) {
+            const pt = PREDATOR_TYPES[typeIdx];
+            return {
+                x: x,
+                y: y,
+                vx: (Math.random() - 0.5) * 2,
+                vy: (Math.random() - 0.5) * 2,
+                ax: 0,
+                ay: 0,
+                type: typeIdx,
+                maxSpeed: pt.speed,
+                maxForce: pt.force,
+                perception: pt.perception,
+                color: pt.color,
+                targetIndex: -1,
+                huntTimer: 0,
+                patrolAngle: Math.random() * Math.PI * 2,
+                ambushWait: 0,
+                ambushPos: null
+            };
+        }
+
+        // --- Create food ---
+        function createFood(x, y) {
+            return {
+                x: x || Math.random() * (W - 40) + 20,
+                y: y || Math.random() * (H - 40) + 20,
+                energy: FOOD_ENERGY,
+                active: true,
+                respawnTimer: 0,
+                pulse: Math.random() * Math.PI * 2
+            };
+        }
+
+        // --- Initialize everything ---
+        function initAll() {
+            boids = [];
+            predators = [];
+            foods = [];
+            obstacles = [];
+            selectedBoid = null;
+            frameCount = 0;
+            dayNightPhase = 0;
+
+            for (let s = 0; s < SPECIES.length; s++) {
+                for (let i = 0; i < SPECIES[s].count; i++) {
+                    boids.push(createBoid(Math.random() * W, Math.random() * H, s));
+                }
+            }
+
+            for (let i = 0; i < PREDATOR_TYPES.length; i++) {
+                predators.push(createPredator(
+                    W * (0.2 + Math.random() * 0.6),
+                    H * (0.2 + Math.random() * 0.6),
+                    i
+                ));
+            }
+
+            for (let i = 0; i < FOOD_COUNT; i++) {
+                foods.push(createFood());
+            }
+
+            initWind();
+            initGrid();
+        }
+
+        initAll();
+
+        // --- Boid behaviors ---
+        function flock(boid) {
+            const neighbors = getNeighbors(boid, PERCEPTION_RADIUS, true);
+            if (neighbors.length === 0) return;
+
+            let sepX = 0, sepY = 0, sepCount = 0;
+            let aliX = 0, aliY = 0;
+            let cohX = 0, cohY = 0;
+
+            for (let i = 0; i < neighbors.length; i++) {
+                const other = neighbors[i];
+                const dx = boid.x - other.x;
+                const dy = boid.y - other.y;
+                const d = Math.sqrt(dx * dx + dy * dy);
+
+                aliX += other.vx;
+                aliY += other.vy;
+                cohX += other.x;
+                cohY += other.y;
+
+                if (d < SEPARATION_RADIUS && d > 0) {
+                    sepX += dx / d;
+                    sepY += dy / d;
+                    sepCount++;
+                }
+            }
+
+            const n = neighbors.length;
+
+            aliX /= n; aliY /= n;
+            let [asx, asy] = setMag(aliX, aliY, MAX_SPEED);
+            asx -= boid.vx; asy -= boid.vy;
+            [asx, asy] = limit(asx, asy, MAX_FORCE);
+
+            cohX /= n; cohY /= n;
+            let cdx = cohX - boid.x, cdy = cohY - boid.y;
+            let [csx, csy] = setMag(cdx, cdy, MAX_SPEED);
+            csx -= boid.vx; csy -= boid.vy;
+            [csx, csy] = limit(csx, csy, MAX_FORCE);
+
+            let ssx = 0, ssy = 0;
+            if (sepCount > 0) {
+                sepX /= sepCount; sepY /= sepCount;
+                [ssx, ssy] = setMag(sepX, sepY, MAX_SPEED);
+                ssx -= boid.vx; ssy -= boid.vy;
+                [ssx, ssy] = limit(ssx, ssy, MAX_FORCE);
+            }
+
+            boid.ax += ssx * SEPARATION_WEIGHT;
+            boid.ay += ssy * SEPARATION_WEIGHT;
+            boid.ax += asx * ALIGNMENT_WEIGHT;
+            boid.ay += asy * ALIGNMENT_WEIGHT;
+            boid.ax += csx * COHESION_WEIGHT;
+            boid.ay += csy * COHESION_WEIGHT;
+        }
+
+        function avoidOtherSpecies(boid) {
+            const others = getOtherSpeciesNear(boid, INTER_SPECIES_RADIUS);
+            if (others.length === 0) return;
+            let fx = 0, fy = 0;
+            for (let i = 0; i < others.length; i++) {
+                const dx = boid.x - others[i].x;
+                const dy = boid.y - others[i].y;
+                const d = Math.sqrt(dx * dx + dy * dy);
+                if (d > 0) {
+                    fx += dx / d;
+                    fy += dy / d;
+                }
+            }
+            let [sx, sy] = setMag(fx, fy, MAX_SPEED);
+            sx -= boid.vx; sy -= boid.vy;
+            [sx, sy] = limit(sx, sy, MAX_FORCE);
+            boid.ax += sx * INTER_SPECIES_AVOID;
+            boid.ay += sy * INTER_SPECIES_AVOID;
+        }
+
+        function avoidPredators(boid) {
+            for (let p = 0; p < predators.length; p++) {
+                const pred = predators[p];
+                const dx = boid.x - pred.x;
+                const dy = boid.y - pred.y;
+                const d = Math.sqrt(dx * dx + dy * dy);
+                if (d < PREDATOR_FEAR_RADIUS && d > 0) {
+                    let [fx, fy] = setMag(dx, dy, MAX_SPEED * 1.5);
+                    fx -= boid.vx; fy -= boid.vy;
+                    [fx, fy] = limit(fx, fy, MAX_FORCE * 2);
+                    const intensity = 1 - d / PREDATOR_FEAR_RADIUS;
+                    boid.ax += fx * PREDATOR_FEAR_WEIGHT * intensity;
+                    boid.ay += fy * PREDATOR_FEAR_WEIGHT * intensity;
+                }
+            }
+        }
+
+        function seekFood(boid) {
+            let closestD = Infinity;
+            let closestFood = null;
+            for (let i = 0; i < foods.length; i++) {
+                if (!foods[i].active) continue;
+                const d = dist2(boid.x, boid.y, foods[i].x, foods[i].y);
+                if (d < closestD && d < FOOD_SEEK_RADIUS * FOOD_SEEK_RADIUS) {
+                    closestD = d;
+                    closestFood = foods[i];
+                }
+            }
+            if (!closestFood) return;
+
+            // Hunger increases seeking strength
+            const hunger = 1 - boid.energy / ENERGY_MAX;
+            const dx = closestFood.x - boid.x;
+            const dy = closestFood.y - boid.y;
+            let [fx, fy] = setMag(dx, dy, MAX_SPEED);
+            fx -= boid.vx; fy -= boid.vy;
+            [fx, fy] = limit(fx, fy, MAX_FORCE);
+            const w = FOOD_SEEK_WEIGHT * (0.5 + hunger * 1.5);
+            boid.ax += fx * w;
+            boid.ay += fy * w;
+
+            // Eat if close enough
+            const d = Math.sqrt(closestD);
+            if (d < FOOD_RADIUS + BOID_SIZE) {
+                boid.energy = Math.min(ENERGY_MAX, boid.energy + closestFood.energy);
+                closestFood.active = false;
+                closestFood.respawnTimer = FOOD_RESPAWN_TIME;
+            }
+        }
+
+        function avoidObstacles(boid) {
+            for (let i = 0; i < obstacles.length; i++) {
+                const ob = obstacles[i];
+                const dx = boid.x - ob.x;
+                const dy = boid.y - ob.y;
+                const d = Math.sqrt(dx * dx + dy * dy);
+                const avoidR = ob.r + OBSTACLE_AVOID_RADIUS;
+                if (d < avoidR && d > 0) {
+                    const intensity = 1 - d / avoidR;
+                    let [fx, fy] = setMag(dx, dy, MAX_SPEED);
+                    fx -= boid.vx; fy -= boid.vy;
+                    [fx, fy] = limit(fx, fy, MAX_FORCE * 1.5);
+                    boid.ax += fx * OBSTACLE_AVOID_WEIGHT * intensity;
+                    boid.ay += fy * OBSTACLE_AVOID_WEIGHT * intensity;
+                }
+            }
+        }
+
+        function edgeWrap(entity) {
+            if (entity.x < -20) entity.x = W + 20;
+            if (entity.x > W + 20) entity.x = -20;
+            if (entity.y < -20) entity.y = H + 20;
+            if (entity.y > H + 20) entity.y = -20;
+        }
+
+        // --- Predator AI ---
+        function updatePredator(pred) {
+            pred.ax = 0;
+            pred.ay = 0;
+            pred.huntTimer++;
+
+            const pt = PREDATOR_TYPES[pred.type];
+
+            if (pt.strategy === 'chase') {
+                // Chase nearest boid
+                if (pred.huntTimer % 90 === 0 || pred.targetIndex < 0 || pred.targetIndex >= boids.length) {
+                    let minDist = Infinity;
+                    let closest = -1;
+                    for (let i = 0; i < boids.length; i++) {
+                        if (!boids[i].alive) continue;
+                        const d = dist2(boids[i].x, boids[i].y, pred.x, pred.y);
+                        if (d < minDist && d < pred.perception * pred.perception) {
+                            minDist = d;
+                            closest = i;
+                        }
+                    }
+                    pred.targetIndex = closest;
+                }
+                if (pred.targetIndex >= 0 && boids[pred.targetIndex] && boids[pred.targetIndex].alive) {
+                    const target = boids[pred.targetIndex];
+                    let dx = target.x - pred.x;
+                    let dy = target.y - pred.y;
+                    let [sx, sy] = setMag(dx, dy, pred.maxSpeed);
+                    sx -= pred.vx; sy -= pred.vy;
+                    [sx, sy] = limit(sx, sy, pred.maxForce);
+                    pred.ax += sx;
+                    pred.ay += sy;
+                }
+            } else if (pt.strategy === 'ambush') {
+                // Wait near food, then burst at passing boids
+                if (!pred.ambushPos || pred.ambushWait <= 0) {
+                    // Pick a food source to lurk near
+                    const activeFood = foods.filter(f => f.active);
+                    if (activeFood.length > 0) {
+                        const f = activeFood[Math.floor(Math.random() * activeFood.length)];
+                        pred.ambushPos = { x: f.x + (Math.random() - 0.5) * 60, y: f.y + (Math.random() - 0.5) * 60 };
+                    } else {
+                        pred.ambushPos = { x: Math.random() * W, y: Math.random() * H };
+                    }
+                    pred.ambushWait = 180 + Math.random() * 180;
+                }
+
+                // Find boid that comes within burst range
+                let burstTarget = null;
+                let burstDist = Infinity;
+                for (let i = 0; i < boids.length; i++) {
+                    if (!boids[i].alive) continue;
+                    const d = dist2(boids[i].x, boids[i].y, pred.x, pred.y);
+                    if (d < 80 * 80 && d < burstDist) {
+                        burstDist = d;
+                        burstTarget = boids[i];
+                    }
+                }
+
+                if (burstTarget) {
+                    // Burst toward prey
+                    let dx = burstTarget.x - pred.x;
+                    let dy = burstTarget.y - pred.y;
+                    let [sx, sy] = setMag(dx, dy, pred.maxSpeed);
+                    sx -= pred.vx; sy -= pred.vy;
+                    [sx, sy] = limit(sx, sy, pred.maxForce * 2);
+                    pred.ax += sx;
+                    pred.ay += sy;
+                } else {
+                    // Drift toward ambush position
+                    let dx = pred.ambushPos.x - pred.x;
+                    let dy = pred.ambushPos.y - pred.y;
+                    let [sx, sy] = setMag(dx, dy, pred.maxSpeed * 0.3);
+                    sx -= pred.vx; sy -= pred.vy;
+                    [sx, sy] = limit(sx, sy, pred.maxForce * 0.3);
+                    pred.ax += sx;
+                    pred.ay += sy;
+                    pred.ambushWait--;
+                }
+            } else if (pt.strategy === 'patrol') {
+                // Circle the area, chasing anything that enters perception
+                pred.patrolAngle += 0.005;
+                const patrolR = Math.min(W, H) * 0.3;
+                const cx = W / 2 + Math.cos(pred.patrolAngle) * patrolR;
+                const cy = H / 2 + Math.sin(pred.patrolAngle) * patrolR;
+
+                // Check for nearby prey
+                let nearestPrey = null;
+                let nearestD = Infinity;
+                for (let i = 0; i < boids.length; i++) {
+                    if (!boids[i].alive) continue;
+                    const d = dist2(boids[i].x, boids[i].y, pred.x, pred.y);
+                    if (d < pred.perception * pred.perception && d < nearestD) {
+                        nearestD = d;
+                        nearestPrey = boids[i];
+                    }
+                }
+
+                if (nearestPrey && nearestD < 150 * 150) {
+                    let dx = nearestPrey.x - pred.x;
+                    let dy = nearestPrey.y - pred.y;
+                    let [sx, sy] = setMag(dx, dy, pred.maxSpeed);
+                    sx -= pred.vx; sy -= pred.vy;
+                    [sx, sy] = limit(sx, sy, pred.maxForce);
+                    pred.ax += sx;
+                    pred.ay += sy;
+                } else {
+                    let dx = cx - pred.x;
+                    let dy = cy - pred.y;
+                    let [sx, sy] = setMag(dx, dy, pred.maxSpeed * 0.6);
+                    sx -= pred.vx; sy -= pred.vy;
+                    [sx, sy] = limit(sx, sy, pred.maxForce * 0.5);
+                    pred.ax += sx;
+                    pred.ay += sy;
+                }
+            }
+
+            // Avoid obstacles
+            for (let i = 0; i < obstacles.length; i++) {
+                const ob = obstacles[i];
+                const dx = pred.x - ob.x;
+                const dy = pred.y - ob.y;
+                const d = Math.sqrt(dx * dx + dy * dy);
+                if (d < ob.r + 50 && d > 0) {
+                    const intensity = 1 - d / (ob.r + 50);
+                    let [fx, fy] = setMag(dx, dy, pred.maxSpeed);
+                    fx -= pred.vx; fy -= pred.vy;
+                    [fx, fy] = limit(fx, fy, pred.maxForce * 2);
+                    pred.ax += fx * 3 * intensity;
+                    pred.ay += fy * 3 * intensity;
+                }
+            }
+
+            // Slight wander
+            pred.ax += (Math.random() - 0.5) * 0.02;
+            pred.ay += (Math.random() - 0.5) * 0.02;
+
+            pred.vx += pred.ax;
+            pred.vy += pred.ay;
+            [pred.vx, pred.vy] = limit(pred.vx, pred.vy, pred.maxSpeed);
+            pred.x += pred.vx;
+            pred.y += pred.vy;
+            edgeWrap(pred);
+
+            // Kill boids on contact
+            for (let i = boids.length - 1; i >= 0; i--) {
+                if (!boids[i].alive) continue;
+                const d = dist2(boids[i].x, boids[i].y, pred.x, pred.y);
+                if (d < (PREDATOR_SIZE + BOID_SIZE) * (PREDATOR_SIZE + BOID_SIZE)) {
+                    boids[i].alive = false;
+                }
+            }
+        }
+
+        // --- Day/night cycle ---
+        function getDayNightColors() {
+            dayNightPhase += 0.0003;
+            const t = (Math.sin(dayNightPhase) + 1) / 2; // 0 = night, 1 = day
+
+            // Interpolate background colors
+            const nightR = 10, nightG = 14, nightB = 28;
+            const dayR = 30, dayG = 22, dayB = 15; // warm sunrise
+            const r = Math.floor(nightR + (dayR - nightR) * t);
+            const g = Math.floor(nightG + (dayG - nightG) * t);
+            const b = Math.floor(nightB + (dayB - nightB) * t);
+
+            return {
+                bg: 'rgb(' + r + ',' + g + ',' + b + ')',
+                bgAlpha: 'rgba(' + r + ',' + g + ',' + b + ',' + TRAIL_FADE + ')',
+                phase: t,
+                label: t < 0.3 ? 'NIGHT' : t < 0.5 ? 'DAWN' : t < 0.7 ? 'DAY' : 'DUSK'
+            };
+        }
+
+        // --- Drawing functions ---
+        function drawBoid(boid) {
+            const angle = Math.atan2(boid.vy, boid.vx);
+            const speed = Math.sqrt(boid.vx * boid.vx + boid.vy * boid.vy);
+            const speedRatio = speed / MAX_SPEED;
+            const energyRatio = boid.energy / ENERGY_MAX;
+
+            ctx.save();
+            ctx.translate(boid.x, boid.y);
+            ctx.rotate(angle);
+
+            // Glow based on energy
+            const alpha = (0.2 + speedRatio * 0.3) * (0.4 + energyRatio * 0.6);
+            ctx.shadowColor = 'hsla(' + boid.hue + ', ' + boid.sat + '%, 65%, ' + alpha + ')';
+            ctx.shadowBlur = 4 + speedRatio * 4 + energyRatio * 2;
+
+            // Triangle body
+            const sz = BOID_SIZE * (0.8 + energyRatio * 0.3);
+            ctx.beginPath();
+            ctx.moveTo(sz * 1.5, 0);
+            ctx.lineTo(-sz, -sz * 0.6);
+            ctx.lineTo(-sz * 0.4, 0);
+            ctx.lineTo(-sz, sz * 0.6);
+            ctx.closePath();
+
+            const brightness = 40 + energyRatio * 30 + speedRatio * 10;
+            const bodyAlpha = 0.5 + energyRatio * 0.4;
+            ctx.fillStyle = 'hsla(' + boid.hue + ', ' + boid.sat + '%, ' + brightness + '%, ' + bodyAlpha + ')';
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        function drawPredator(pred) {
+            const angle = Math.atan2(pred.vy, pred.vx);
+            const pulse = 0.8 + Math.sin(Date.now() * 0.005 + pred.type) * 0.2;
+            const c = pred.color;
+
+            ctx.save();
+            ctx.translate(pred.x, pred.y);
+            ctx.rotate(angle);
+
+            ctx.shadowColor = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ', 0.8)';
+            ctx.shadowBlur = 15 * pulse;
+
+            // Outer triangle
+            ctx.beginPath();
+            ctx.moveTo(PREDATOR_SIZE * 1.8, 0);
+            ctx.lineTo(-PREDATOR_SIZE, -PREDATOR_SIZE * 0.8);
+            ctx.lineTo(-PREDATOR_SIZE * 0.3, 0);
+            ctx.lineTo(-PREDATOR_SIZE, PREDATOR_SIZE * 0.8);
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ', ' + (0.8 * pulse) + ')';
+            ctx.fill();
+
+            // Inner core
+            ctx.beginPath();
+            ctx.moveTo(PREDATOR_SIZE * 1.2, 0);
+            ctx.lineTo(-PREDATOR_SIZE * 0.5, -PREDATOR_SIZE * 0.35);
+            ctx.lineTo(-PREDATOR_SIZE * 0.1, 0);
+            ctx.lineTo(-PREDATOR_SIZE * 0.5, PREDATOR_SIZE * 0.35);
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(255, 200, 100, ' + (0.5 * pulse) + ')';
+            ctx.fill();
+
+            ctx.restore();
+
+            // Danger radius
+            ctx.beginPath();
+            ctx.arc(pred.x, pred.y, PREDATOR_FEAR_RADIUS, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ', 0.03)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Strategy label
+            ctx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ', 0.3)';
+            ctx.font = '8px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(PREDATOR_TYPES[pred.type].strategy.toUpperCase(), pred.x, pred.y - PREDATOR_SIZE - 5);
+        }
+
+        function drawFood() {
+            for (let i = 0; i < foods.length; i++) {
+                const f = foods[i];
+                if (!f.active) continue;
+                f.pulse += 0.03;
+                const p = 0.7 + Math.sin(f.pulse) * 0.3;
+                const r = FOOD_RADIUS * p;
+
+                ctx.save();
+                ctx.shadowColor = 'rgba(80, 255, 80, 0.5)';
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.arc(f.x, f.y, r, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(80, 220, 80, ' + (0.6 * p) + ')';
+                ctx.fill();
+
+                // Inner bright dot
+                ctx.beginPath();
+                ctx.arc(f.x, f.y, r * 0.4, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(150, 255, 150, ' + (0.8 * p) + ')';
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        function drawObstacles() {
+            for (let i = 0; i < obstacles.length; i++) {
+                const ob = obstacles[i];
+                ctx.save();
+                ctx.shadowColor = 'rgba(150, 130, 100, 0.3)';
+                ctx.shadowBlur = 10;
+
+                // Outer ring
+                ctx.beginPath();
+                ctx.arc(ob.x, ob.y, ob.r, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(120, 100, 80, 0.3)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Fill
+                ctx.fillStyle = 'rgba(60, 50, 40, 0.25)';
+                ctx.fill();
+
+                // Avoid radius hint
+                ctx.beginPath();
+                ctx.arc(ob.x, ob.y, ob.r + OBSTACLE_AVOID_RADIUS, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(120, 100, 80, 0.06)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                ctx.restore();
+            }
+        }
+
+        function drawWindField() {
+            if (!showWind) return;
+            const cellW = W / WIND_COLS;
+            const cellH = H / WIND_ROWS;
+            ctx.save();
+            ctx.strokeStyle = 'rgba(100, 200, 255, 0.12)';
+            ctx.lineWidth = 1;
+            for (let r = 0; r < WIND_ROWS; r++) {
+                for (let c = 0; c < WIND_COLS; c++) {
+                    const w = windField[r * WIND_COLS + c];
+                    const cx = (c + 0.5) * cellW;
+                    const cy = (r + 0.5) * cellH;
+                    const t = frameCount * 0.002;
+                    const a = w.angle + Math.sin(t + w.phase) * 0.5;
+                    const s = w.strength * 18;
+                    const ex = cx + Math.cos(a) * s;
+                    const ey = cy + Math.sin(a) * s;
+
+                    ctx.beginPath();
+                    ctx.moveTo(cx, cy);
+                    ctx.lineTo(ex, ey);
+                    ctx.stroke();
+
+                    // Arrowhead
+                    const headA = a + Math.PI * 0.85;
+                    const headB = a - Math.PI * 0.85;
+                    const hl = 5;
+                    ctx.beginPath();
+                    ctx.moveTo(ex, ey);
+                    ctx.lineTo(ex + Math.cos(headA) * hl, ey + Math.sin(headA) * hl);
+                    ctx.moveTo(ex, ey);
+                    ctx.lineTo(ex + Math.cos(headB) * hl, ey + Math.sin(headB) * hl);
+                    ctx.stroke();
+                }
+            }
+            ctx.restore();
+        }
+
+        function drawSpatialGrid() {
+            if (!showGrid) return;
+            ctx.save();
+            ctx.strokeStyle = 'rgba(100, 200, 255, 0.06)';
+            ctx.lineWidth = 0.5;
+            for (let c = 0; c <= gridCols; c++) {
+                ctx.beginPath();
+                ctx.moveTo(c * CELL_SIZE, 0);
+                ctx.lineTo(c * CELL_SIZE, H);
+                ctx.stroke();
+            }
+            for (let r = 0; r <= gridRows; r++) {
+                ctx.beginPath();
+                ctx.moveTo(0, r * CELL_SIZE);
+                ctx.lineTo(W, r * CELL_SIZE);
+                ctx.stroke();
+            }
+
+            // Highlight occupied cells
+            for (let i = 0; i < grid.length; i++) {
+                if (grid[i]) {
+                    const c = i % gridCols;
+                    const r = Math.floor(i / gridCols);
+                    ctx.fillStyle = 'rgba(100, 200, 255, 0.02)';
+                    ctx.fillRect(c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                }
+            }
+            ctx.restore();
+        }
+
+        function drawPerceptionCone() {
+            if (!showPerception || !selectedBoid || !selectedBoid.alive) return;
+            const b = selectedBoid;
+            const angle = Math.atan2(b.vy, b.vx);
+
+            ctx.save();
+            // Perception radius
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, PERCEPTION_RADIUS, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255, 255, 100, 0.2)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(255, 255, 100, 0.03)';
+            ctx.fill();
+
+            // Separation radius
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, SEPARATION_RADIUS, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255, 100, 100, 0.2)';
+            ctx.stroke();
+
+            // Food seek radius
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, FOOD_SEEK_RADIUS, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(100, 255, 100, 0.1)';
+            ctx.setLineDash([3, 6]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Direction arrow
+            ctx.beginPath();
+            ctx.moveTo(b.x, b.y);
+            ctx.lineTo(b.x + Math.cos(angle) * PERCEPTION_RADIUS, b.y + Math.sin(angle) * PERCEPTION_RADIUS);
+            ctx.strokeStyle = 'rgba(255, 255, 100, 0.3)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Energy bar
+            const barW = 30, barH = 3;
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.fillRect(b.x - barW / 2, b.y - BOID_SIZE - 10, barW, barH);
+            const eRatio = b.energy / ENERGY_MAX;
+            const eColor = eRatio > 0.5 ? 'rgba(80, 255, 80, 0.6)' : eRatio > 0.25 ? 'rgba(255, 200, 50, 0.6)' : 'rgba(255, 60, 40, 0.6)';
+            ctx.fillStyle = eColor;
+            ctx.fillRect(b.x - barW / 2, b.y - BOID_SIZE - 10, barW * eRatio, barH);
+
+            ctx.restore();
+        }
+
+        function drawMouseIndicator() {
+            if (!mouseActive) return;
+            ctx.beginPath();
+            ctx.arc(mouseX, mouseY, 80, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(100, 200, 255, 0.06)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(mouseX, mouseY, 3, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(100, 200, 255, 0.3)';
+            ctx.fill();
+        }
+
+        // --- Stats ---
+        function updateStats() {
+            if (frameCount % 15 !== 0) return;
+
+            const counts = [0, 0, 0];
+            let totalSpeed = 0;
+            let aliveCount = 0;
+            let cohSum = 0;
+
+            for (let i = 0; i < boids.length; i++) {
+                if (!boids[i].alive) continue;
+                counts[boids[i].species]++;
+                aliveCount++;
+                totalSpeed += Math.sqrt(boids[i].vx * boids[i].vx + boids[i].vy * boids[i].vy);
+            }
+
+            // Compute cohesion: average distance to flock center per species
+            for (let s = 0; s < 3; s++) {
+                if (counts[s] === 0) continue;
+                let cx = 0, cy = 0, n = 0;
+                for (let i = 0; i < boids.length; i++) {
+                    if (!boids[i].alive || boids[i].species !== s) continue;
+                    cx += boids[i].x; cy += boids[i].y; n++;
+                }
+                cx /= n; cy /= n;
+                let avgD = 0;
+                for (let i = 0; i < boids.length; i++) {
+                    if (!boids[i].alive || boids[i].species !== s) continue;
+                    avgD += Math.sqrt(dist2(boids[i].x, boids[i].y, cx, cy));
+                }
+                cohSum += avgD / n;
+            }
+
+            const activeFood = foods.filter(f => f.active).length;
+            const dayInfo = getDayNightColors();
+
+            document.getElementById('sBlue').textContent = counts[0];
+            document.getElementById('sGreen').textContent = counts[1];
+            document.getElementById('sGold').textContent = counts[2];
+            document.getElementById('sPred').textContent = predators.length;
+            document.getElementById('sFood').textContent = activeFood;
+            document.getElementById('sSpeed').textContent = aliveCount > 0 ? (totalSpeed / aliveCount).toFixed(1) : '0';
+            document.getElementById('sCoh').textContent = (cohSum / 3).toFixed(0) + 'px';
+            document.getElementById('sCycle').textContent = dayInfo.label;
+        }
+
+        // --- Animation loop ---
+        let animId;
+        let running = true;
+        let grainCounter = 0;
+
+        function animate() {
+            if (!running) return;
+            frameCount++;
+
+            const dayColors = getDayNightColors();
+
+            // Fade trails with day/night color
+            trailCtx.fillStyle = dayColors.bgAlpha;
+            trailCtx.fillRect(0, 0, W, H);
+
+            // Draw boid trails on trail canvas
+            trailCtx.shadowBlur = 0;
+            for (let i = 0; i < boids.length; i++) {
+                const b = boids[i];
+                if (!b.alive) continue;
+                const speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+                const energyRatio = b.energy / ENERGY_MAX;
+                const alpha = (0.1 + (speed / MAX_SPEED) * 0.12) * (0.5 + energyRatio * 0.5);
+                trailCtx.fillStyle = 'hsla(' + b.hue + ', ' + b.sat + '%, 45%, ' + alpha + ')';
+                trailCtx.fillRect(b.x - 0.7, b.y - 0.7, 1.4, 1.4);
+            }
+
+            // Predator trails
+            for (let p = 0; p < predators.length; p++) {
+                const pred = predators[p];
+                const c = pred.color;
+                trailCtx.fillStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ', 0.2)';
+                trailCtx.beginPath();
+                trailCtx.arc(pred.x, pred.y, 2.5, 0, Math.PI * 2);
+                trailCtx.fill();
+            }
+
+            // Clear main canvas
+            ctx.clearRect(0, 0, W, H);
+
+            // Build spatial grid
+            clearGrid();
+            for (let i = 0; i < boids.length; i++) {
+                if (boids[i].alive) insertBoid(boids[i]);
+            }
+
+            // Update wind
+            if (showWind) updateWind();
+
+            // Update boids
+            for (let i = 0; i < boids.length; i++) {
+                const b = boids[i];
+                if (!b.alive) continue;
+
+                b.ax = 0;
+                b.ay = 0;
+
+                flock(b);
+                avoidOtherSpecies(b);
+                avoidPredators(b);
+                seekFood(b);
+                avoidObstacles(b);
+
+                // Wind
+                if (showWind) {
+                    const [wx, wy] = getWind(b.x, b.y);
+                    b.ax += wx;
+                    b.ay += wy;
+                }
+
+                // Energy drain and speed modulation
+                b.energy -= ENERGY_DRAIN;
+                const energyRatio = b.energy / ENERGY_MAX;
+                const speedCap = MIN_SPEED + (MAX_SPEED - MIN_SPEED) * Math.max(0.1, energyRatio);
+
+                b.vx += b.ax;
+                b.vy += b.ay;
+                [b.vx, b.vy] = limit(b.vx, b.vy, speedCap);
+                b.x += b.vx;
+                b.y += b.vy;
+                edgeWrap(b);
+
+                // Starve
+                if (b.energy <= ENERGY_STARVE) {
+                    b.alive = false;
+                }
+
+                // Reproduce
+                if (b.energy > ENERGY_REPRODUCE && Math.random() < REPRODUCE_CHANCE) {
+                    const speciesCount = boids.filter(bb => bb.alive && bb.species === b.species).length;
+                    if (speciesCount < MAX_BOIDS_PER_SPECIES) {
+                        b.energy -= REPRODUCE_COST;
+                        const child = createBoid(
+                            b.x + (Math.random() - 0.5) * 20,
+                            b.y + (Math.random() - 0.5) * 20,
+                            b.species
+                        );
+                        child.energy = REPRODUCE_COST * 0.8;
+                        boids.push(child);
+                    }
+                }
+            }
+
+            // Remove dead boids periodically to prevent array bloat
+            if (frameCount % 120 === 0) {
+                boids = boids.filter(b => b.alive);
+
+                // Respawn boids if species drops too low
+                for (let s = 0; s < SPECIES.length; s++) {
+                    const count = boids.filter(b => b.species === s).length;
+                    if (count < 20) {
+                        for (let i = 0; i < 10; i++) {
+                            boids.push(createBoid(Math.random() * W, Math.random() * H, s));
+                        }
+                    }
+                }
+            }
+
+            // Update predators
+            for (let p = 0; p < predators.length; p++) {
+                updatePredator(predators[p]);
+            }
+
+            // Update food
+            for (let i = 0; i < foods.length; i++) {
+                if (!foods[i].active) {
+                    foods[i].respawnTimer--;
+                    if (foods[i].respawnTimer <= 0) {
+                        foods[i].x = Math.random() * (W - 40) + 20;
+                        foods[i].y = Math.random() * (H - 40) + 20;
+                        foods[i].active = true;
+                        foods[i].energy = FOOD_ENERGY;
+                    }
+                }
+            }
+
+            // --- Draw everything ---
+            drawSpatialGrid();
+            drawWindField();
+            drawObstacles();
+            drawFood();
+
+            for (let i = 0; i < boids.length; i++) {
+                if (boids[i].alive) drawBoid(boids[i]);
+            }
+
+            for (let p = 0; p < predators.length; p++) {
+                drawPredator(predators[p]);
+            }
+
+            drawPerceptionCone();
+            drawMouseIndicator();
+
+            // Film grain (every 3 frames for performance)
+            grainCounter++;
+            if (grainCounter % 3 === 0) {
+                renderGrain();
+            }
+
+            // Update stats
+            updateStats();
+
+            animId = requestAnimationFrame(animate);
+        }
+
+        animate();
+
+        // Fade out info text after 8 seconds
+        setTimeout(function() {
+            document.getElementById('infoText').style.opacity = '0';
+            document.getElementById('controlsHint').style.opacity = '0';
+        }, 8000);
+
+        // --- Reset / pause ---
+        window.reset = function() {
+            trailCtx.clearRect(0, 0, W, H);
+            initAll();
+        };
+
+        window.addEventListener('resize', function() {
+            initGrid();
+        });
+
+        // Pause / resume support for enhance.js
+        Object.defineProperty(window, 'paused', {
+            get: function() { return !running; },
+            set: function(val) {
+                running = !val;
+                if (running) animate();
+            }
+        });
+
+    })();
+    </script>
+    <script src="../assets/js/enhance.js"></script>
+</body>
+</html>
