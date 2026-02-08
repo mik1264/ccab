@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sinai Billiard - Dispersing Chaos</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+        a.back:hover { color: #bdf; }
+        #controls {
+            position: fixed; top: 20px; right: 20px; z-index: 100;
+            background: rgba(10, 14, 26, 0.75); backdrop-filter: blur(10px);
+            border: 1px solid rgba(138, 170, 255, 0.15); border-radius: 12px;
+            padding: 16px; color: #cde; font-size: 13px; width: 220px;
+        }
+        #controls h3 { color: #8af; margin-bottom: 10px; font-size: 14px; }
+        .ctrl-row { margin-bottom: 8px; }
+        .ctrl-row label { display: block; margin-bottom: 2px; color: #9ab; font-size: 11px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #8af; }
+        .ctrl-row select, .ctrl-row button {
+            width: 100%; padding: 4px 8px; background: rgba(138,170,255,0.1);
+            border: 1px solid rgba(138,170,255,0.25); border-radius: 6px;
+            color: #cde; font-size: 12px; cursor: pointer;
+        }
+        .ctrl-row button:hover { background: rgba(138,170,255,0.2); }
+        #info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(10,14,26,0.8); backdrop-filter: blur(10px);
+            border: 1px solid rgba(138,170,255,0.15); border-radius: 10px;
+            padding: 10px 18px; color: #9ab; font-size: 12px; max-width: 600px;
+            text-align: center; z-index: 100;
+        }
+        #phase {
+            position: fixed; bottom: 80px; right: 20px; z-index: 100;
+            border: 1px solid rgba(138,170,255,0.2); border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+<a href="index.html" class="back">&larr; Back</a>
+<canvas id="c"></canvas>
+<canvas id="phase" width="180" height="180"></canvas>
+<div id="controls">
+    <h3>Sinai Billiard</h3>
+    <div class="ctrl-row">
+        <label>Disk Radius: <span id="vDisk">0.30</span></label>
+        <input type="range" id="disk" min="0.05" max="0.45" step="0.01" value="0.30">
+    </div>
+    <div class="ctrl-row">
+        <label>Ball Speed: <span id="vSpeed">3</span></label>
+        <input type="range" id="speed" min="1" max="10" step="0.5" value="3">
+    </div>
+    <div class="ctrl-row">
+        <label>Trail Length: <span id="vTrail">1200</span></label>
+        <input type="range" id="trail" min="200" max="4000" step="100" value="1200">
+    </div>
+    <div class="ctrl-row">
+        <label>Mode</label>
+        <select id="mode">
+            <option value="single" selected>Single Ball</option>
+            <option value="pair">Sensitivity Pair</option>
+        </select>
+    </div>
+    <div class="ctrl-row">
+        <button id="resetBtn">Reset</button>
+    </div>
+</div>
+<div id="info">
+    Sinai's billiard (1970) was the first physically realistic system proved to be fully chaotic.
+    The central disk disperses nearby trajectories, guaranteeing ergodicity and mixing.
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const phaseCanvas = document.getElementById('phase');
+const pctx = phaseCanvas.getContext('2d');
+
+let W, H, boxSize, boxLeft, boxTop, diskR;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    boxSize = Math.min(W, H) * 0.6;
+    boxLeft = (W - boxSize) / 2;
+    boxTop = (H - boxSize) / 2;
+    clearPhase();
+}
+
+function clearPhase() {
+    pctx.fillStyle = '#0a0e1a';
+    pctx.fillRect(0, 0, 180, 180);
+    pctx.strokeStyle = 'rgba(138,170,255,0.2)';
+    pctx.strokeRect(2, 2, 176, 176);
+    pctx.fillStyle = '#5a7a9a';
+    pctx.font = '9px sans-serif';
+    pctx.fillText('Phase Space', 60, 12);
+    pctx.fillText('boundary pos', 60, 175);
+}
+
+function getDisk() { return parseFloat(document.getElementById('disk').value); }
+function getSpeed() { return parseFloat(document.getElementById('speed').value); }
+function getTrail() { return parseInt(document.getElementById('trail').value); }
+function getMode() { return document.getElementById('mode').value; }
+
+class Ball {
+    constructor(x, y, vx, vy, color) {
+        this.x = x; this.y = y;
+        this.vx = vx; this.vy = vy;
+        this.color = color;
+        this.trail = [];
+        this.hue = 0;
+    }
+}
+
+let balls = [];
+let bounceCount = 0;
+let trailHue = 0;
+
+function initBalls() {
+    const spd = getSpeed();
+    const angle = Math.random() * Math.PI * 2;
+    const bx = boxLeft + boxSize * 0.25 + Math.random() * boxSize * 0.1;
+    const by = boxTop + boxSize * 0.25 + Math.random() * boxSize * 0.1;
+    balls = [];
+    balls.push(new Ball(bx, by, Math.cos(angle) * spd, Math.sin(angle) * spd, '#ff6644'));
+    if (getMode() === 'pair') {
+        const eps = 0.002;
+        balls.push(new Ball(bx + eps, by + eps,
+            Math.cos(angle + eps) * spd, Math.sin(angle + eps) * spd, '#44aaff'));
+    }
+    bounceCount = 0;
+    trailHue = 0;
+    clearPhase();
+}
+
+function plotPhase(ball, wallPos, angle) {
+    // wallPos: 0-1 around perimeter, angle: -PI/2 to PI/2
+    const px = 5 + wallPos * 170;
+    const py = 90 - (angle / (Math.PI / 2)) * 85;
+    const r = parseInt(ball.color.slice(1,3),16);
+    const g = parseInt(ball.color.slice(3,5),16);
+    const b = parseInt(ball.color.slice(5,7),16);
+    pctx.fillStyle = `rgba(${r},${g},${b},0.6)`;
+    pctx.fillRect(px, py, 2, 2);
+}
+
+function collide(ball) {
+    const dr = getDisk() * boxSize / 2;
+    const diskCx = boxLeft + boxSize / 2;
+    const diskCy = boxTop + boxSize / 2;
+
+    // Wall collisions
+    if (ball.x <= boxLeft + 1) {
+        ball.x = boxLeft + 2;
+        ball.vx = Math.abs(ball.vx);
+        const wp = (ball.y - boxTop) / (4 * boxSize);
+        const ang = Math.atan2(ball.vy, ball.vx);
+        plotPhase(ball, wp, ang);
+        bounceCount++;
+    }
+    if (ball.x >= boxLeft + boxSize - 1) {
+        ball.x = boxLeft + boxSize - 2;
+        ball.vx = -Math.abs(ball.vx);
+        const wp = 0.25 + (boxTop + boxSize - ball.y) / (4 * boxSize);
+        const ang = Math.atan2(ball.vy, ball.vx);
+        plotPhase(ball, wp, ang);
+        bounceCount++;
+    }
+    if (ball.y <= boxTop + 1) {
+        ball.y = boxTop + 2;
+        ball.vy = Math.abs(ball.vy);
+        const wp = 0.5 + (ball.x - boxLeft) / (4 * boxSize);
+        const ang = Math.atan2(ball.vy, ball.vx);
+        plotPhase(ball, wp, ang);
+        bounceCount++;
+    }
+    if (ball.y >= boxTop + boxSize - 1) {
+        ball.y = boxTop + boxSize - 2;
+        ball.vy = -Math.abs(ball.vy);
+        const wp = 0.75 + (boxLeft + boxSize - ball.x) / (4 * boxSize);
+        const ang = Math.atan2(ball.vy, ball.vx);
+        plotPhase(ball, wp, ang);
+        bounceCount++;
+    }
+
+    // Disk collision
+    const dx = ball.x - diskCx, dy = ball.y - diskCy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist <= dr + 1) {
+        const nx = dx / dist, ny = dy / dist;
+        const dot = ball.vx * nx + ball.vy * ny;
+        if (dot < 0) {
+            ball.vx -= 2 * dot * nx;
+            ball.vy -= 2 * dot * ny;
+            ball.x = diskCx + nx * (dr + 2);
+            ball.y = diskCy + ny * (dr + 2);
+            bounceCount++;
+        }
+    }
+}
+
+function step() {
+    const spd = getSpeed();
+    const trailLen = getTrail();
+    const substeps = Math.ceil(spd * 2);
+    trailHue = (trailHue + 0.15) % 360;
+
+    for (const ball of balls) {
+        for (let s = 0; s < substeps; s++) {
+            const dt = 1 / substeps;
+            ball.x += ball.vx * dt;
+            ball.y += ball.vy * dt;
+            collide(ball);
+        }
+        ball.hue = trailHue;
+        ball.trail.push({ x: ball.x, y: ball.y, h: trailHue });
+        if (ball.trail.length > trailLen) ball.trail.shift();
+    }
+}
+
+function drawBox() {
+    const dr = getDisk() * boxSize / 2;
+    const diskCx = boxLeft + boxSize / 2;
+    const diskCy = boxTop + boxSize / 2;
+
+    ctx.strokeStyle = 'rgba(138,170,255,0.35)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(boxLeft, boxTop, boxSize, boxSize);
+
+    // Disk
+    ctx.beginPath();
+    ctx.arc(diskCx, diskCy, dr, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(138,170,255,0.08)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(138,170,255,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Disk glow
+    const grd = ctx.createRadialGradient(diskCx, diskCy, dr * 0.8, diskCx, diskCy, dr * 1.4);
+    grd.addColorStop(0, 'rgba(138,170,255,0.05)');
+    grd.addColorStop(1, 'rgba(138,170,255,0)');
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.arc(diskCx, diskCy, dr * 1.4, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    drawBox();
+
+    for (const ball of balls) {
+        if (ball.trail.length < 2) continue;
+        const len = ball.trail.length;
+        const isSingle = balls.length === 1;
+        for (let i = 1; i < len; i++) {
+            const alpha = (i / len) * 0.6 + 0.05;
+            ctx.beginPath();
+            ctx.moveTo(ball.trail[i-1].x, ball.trail[i-1].y);
+            ctx.lineTo(ball.trail[i].x, ball.trail[i].y);
+            if (isSingle) {
+                const h = ball.trail[i].h;
+                ctx.strokeStyle = `hsla(${h},80%,60%,${alpha})`;
+            } else {
+                const r = parseInt(ball.color.slice(1,3),16);
+                const g = parseInt(ball.color.slice(3,5),16);
+                const b = parseInt(ball.color.slice(5,7),16);
+                ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+            }
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+        }
+
+        // Ball glow
+        const r = parseInt(ball.color.slice(1,3),16);
+        const g = parseInt(ball.color.slice(3,5),16);
+        const b = parseInt(ball.color.slice(5,7),16);
+        const grd = ctx.createRadialGradient(ball.x, ball.y, 0, ball.x, ball.y, 10);
+        grd.addColorStop(0, `rgba(${r},${g},${b},0.9)`);
+        grd.addColorStop(0.4, `rgba(${r},${g},${b},0.3)`);
+        grd.addColorStop(1, `rgba(${r},${g},${b},0)`);
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, 10, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    ctx.fillStyle = '#5a7a9a';
+    ctx.font = '12px monospace';
+    ctx.fillText(`Bounces: ${bounceCount}`, 20, H - 20);
+}
+
+let running = true;
+
+function animate() {
+    if (running) { step(); draw(); }
+    requestAnimationFrame(animate);
+}
+
+// Controls
+document.getElementById('disk').addEventListener('input', e => {
+    document.getElementById('vDisk').textContent = parseFloat(e.target.value).toFixed(2);
+});
+document.getElementById('speed').addEventListener('input', e => {
+    document.getElementById('vSpeed').textContent = e.target.value;
+    const spd = parseFloat(e.target.value);
+    for (const b of balls) {
+        const mag = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+        if (mag > 0) { b.vx = b.vx/mag*spd; b.vy = b.vy/mag*spd; }
+    }
+});
+document.getElementById('trail').addEventListener('input', e => {
+    document.getElementById('vTrail').textContent = e.target.value;
+});
+document.getElementById('mode').addEventListener('change', () => initBalls());
+document.getElementById('resetBtn').addEventListener('click', () => initBalls());
+
+// Click to place ball
+canvas.addEventListener('click', e => {
+    const x = e.clientX, y = e.clientY;
+    if (x >= boxLeft && x <= boxLeft + boxSize && y >= boxTop && y <= boxTop + boxSize) {
+        const dr = getDisk() * boxSize / 2;
+        const diskCx = boxLeft + boxSize / 2, diskCy = boxTop + boxSize / 2;
+        const dx = x - diskCx, dy = y - diskCy;
+        if (Math.sqrt(dx*dx + dy*dy) > dr + 5) {
+            const spd = getSpeed();
+            const angle = Math.random() * Math.PI * 2;
+            balls = [new Ball(x, y, Math.cos(angle)*spd, Math.sin(angle)*spd, '#ff6644')];
+            if (getMode() === 'pair') {
+                const eps = 0.002;
+                balls.push(new Ball(x+eps, y+eps, Math.cos(angle+eps)*spd, Math.sin(angle+eps)*spd, '#44aaff'));
+            }
+            bounceCount = 0;
+            clearPhase();
+        }
+    }
+});
+
+window.addEventListener('resize', () => { resize(); initBalls(); });
+
+window.reset = function() { initBalls(); };
+
+resize();
+initBalls();
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Billiard Unfolding - Reflections Become Straight Lines</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; color: #c8d8e8; }
+canvas { display: block; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+#controls {
+  position: fixed; top: 20px; right: 20px; z-index: 100;
+  background: rgba(10, 14, 30, 0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(120, 160, 255, 0.15); border-radius: 12px;
+  padding: 16px 20px; min-width: 220px;
+}
+#controls h3 { color: #8af; margin-bottom: 10px; font-size: 0.95em; text-transform: uppercase; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; }
+.ctrl-row label { display: block; font-size: 0.8em; color: #8ab; margin-bottom: 3px; }
+.ctrl-row input[type=range] { width: 100%; accent-color: #6af; }
+.ctrl-row .val { float: right; font-size: 0.8em; color: #adf; }
+.btn { background: rgba(100,160,255,0.15); border: 1px solid rgba(100,160,255,0.3); color: #8af; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8em; margin: 2px; }
+.btn:hover { background: rgba(100,160,255,0.3); }
+.btn.active { background: rgba(100,200,150,0.25); border-color: rgba(100,200,150,0.5); color: #8fa; }
+#info { position: fixed; bottom: 20px; left: 20px; right: 20px; z-index: 100; font-size: 0.8em; color: #7a9ab8; background: rgba(10,14,30,0.7); backdrop-filter: blur(10px); padding: 10px 16px; border-radius: 8px; text-align: center; max-width: 700px; margin: 0 auto; }
+.divider { width: 100%; height: 1px; background: rgba(120,160,255,0.15); margin: 10px 0; }
+</style>
+</head>
+<body>
+<a href="index.html">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+  <h3>Billiard Unfolding</h3>
+  <div class="ctrl-row">
+    <label>Polygon Shape</label>
+    <div>
+      <button class="btn active" data-shape="rectangle">Rectangle</button>
+      <button class="btn" data-shape="square">Square</button>
+      <button class="btn" data-shape="equilateral">Equilateral</button>
+      <button class="btn" data-shape="right-tri">Right Triangle</button>
+    </div>
+  </div>
+  <div class="ctrl-row">
+    <label>Launch Angle <span class="val" id="vAngle">0.40</span></label>
+    <input type="range" id="sAngle" min="0.05" max="1.50" step="0.01" value="0.40">
+  </div>
+  <div class="ctrl-row">
+    <label>Max Bounces <span class="val" id="vBounces">15</span></label>
+    <input type="range" id="sBounces" min="3" max="30" step="1" value="15">
+  </div>
+  <div class="ctrl-row">
+    <label>Ball Speed <span class="val" id="vSpeed">1.0</span></label>
+    <input type="range" id="sSpeed" min="0.1" max="3.0" step="0.1" value="1.0">
+  </div>
+  <div class="divider"></div>
+  <div class="ctrl-row">
+    <label>View</label>
+    <div>
+      <button class="btn active" data-view="both">Both</button>
+      <button class="btn" data-view="billiard">Billiard Only</button>
+      <button class="btn" data-view="unfolded">Unfolded Only</button>
+    </div>
+  </div>
+</div>
+<div id="info">The unfolding trick turns billiard problems into questions about straight lines on flat surfaces. Instead of reflecting the ball, reflect the table -- the trajectory becomes a straight line.</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+let shape = 'rectangle';
+let launchAngle = 0.40;
+let maxBounces = 15;
+let ballSpeed = 1.0;
+let viewMode = 'both';
+let paused = false;
+let time = 0;
+let ballProgress = 0;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function getPolygon(shape) {
+  const s = Math.min(W, H) * 0.12;
+  if (shape === 'rectangle') {
+    const w = s * 1.6, h = s;
+    return [
+      { x: -w, y: -h }, { x: w, y: -h },
+      { x: w, y: h }, { x: -w, y: h }
+    ];
+  } else if (shape === 'square') {
+    return [
+      { x: -s, y: -s }, { x: s, y: -s },
+      { x: s, y: s }, { x: -s, y: s }
+    ];
+  } else if (shape === 'equilateral') {
+    const pts = [];
+    for (let i = 0; i < 3; i++) {
+      const a = -Math.PI / 2 + (2 * Math.PI * i) / 3;
+      pts.push({ x: s * 1.2 * Math.cos(a), y: s * 1.2 * Math.sin(a) });
+    }
+    return pts;
+  } else if (shape === 'right-tri') {
+    return [
+      { x: -s, y: s },
+      { x: s, y: s },
+      { x: -s, y: -s }
+    ];
+  }
+  return [];
+}
+
+function lineIntersect(px, py, dx, dy, ax, ay, bx, by) {
+  const ex = bx - ax, ey = by - ay;
+  const denom = dx * ey - dy * ex;
+  if (Math.abs(denom) < 1e-12) return null;
+  const t = ((ax - px) * ey - (ay - py) * ex) / denom;
+  const s = ((ax - px) * dy - (ay - py) * dx) / denom;
+  if (t > 0.001 && s >= -0.001 && s <= 1.001) {
+    return { t, x: px + dx * t, y: py + dy * t, s, wallDx: ex, wallDy: ey };
+  }
+  return null;
+}
+
+function computeTrajectory(poly, startX, startY, angle, maxB) {
+  const bounces = [];
+  let px = startX, py = startY;
+  let vx = Math.cos(angle), vy = Math.sin(angle);
+  bounces.push({ x: px, y: py, wall: -1 });
+  let lastWall = -1;
+
+  for (let b = 0; b < maxB; b++) {
+    let bestT = Infinity, bestHit = null, bestWall = -1;
+    for (let i = 0; i < poly.length; i++) {
+      if (i === lastWall) continue;
+      const j = (i + 1) % poly.length;
+      const hit = lineIntersect(px, py, vx, vy, poly[i].x, poly[i].y, poly[j].x, poly[j].y);
+      if (hit && hit.t < bestT) {
+        bestT = hit.t;
+        bestHit = hit;
+        bestWall = i;
+      }
+    }
+    if (!bestHit) break;
+    px = bestHit.x;
+    py = bestHit.y;
+    bounces.push({ x: px, y: py, wall: bestWall });
+
+    // Reflect velocity
+    const j = (bestWall + 1) % poly.length;
+    let nx = poly[j].y - poly[bestWall].y;
+    let ny = -(poly[j].x - poly[bestWall].x);
+    const nlen = Math.sqrt(nx * nx + ny * ny);
+    nx /= nlen; ny /= nlen;
+    const dot = vx * nx + vy * ny;
+    vx -= 2 * dot * nx;
+    vy -= 2 * dot * ny;
+    lastWall = bestWall;
+  }
+  return bounces;
+}
+
+function reflectPoint(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  const projX = ax + t * dx;
+  const projY = ay + t * dy;
+  return { x: 2 * projX - px, y: 2 * projY - py };
+}
+
+function reflectPoly(poly, wallIdx) {
+  const a = poly[wallIdx];
+  const b = poly[(wallIdx + 1) % poly.length];
+  return poly.map(p => reflectPoint(p.x, p.y, a.x, a.y, b.x, b.y));
+}
+
+function computeUnfolding(poly, trajectory) {
+  // Build unfolded copies and the straight-line trajectory
+  const copies = [{ poly: poly.map(p => ({ ...p })), color: 0 }];
+  const straightLine = [{ x: trajectory[0].x, y: trajectory[0].y }];
+  let currentPoly = poly.map(p => ({ ...p }));
+
+  for (let i = 1; i < trajectory.length; i++) {
+    const wallIdx = trajectory[i].wall;
+    if (wallIdx < 0) continue;
+
+    // The point in the current (reflected) coordinate system
+    // We need to "unfold" by reflecting the polygon across the wall
+    const newPoly = reflectPoly(currentPoly, wallIdx);
+    copies.push({ poly: newPoly, color: i });
+
+    // The bounce point in the unfolded view is the same as in the original
+    // But we need to find it in the reflected coords
+    // Actually: the straight line in the unfolded view goes from the start
+    // through all the reflected copies. Each bounce point stays at the
+    // same position relative to its reflected polygon.
+
+    // Map the bounce point: find where it is relative to currentPoly,
+    // then that same position relative to newPoly
+    // For simplicity with rectangles, we can compute the unfolded position directly
+    currentPoly = newPoly;
+  }
+
+  return copies;
+}
+
+function computeUnfoldedTrajectory(poly, trajectory) {
+  // For rectangles/squares: unfold is simple grid reflections
+  // General approach: reflect the trajectory point through each successive wall
+  const unfoldedPts = [{ x: trajectory[0].x, y: trajectory[0].y }];
+  let transforms = []; // Stack of wall reflections
+
+  for (let i = 1; i < trajectory.length; i++) {
+    const wallIdx = trajectory[i].wall;
+    if (wallIdx < 0) continue;
+
+    // The current point needs to be reflected through all accumulated walls
+    // But for the unfolding, we reflect the DESTINATION through the wall
+    // Actually the key insight: we unfold by reflecting each subsequent
+    // bounce point through the accumulated reflection
+
+    // Simple approach: track the cumulative reflected position
+    let pt = { x: trajectory[i].x, y: trajectory[i].y };
+
+    // Apply all reflections in reverse order
+    for (let j = i - 1; j >= 0; j--) {
+      // No reflection needed for the first segment
+    }
+
+    // Better approach: reflect the straight line endpoint
+    // The unfolded trajectory endpoint = reflect point i through walls i-1, i-2, ... 0
+    // But it's simpler: in the unfolded view, the line is straight.
+    // So we just need to find where each wall maps to in the unfolded space.
+
+    transforms.push(wallIdx);
+  }
+
+  // Build the unfolded copies and straight line
+  const copies = [];
+  let currentPoly = poly.map(p => ({ ...p }));
+  copies.push(currentPoly.map(p => ({ ...p })));
+
+  const straightStart = { x: trajectory[0].x, y: trajectory[0].y };
+  // We need to find the final unfolded point
+  // Apply successive reflections to ALL subsequent points
+  let points = trajectory.map(t => ({ x: t.x, y: t.y, wall: t.wall }));
+
+  const unfoldedCopies = [{ poly: poly.map(p => ({ ...p })) }];
+  const unfoldedLine = [{ x: trajectory[0].x, y: trajectory[0].y }];
+
+  let curPoly = poly.map(p => ({ ...p }));
+
+  for (let i = 1; i < trajectory.length; i++) {
+    const wallIdx = trajectory[i].wall;
+    if (wallIdx < 0) break;
+
+    // Reflect curPoly across the wall
+    const a = curPoly[wallIdx];
+    const b = curPoly[(wallIdx + 1) % curPoly.length];
+
+    const newPoly = curPoly.map(p => reflectPoint(p.x, p.y, a.x, a.y, b.x, b.y));
+    unfoldedCopies.push({ poly: newPoly });
+
+    // The bounce point stays at its position
+    // The unfolded line continues straight: reflect the bounce point back through all walls
+    // But in the unfolded view, the trajectory[i] point is at its original position
+    // relative to the REFLECTED polygon. So we need to find where that point maps.
+
+    // Actually for the unfolding: the point trajectory[i] lies on the wall between
+    // curPoly and newPoly. In the unfolded view, it's at the same absolute position.
+    unfoldedLine.push({ x: trajectory[i].x, y: trajectory[i].y });
+
+    // But we also need to reflect all FUTURE points through this wall
+    for (let j = i + 1; j < trajectory.length; j++) {
+      const rp = reflectPoint(trajectory[j].x, trajectory[j].y, a.x, a.y, b.x, b.y);
+      trajectory[j].x = rp.x;
+      trajectory[j].y = rp.y;
+    }
+
+    curPoly = newPoly;
+  }
+
+  return { copies: unfoldedCopies, line: unfoldedLine };
+}
+
+function drawPoly(poly, cx, cy, color, alpha) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.moveTo(cx + poly[0].x, cy + poly[0].y);
+  for (let i = 1; i <= poly.length; i++) {
+    const p = poly[i % poly.length];
+    ctx.lineTo(cx + p.x, cy + p.y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function drawTrajectoryAnimated(pts, cx, cy, progress) {
+  if (pts.length < 2) return;
+  const totalSegs = pts.length - 1;
+  const currentSeg = Math.min(Math.floor(progress * totalSegs), totalSegs - 1);
+  const segFrac = (progress * totalSegs) - currentSeg;
+
+  // Draw completed segments
+  ctx.strokeStyle = '#ff6b6b';
+  ctx.lineWidth = 2;
+  ctx.shadowBlur = 8;
+  ctx.shadowColor = 'rgba(255,100,100,0.5)';
+  ctx.beginPath();
+  ctx.moveTo(cx + pts[0].x, cy + pts[0].y);
+  for (let i = 1; i <= currentSeg; i++) {
+    ctx.lineTo(cx + pts[i].x, cy + pts[i].y);
+  }
+  // Partial segment
+  if (currentSeg < totalSegs) {
+    const ax = pts[currentSeg].x, ay = pts[currentSeg].y;
+    const bx = pts[currentSeg + 1].x, by = pts[currentSeg + 1].y;
+    const ex = ax + (bx - ax) * segFrac;
+    const ey = ay + (by - ay) * segFrac;
+    ctx.lineTo(cx + ex, cy + ey);
+
+    // Ball
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    const grad = ctx.createRadialGradient(cx + ex, cy + ey, 0, cx + ex, cy + ey, 10);
+    grad.addColorStop(0, 'rgba(255,255,255,0.9)');
+    grad.addColorStop(0.4, 'rgba(255,100,100,0.5)');
+    grad.addColorStop(1, 'rgba(255,100,100,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx + ex, cy + ey, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(cx + ex, cy + ey, 3, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  // Bounce points
+  ctx.fillStyle = '#fcc419';
+  for (let i = 1; i <= currentSeg && i < pts.length; i++) {
+    ctx.beginPath();
+    ctx.arc(cx + pts[i].x, cy + pts[i].y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#0a0e1a';
+  ctx.fillRect(0, 0, W, H);
+
+  if (!paused) {
+    time += 0.016;
+    ballProgress += 0.002 * ballSpeed;
+    if (ballProgress > 1) ballProgress = 0;
+  }
+
+  const poly = getPolygon(shape);
+  const startX = poly[0].x * 0.3;
+  const startY = poly[0].y * 0.3;
+  const traj = computeTrajectory(poly, startX, startY, launchAngle, maxBounces);
+
+  // Deep copy trajectory for unfolding (it mutates points)
+  const trajCopy = traj.map(t => ({ x: t.x, y: t.y, wall: t.wall }));
+  const unfolded = computeUnfoldedTrajectory(poly, trajCopy);
+
+  if (viewMode === 'both') {
+    const leftCx = W * 0.25;
+    const rightCx = W * 0.65;
+    const midY = H / 2;
+
+    // Labels
+    ctx.fillStyle = '#8af';
+    ctx.font = 'bold 13px Segoe UI';
+    ctx.textAlign = 'center';
+    ctx.fillText('Billiard Table', leftCx, 30);
+    ctx.fillText('Unfolded View (straight line)', rightCx, 30);
+
+    // Divider
+    ctx.strokeStyle = 'rgba(120,180,255,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W / 2, 0);
+    ctx.lineTo(W / 2, H);
+    ctx.stroke();
+
+    // Left: billiard
+    drawPoly(poly, leftCx, midY, 'rgba(120,180,255,0.6)', 1);
+    drawTrajectoryAnimated(traj, leftCx, midY, ballProgress);
+
+    // Right: unfolded copies + straight line
+    // Calculate bounds of unfolded copies for centering
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const copy of unfolded.copies) {
+      for (const p of copy.poly) {
+        minX = Math.min(minX, p.x);
+        maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y);
+        maxY = Math.max(maxY, p.y);
+      }
+    }
+    // Also include line points
+    for (const p of unfolded.line) {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    }
+
+    const uw = maxX - minX || 1;
+    const uh = maxY - minY || 1;
+    const availW = W * 0.42;
+    const availH = H * 0.85;
+    const scale = Math.min(availW / uw, availH / uh, 1);
+    const offsetX = rightCx - (minX + maxX) / 2 * scale;
+    const offsetY = midY - (minY + maxY) / 2 * scale;
+
+    const colors = ['rgba(120,180,255,0.3)', 'rgba(100,200,150,0.2)', 'rgba(200,150,100,0.2)', 'rgba(150,100,200,0.2)'];
+    for (let i = 0; i < unfolded.copies.length; i++) {
+      const copy = unfolded.copies[i];
+      const col = colors[i % colors.length];
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(offsetX + copy.poly[0].x * scale, offsetY + copy.poly[0].y * scale);
+      for (let j = 1; j <= copy.poly.length; j++) {
+        const p = copy.poly[j % copy.poly.length];
+        ctx.lineTo(offsetX + p.x * scale, offsetY + p.y * scale);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      // light fill
+      ctx.fillStyle = col.replace('0.3', '0.05').replace('0.2', '0.03');
+      ctx.fill();
+    }
+
+    // Draw unfolded straight line
+    if (unfolded.line.length > 1) {
+      ctx.strokeStyle = '#51cf66';
+      ctx.lineWidth = 2;
+      ctx.shadowBlur = 8;
+      ctx.shadowColor = 'rgba(80,200,100,0.5)';
+      ctx.beginPath();
+      ctx.moveTo(offsetX + unfolded.line[0].x * scale, offsetY + unfolded.line[0].y * scale);
+      const maxIdx = Math.min(Math.floor(ballProgress * (unfolded.line.length - 1)) + 1, unfolded.line.length - 1);
+      for (let i = 1; i <= maxIdx; i++) {
+        ctx.lineTo(offsetX + unfolded.line[i].x * scale, offsetY + unfolded.line[i].y * scale);
+      }
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+  } else if (viewMode === 'billiard') {
+    ctx.fillStyle = '#8af';
+    ctx.font = 'bold 14px Segoe UI';
+    ctx.textAlign = 'center';
+    ctx.fillText('Billiard Table - ' + shape, W / 2, 30);
+    drawPoly(poly, W / 2, H / 2, 'rgba(120,180,255,0.6)', 1);
+    drawTrajectoryAnimated(traj, W / 2, H / 2, ballProgress);
+
+  } else {
+    ctx.fillStyle = '#8af';
+    ctx.font = 'bold 14px Segoe UI';
+    ctx.textAlign = 'center';
+    ctx.fillText('Unfolded View - Straight Line Trajectory', W / 2, 30);
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const copy of unfolded.copies) {
+      for (const p of copy.poly) {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      }
+    }
+    for (const p of unfolded.line) {
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    }
+    const uw = maxX - minX || 1, uh = maxY - minY || 1;
+    const scale = Math.min((W * 0.85) / uw, (H * 0.85) / uh, 1);
+    const offsetX = W / 2 - (minX + maxX) / 2 * scale;
+    const offsetY = H / 2 - (minY + maxY) / 2 * scale;
+
+    const colors = ['rgba(120,180,255,0.35)', 'rgba(100,200,150,0.25)', 'rgba(200,150,100,0.25)', 'rgba(150,100,200,0.25)'];
+    for (let i = 0; i < unfolded.copies.length; i++) {
+      const copy = unfolded.copies[i];
+      ctx.strokeStyle = colors[i % colors.length];
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(offsetX + copy.poly[0].x * scale, offsetY + copy.poly[0].y * scale);
+      for (let j = 1; j <= copy.poly.length; j++) {
+        const p = copy.poly[j % copy.poly.length];
+        ctx.lineTo(offsetX + p.x * scale, offsetY + p.y * scale);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    if (unfolded.line.length > 1) {
+      ctx.strokeStyle = '#51cf66';
+      ctx.lineWidth = 2.5;
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = 'rgba(80,200,100,0.6)';
+      ctx.beginPath();
+      ctx.moveTo(offsetX + unfolded.line[0].x * scale, offsetY + unfolded.line[0].y * scale);
+      for (let i = 1; i < unfolded.line.length; i++) {
+        ctx.lineTo(offsetX + unfolded.line[i].x * scale, offsetY + unfolded.line[i].y * scale);
+      }
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+  }
+
+  requestAnimationFrame(draw);
+}
+
+// Controls
+document.querySelectorAll('[data-shape]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-shape]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    shape = btn.dataset.shape;
+    ballProgress = 0;
+  });
+});
+
+document.querySelectorAll('[data-view]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-view]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    viewMode = btn.dataset.view;
+  });
+});
+
+document.getElementById('sAngle').addEventListener('input', e => {
+  launchAngle = parseFloat(e.target.value);
+  document.getElementById('vAngle').textContent = launchAngle.toFixed(2);
+  ballProgress = 0;
+});
+
+document.getElementById('sBounces').addEventListener('input', e => {
+  maxBounces = parseInt(e.target.value);
+  document.getElementById('vBounces').textContent = maxBounces;
+  ballProgress = 0;
+});
+
+document.getElementById('sSpeed').addEventListener('input', e => {
+  ballSpeed = parseFloat(e.target.value);
+  document.getElementById('vSpeed').textContent = ballSpeed.toFixed(1);
+});
+
+window.reset = function() {
+  shape = 'rectangle';
+  launchAngle = 0.40;
+  maxBounces = 15;
+  ballSpeed = 1.0;
+  viewMode = 'both';
+  ballProgress = 0;
+  time = 0;
+  document.getElementById('sAngle').value = '0.40';
+  document.getElementById('vAngle').textContent = '0.40';
+  document.getElementById('sBounces').value = 15;
+  document.getElementById('vBounces').textContent = '15';
+  document.getElementById('sSpeed').value = '1.0';
+  document.getElementById('vSpeed').textContent = '1.0';
+  document.querySelectorAll('[data-shape]').forEach(b => b.classList.remove('active'));
+  document.querySelector('[data-shape="rectangle"]').classList.add('active');
+  document.querySelectorAll('[data-view]').forEach(b => b.classList.remove('active'));
+  document.querySelector('[data-view="both"]').classList.add('active');
+};
+
+draw();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

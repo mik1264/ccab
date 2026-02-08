@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Two Envelopes Paradox</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow: hidden; }
+canvas { display: block; }
+#controls {
+    position: fixed; top: 16px; right: 16px; z-index: 10;
+    background: rgba(20,20,40,0.85); backdrop-filter: blur(10px);
+    border: 1px solid rgba(100,140,255,0.2); border-radius: 12px;
+    padding: 16px; min-width: 250px;
+}
+#controls h3 { color: #7aa2f7; margin-bottom: 10px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
+#controls .stat { display: flex; justify-content: space-between; margin: 4px 0; font-size: 13px; }
+#controls .stat span:last-child { color: #7aa2f7; font-weight: bold; }
+#controls label { display: block; font-size: 12px; color: #8090b0; margin-top: 8px; }
+#controls select, #controls button {
+    width: 100%; padding: 8px; margin-top: 6px; border: 1px solid rgba(100,140,255,0.3);
+    background: rgba(40,50,80,0.6); color: #c0d0ff; border-radius: 6px;
+    cursor: pointer; font-size: 13px;
+}
+#controls button:hover { background: rgba(60,80,140,0.7); }
+#info {
+    position: fixed; bottom: 16px; left: 16px; z-index: 10;
+    background: rgba(20,20,40,0.85); backdrop-filter: blur(10px);
+    border: 1px solid rgba(100,140,255,0.2); border-radius: 12px;
+    padding: 16px; max-width: 400px; font-size: 13px; line-height: 1.5;
+}
+#info h3 { color: #7aa2f7; margin-bottom: 8px; }
+#info em { color: #bb9af7; }
+#info .step { background: rgba(40,50,80,0.4); padding: 6px 10px; margin: 4px 0; border-radius: 4px; border-left: 3px solid #bb9af7; }
+a.back { position: fixed; top: 16px; left: 16px; color: #7aa2f7; text-decoration: none; font-size: 14px; z-index: 20; }
+a.back:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+    <h3>Two Envelopes</h3>
+    <div class="stat"><span>Games played:</span><span id="sGames">0</span></div>
+    <div class="stat"><span>Stay total:</span><span id="sStayTotal">$0</span></div>
+    <div class="stat"><span>Switch total:</span><span id="sSwitchTotal">$0</span></div>
+    <div class="stat"><span>Stay avg:</span><span id="sStayAvg">-</span></div>
+    <div class="stat"><span>Switch avg:</span><span id="sSwitchAvg">-</span></div>
+    <label>Distribution:</label>
+    <select id="selDist">
+        <option value="uniform">Uniform ($1-$100)</option>
+        <option value="exponential">Exponential</option>
+        <option value="power">Power Law</option>
+        <option value="fixed">Fixed ($50)</option>
+    </select>
+    <button id="btnPlay">New Game (click envelope)</button>
+    <button id="btnAuto1k">Auto-Run 1,000 Trials</button>
+    <button id="btnAuto10k">Auto-Run 10,000 Trials</button>
+    <button id="btnReset">Reset Statistics</button>
+</div>
+<div id="info">
+    <h3>The Two Envelopes Paradox</h3>
+    <p>Two envelopes: one has <em>twice</em> the amount of the other. You pick one and see $X inside.</p>
+    <div class="step">The other has $2X or $X/2, each with 50% probability</div>
+    <div class="step">Expected value of switching: 0.5(2X) + 0.5(X/2) = <em>1.25X</em></div>
+    <div class="step">So switching seems ALWAYS better... but that's impossible!</div>
+    <p style="margin-top:6px;">The fallacy: you can't simultaneously condition on your envelope being the smaller AND larger one while using X as a fixed value. The prior distribution matters.</p>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+// State
+let phase = 'choose'; // choose, revealed, decided
+let envelope1Val = 0, envelope2Val = 0;
+let chosenEnv = -1;
+let revealedAmount = 0;
+let resultMsg = '';
+let resultTimer = 0;
+let envOpenAnim = [0, 0];
+let envOpenTarget = [0, 0];
+let particles = [];
+
+let stats = { games: 0, stayTotal: 0, switchTotal: 0 };
+let trialHistory = []; // for chart
+
+let distribution = 'uniform';
+
+function generateAmounts() {
+    let base;
+    switch (distribution) {
+        case 'uniform': base = Math.floor(Math.random() * 100) + 1; break;
+        case 'exponential': base = Math.floor(Math.exp(Math.random() * 4.6)) + 1; break;
+        case 'power': base = Math.floor(Math.pow(Math.random(), -0.5)) + 1; break;
+        case 'fixed': base = 50; break;
+    }
+    // Randomly assign base and 2*base to envelopes
+    if (Math.random() < 0.5) {
+        envelope1Val = base;
+        envelope2Val = base * 2;
+    } else {
+        envelope1Val = base * 2;
+        envelope2Val = base;
+    }
+}
+
+function newGame() {
+    phase = 'choose';
+    generateAmounts();
+    chosenEnv = -1;
+    revealedAmount = 0;
+    resultMsg = '';
+    envOpenAnim = [0, 0];
+    envOpenTarget = [0, 0];
+}
+
+function chooseEnvelope(idx) {
+    if (phase !== 'choose') return;
+    chosenEnv = idx;
+    revealedAmount = idx === 0 ? envelope1Val : envelope2Val;
+    envOpenTarget[idx] = 1;
+    phase = 'revealed';
+}
+
+function decide(switchEnv) {
+    let stayAmount = chosenEnv === 0 ? envelope1Val : envelope2Val;
+    let switchAmount = chosenEnv === 0 ? envelope2Val : envelope1Val;
+    let finalAmount = switchEnv ? switchAmount : stayAmount;
+
+    stats.games++;
+    if (switchEnv) {
+        stats.switchTotal += finalAmount;
+    } else {
+        stats.stayTotal += finalAmount;
+    }
+
+    trialHistory.push({ stay: stayAmount, switch: switchAmount, chose: switchEnv ? 'switch' : 'stay' });
+
+    // Open both
+    envOpenTarget = [1, 1];
+    phase = 'decided';
+    let gained = switchEnv ? (switchAmount > stayAmount) : (stayAmount > switchAmount);
+    resultMsg = (switchEnv ? 'SWITCHED' : 'STAYED') + ': $' + finalAmount + (gained ? ' (Better!)' : switchAmount === stayAmount ? '' : ' (Worse!)');
+    resultTimer = 120;
+
+    if (gained) {
+        let ex = switchEnv ? getEnvX(1 - chosenEnv) : getEnvX(chosenEnv);
+        for (let i = 0; i < 20; i++) {
+            particles.push({
+                x: ex, y: H * 0.4,
+                vx: (Math.random() - 0.5) * 5,
+                vy: -Math.random() * 4 - 1,
+                life: 50 + Math.random() * 30,
+                color: `hsl(${50 + Math.random() * 20}, 80%, 60%)`
+            });
+        }
+    }
+
+    updateUI();
+}
+
+function autoRun(n) {
+    let stayCount = 0, switchCount = 0;
+    for (let i = 0; i < n; i++) {
+        generateAmounts();
+        let pick = Math.random() < 0.5 ? 0 : 1;
+        let stayVal = pick === 0 ? envelope1Val : envelope2Val;
+        let switchVal = pick === 0 ? envelope2Val : envelope1Val;
+        stats.games++;
+        // Alternate stay/switch
+        if (i % 2 === 0) {
+            stats.stayTotal += stayVal;
+            stayCount++;
+        } else {
+            stats.switchTotal += switchVal;
+            switchCount++;
+        }
+    }
+    updateUI();
+    newGame();
+}
+
+function updateUI() {
+    document.getElementById('sGames').textContent = stats.games;
+    document.getElementById('sStayTotal').textContent = '$' + stats.stayTotal.toLocaleString();
+    document.getElementById('sSwitchTotal').textContent = '$' + stats.switchTotal.toLocaleString();
+    let stayN = Math.ceil(stats.games / 2);
+    let switchN = Math.floor(stats.games / 2);
+    document.getElementById('sStayAvg').textContent = stayN > 0 ? '$' + (stats.stayTotal / stayN).toFixed(2) : '-';
+    document.getElementById('sSwitchAvg').textContent = switchN > 0 ? '$' + (stats.switchTotal / switchN).toFixed(2) : '-';
+}
+
+function getEnvX(idx) {
+    let spacing = Math.min(W * 0.2, 180);
+    return W / 2 + (idx === 0 ? -1 : 1) * spacing;
+}
+
+function drawEnvelope(idx) {
+    let x = getEnvX(idx);
+    let y = H * 0.38;
+    let w = Math.min(140, W * 0.12);
+    let h = w * 0.65;
+    let openAmt = envOpenAnim[idx];
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(x - w/2 + 4, y - h/2 + 4, w, h);
+
+    // Envelope body
+    let isChosen = chosenEnv === idx;
+    ctx.fillStyle = isChosen ? '#3a4a70' : '#2a3050';
+    ctx.strokeStyle = isChosen ? '#7aa2f7' : '#4a5070';
+    ctx.lineWidth = 2;
+    ctx.fillRect(x - w/2, y - h/2, w, h);
+    ctx.strokeRect(x - w/2, y - h/2, w, h);
+
+    // Flap (top triangle)
+    if (openAmt < 0.5) {
+        ctx.fillStyle = isChosen ? '#3550a0' : '#252a40';
+        ctx.beginPath();
+        ctx.moveTo(x - w/2, y - h/2);
+        ctx.lineTo(x, y - h/2 + h * 0.3 * (1 - openAmt * 2));
+        ctx.lineTo(x + w/2, y - h/2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+    }
+
+    // Money inside (visible when open)
+    if (openAmt > 0.3) {
+        ctx.globalAlpha = Math.min(1, (openAmt - 0.3) / 0.4);
+        let val = idx === 0 ? envelope1Val : envelope2Val;
+        ctx.fillStyle = '#f7c948';
+        ctx.font = `bold ${Math.min(w * 0.22, 24)}px "Segoe UI"`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('$' + val, x, y);
+
+        // Dollar sign decoration
+        ctx.fillStyle = 'rgba(247, 201, 72, 0.3)';
+        ctx.font = `${w * 0.4}px serif`;
+        ctx.fillText('$', x, y - 2);
+        ctx.globalAlpha = 1;
+    }
+
+    // Label
+    ctx.fillStyle = '#8090b0';
+    ctx.font = '13px "Segoe UI"';
+    ctx.textAlign = 'center';
+    ctx.fillText('Envelope ' + (idx + 1), x, y + h/2 + 22);
+
+    if (phase === 'choose') {
+        ctx.fillStyle = 'rgba(200,220,255,0.5)';
+        ctx.font = '11px "Segoe UI"';
+        ctx.fillText('Click to choose', x, y + h/2 + 38);
+    }
+}
+
+function drawDecisionTree() {
+    if (phase !== 'revealed' && phase !== 'decided') return;
+
+    let tx = W * 0.15;
+    let ty = H * 0.2;
+    let spread = 80;
+
+    ctx.fillStyle = '#8090b0';
+    ctx.font = 'bold 13px "Segoe UI"';
+    ctx.textAlign = 'center';
+    ctx.fillText('The "Reasoning":', tx, ty - 20);
+
+    ctx.fillStyle = '#c0d0ff';
+    ctx.font = '12px "Segoe UI"';
+    ctx.fillText('You see: $' + revealedAmount, tx, ty + 10);
+
+    // Branch: other envelope
+    ctx.strokeStyle = 'rgba(100,140,255,0.4)';
+    ctx.lineWidth = 1.5;
+
+    // Left branch (half)
+    ctx.beginPath();
+    ctx.moveTo(tx, ty + 20);
+    ctx.lineTo(tx - spread, ty + 60);
+    ctx.stroke();
+    ctx.fillStyle = '#f76c6c';
+    ctx.fillText('50%: $' + (revealedAmount / 2), tx - spread, ty + 78);
+
+    // Right branch (double)
+    ctx.beginPath();
+    ctx.moveTo(tx, ty + 20);
+    ctx.lineTo(tx + spread, ty + 60);
+    ctx.stroke();
+    ctx.fillStyle = '#7dda58';
+    ctx.fillText('50%: $' + (revealedAmount * 2), tx + spread, ty + 78);
+
+    // EV calculation
+    ctx.fillStyle = '#bb9af7';
+    ctx.font = '12px "Segoe UI"';
+    let ev = 0.5 * (revealedAmount / 2) + 0.5 * (revealedAmount * 2);
+    ctx.fillText('EV = $' + ev.toFixed(0), tx, ty + 110);
+    ctx.fillText('(' + (ev / revealedAmount * 100).toFixed(0) + '% of $' + revealedAmount + ')', tx, ty + 128);
+    ctx.fillStyle = '#f7c948';
+    ctx.font = 'bold 12px "Segoe UI"';
+    ctx.fillText('"Always switch!"', tx, ty + 150);
+    ctx.fillStyle = '#f76c6c';
+    ctx.font = '10px "Segoe UI"';
+    ctx.fillText('(But this is WRONG)', tx, ty + 168);
+}
+
+function drawResultChart() {
+    if (stats.games < 2) return;
+
+    let cx = W * 0.15;
+    let cy = H * 0.75;
+    let cw = W * 0.18;
+    let ch = H * 0.15;
+
+    let stayN = Math.ceil(stats.games / 2);
+    let switchN = Math.floor(stats.games / 2);
+    if (stayN === 0 || switchN === 0) return;
+
+    let stayAvg = stats.stayTotal / stayN;
+    let switchAvg = stats.switchTotal / switchN;
+    let maxVal = Math.max(stayAvg, switchAvg);
+
+    ctx.fillStyle = 'rgba(120,140,200,0.4)';
+    ctx.font = '11px "Segoe UI"';
+    ctx.textAlign = 'center';
+    ctx.fillText('Average Winnings', cx, cy - ch/2 - 8);
+
+    let bw = cw * 0.3;
+    let h1 = (stayAvg / maxVal) * ch;
+    let h2 = (switchAvg / maxVal) * ch;
+
+    ctx.fillStyle = 'rgba(100,180,255,0.6)';
+    ctx.fillRect(cx - bw * 1.2, cy + ch/2 - h1, bw, h1);
+    ctx.fillStyle = 'rgba(255,180,100,0.6)';
+    ctx.fillRect(cx + bw * 0.2, cy + ch/2 - h2, bw, h2);
+
+    ctx.fillStyle = '#80c0ff';
+    ctx.font = '10px "Segoe UI"';
+    ctx.fillText('Stay', cx - bw * 0.7, cy + ch/2 + 14);
+    ctx.fillText('$' + stayAvg.toFixed(1), cx - bw * 0.7, cy + ch/2 - h1 - 6);
+
+    ctx.fillStyle = '#ffb060';
+    ctx.fillText('Switch', cx + bw * 0.7, cy + ch/2 + 14);
+    ctx.fillText('$' + switchAvg.toFixed(1), cx + bw * 0.7, cy + ch/2 - h2 - 6);
+
+    // Baseline
+    ctx.strokeStyle = 'rgba(200,200,200,0.2)';
+    ctx.beginPath();
+    ctx.moveTo(cx - cw/2, cy + ch/2);
+    ctx.lineTo(cx + cw/2, cy + ch/2);
+    ctx.stroke();
+}
+
+canvas.addEventListener('click', function(e) {
+    let mx = e.clientX, my = e.clientY;
+
+    if (phase === 'decided') {
+        if (resultTimer <= 10) newGame();
+        return;
+    }
+
+    if (phase === 'choose') {
+        for (let i = 0; i < 2; i++) {
+            let ex = getEnvX(i);
+            let ew = Math.min(140, W * 0.12);
+            let eh = ew * 0.65;
+            if (mx > ex - ew/2 && mx < ex + ew/2 && my > H * 0.38 - eh/2 && my < H * 0.38 + eh/2) {
+                chooseEnvelope(i);
+                return;
+            }
+        }
+    }
+
+    if (phase === 'revealed') {
+        // Click on chosen envelope = stay, click on other = switch
+        for (let i = 0; i < 2; i++) {
+            let ex = getEnvX(i);
+            let ew = Math.min(140, W * 0.12);
+            let eh = ew * 0.65;
+            if (mx > ex - ew/2 && mx < ex + ew/2 && my > H * 0.38 - eh/2 && my < H * 0.38 + eh/2) {
+                decide(i !== chosenEnv);
+                return;
+            }
+        }
+    }
+});
+
+document.getElementById('selDist').addEventListener('change', e => { distribution = e.target.value; newGame(); });
+document.getElementById('btnPlay').addEventListener('click', newGame);
+document.getElementById('btnAuto1k').addEventListener('click', () => autoRun(1000));
+document.getElementById('btnAuto10k').addEventListener('click', () => autoRun(10000));
+document.getElementById('btnReset').addEventListener('click', () => {
+    stats = { games: 0, stayTotal: 0, switchTotal: 0 };
+    trialHistory = [];
+    updateUI();
+    newGame();
+});
+
+function animate() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Grid
+    ctx.strokeStyle = 'rgba(50,60,100,0.1)';
+    for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+    // Title
+    ctx.fillStyle = '#7aa2f7';
+    ctx.font = 'bold 22px "Segoe UI"';
+    ctx.textAlign = 'center';
+    ctx.fillText('The Two Envelopes Paradox', W / 2, 36);
+    ctx.fillStyle = '#5a6a8a';
+    ctx.font = '13px "Segoe UI"';
+    ctx.fillText('One envelope has twice the other. Should you always switch?', W / 2, 58);
+
+    // Animate envelopes
+    for (let i = 0; i < 2; i++) {
+        envOpenAnim[i] += (envOpenTarget[i] - envOpenAnim[i]) * 0.08;
+        drawEnvelope(i);
+    }
+
+    // Instructions
+    if (phase === 'revealed') {
+        ctx.fillStyle = 'rgba(200,220,255,0.7)';
+        ctx.font = '14px "Segoe UI"';
+        ctx.textAlign = 'center';
+        ctx.fillText('You see $' + revealedAmount + '. Click your envelope to STAY, or the other to SWITCH.', W / 2, H * 0.57);
+    }
+
+    if (phase === 'decided' && resultTimer > 0) {
+        ctx.fillStyle = resultMsg.includes('Better') ? '#7dda58' : (resultMsg.includes('Worse') ? '#f76c6c' : '#c0d0ff');
+        ctx.font = 'bold 16px "Segoe UI"';
+        ctx.textAlign = 'center';
+        ctx.fillText(resultMsg, W / 2, H * 0.57);
+        ctx.fillStyle = 'rgba(200,220,255,0.4)';
+        ctx.font = '12px "Segoe UI"';
+        ctx.fillText('Click anywhere for next round', W / 2, H * 0.6);
+        resultTimer--;
+    }
+
+    drawDecisionTree();
+    drawResultChart();
+
+    // Particles
+    particles = particles.filter(p => p.life > 0);
+    particles.forEach(p => {
+        p.x += p.vx; p.y += p.vy; p.vy += 0.06; p.life--;
+        ctx.globalAlpha = p.life / 50;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+    });
+    ctx.globalAlpha = 1;
+
+    requestAnimationFrame(animate);
+}
+
+newGame();
+animate();
+
+window.reset = function() {
+    stats = { games: 0, stayTotal: 0, switchTotal: 0 };
+    trialHistory = [];
+    particles = [];
+    updateUI();
+    newGame();
+};
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lorentz Gas - Molecular Diffusion</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+        a.back:hover { color: #bdf; }
+        #controls {
+            position: fixed; top: 20px; right: 20px; z-index: 100;
+            background: rgba(10, 14, 26, 0.75); backdrop-filter: blur(10px);
+            border: 1px solid rgba(138, 170, 255, 0.15); border-radius: 12px;
+            padding: 16px; color: #cde; font-size: 13px; width: 230px;
+        }
+        #controls h3 { color: #8af; margin-bottom: 10px; font-size: 14px; }
+        .ctrl-row { margin-bottom: 8px; }
+        .ctrl-row label { display: block; margin-bottom: 2px; color: #9ab; font-size: 11px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #8af; }
+        .ctrl-row select, .ctrl-row button {
+            width: 100%; padding: 4px 8px; background: rgba(138,170,255,0.1);
+            border: 1px solid rgba(138,170,255,0.25); border-radius: 6px;
+            color: #cde; font-size: 12px; cursor: pointer;
+        }
+        .ctrl-row button:hover { background: rgba(138,170,255,0.2); }
+        #plot {
+            position: fixed; bottom: 80px; right: 20px; z-index: 100;
+            border: 1px solid rgba(138,170,255,0.2); border-radius: 8px;
+            background: rgba(10,14,26,0.8);
+        }
+        #info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(10,14,26,0.8); backdrop-filter: blur(10px);
+            border: 1px solid rgba(138,170,255,0.15); border-radius: 10px;
+            padding: 10px 18px; color: #9ab; font-size: 12px; max-width: 640px;
+            text-align: center; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+<a href="index.html" class="back">&larr; Back</a>
+<canvas id="c"></canvas>
+<canvas id="plot" width="200" height="140"></canvas>
+<div id="controls">
+    <h3>Lorentz Gas</h3>
+    <div class="ctrl-row">
+        <label>Scatterer Radius: <span id="vRad">20</span></label>
+        <input type="range" id="scatR" min="8" max="40" step="1" value="20">
+    </div>
+    <div class="ctrl-row">
+        <label>Spacing: <span id="vSpace">80</span></label>
+        <input type="range" id="spacing" min="50" max="150" step="5" value="80">
+    </div>
+    <div class="ctrl-row">
+        <label>Lattice</label>
+        <select id="lattice">
+            <option value="square">Square</option>
+            <option value="hex" selected>Hexagonal</option>
+        </select>
+    </div>
+    <div class="ctrl-row">
+        <label>Ball Speed: <span id="vSpeed">3</span></label>
+        <input type="range" id="speed" min="1" max="8" step="0.5" value="3">
+    </div>
+    <div class="ctrl-row">
+        <label>Num Balls: <span id="vBalls">5</span></label>
+        <input type="range" id="numBalls" min="1" max="20" step="1" value="5">
+    </div>
+    <div class="ctrl-row">
+        <label><input type="checkbox" id="showDisp" checked> Show Displacement</label>
+    </div>
+    <div class="ctrl-row">
+        <button id="resetBtn">Reset</button>
+    </div>
+</div>
+<div id="info">
+    Lorentz proposed this model in 1905 to explain electron motion in metals.
+    The mean free path and diffusion coefficient emerge from pure geometry.
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const plotCanvas = document.getElementById('plot');
+const pctx = plotCanvas.getContext('2d');
+
+let W, H;
+let scatterers = [];
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    buildScatterers();
+}
+
+function getScatR() { return parseInt(document.getElementById('scatR').value); }
+function getSpacing() { return parseInt(document.getElementById('spacing').value); }
+function getLattice() { return document.getElementById('lattice').value; }
+function getSpeed() { return parseFloat(document.getElementById('speed').value); }
+function getNumBalls() { return parseInt(document.getElementById('numBalls').value); }
+function showDisp() { return document.getElementById('showDisp').checked; }
+
+function buildScatterers() {
+    scatterers = [];
+    const sp = getSpacing();
+    const lattice = getLattice();
+    // Extend well beyond screen for scrolling feel
+    const margin = sp * 3;
+    if (lattice === 'square') {
+        for (let x = -margin; x < W + margin; x += sp) {
+            for (let y = -margin; y < H + margin; y += sp) {
+                scatterers.push({ x, y });
+            }
+        }
+    } else {
+        // Hexagonal
+        const rowH = sp * Math.sqrt(3) / 2;
+        let row = 0;
+        for (let y = -margin; y < H + margin; y += rowH) {
+            const offset = (row % 2) * sp / 2;
+            for (let x = -margin + offset; x < W + margin; x += sp) {
+                scatterers.push({ x, y });
+            }
+            row++;
+        }
+    }
+}
+
+class Ball {
+    constructor(x, y, vx, vy, hue) {
+        this.x = x; this.y = y;
+        this.startX = x; this.startY = y;
+        this.vx = vx; this.vy = vy;
+        this.hue = hue;
+        this.trail = [];
+        this.dispSq = []; // displacement squared over time
+    }
+}
+
+let balls = [];
+let time = 0;
+let dispPlotData = []; // average displacement^2
+
+function initBalls() {
+    const n = getNumBalls();
+    const spd = getSpeed();
+    balls = [];
+    const cx = W / 2, cy = H / 2;
+    for (let i = 0; i < n; i++) {
+        const angle = (i / n) * Math.PI * 2 + Math.random() * 0.1;
+        const hue = (i / n) * 360;
+        balls.push(new Ball(cx, cy, Math.cos(angle)*spd, Math.sin(angle)*spd, hue));
+    }
+    time = 0;
+    dispPlotData = [];
+}
+
+function collideScatterers(ball) {
+    const r = getScatR();
+    for (const s of scatterers) {
+        const dx = ball.x - s.x, dy = ball.y - s.y;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist <= r + 0.5) {
+            const nx = dx / dist, ny = dy / dist;
+            const dot = ball.vx * nx + ball.vy * ny;
+            if (dot < 0) {
+                ball.vx -= 2 * dot * nx;
+                ball.vy -= 2 * dot * ny;
+                ball.x = s.x + nx * (r + 1.5);
+                ball.y = s.y + ny * (r + 1.5);
+            }
+        }
+    }
+}
+
+function step() {
+    const spd = getSpeed();
+    const substeps = Math.ceil(spd * 2);
+    time++;
+
+    for (const ball of balls) {
+        for (let s = 0; s < substeps; s++) {
+            ball.x += ball.vx / substeps;
+            ball.y += ball.vy / substeps;
+            collideScatterers(ball);
+        }
+        ball.trail.push({ x: ball.x, y: ball.y });
+        if (ball.trail.length > 600) ball.trail.shift();
+    }
+
+    // Average displacement squared
+    if (time % 5 === 0) {
+        let avgDsq = 0;
+        for (const b of balls) {
+            const dx = b.x - b.startX, dy = b.y - b.startY;
+            avgDsq += dx*dx + dy*dy;
+        }
+        avgDsq /= balls.length;
+        dispPlotData.push(avgDsq);
+        if (dispPlotData.length > 200) dispPlotData.shift();
+    }
+}
+
+function drawScatterers() {
+    const r = getScatR();
+    for (const s of scatterers) {
+        if (s.x < -r || s.x > W+r || s.y < -r || s.y > H+r) continue;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(60,80,120,0.35)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(100,140,200,0.25)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+}
+
+function drawPlot() {
+    pctx.fillStyle = 'rgba(10,14,26,0.9)';
+    pctx.fillRect(0, 0, 200, 140);
+    pctx.strokeStyle = 'rgba(138,170,255,0.2)';
+    pctx.strokeRect(2, 2, 196, 136);
+
+    pctx.fillStyle = '#5a7a9a';
+    pctx.font = '9px sans-serif';
+    pctx.fillText('Displacement² vs Time', 45, 12);
+    pctx.fillText('(linear = diffusion)', 55, 22);
+
+    if (dispPlotData.length < 2) return;
+    const maxVal = Math.max(...dispPlotData, 1);
+    const len = dispPlotData.length;
+
+    pctx.beginPath();
+    for (let i = 0; i < len; i++) {
+        const px = 10 + (i / (len - 1)) * 180;
+        const py = 130 - (dispPlotData[i] / maxVal) * 100;
+        if (i === 0) pctx.moveTo(px, py);
+        else pctx.lineTo(px, py);
+    }
+    pctx.strokeStyle = '#8af';
+    pctx.lineWidth = 1.5;
+    pctx.stroke();
+
+    // Linear reference
+    pctx.beginPath();
+    pctx.moveTo(10, 130);
+    pctx.lineTo(190, 30);
+    pctx.strokeStyle = 'rgba(255,200,100,0.2)';
+    pctx.lineWidth = 1;
+    pctx.setLineDash([3, 3]);
+    pctx.stroke();
+    pctx.setLineDash([]);
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    drawScatterers();
+
+    for (const ball of balls) {
+        const len = ball.trail.length;
+        if (len < 2) continue;
+        for (let i = 1; i < len; i++) {
+            const alpha = (i / len) * 0.6 + 0.05;
+            const h = ball.hue + (i / len) * 60;
+            ctx.beginPath();
+            ctx.moveTo(ball.trail[i-1].x, ball.trail[i-1].y);
+            ctx.lineTo(ball.trail[i].x, ball.trail[i].y);
+            ctx.strokeStyle = `hsla(${h},75%,60%,${alpha})`;
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+        }
+
+        // Glow
+        const grd = ctx.createRadialGradient(ball.x, ball.y, 0, ball.x, ball.y, 10);
+        grd.addColorStop(0, `hsla(${ball.hue},80%,65%,0.9)`);
+        grd.addColorStop(0.4, `hsla(${ball.hue},80%,65%,0.3)`);
+        grd.addColorStop(1, `hsla(${ball.hue},80%,65%,0)`);
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, 10, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Displacement arrow
+        if (showDisp()) {
+            ctx.beginPath();
+            ctx.moveTo(ball.startX, ball.startY);
+            ctx.lineTo(ball.x, ball.y);
+            ctx.strokeStyle = `hsla(${ball.hue},60%,50%,0.2)`;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+    }
+
+    // Start point marker
+    if (showDisp() && balls.length > 0) {
+        ctx.beginPath();
+        ctx.arc(balls[0].startX, balls[0].startY, 4, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        ctx.fill();
+    }
+
+    ctx.fillStyle = '#5a7a9a';
+    ctx.font = '12px monospace';
+    ctx.fillText(`Time: ${time}  Balls: ${balls.length}`, 20, H - 20);
+
+    drawPlot();
+}
+
+let running = true;
+
+function animate() {
+    if (running) { step(); draw(); }
+    requestAnimationFrame(animate);
+}
+
+// Controls
+document.getElementById('scatR').addEventListener('input', e => {
+    document.getElementById('vRad').textContent = e.target.value;
+    buildScatterers();
+});
+document.getElementById('spacing').addEventListener('input', e => {
+    document.getElementById('vSpace').textContent = e.target.value;
+    buildScatterers();
+});
+document.getElementById('lattice').addEventListener('change', () => { buildScatterers(); initBalls(); });
+document.getElementById('speed').addEventListener('input', e => {
+    document.getElementById('vSpeed').textContent = e.target.value;
+    const spd = parseFloat(e.target.value);
+    for (const b of balls) {
+        const mag = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+        if (mag > 0) { b.vx = b.vx/mag*spd; b.vy = b.vy/mag*spd; }
+    }
+});
+document.getElementById('numBalls').addEventListener('input', e => {
+    document.getElementById('vBalls').textContent = e.target.value;
+});
+document.getElementById('numBalls').addEventListener('change', () => initBalls());
+document.getElementById('resetBtn').addEventListener('click', () => initBalls());
+
+window.addEventListener('resize', () => { resize(); initBalls(); });
+
+window.reset = function() { initBalls(); };
+
+resize();
+initBalls();
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

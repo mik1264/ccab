@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Geodesic Patterns - Non-Euclidean Geometry</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; }
+canvas { display: block; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+
+.panel {
+    position: fixed; top: 20px; right: 20px; z-index: 100;
+    background: rgba(10, 14, 26, 0.8); backdrop-filter: blur(10px);
+    border: 1px solid rgba(138, 170, 255, 0.2); border-radius: 12px;
+    padding: 18px; color: #ccd; width: 240px;
+}
+.panel h3 { color: #8af; margin-bottom: 12px; font-size: 0.95em; text-transform: uppercase; letter-spacing: 1px; }
+.panel label { display: block; margin-bottom: 4px; font-size: 0.82em; color: #99a; }
+.panel input[type="range"] { width: 100%; margin-bottom: 10px; accent-color: #8af; }
+.panel .toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.panel .toggle-row input { accent-color: #8af; }
+.panel .toggle-row label { margin: 0; cursor: pointer; }
+.val { color: #8af; float: right; font-size: 0.82em; }
+.info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); color: rgba(138,170,255,0.5); font-size: 0.8em; z-index: 100; }
+</style>
+</head>
+<body>
+<a href="index.html">&#8592; Back</a>
+
+<div class="panel">
+    <h3>Geodesic Patterns</h3>
+    <label>Geodesics <span class="val" id="numVal">36</span></label>
+    <input type="range" id="numGeodesics" min="10" max="100" value="36">
+    <label>Particle Speed <span class="val" id="speedVal">1.0</span></label>
+    <input type="range" id="speed" min="1" max="30" value="10">
+    <label>Trail Length <span class="val" id="trailVal">40</span></label>
+    <input type="range" id="trailLen" min="5" max="100" value="40">
+    <div class="toggle-row"><input type="checkbox" id="showHoro"><label for="showHoro">Horocycles</label></div>
+    <div class="toggle-row"><input type="checkbox" id="showEqui"><label for="showEqui">Equidistant Curves</label></div>
+    <div class="toggle-row"><input type="checkbox" id="showTrails" checked><label for="showTrails">Particle Trails</label></div>
+</div>
+
+<div class="info">Click to move emission point</div>
+
+<canvas id="c"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H, cx, cy, R;
+let emitX = 0, emitY = 0;
+let numGeo = 36;
+let particleSpeed = 1.0;
+let trailLength = 40;
+let showHorocycles = false;
+let showEquidistant = false;
+let showTrails = true;
+let animId;
+let time = 0;
+
+const particles = [];
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cx = W / 2;
+    cy = H / 2;
+    R = Math.min(W, H) * 0.42;
+}
+resize();
+window.addEventListener('resize', resize);
+
+function diskToScreen(x, y) {
+    return [cx + x * R, cy + y * R];
+}
+
+function screenToDisk(sx, sy) {
+    return [(sx - cx) / R, (sy - cy) / R];
+}
+
+function complexMul(a, b, c, d) { return [a*c - b*d, a*d + b*c]; }
+function complexDiv(a, b, c, d) {
+    const den = c*c + d*d;
+    return [(a*c + b*d) / den, (b*c - a*d) / den];
+}
+function complexConj(a, b) { return [a, -b]; }
+
+// Inversion through unit circle: z* = 1/conj(z)
+function invertPoint(x, y) {
+    const r2 = x*x + y*y;
+    if (r2 < 1e-10) return [1e5, 1e5];
+    return [x / r2, -(-y) / r2]; // 1/conj(z) = conj(z)/|z|^2... no: 1/conj(z) = z/|z|^2? No.
+    // conj(z) = (x, -y), 1/conj(z) = (x,-y)/(x^2+y^2)... wait
+    // z = x+iy, conj(z) = x-iy, 1/conj(z) = (x+iy)/(x^2+y^2) -- no
+    // 1/(x-iy) = (x+iy)/(x^2+y^2)
+    // So 1/conj(z) = (x+iy)/(x^2+y^2) => real=x/r2, imag=y/r2
+}
+
+function invertPointCorrect(px, py) {
+    const r2 = px*px + py*py;
+    if (r2 < 1e-10) return [1e5, 1e5];
+    return [px / r2, py / r2];
+}
+
+// Find circle through 3 points
+function circleThrough3(x1,y1, x2,y2, x3,y3) {
+    const ax = x1, ay = y1, bx = x2, by = y2, cxx = x3, cyy = y3;
+    const D = 2 * (ax*(by - cyy) + bx*(cyy - ay) + cxx*(ay - by));
+    if (Math.abs(D) < 1e-10) return null; // collinear
+    const ux = ((ax*ax + ay*ay)*(by - cyy) + (bx*bx + by*by)*(cyy - ay) + (cxx*cxx + cyy*cyy)*(ay - by)) / D;
+    const uy = ((ax*ax + ay*ay)*(cxx - bx) + (bx*bx + by*by)*(ax - cxx) + (cxx*cxx + cyy*cyy)*(bx - ax)) / D;
+    const r = Math.sqrt((ax-ux)**2 + (ay-uy)**2);
+    return { cx: ux, cy: uy, r };
+}
+
+// Draw geodesic arc from p1 to the boundary in a given direction
+function getGeodesicArc(ox, oy, angle) {
+    // Point on the disk near the origin in the given direction
+    const dist = 0.01;
+    const px = ox + dist * Math.cos(angle);
+    const py = oy + dist * Math.sin(angle);
+
+    // If emission point is near origin, geodesics are nearly straight lines
+    const or2 = ox*ox + oy*oy;
+
+    // Invert emission point through unit circle
+    const [ix, iy] = invertPointCorrect(ox, oy);
+
+    // Check if points are nearly collinear through origin
+    const cross = (px - ox) * (iy - oy) - (py - oy) * (ix - ox);
+    if (Math.abs(cross) < 1e-6 || or2 < 1e-6) {
+        // Straight line geodesic (through origin)
+        return { type: 'line', ox, oy, angle };
+    }
+
+    const circ = circleThrough3(ox, oy, px, py, ix, iy);
+    if (!circ) return { type: 'line', ox, oy, angle };
+
+    return { type: 'arc', cx: circ.cx, cy: circ.cy, r: circ.r, ox, oy, angle };
+}
+
+// Get point along geodesic at parameter t (0 = emission, 1 = boundary)
+function pointOnGeodesic(geo, t) {
+    if (geo.type === 'line') {
+        const x = geo.ox + t * 2 * Math.cos(geo.angle);
+        const y = geo.oy + t * 2 * Math.sin(geo.angle);
+        const r = Math.sqrt(x*x + y*y);
+        if (r >= 0.99) return null;
+        return [x, y];
+    }
+
+    const startAngle = Math.atan2(geo.oy - geo.cy, geo.ox - geo.cx);
+    // Determine sweep direction
+    const testAngle = startAngle + 0.01;
+    const tx = geo.cx + geo.r * Math.cos(testAngle);
+    const ty = geo.cy + geo.r * Math.sin(testAngle);
+    const dotForward = (tx - geo.ox) * Math.cos(geo.angle) + (ty - geo.oy) * Math.sin(geo.angle);
+    const dir = dotForward > 0 ? 1 : -1;
+
+    const a = startAngle + dir * t * Math.PI * 0.8;
+    const x = geo.cx + geo.r * Math.cos(a);
+    const y = geo.cy + geo.r * Math.sin(a);
+    const r = Math.sqrt(x*x + y*y);
+    if (r >= 0.99) return null;
+    return [x, y];
+}
+
+// Draw geodesic in the Poincare disk
+function drawGeodesic(geo, color, alpha) {
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = 1;
+
+    if (geo.type === 'line') {
+        const [sx, sy] = diskToScreen(geo.ox, geo.oy);
+        const ex = geo.ox + 2 * Math.cos(geo.angle);
+        const ey = geo.oy + 2 * Math.sin(geo.angle);
+        const [esx, esy] = diskToScreen(ex, ey);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(esx, esy);
+        ctx.stroke();
+    } else {
+        const startAngle = Math.atan2(geo.oy - geo.cy, geo.ox - geo.cx);
+        const [scx, scy] = diskToScreen(geo.cx, geo.cy);
+        const sr = geo.r * R;
+
+        ctx.beginPath();
+        ctx.arc(scx, scy, sr, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+}
+
+// Clip drawing to the disk
+function clipToDisk() {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.clip();
+}
+
+function hsl(h, s, l) {
+    return `hsl(${h}, ${s}%, ${l}%)`;
+}
+
+function initParticles() {
+    particles.length = 0;
+    for (let i = 0; i < numGeo; i++) {
+        const angle = (i / numGeo) * Math.PI * 2;
+        const geo = getGeodesicArc(emitX, emitY, angle);
+        particles.push({
+            geo,
+            t: Math.random(),
+            speed: 0.002 + Math.random() * 0.003,
+            hue: (i / numGeo) * 360,
+            trail: []
+        });
+    }
+}
+
+function drawHorocycles() {
+    // Horocycles tangent to boundary at various points
+    const numHoro = 6;
+    ctx.lineWidth = 1;
+    for (let i = 0; i < numHoro; i++) {
+        const angle = (i / numHoro) * Math.PI * 2 + time * 0.1;
+        // Tangent point on boundary
+        const bx = Math.cos(angle);
+        const by = Math.sin(angle);
+
+        // Horocycle is a Euclidean circle inside the disk tangent to boundary
+        for (let k = 1; k <= 3; k++) {
+            const rad = k * 0.12;
+            const hcx = bx * (1 - rad);
+            const hcy = by * (1 - rad);
+            const [sx, sy] = diskToScreen(hcx, hcy);
+            ctx.strokeStyle = `hsla(${(i/numHoro)*360 + 180}, 60%, 50%, 0.25)`;
+            ctx.beginPath();
+            ctx.arc(sx, sy, rad * R, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    }
+}
+
+function drawEquidistantCurves() {
+    // Equidistant curves from the horizontal geodesic through emission point
+    ctx.lineWidth = 1;
+    const steps = 200;
+    for (let d = -3; d <= 3; d++) {
+        if (d === 0) continue;
+        const dist = d * 0.08;
+        ctx.strokeStyle = `hsla(${120 + d * 30}, 60%, 50%, 0.2)`;
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i <= steps; i++) {
+            const t = (i / steps) * Math.PI * 2;
+            // Euclidean circle approximation for equidistant curve
+            const x = 0.9 * Math.cos(t);
+            const y = dist + 0.3 * Math.sin(t);
+            const r = Math.sqrt(x*x + y*y);
+            if (r < 0.98) {
+                const [sx, sy] = diskToScreen(x, y);
+                if (!started) { ctx.moveTo(sx, sy); started = true; }
+                else ctx.lineTo(sx, sy);
+            }
+        }
+        ctx.stroke();
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw boundary circle glow
+    const grad = ctx.createRadialGradient(cx, cy, R - 8, cx, cy, R + 8);
+    grad.addColorStop(0, 'rgba(138, 170, 255, 0.15)');
+    grad.addColorStop(0.5, 'rgba(138, 170, 255, 0.05)');
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R + 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Boundary circle
+    ctx.strokeStyle = 'rgba(138, 170, 255, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.stroke();
+
+    clipToDisk();
+
+    // Optional layers
+    if (showHorocycles) drawHorocycles();
+    if (showEquidistant) drawEquidistantCurves();
+
+    // Draw geodesics
+    for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        const geo = p.geo;
+        const color = hsl(p.hue, 70, 50);
+
+        // Draw geodesic line faintly
+        if (geo.type === 'arc') {
+            const [scx, scy] = diskToScreen(geo.cx, geo.cy);
+            const sr = geo.r * R;
+            ctx.strokeStyle = `hsla(${p.hue}, 70%, 40%, 0.12)`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(scx, scy, sr, 0, Math.PI * 2);
+            ctx.stroke();
+        } else {
+            ctx.strokeStyle = `hsla(${p.hue}, 70%, 40%, 0.12)`;
+            ctx.lineWidth = 1;
+            const [sx, sy] = diskToScreen(-Math.cos(geo.angle), -Math.sin(geo.angle));
+            const [ex, ey] = diskToScreen(Math.cos(geo.angle), Math.sin(geo.angle));
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(ex, ey);
+            ctx.stroke();
+        }
+
+        // Draw trail
+        if (showTrails && p.trail.length > 1) {
+            for (let j = 1; j < p.trail.length; j++) {
+                const alpha = j / p.trail.length * 0.7;
+                const [sx, sy] = diskToScreen(p.trail[j-1][0], p.trail[j-1][1]);
+                const [ex, ey] = diskToScreen(p.trail[j][0], p.trail[j][1]);
+                ctx.strokeStyle = `hsla(${p.hue}, 80%, 60%, ${alpha})`;
+                ctx.lineWidth = 2.5;
+                ctx.beginPath();
+                ctx.moveTo(sx, sy);
+                ctx.lineTo(ex, ey);
+                ctx.stroke();
+            }
+        }
+
+        // Draw particle
+        const pt = pointOnGeodesic(geo, p.t);
+        if (pt) {
+            const [sx, sy] = diskToScreen(pt[0], pt[1]);
+            const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, 8);
+            glow.addColorStop(0, `hsla(${p.hue}, 90%, 70%, 0.9)`);
+            glow.addColorStop(0.5, `hsla(${p.hue}, 80%, 50%, 0.3)`);
+            glow.addColorStop(1, 'transparent');
+            ctx.fillStyle = glow;
+            ctx.beginPath();
+            ctx.arc(sx, sy, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = `hsl(${p.hue}, 90%, 80%)`;
+            ctx.beginPath();
+            ctx.arc(sx, sy, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Emission point
+    const [epx, epy] = diskToScreen(emitX, emitY);
+    const epGlow = ctx.createRadialGradient(epx, epy, 0, epx, epy, 15);
+    epGlow.addColorStop(0, 'rgba(255, 255, 255, 0.9)');
+    epGlow.addColorStop(0.3, 'rgba(138, 170, 255, 0.4)');
+    epGlow.addColorStop(1, 'transparent');
+    ctx.fillStyle = epGlow;
+    ctx.beginPath();
+    ctx.arc(epx, epy, 15, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+}
+
+function update() {
+    time += 0.016;
+
+    for (const p of particles) {
+        p.t += p.speed * particleSpeed;
+
+        const pt = pointOnGeodesic(p.geo, p.t);
+        if (pt) {
+            p.trail.push([pt[0], pt[1]]);
+            if (p.trail.length > trailLength) p.trail.shift();
+        } else {
+            // Reset particle
+            p.t = 0;
+            p.trail = [];
+        }
+    }
+}
+
+function animate() {
+    update();
+    draw();
+    animId = requestAnimationFrame(animate);
+}
+
+// Event handlers
+canvas.addEventListener('click', (e) => {
+    const [dx, dy] = screenToDisk(e.clientX, e.clientY);
+    const r = Math.sqrt(dx*dx + dy*dy);
+    if (r < 0.95) {
+        emitX = dx;
+        emitY = dy;
+        initParticles();
+    }
+});
+
+document.getElementById('numGeodesics').addEventListener('input', function() {
+    numGeo = parseInt(this.value);
+    document.getElementById('numVal').textContent = numGeo;
+    initParticles();
+});
+
+document.getElementById('speed').addEventListener('input', function() {
+    particleSpeed = this.value / 10;
+    document.getElementById('speedVal').textContent = particleSpeed.toFixed(1);
+});
+
+document.getElementById('trailLen').addEventListener('input', function() {
+    trailLength = parseInt(this.value);
+    document.getElementById('trailVal').textContent = trailLength;
+});
+
+document.getElementById('showHoro').addEventListener('change', function() { showHorocycles = this.checked; });
+document.getElementById('showEqui').addEventListener('change', function() { showEquidistant = this.checked; });
+document.getElementById('showTrails').addEventListener('change', function() { showTrails = this.checked; });
+
+window.reset = function() {
+    emitX = 0;
+    emitY = 0;
+    time = 0;
+    initParticles();
+};
+
+initParticles();
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

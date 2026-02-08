@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hyperbolic Kaleidoscope - Non-Euclidean Geometry</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; }
+canvas { display: block; cursor: crosshair; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+
+.panel {
+    position: fixed; top: 20px; right: 20px; z-index: 100;
+    background: rgba(10, 14, 26, 0.8); backdrop-filter: blur(10px);
+    border: 1px solid rgba(138, 170, 255, 0.2); border-radius: 12px;
+    padding: 18px; color: #ccd; width: 220px;
+}
+.panel h3 { color: #8af; margin-bottom: 12px; font-size: 0.95em; text-transform: uppercase; letter-spacing: 1px; }
+.panel label { display: block; margin-bottom: 4px; font-size: 0.82em; color: #99a; }
+.panel input[type="range"] { width: 100%; margin-bottom: 10px; accent-color: #8af; }
+.panel select { width: 100%; padding: 5px; margin-bottom: 10px; background: rgba(20,25,40,0.9); color: #ccd; border: 1px solid rgba(138,170,255,0.3); border-radius: 6px; }
+.btn { display: inline-block; padding: 6px 14px; margin: 3px; background: rgba(138,170,255,0.15); border: 1px solid rgba(138,170,255,0.3); color: #8af; border-radius: 6px; cursor: pointer; font-size: 0.82em; }
+.btn:hover { background: rgba(138,170,255,0.3); }
+.color-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.color-row input[type="color"] { width: 36px; height: 28px; border: none; background: none; cursor: pointer; }
+.val { color: #8af; float: right; font-size: 0.82em; }
+.info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); color: rgba(138,170,255,0.5); font-size: 0.8em; z-index: 100; }
+</style>
+</head>
+<body>
+<a href="index.html">&#8592; Back</a>
+
+<div class="panel">
+    <h3>Hyperbolic Kaleidoscope</h3>
+    <label>Triangle Group</label>
+    <select id="group">
+        <option value="2,3,7">{2,3,7} Hurwitz</option>
+        <option value="2,4,5">{2,4,5}</option>
+        <option value="3,3,4">{3,3,4}</option>
+        <option value="2,3,8">{2,3,8}</option>
+        <option value="2,5,5">{2,5,5}</option>
+    </select>
+    <label>Brush Size <span class="val" id="brushVal">8</span></label>
+    <input type="range" id="brushSize" min="2" max="30" value="8">
+    <div class="color-row">
+        <label style="margin:0">Color</label>
+        <input type="color" id="brushColor" value="#ff6688">
+    </div>
+    <label>Reflection Depth <span class="val" id="depthVal">4</span></label>
+    <input type="range" id="depth" min="1" max="6" value="4">
+    <div style="margin-top:8px">
+        <span class="btn" id="btnClear">Clear</span>
+        <span class="btn" id="btnPattern">Auto Pattern</span>
+    </div>
+</div>
+
+<div class="info">Draw inside the fundamental domain, watch it reflect infinitely</div>
+
+<canvas id="c"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// Offscreen canvas for the fundamental domain drawing
+const drawCanvas = document.createElement('canvas');
+const drawCtx = drawCanvas.getContext('2d');
+drawCanvas.width = 800;
+drawCanvas.height = 800;
+
+let W, H, cx, cy, R;
+let brushSize = 8;
+let brushColor = '#ff6688';
+let reflectionDepth = 4;
+let isDrawing = false;
+let lastMx, lastMy;
+let animId;
+let needsRedraw = true;
+
+// Triangle group parameters
+let p = 2, q = 3, r = 7;
+
+// Fundamental domain vertices in the Poincare disk
+let domainVerts = [];
+let domainEdges = []; // Each edge: { circle center, radius } for hyperbolic reflection
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cx = W / 2;
+    cy = H / 2;
+    R = Math.min(W, H) * 0.42;
+    needsRedraw = true;
+}
+resize();
+window.addEventListener('resize', resize);
+
+function diskToScreen(x, y) { return [cx + x * R, cy + y * R]; }
+function screenToDisk(sx, sy) { return [(sx - cx) / R, (sy - cy) / R]; }
+
+// Complex arithmetic
+function cMul(a, b) { return [a[0]*b[0]-a[1]*b[1], a[0]*b[1]+a[1]*b[0]]; }
+function cDiv(a, b) { const d = b[0]*b[0]+b[1]*b[1]; return [(a[0]*b[0]+a[1]*b[1])/d, (a[1]*b[0]-a[0]*b[1])/d]; }
+function cConj(a) { return [a[0], -a[1]]; }
+function cAbs(a) { return Math.sqrt(a[0]*a[0]+a[1]*a[1]); }
+function cSub(a, b) { return [a[0]-b[0], a[1]-b[1]]; }
+function cAdd(a, b) { return [a[0]+b[0], a[1]+b[1]]; }
+function cScale(a, s) { return [a[0]*s, a[1]*s]; }
+
+// Mobius transform: T(z) = (az+b)/(cz+d)
+function mobius(z, a, b, c, d) {
+    return cDiv(cAdd(cMul(a, z), b), cAdd(cMul(c, z), d));
+}
+
+// Hyperbolic reflection across geodesic defined by a circle (center, radius)
+function reflectInCircle(z, center, rad) {
+    const diff = cSub(z, center);
+    const r2 = rad * rad;
+    const d2 = diff[0]*diff[0] + diff[1]*diff[1];
+    if (d2 < 1e-12) return z;
+    return cAdd(center, cScale(diff, r2 / d2));
+}
+
+// Reflection across a line through origin at angle theta
+function reflectInLine(z, theta) {
+    const c2 = Math.cos(2 * theta);
+    const s2 = Math.sin(2 * theta);
+    return [z[0]*c2 + z[1]*s2, z[0]*s2 - z[1]*c2];
+}
+
+// Compute the fundamental domain for {p,q,r} triangle group
+function computeDomain() {
+    const angleA = Math.PI / p;
+    const angleB = Math.PI / q;
+    const angleC = Math.PI / r;
+
+    // Use hyperbolic law of cosines to find side lengths
+    // cosh(a) = (cos(A) + cos(B)cos(C)) / (sin(B)sin(C))
+    const cosA = Math.cos(angleA), cosB = Math.cos(angleB), cosC = Math.cos(angleC);
+    const sinB = Math.sin(angleB), sinC = Math.sin(angleC);
+    const sinA = Math.sin(angleA);
+
+    const coshA = (cosA + cosB * cosC) / (sinB * sinC);
+    const coshB = (cosB + cosA * cosC) / (sinA * sinC);
+    const coshC = (cosC + cosA * cosB) / (sinA * sinB);
+
+    // Convert hyperbolic distance to Poincare disk distance
+    // In Poincare disk: |z| = tanh(d/2)
+    function hypToPoincare(coshD) {
+        const d = Math.acosh(Math.max(coshD, 1));
+        return Math.tanh(d / 2);
+    }
+
+    const distA = hypToPoincare(coshA); // opposite vertex A, between B and C
+    const distB = hypToPoincare(coshB);
+    const distC = hypToPoincare(coshC);
+
+    // Place vertex A at origin, vertex B along positive x-axis
+    const vA = [0, 0];
+    const vB = [distC, 0]; // side c = AB has length distC in disk...
+    // Actually, side a is opposite A, side b opposite B, side c opposite C
+    // Let's place properly:
+    // A at origin, B at distance c along x-axis
+    // C at angle A from AB direction
+
+    const vC = [distB * Math.cos(angleA), distB * Math.sin(angleA)];
+
+    domainVerts = [vA, vB, vC];
+
+    // Compute reflection circles for each edge
+    domainEdges = [];
+
+    // Edge AB: from A(origin) to B - this is along x-axis, so reflect across x-axis (line at angle 0)
+    domainEdges.push({ type: 'line', angle: 0 });
+
+    // Edge AC: from A(origin) to C - this is along angle angleA, so reflect across this line
+    domainEdges.push({ type: 'line', angle: angleA });
+
+    // Edge BC: geodesic between B and C - need the circle
+    // Invert B through unit circle
+    const bLen2 = vB[0]*vB[0] + vB[1]*vB[1];
+    const bInv = [vB[0]/bLen2, vB[1]/bLen2];
+
+    // Circle through vB, vC, bInv
+    const circ = circleThrough3(vB[0], vB[1], vC[0], vC[1], bInv[0], bInv[1]);
+    if (circ) {
+        domainEdges.push({ type: 'circle', center: [circ.cx, circ.cy], radius: circ.r });
+    }
+
+    needsRedraw = true;
+}
+
+function circleThrough3(x1,y1,x2,y2,x3,y3) {
+    const D = 2*(x1*(y2-y3)+x2*(y3-y1)+x3*(y1-y2));
+    if (Math.abs(D) < 1e-10) return null;
+    const ux = ((x1*x1+y1*y1)*(y2-y3)+(x2*x2+y2*y2)*(y3-y1)+(x3*x3+y3*y3)*(y1-y2))/D;
+    const uy = ((x1*x1+y1*y1)*(x3-x2)+(x2*x2+y2*y2)*(x1-x3)+(x3*x3+y3*y3)*(x2-x1))/D;
+    return { cx: ux, cy: uy, r: Math.sqrt((x1-ux)**2+(y1-uy)**2) };
+}
+
+// Apply a single reflection
+function applyReflection(z, edge) {
+    if (edge.type === 'line') {
+        return reflectInLine(z, edge.angle);
+    } else {
+        return reflectInCircle(z, edge.center, edge.radius);
+    }
+}
+
+// Check if a point is inside the fundamental domain
+function isInDomain(z) {
+    const x = z[0], y = z[1];
+    // Above x-axis (edge AB is along x-axis, domain is above)
+    if (y < -1e-6) return false;
+    // Below the line at angle angleA from origin
+    const angleA = Math.PI / p;
+    const ny = -Math.sin(angleA) * x + Math.cos(angleA) * y; // perpendicular distance
+    // The domain is between angle 0 and angle A lines
+    const anglePt = Math.atan2(y, x);
+    if (anglePt > angleA + 1e-6) return false;
+    // On correct side of edge BC circle
+    if (domainEdges.length >= 3 && domainEdges[2].type === 'circle') {
+        const e = domainEdges[2];
+        const dist = Math.sqrt((x-e.center[0])**2 + (y-e.center[1])**2);
+        if (dist < e.radius - 1e-6) return false; // inside the circle means outside domain
+    }
+    return true;
+}
+
+// Get all reflected copies of a point up to given depth
+function getReflections(z, maxDepth) {
+    const results = [z];
+    const queue = [{point: z, depth: 0, lastEdge: -1}];
+    const seen = new Set();
+    seen.add(Math.round(z[0]*1000) + ',' + Math.round(z[1]*1000));
+
+    while (queue.length > 0) {
+        const item = queue.shift();
+        if (item.depth >= maxDepth) continue;
+
+        for (let i = 0; i < domainEdges.length; i++) {
+            const reflected = applyReflection(item.point, domainEdges[i]);
+            const r = cAbs(reflected);
+            if (r > 0.98) continue;
+
+            const key = Math.round(reflected[0]*500) + ',' + Math.round(reflected[1]*500);
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            results.push(reflected);
+            queue.push({point: reflected, depth: item.depth + 1, lastEdge: i});
+        }
+    }
+    return results;
+}
+
+// Draw everything
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw boundary glow
+    const grad = ctx.createRadialGradient(cx, cy, R - 6, cx, cy, R + 6);
+    grad.addColorStop(0, 'rgba(138, 170, 255, 0.12)');
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R + 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Boundary
+    ctx.strokeStyle = 'rgba(138, 170, 255, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.clip();
+
+    // Draw the tiling by reflecting the drawing canvas content
+    // First, draw all fundamental domain outlines
+    drawTiling();
+
+    // Then draw the user's strokes reflected everywhere
+    drawReflectedStrokes();
+
+    ctx.restore();
+}
+
+function drawTiling() {
+    // Generate fundamental domain copies
+    const origin = [0, 0];
+    const copies = getReflections(origin, reflectionDepth);
+
+    // Draw edges of each fundamental domain copy faintly
+    for (const copy of copies) {
+        // This is approximate - draw edges around each reflected domain
+        // We'll draw the actual domain boundary for visual effect
+    }
+
+    // Draw the fundamental domain boundaries using all reflections
+    // For simplicity, draw a tiling pattern
+    const points = [];
+    for (const v of domainVerts) {
+        const reflected = getReflections(v, reflectionDepth);
+        for (const rv of reflected) {
+            if (cAbs(rv) < 0.99) points.push(rv);
+        }
+    }
+
+    // Draw edges
+    ctx.strokeStyle = 'rgba(138, 170, 255, 0.08)';
+    ctx.lineWidth = 0.5;
+
+    // Instead draw the geodesic edges of reflected domains
+    for (const edge of domainEdges) {
+        if (edge.type === 'line') {
+            const [sx, sy] = diskToScreen(-Math.cos(edge.angle), -Math.sin(edge.angle));
+            const [ex, ey] = diskToScreen(Math.cos(edge.angle), Math.sin(edge.angle));
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(ex, ey);
+            ctx.stroke();
+        } else {
+            const [scx, scy] = diskToScreen(edge.center[0], edge.center[1]);
+            ctx.beginPath();
+            ctx.arc(scx, scy, edge.radius * R, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    }
+}
+
+// Store user strokes as disk-coordinate points
+const strokes = [];
+let currentStroke = null;
+
+function drawReflectedStrokes() {
+    for (const stroke of strokes) {
+        if (stroke.points.length < 2) continue;
+
+        // Get all reflections of each point
+        for (let i = 1; i < stroke.points.length; i++) {
+            const p1 = stroke.points[i-1];
+            const p2 = stroke.points[i];
+
+            // Get reflected copies of the midpoint
+            const mid = [(p1[0]+p2[0])/2, (p1[1]+p2[1])/2];
+            const reflections = getReflections(mid, reflectionDepth);
+
+            for (const ref of reflections) {
+                const dx = ref[0] - mid[0];
+                const dy = ref[1] - mid[1];
+
+                // Transform both endpoints
+                const rp1 = [p1[0]+dx, p1[1]+dy];
+                const rp2 = [p2[0]+dx, p2[1]+dy];
+
+                if (cAbs(rp1) > 0.99 || cAbs(rp2) > 0.99) continue;
+
+                const [sx1, sy1] = diskToScreen(rp1[0], rp1[1]);
+                const [sx2, sy2] = diskToScreen(rp2[0], rp2[1]);
+
+                // Scale brush size by distance from center (hyperbolic shrinking)
+                const distFactor = 1 - cAbs(ref) * 0.6;
+
+                ctx.strokeStyle = stroke.color;
+                ctx.lineWidth = stroke.size * distFactor * (R / 300);
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.globalAlpha = Math.max(0.2, distFactor);
+                ctx.beginPath();
+                ctx.moveTo(sx1, sy1);
+                ctx.lineTo(sx2, sy2);
+                ctx.stroke();
+            }
+        }
+    }
+    ctx.globalAlpha = 1;
+}
+
+// Generate auto pattern
+function generateAutoPattern() {
+    strokes.length = 0;
+    const colors = ['#ff6688', '#66aaff', '#88ff66', '#ffaa44', '#cc66ff', '#44ffdd'];
+
+    // Spiral pattern
+    for (let c = 0; c < 3; c++) {
+        const stroke = { points: [], color: colors[c], size: 4 + c * 2 };
+        const numPts = 40;
+        for (let i = 0; i < numPts; i++) {
+            const t = i / numPts;
+            const angle = t * Math.PI * 3 + c * Math.PI * 2 / 3;
+            const rad = t * 0.25 + 0.05;
+            const x = rad * Math.cos(angle) + 0.15;
+            const y = rad * Math.sin(angle) + 0.1;
+            if (Math.sqrt(x*x+y*y) < 0.5) {
+                stroke.points.push([x, y]);
+            }
+        }
+        strokes.push(stroke);
+    }
+
+    // Some circles
+    for (let c = 0; c < 2; c++) {
+        const stroke = { points: [], color: colors[3 + c], size: 3 };
+        const cx0 = 0.12 + c * 0.08;
+        const cy0 = 0.08 + c * 0.05;
+        const rad0 = 0.06 + c * 0.03;
+        for (let i = 0; i <= 30; i++) {
+            const a = (i / 30) * Math.PI * 2;
+            stroke.points.push([cx0 + rad0 * Math.cos(a), cy0 + rad0 * Math.sin(a)]);
+        }
+        strokes.push(stroke);
+    }
+
+    needsRedraw = true;
+}
+
+// Mouse handling
+canvas.addEventListener('mousedown', (e) => {
+    isDrawing = true;
+    const [dx, dy] = screenToDisk(e.clientX, e.clientY);
+    currentStroke = { points: [[dx, dy]], color: brushColor, size: brushSize };
+    lastMx = e.clientX;
+    lastMy = e.clientY;
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (!isDrawing || !currentStroke) return;
+    const [dx, dy] = screenToDisk(e.clientX, e.clientY);
+    const r = Math.sqrt(dx*dx + dy*dy);
+    if (r < 0.98) {
+        currentStroke.points.push([dx, dy]);
+        needsRedraw = true;
+    }
+    lastMx = e.clientX;
+    lastMy = e.clientY;
+});
+
+canvas.addEventListener('mouseup', () => {
+    if (currentStroke && currentStroke.points.length > 1) {
+        strokes.push(currentStroke);
+    }
+    currentStroke = null;
+    isDrawing = false;
+    needsRedraw = true;
+});
+
+// Touch support
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    const [dx, dy] = screenToDisk(t.clientX, t.clientY);
+    isDrawing = true;
+    currentStroke = { points: [[dx, dy]], color: brushColor, size: brushSize };
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (!isDrawing || !currentStroke) return;
+    const t = e.touches[0];
+    const [dx, dy] = screenToDisk(t.clientX, t.clientY);
+    if (Math.sqrt(dx*dx+dy*dy) < 0.98) {
+        currentStroke.points.push([dx, dy]);
+        needsRedraw = true;
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => {
+    if (currentStroke && currentStroke.points.length > 1) strokes.push(currentStroke);
+    currentStroke = null;
+    isDrawing = false;
+    needsRedraw = true;
+});
+
+// Controls
+document.getElementById('brushSize').addEventListener('input', function() {
+    brushSize = parseInt(this.value);
+    document.getElementById('brushVal').textContent = brushSize;
+});
+
+document.getElementById('brushColor').addEventListener('input', function() {
+    brushColor = this.value;
+});
+
+document.getElementById('depth').addEventListener('input', function() {
+    reflectionDepth = parseInt(this.value);
+    document.getElementById('depthVal').textContent = reflectionDepth;
+    needsRedraw = true;
+});
+
+document.getElementById('group').addEventListener('change', function() {
+    const parts = this.value.split(',').map(Number);
+    p = parts[0]; q = parts[1]; r = parts[2];
+    computeDomain();
+});
+
+document.getElementById('btnClear').addEventListener('click', () => {
+    strokes.length = 0;
+    needsRedraw = true;
+});
+
+document.getElementById('btnPattern').addEventListener('click', generateAutoPattern);
+
+function animate() {
+    if (needsRedraw || isDrawing) {
+        // While drawing, temporarily add current stroke
+        if (currentStroke) strokes.push(currentStroke);
+        draw();
+        if (currentStroke) strokes.pop();
+        needsRedraw = false;
+    }
+    animId = requestAnimationFrame(animate);
+}
+
+window.reset = function() {
+    strokes.length = 0;
+    p = 2; q = 3; r = 7;
+    document.getElementById('group').value = '2,3,7';
+    computeDomain();
+    generateAutoPattern();
+};
+
+computeDomain();
+generateAutoPattern();
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

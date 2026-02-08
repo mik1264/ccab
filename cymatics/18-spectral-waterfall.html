@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spectral Waterfall - Cymatics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; color: #c8d0e0; }
+canvas { display: block; }
+.back-link {
+    position: fixed; top: 20px; left: 20px; z-index: 100;
+    color: #8A9A5B; text-decoration: none; font-size: 14px; font-weight: 600;
+    background: rgba(10,14,26,0.8); border-radius: 25px;
+    border: 2px solid #8A9A5B; padding: 10px 20px;
+    transition: all 0.3s ease;
+}
+.back-link:hover { background: #8A9A5B; color: #0a0e1a; }
+.controls {
+    position: fixed; top: 20px; right: 20px; z-index: 100;
+    background: rgba(10,14,26,0.85); backdrop-filter: blur(10px);
+    border-radius: 10px; padding: 20px; max-width: 300px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { color: #8A9A5B; margin-bottom: 12px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
+.control-row { margin-bottom: 10px; }
+.control-row label { display: block; font-size: 12px; color: #8a92a8; margin-bottom: 3px; }
+.control-row input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+.control-row .value { float: right; color: #DDA15E; font-size: 12px; font-weight: 600; }
+.control-row select {
+    width: 100%; background: rgba(10,14,26,0.9); color: #c8d0e0;
+    border: 1px solid rgba(138,154,91,0.4); padding: 6px 8px; border-radius: 5px; font-size: 12px;
+}
+.control-row button {
+    background: rgba(138,154,91,0.2); color: #8A9A5B; border: 1px solid rgba(138,154,91,0.4);
+    padding: 6px 12px; border-radius: 5px; cursor: pointer; font-size: 12px; margin: 2px;
+    transition: all 0.2s;
+}
+.control-row button:hover { background: rgba(138,154,91,0.4); }
+.control-row button.active { background: #8A9A5B; color: #0a0e1a; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&larr; Cymatics</a>
+
+<div class="controls">
+    <h3>Spectral Waterfall</h3>
+    <div class="control-row">
+        <label>Generator</label>
+        <select id="genSelect">
+            <option value="sine">Sine Tone</option>
+            <option value="sweep" selected>Frequency Sweep</option>
+            <option value="harmonics">Harmonics</option>
+            <option value="noise">White Noise</option>
+            <option value="chord">Major Chord</option>
+        </select>
+    </div>
+    <div class="control-row">
+        <label>Base Frequency <span class="value" id="freqVal">440</span> Hz</label>
+        <input type="range" id="freqSlider" min="50" max="2000" value="440">
+    </div>
+    <div class="control-row">
+        <label>Sweep Range <span class="value" id="sweepVal">800</span> Hz</label>
+        <input type="range" id="sweepSlider" min="100" max="3000" value="800">
+    </div>
+    <div class="control-row">
+        <label>FFT Size <span class="value" id="fftVal">512</span></label>
+        <select id="fftSelect">
+            <option value="256">256</option>
+            <option value="512" selected>512</option>
+        </select>
+    </div>
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+let genType = 'sweep';
+let baseFreq = 440, sweepRange = 800;
+let fftSize = 512;
+let time = 0;
+let running = true;
+
+// Waterfall buffer: array of spectrum rows
+const MAX_ROWS = 300;
+let waterfallRows = [];
+
+// Sample rate for our synthetic signal
+const SAMPLE_RATE = 8192;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Generate signal samples
+function generateSignal(t, N) {
+    const samples = new Float64Array(N);
+    const dt = 1 / SAMPLE_RATE;
+
+    for (let i = 0; i < N; i++) {
+        const ti = t + i * dt;
+        let val = 0;
+
+        switch (genType) {
+            case 'sine':
+                val = Math.sin(2 * Math.PI * baseFreq * ti);
+                break;
+            case 'sweep': {
+                const sweepPeriod = 4.0;
+                const phase = (ti % sweepPeriod) / sweepPeriod;
+                const freq = baseFreq + sweepRange * phase;
+                val = Math.sin(2 * Math.PI * freq * ti);
+                break;
+            }
+            case 'harmonics':
+                for (let h = 1; h <= 8; h++) {
+                    val += (1 / h) * Math.sin(2 * Math.PI * baseFreq * h * ti);
+                }
+                val /= 2;
+                break;
+            case 'noise':
+                val = (Math.random() * 2 - 1);
+                break;
+            case 'chord': {
+                // Major chord: root, major third (5/4), fifth (3/2)
+                val = Math.sin(2 * Math.PI * baseFreq * ti) +
+                      0.8 * Math.sin(2 * Math.PI * baseFreq * 1.25 * ti) +
+                      0.8 * Math.sin(2 * Math.PI * baseFreq * 1.5 * ti);
+                val /= 2.6;
+                break;
+            }
+        }
+        samples[i] = val;
+    }
+    return samples;
+}
+
+// Simple DFT (not FFT, but correct)
+function computeDFT(samples) {
+    const N = samples.length;
+    const spectrum = new Float64Array(N / 2);
+
+    for (let k = 0; k < N / 2; k++) {
+        let re = 0, im = 0;
+        for (let n = 0; n < N; n++) {
+            const angle = -2 * Math.PI * k * n / N;
+            re += samples[n] * Math.cos(angle);
+            im += samples[n] * Math.sin(angle);
+        }
+        spectrum[k] = Math.sqrt(re * re + im * im) / N;
+    }
+    return spectrum;
+}
+
+// Hann window
+function applyWindow(samples) {
+    const N = samples.length;
+    const windowed = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+        const w = 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1)));
+        windowed[i] = samples[i] * w;
+    }
+    return windowed;
+}
+
+// Hot colormap: black -> red -> yellow -> white
+function hotColormap(v) {
+    v = Math.max(0, Math.min(1, v));
+    let r, g, b;
+    if (v < 0.33) {
+        const t = v / 0.33;
+        r = Math.floor(t * 255);
+        g = 0;
+        b = 0;
+    } else if (v < 0.66) {
+        const t = (v - 0.33) / 0.33;
+        r = 255;
+        g = Math.floor(t * 255);
+        b = 0;
+    } else {
+        const t = (v - 0.66) / 0.34;
+        r = 255;
+        g = 255;
+        b = Math.floor(t * 255);
+    }
+    return [r, g, b];
+}
+
+function processFrame() {
+    const samples = generateSignal(time, fftSize);
+    const windowed = applyWindow(samples);
+    const spectrum = computeDFT(windowed);
+
+    // Normalize to dB-like scale
+    const normalized = new Float64Array(spectrum.length);
+    for (let i = 0; i < spectrum.length; i++) {
+        // Convert to dB, then normalize
+        const db = 20 * Math.log10(Math.max(spectrum[i], 1e-10));
+        normalized[i] = Math.max(0, (db + 60) / 60); // -60 dB floor
+    }
+
+    waterfallRows.unshift(normalized);
+    if (waterfallRows.length > MAX_ROWS) {
+        waterfallRows.length = MAX_ROWS;
+    }
+
+    time += fftSize / SAMPLE_RATE;
+}
+
+function drawSpectrumLine() {
+    if (waterfallRows.length === 0) return;
+
+    const spectrum = waterfallRows[0];
+    const plotX = W * 0.08;
+    const plotY = 20;
+    const plotW = W * 0.6;
+    const plotH = H * 0.18;
+
+    // Background
+    ctx.fillStyle = 'rgba(15,20,40,0.7)';
+    ctx.fillRect(plotX, plotY, plotW, plotH);
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(plotX, plotY, plotW, plotH);
+
+    // Draw spectrum line
+    ctx.beginPath();
+    ctx.strokeStyle = '#DDA15E';
+    ctx.lineWidth = 1.5;
+    const freqBins = spectrum.length;
+    for (let i = 0; i < freqBins; i++) {
+        const x = plotX + (i / freqBins) * plotW;
+        const y = plotY + plotH - spectrum[i] * plotH;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Fill under curve
+    ctx.lineTo(plotX + plotW, plotY + plotH);
+    ctx.lineTo(plotX, plotY + plotH);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(221,161,94,0.1)';
+    ctx.fill();
+
+    // Frequency labels
+    ctx.fillStyle = '#5a6278';
+    ctx.font = '10px Segoe UI, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    const maxFreq = SAMPLE_RATE / 2;
+    for (let f = 0; f <= maxFreq; f += 1000) {
+        const x = plotX + (f / maxFreq) * plotW;
+        ctx.fillText(f + ' Hz', x, plotY + plotH + 12);
+    }
+
+    // Title
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = '11px Segoe UI, system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Current Spectrum', plotX + 5, plotY + 14);
+}
+
+function drawWaterfall() {
+    const plotX = W * 0.08;
+    const plotY = H * 0.25;
+    const plotW = W * 0.6;
+    const plotH = H * 0.7;
+
+    if (waterfallRows.length === 0) return;
+
+    const freqBins = waterfallRows[0].length;
+    const rowHeight = Math.max(1, plotH / MAX_ROWS);
+
+    // Use imageData for performance
+    const visibleRows = Math.min(waterfallRows.length, Math.ceil(plotH / rowHeight));
+    const imgW = Math.min(freqBins, Math.floor(plotW));
+    const imgH = Math.ceil(visibleRows * rowHeight);
+    const imgData = ctx.createImageData(imgW, imgH);
+    const d = imgData.data;
+
+    for (let row = 0; row < visibleRows; row++) {
+        const spectrum = waterfallRows[row];
+        const yStart = Math.floor(row * rowHeight);
+        const yEnd = Math.floor((row + 1) * rowHeight);
+
+        for (let x = 0; x < imgW; x++) {
+            const binIdx = Math.floor((x / imgW) * freqBins);
+            const val = spectrum[binIdx];
+            const [r, g, b] = hotColormap(val);
+
+            for (let y = yStart; y < yEnd && y < imgH; y++) {
+                const idx = (y * imgW + x) * 4;
+                d[idx] = r;
+                d[idx + 1] = g;
+                d[idx + 2] = b;
+                d[idx + 3] = 255;
+            }
+        }
+    }
+
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = imgW;
+    offCanvas.height = imgH;
+    offCanvas.getContext('2d').putImageData(imgData, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(offCanvas, plotX, plotY, plotW, plotH);
+
+    // Border
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(plotX, plotY, plotW, plotH);
+
+    // Time arrow on right
+    ctx.fillStyle = '#5a6278';
+    ctx.font = '11px Segoe UI, system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Time \u2193', plotX + plotW + 8, plotY + 20);
+    ctx.fillText('(newest at top)', plotX + plotW + 8, plotY + 35);
+
+    // Frequency scale at bottom
+    ctx.fillStyle = '#5a6278';
+    ctx.font = '10px Segoe UI, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    const maxFreq = SAMPLE_RATE / 2;
+    for (let f = 0; f <= maxFreq; f += 1000) {
+        const x = plotX + (f / maxFreq) * plotW;
+        ctx.fillText(f + ' Hz', x, plotY + plotH + 15);
+    }
+
+    // Title
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = '13px Segoe UI, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Spectrogram Waterfall', plotX + plotW / 2, plotY - 8);
+
+    // Color legend
+    const legX = plotX + plotW + 10;
+    const legY = plotY + 60;
+    const legW = 15;
+    const legH = 120;
+    for (let i = 0; i < legH; i++) {
+        const v = 1 - i / legH;
+        const [r, g, b] = hotColormap(v);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect(legX, legY + i, legW, 1);
+    }
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.strokeRect(legX, legY, legW, legH);
+    ctx.fillStyle = '#5a6278';
+    ctx.font = '9px Segoe UI, system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('0 dB', legX + legW + 4, legY + 5);
+    ctx.fillText('-60 dB', legX + legW + 4, legY + legH);
+}
+
+let frameCount = 0;
+
+function animate() {
+    if (running) {
+        // Process multiple frames to keep waterfall scrolling
+        processFrame();
+        if (frameCount % 2 === 0) processFrame(); // Double speed for visual effect
+    }
+
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    drawWaterfall();
+    drawSpectrumLine();
+
+    frameCount++;
+    requestAnimationFrame(animate);
+}
+
+document.getElementById('genSelect').addEventListener('change', function() {
+    genType = this.value;
+    waterfallRows = [];
+});
+
+document.getElementById('freqSlider').addEventListener('input', function() {
+    baseFreq = parseInt(this.value);
+    document.getElementById('freqVal').textContent = baseFreq;
+});
+
+document.getElementById('sweepSlider').addEventListener('input', function() {
+    sweepRange = parseInt(this.value);
+    document.getElementById('sweepVal').textContent = sweepRange;
+});
+
+document.getElementById('fftSelect').addEventListener('change', function() {
+    fftSize = parseInt(this.value);
+    document.getElementById('fftVal').textContent = fftSize;
+    waterfallRows = [];
+});
+
+window.reset = function() {
+    genType = 'sweep'; baseFreq = 440; sweepRange = 800; fftSize = 512; time = 0;
+    waterfallRows = [];
+    document.getElementById('genSelect').value = 'sweep';
+    document.getElementById('freqSlider').value = 440;
+    document.getElementById('sweepSlider').value = 800;
+    document.getElementById('fftSelect').value = '512';
+    document.getElementById('freqVal').textContent = '440';
+    document.getElementById('sweepVal').textContent = '800';
+    document.getElementById('fftVal').textContent = '512';
+    resize();
+};
+
+window.togglePause = function() { running = !running; };
+
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

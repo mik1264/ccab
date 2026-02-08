@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Illumination Problem - Can Light Reach Every Point?</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; color: #c8d8e8; }
+canvas { display: block; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+#controls {
+  position: fixed; top: 20px; right: 20px; z-index: 100;
+  background: rgba(10, 14, 30, 0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(120, 160, 255, 0.15); border-radius: 12px;
+  padding: 16px 20px; min-width: 240px; max-height: 90vh; overflow-y: auto;
+}
+#controls h3 { color: #8af; margin-bottom: 10px; font-size: 0.95em; text-transform: uppercase; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; }
+.ctrl-row label { display: block; font-size: 0.8em; color: #8ab; margin-bottom: 3px; }
+.ctrl-row input[type=range] { width: 100%; accent-color: #6af; }
+.ctrl-row .val { float: right; font-size: 0.8em; color: #adf; }
+.btn { background: rgba(100,160,255,0.15); border: 1px solid rgba(100,160,255,0.3); color: #8af; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8em; margin: 2px; }
+.btn:hover { background: rgba(100,160,255,0.3); }
+.btn.active { background: rgba(100,200,150,0.25); border-color: rgba(100,200,150,0.5); color: #8fa; }
+#info { position: fixed; bottom: 20px; left: 20px; z-index: 100; font-size: 0.8em; color: #6a8; background: rgba(10,14,30,0.6); backdrop-filter: blur(10px); padding: 10px 14px; border-radius: 8px; max-width: 440px; line-height: 1.5; }
+#stats { position: fixed; bottom: 20px; right: 20px; z-index: 100; font-size: 0.85em; color: #6a8; background: rgba(10,14,30,0.6); backdrop-filter: blur(10px); padding: 8px 14px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<a href="index.html">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+  <h3>Illumination Problem</h3>
+  <div style="margin-bottom:10px;">
+    <label style="font-size:0.8em;color:#8ab;">Room Shape</label>
+    <div style="margin-top:4px;">
+      <button class="btn active" data-room="circle">Circle</button>
+      <button class="btn" data-room="rect">Rectangle</button>
+      <button class="btn" data-room="lshape">L-Shape</button>
+      <button class="btn" data-room="pillars">Pillars</button>
+      <button class="btn" data-room="penrose">Penrose</button>
+    </div>
+  </div>
+  <div class="ctrl-row">
+    <label>Number of Rays <span class="val" id="vRays">1500</span></label>
+    <input type="range" id="sRays" min="100" max="5000" step="100" value="1500">
+  </div>
+  <div class="ctrl-row">
+    <label>Max Reflections <span class="val" id="vBounce">25</span></label>
+    <input type="range" id="sBounce" min="1" max="80" step="1" value="25">
+  </div>
+  <div class="ctrl-row">
+    <label>Ray Brightness <span class="val" id="vBright">0.4</span></label>
+    <input type="range" id="sBright" min="0.05" max="1.0" step="0.05" value="0.4">
+  </div>
+  <div style="margin-top:8px;">
+    <button class="btn" id="bRetrace">Retrace Rays</button>
+    <button class="btn" id="bReset">Reset</button>
+  </div>
+  <p style="font-size:0.7em;color:#68a;margin-top:10px;">Drag the light source to move it</p>
+</div>
+<div id="stats">
+  Illuminated: <span id="vIllum">--</span>%
+</div>
+<div id="info">
+  <strong style="color:#8af;">Illumination Problem:</strong> Place a point light in a mirrored room. Does every point get illuminated? For convex rooms: yes. For L-shaped rooms or rooms with pillars, dark regions can exist. Roger Penrose showed in 1958 that certain rooms cannot be fully illuminated from any position.
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, cx, cy, scale;
+let numRays = 1500;
+let maxBounces = 25;
+let rayBright = 0.4;
+let roomType = 'circle';
+let lightX, lightY;
+let dragging = false;
+let walls = [];
+let raySegments = [];
+let needRetrace = true;
+let illuminationMap = null;
+const gridRes = 4; // pixels per cell for illumination map
+
+function resize() {
+  W = canvas.width = innerWidth;
+  H = canvas.height = innerHeight;
+  cx = W / 2;
+  cy = H / 2;
+  scale = Math.min(W, H) * 0.35;
+  buildRoom();
+  needRetrace = true;
+}
+
+function buildRoom() {
+  walls = [];
+  if (roomType === 'circle') {
+    // Approximate circle with segments
+    const n = 80;
+    for (let i = 0; i < n; i++) {
+      const a1 = (i / n) * Math.PI * 2;
+      const a2 = ((i + 1) / n) * Math.PI * 2;
+      walls.push({
+        x1: cx + Math.cos(a1) * scale, y1: cy + Math.sin(a1) * scale,
+        x2: cx + Math.cos(a2) * scale, y2: cy + Math.sin(a2) * scale
+      });
+    }
+    if (!lightX) { lightX = cx; lightY = cy; }
+  } else if (roomType === 'rect') {
+    const hw = scale * 1.2, hh = scale * 0.8;
+    walls.push({ x1: cx-hw, y1: cy-hh, x2: cx+hw, y2: cy-hh });
+    walls.push({ x1: cx+hw, y1: cy-hh, x2: cx+hw, y2: cy+hh });
+    walls.push({ x1: cx+hw, y1: cy+hh, x2: cx-hw, y2: cy+hh });
+    walls.push({ x1: cx-hw, y1: cy+hh, x2: cx-hw, y2: cy-hh });
+    if (!lightX) { lightX = cx; lightY = cy; }
+  } else if (roomType === 'lshape') {
+    const s = scale * 0.8;
+    // L-shape: missing upper-right quadrant
+    const pts = [
+      { x: cx - s, y: cy - s },
+      { x: cx, y: cy - s },
+      { x: cx, y: cy },
+      { x: cx + s, y: cy },
+      { x: cx + s, y: cy + s },
+      { x: cx - s, y: cy + s }
+    ];
+    for (let i = 0; i < pts.length; i++) {
+      const j = (i + 1) % pts.length;
+      walls.push({ x1: pts[i].x, y1: pts[i].y, x2: pts[j].x, y2: pts[j].y });
+    }
+    lightX = cx - s * 0.5;
+    lightY = cy + s * 0.5;
+  } else if (roomType === 'pillars') {
+    // Rectangle with two circular pillars
+    const hw = scale * 1.2, hh = scale * 0.8;
+    walls.push({ x1: cx-hw, y1: cy-hh, x2: cx+hw, y2: cy-hh });
+    walls.push({ x1: cx+hw, y1: cy-hh, x2: cx+hw, y2: cy+hh });
+    walls.push({ x1: cx+hw, y1: cy+hh, x2: cx-hw, y2: cy+hh });
+    walls.push({ x1: cx-hw, y1: cy+hh, x2: cx-hw, y2: cy-hh });
+    // Pillars as polygon approximations
+    const pillarR = scale * 0.15;
+    const pillars = [
+      { px: cx - scale * 0.4, py: cy - scale * 0.2 },
+      { px: cx + scale * 0.35, py: cy + scale * 0.25 }
+    ];
+    for (const p of pillars) {
+      const n = 20;
+      for (let i = 0; i < n; i++) {
+        const a1 = (i / n) * Math.PI * 2;
+        const a2 = ((i + 1) / n) * Math.PI * 2;
+        walls.push({
+          x1: p.px + Math.cos(a1) * pillarR, y1: p.py + Math.sin(a1) * pillarR,
+          x2: p.px + Math.cos(a2) * pillarR, y2: p.py + Math.sin(a2) * pillarR,
+          isPillar: true
+        });
+      }
+    }
+    lightX = cx - scale * 0.8;
+    lightY = cy;
+  } else if (roomType === 'penrose') {
+    // Penrose-like unilluminable room: mushroom shape with concavities
+    const s = scale * 0.7;
+    // A room with two elliptical alcoves connected by a narrow corridor
+    // Simplified as a polygon with tight concavities
+    const pts = [
+      // Bottom chamber
+      { x: cx - s * 1.0, y: cy + s * 1.0 },
+      { x: cx - s * 1.0, y: cy + s * 0.2 },
+      // Narrow corridor left
+      { x: cx - s * 0.15, y: cy + s * 0.2 },
+      { x: cx - s * 0.15, y: cy - s * 0.2 },
+      // Upper left alcove
+      { x: cx - s * 1.0, y: cy - s * 0.2 },
+      { x: cx - s * 1.0, y: cy - s * 0.6 },
+      { x: cx - s * 0.6, y: cy - s * 1.0 },
+      { x: cx - s * 0.15, y: cy - s * 0.8 },
+      { x: cx - s * 0.15, y: cy - s * 0.2 },
+      // Top corridor
+      { x: cx + s * 0.15, y: cy - s * 0.2 },
+      { x: cx + s * 0.15, y: cy - s * 0.8 },
+      // Upper right alcove
+      { x: cx + s * 0.6, y: cy - s * 1.0 },
+      { x: cx + s * 1.0, y: cy - s * 0.6 },
+      { x: cx + s * 1.0, y: cy - s * 0.2 },
+      // Narrow corridor right
+      { x: cx + s * 0.15, y: cy - s * 0.2 },
+      { x: cx + s * 0.15, y: cy + s * 0.2 },
+      { x: cx + s * 1.0, y: cy + s * 0.2 },
+      { x: cx + s * 1.0, y: cy + s * 1.0 }
+    ];
+    for (let i = 0; i < pts.length; i++) {
+      const j = (i + 1) % pts.length;
+      walls.push({ x1: pts[i].x, y1: pts[i].y, x2: pts[j].x, y2: pts[j].y });
+    }
+    lightX = cx;
+    lightY = cy + s * 0.6;
+  }
+}
+
+// Ray-segment intersection
+function raySegIntersect(ox, oy, dx, dy, w) {
+  const sx = w.x2 - w.x1, sy = w.y2 - w.y1;
+  const denom = dx * sy - dy * sx;
+  if (Math.abs(denom) < 1e-10) return null;
+  const t = ((w.x1 - ox) * sy - (w.y1 - oy) * sx) / denom;
+  const u = ((w.x1 - ox) * dy - (w.y1 - oy) * dx) / denom;
+  if (t > 0.001 && u >= 0 && u <= 1) {
+    return { t, u, x: ox + dx * t, y: oy + dy * t, wall: w };
+  }
+  return null;
+}
+
+function traceRay(ox, oy, dx, dy, bounces) {
+  const segments = [];
+  let curX = ox, curY = oy, curDx = dx, curDy = dy;
+
+  for (let b = 0; b < bounces; b++) {
+    let closest = null;
+    let closestT = Infinity;
+    for (const w of walls) {
+      const hit = raySegIntersect(curX, curY, curDx, curDy, w);
+      if (hit && hit.t < closestT) {
+        closestT = hit.t;
+        closest = hit;
+      }
+    }
+    if (!closest || closestT > 5000) break;
+
+    segments.push({ x1: curX, y1: curY, x2: closest.x, y2: closest.y, bounce: b });
+
+    // Reflect
+    const w = closest.wall;
+    const wx = w.x2 - w.x1, wy = w.y2 - w.y1;
+    const wlen = Math.hypot(wx, wy);
+    const wnx = -wy / wlen, wny = wx / wlen; // normal
+    const dot = curDx * wnx + curDy * wny;
+    curDx = curDx - 2 * dot * wnx;
+    curDy = curDy - 2 * dot * wny;
+    curX = closest.x;
+    curY = closest.y;
+  }
+  return segments;
+}
+
+function traceAllRays() {
+  raySegments = [];
+  for (let i = 0; i < numRays; i++) {
+    const angle = (i / numRays) * Math.PI * 2;
+    const dx = Math.cos(angle), dy = Math.sin(angle);
+    const segs = traceRay(lightX, lightY, dx, dy, maxBounces);
+    raySegments.push(...segs);
+  }
+  computeIllumination();
+  needRetrace = false;
+}
+
+function computeIllumination() {
+  const gw = Math.ceil(W / gridRes);
+  const gh = Math.ceil(H / gridRes);
+  illuminationMap = new Float32Array(gw * gh);
+
+  for (const seg of raySegments) {
+    // Bresenham-like: mark cells along each segment
+    const dx = seg.x2 - seg.x1, dy = seg.y2 - seg.y1;
+    const len = Math.hypot(dx, dy);
+    const steps = Math.ceil(len / gridRes);
+    for (let s = 0; s <= steps; s++) {
+      const t = s / Math.max(1, steps);
+      const px = seg.x1 + dx * t;
+      const py = seg.y1 + dy * t;
+      const gx = Math.floor(px / gridRes);
+      const gy = Math.floor(py / gridRes);
+      if (gx >= 0 && gx < gw && gy >= 0 && gy < gh) {
+        illuminationMap[gy * gw + gx] += 0.3;
+      }
+    }
+  }
+
+  // Compute illumination percentage (rough)
+  let lit = 0, total = 0;
+  // Only count cells that are inside the room (simple check using center)
+  for (let gy = 0; gy < gh; gy++) {
+    for (let gx = 0; gx < gw; gx++) {
+      const px = gx * gridRes + gridRes / 2;
+      const py = gy * gridRes + gridRes / 2;
+      if (isInsideRoom(px, py)) {
+        total++;
+        if (illuminationMap[gy * gw + gx] > 0.1) lit++;
+      }
+    }
+  }
+  const pct = total > 0 ? (lit / total * 100).toFixed(1) : '--';
+  document.getElementById('vIllum').textContent = pct;
+}
+
+function isInsideRoom(px, py) {
+  // Ray casting against walls
+  let crossings = 0;
+  for (const w of walls) {
+    const y1 = w.y1, y2 = w.y2;
+    if ((y1 > py) !== (y2 > py)) {
+      const x = w.x1 + (py - y1) / (y2 - y1) * (w.x2 - w.x1);
+      if (px < x) crossings++;
+    }
+  }
+  return crossings % 2 === 1;
+}
+
+function draw() {
+  ctx.fillStyle = '#0a0e1a';
+  ctx.fillRect(0, 0, W, H);
+
+  // Draw illumination heatmap
+  if (illuminationMap) {
+    const gw = Math.ceil(W / gridRes);
+    const gh = Math.ceil(H / gridRes);
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        const val = illuminationMap[gy * gw + gx];
+        if (val > 0.05) {
+          const intensity = Math.min(1, val * 0.05);
+          const r = Math.floor(255 * intensity * 0.9);
+          const g = Math.floor(200 * intensity * 0.7);
+          const b = Math.floor(80 * intensity * 0.3);
+          ctx.fillStyle = `rgba(${r},${g},${b},${Math.min(0.8, intensity)})`;
+          ctx.fillRect(gx * gridRes, gy * gridRes, gridRes, gridRes);
+        }
+      }
+    }
+  }
+
+  // Draw walls
+  ctx.strokeStyle = 'rgba(120,180,255,0.6)';
+  ctx.lineWidth = 2;
+  for (const w of walls) {
+    ctx.beginPath();
+    ctx.moveTo(w.x1, w.y1);
+    ctx.lineTo(w.x2, w.y2);
+    ctx.stroke();
+  }
+
+  // Draw rays
+  for (const seg of raySegments) {
+    const fade = 1 / (1 + seg.bounce * 0.15);
+    const hue = (seg.bounce * 25 + 40) % 360;
+    ctx.strokeStyle = `hsla(${hue}, 70%, 55%, ${rayBright * fade * 0.15})`;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(seg.x1, seg.y1);
+    ctx.lineTo(seg.x2, seg.y2);
+    ctx.stroke();
+  }
+
+  // Draw light source
+  const grad = ctx.createRadialGradient(lightX, lightY, 0, lightX, lightY, 30);
+  grad.addColorStop(0, 'rgba(255,240,180,0.9)');
+  grad.addColorStop(0.3, 'rgba(255,220,100,0.5)');
+  grad.addColorStop(1, 'rgba(255,200,50,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(lightX, lightY, 30, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.shadowColor = 'rgba(255,240,150,0.8)';
+  ctx.shadowBlur = 15;
+  ctx.fillStyle = '#ffe880';
+  ctx.beginPath();
+  ctx.arc(lightX, lightY, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Light icon
+  ctx.strokeStyle = 'rgba(255,240,180,0.5)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(lightX + Math.cos(a) * 8, lightY + Math.sin(a) * 8);
+    ctx.lineTo(lightX + Math.cos(a) * 14, lightY + Math.sin(a) * 14);
+    ctx.stroke();
+  }
+}
+
+function animate() {
+  if (needRetrace) {
+    traceAllRays();
+  }
+  draw();
+  requestAnimationFrame(animate);
+}
+
+// Dragging light source
+canvas.addEventListener('mousedown', e => {
+  const dx = e.clientX - lightX, dy = e.clientY - lightY;
+  if (Math.hypot(dx, dy) < 30) {
+    dragging = true;
+  }
+});
+canvas.addEventListener('mousemove', e => {
+  if (dragging) {
+    lightX = e.clientX;
+    lightY = e.clientY;
+    needRetrace = true;
+  }
+});
+canvas.addEventListener('mouseup', () => { dragging = false; });
+canvas.addEventListener('mouseleave', () => { dragging = false; });
+
+// Touch support
+canvas.addEventListener('touchstart', e => {
+  const t = e.touches[0];
+  const dx = t.clientX - lightX, dy = t.clientY - lightY;
+  if (Math.hypot(dx, dy) < 40) {
+    dragging = true;
+    e.preventDefault();
+  }
+});
+canvas.addEventListener('touchmove', e => {
+  if (dragging) {
+    lightX = e.touches[0].clientX;
+    lightY = e.touches[0].clientY;
+    needRetrace = true;
+    e.preventDefault();
+  }
+});
+canvas.addEventListener('touchend', () => { dragging = false; });
+
+// Controls
+document.querySelectorAll('[data-room]').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-room]').forEach(bb => bb.classList.remove('active'));
+    b.classList.add('active');
+    roomType = b.dataset.room;
+    lightX = null; lightY = null;
+    buildRoom();
+    needRetrace = true;
+  });
+});
+document.getElementById('sRays').addEventListener('input', e => {
+  numRays = parseInt(e.target.value);
+  document.getElementById('vRays').textContent = numRays;
+  needRetrace = true;
+});
+document.getElementById('sBounce').addEventListener('input', e => {
+  maxBounces = parseInt(e.target.value);
+  document.getElementById('vBounce').textContent = maxBounces;
+  needRetrace = true;
+});
+document.getElementById('sBright').addEventListener('input', e => {
+  rayBright = parseFloat(e.target.value);
+  document.getElementById('vBright').textContent = rayBright.toFixed(2);
+});
+document.getElementById('bRetrace').addEventListener('click', () => { needRetrace = true; });
+document.getElementById('bReset').addEventListener('click', () => {
+  lightX = null; lightY = null;
+  buildRoom();
+  needRetrace = true;
+});
+
+window.reset = function() {
+  lightX = null; lightY = null;
+  buildRoom();
+  needRetrace = true;
+};
+
+resize();
+window.addEventListener('resize', resize);
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

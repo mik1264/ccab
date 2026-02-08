@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Liquid Democracy</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; }
+#controls {
+    position: fixed; top: 10px; right: 10px; width: 310px;
+    background: rgba(20,20,40,0.85); backdrop-filter: blur(10px);
+    border-radius: 12px; padding: 16px; z-index: 10;
+    border: 1px solid rgba(100,140,200,0.3);
+    max-height: 92vh; overflow-y: auto;
+}
+#info {
+    position: fixed; bottom: 10px; left: 10px; max-width: 380px;
+    background: rgba(20,20,40,0.85); backdrop-filter: blur(10px);
+    border-radius: 12px; padding: 16px; z-index: 10;
+    border: 1px solid rgba(100,140,200,0.3); font-size: 13px; line-height: 1.5;
+}
+h3 { color: #7eb8f0; margin-bottom: 8px; font-size: 15px; }
+label { display: block; margin: 8px 0 3px; font-size: 12px; color: #a0b4d0; }
+button {
+    background: rgba(60,80,140,0.6); color: #c0d4f0; border: 1px solid rgba(100,140,200,0.4);
+    border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 12px; margin: 3px 2px;
+    transition: background 0.2s;
+}
+button:hover { background: rgba(80,110,180,0.7); }
+input[type="range"] { width: 100%; }
+.stat { font-size: 12px; margin: 3px 0; color: #b0c4e0; }
+.cycle-warn { color: #f06070; font-weight: bold; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; margin: 3px 0; }
+.legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+a { color: #7eb8f0; text-decoration: none; }
+a:hover { text-decoration: underline; }
+#backLink { position: fixed; top: 10px; left: 10px; z-index: 20; font-size: 13px; }
+select {
+    background: rgba(50,60,90,0.5); border: 1px solid rgba(100,140,200,0.3);
+    border-radius: 4px; color: #e0e0e0; padding: 4px 8px; font-size: 13px; width: 100%;
+}
+</style>
+</head>
+<body>
+<a id="backLink" href="index.html">&#8592; Back</a>
+<canvas id="canvas"></canvas>
+
+<div id="controls">
+    <h3>Liquid Democracy</h3>
+    <p style="font-size:11px;color:#8099bb;margin-bottom:8px;">Click a voter to cycle their vote (Yes/No/Abstain). Drag from one voter to another to create a delegation.</p>
+
+    <label>Proposal:</label>
+    <select id="proposal">
+        <option value="park">Build a new park</option>
+        <option value="tax">Raise income tax 2%</option>
+        <option value="transit">Fund public transit</option>
+    </select>
+
+    <label>Voters: <span id="voterCount">15</span></label>
+    <input type="range" id="numVoters" min="6" max="30" value="15">
+
+    <div style="margin-top:8px;">
+        <button id="clearDelegations">Clear Delegations</button>
+        <button id="randomDelegations">Random Delegations</button>
+        <button id="resetBtn">Reset All</button>
+    </div>
+
+    <div id="statsArea" style="margin-top:10px;"></div>
+
+    <label style="margin-top:10px;">Legend:</label>
+    <div class="legend-item"><div class="legend-dot" style="background:#50d890;"></div> Yes vote</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#f06070;"></div> No vote</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#8090a0;"></div> Abstain</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#f0c040;"></div> Delegating</div>
+    <div class="legend-item"><div class="legend-dot" style="border:2px solid #f06070;background:none;"></div> In cycle (broken)</div>
+</div>
+
+<div id="info">
+    <h3>Liquid Democracy</h3>
+    <p>Each voter can <strong>vote directly</strong> or <strong>delegate</strong> their vote to someone they trust. Delegations chain: if A delegates to B, and B delegates to C, then C votes with the weight of all three.</p>
+    <p style="margin-top:6px;">This combines the best of direct and representative democracy: experts accumulate influence, but anyone can reclaim their vote at any time.</p>
+    <p style="margin-top:6px;"><strong>Cycles</strong> (A->B->C->A) are problematic and those votes are lost.</p>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    layoutVoters();
+}
+window.addEventListener('resize', resize);
+
+const names = ['Ada','Bob','Cho','Dan','Eve','Fay','Gil','Hal','Ivy','Jan','Kim','Leo','Mia','Neo','Ola','Pat','Qin','Ray','Sam','Tia','Uma','Val','Wes','Xia','Yui','Zoe','Abe','Bea','Cal','Dee'];
+
+let voters = [];
+let dragging = null;
+let dragTarget = null;
+let mouseX = 0, mouseY = 0;
+let hoveredVoter = -1;
+let animT = 0;
+
+function initVoters(n) {
+    voters = [];
+    for (let i = 0; i < n; i++) {
+        const votes = ['yes', 'no', 'abstain'];
+        voters.push({
+            name: names[i] || 'V' + i,
+            vote: votes[Math.floor(Math.random() * 3)],
+            delegate: -1,
+            x: 0, y: 0, tx: 0, ty: 0,
+            vx: 0, vy: 0
+        });
+    }
+    layoutVoters();
+}
+
+function layoutVoters() {
+    const cx = Math.min(W * 0.38, W - 360);
+    const cy = H * 0.5;
+    const radius = Math.min(cx - 60, cy - 80, 280);
+    const n = voters.length;
+    for (let i = 0; i < n; i++) {
+        const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
+        voters[i].tx = cx + Math.cos(angle) * radius;
+        voters[i].ty = cy + Math.sin(angle) * radius;
+        if (voters[i].x === 0) {
+            voters[i].x = voters[i].tx;
+            voters[i].y = voters[i].ty;
+        }
+    }
+}
+
+function resolveVote(i, visited) {
+    if (!visited) visited = new Set();
+    if (visited.has(i)) return { vote: 'cycle', weight: 0 };
+    visited.add(i);
+
+    const v = voters[i];
+    if (v.delegate < 0 || v.delegate >= voters.length) {
+        return { vote: v.vote, weight: 1 };
+    }
+    return resolveVote(v.delegate, visited);
+}
+
+function getEffectiveWeight(i) {
+    let weight = 0;
+    const chain = getChainTo(i);
+    for (const idx of chain) {
+        const res = resolveVote(idx);
+        if (res.vote !== 'cycle') weight++;
+    }
+    return weight;
+}
+
+function getChainTo(target) {
+    const delegators = [target];
+    for (let j = 0; j < voters.length; j++) {
+        if (j === target) continue;
+        let cur = j;
+        const visited = new Set();
+        while (cur >= 0 && cur < voters.length && !visited.has(cur)) {
+            visited.add(cur);
+            if (cur === target && cur !== j) {
+                delegators.push(j);
+                break;
+            }
+            cur = voters[cur].delegate;
+        }
+    }
+    return delegators;
+}
+
+function detectCycles() {
+    const inCycle = new Set();
+    for (let i = 0; i < voters.length; i++) {
+        if (voters[i].delegate < 0) continue;
+        const visited = new Set();
+        let cur = i;
+        while (cur >= 0 && cur < voters.length && !visited.has(cur)) {
+            visited.add(cur);
+            cur = voters[cur].delegate;
+        }
+        if (cur >= 0 && cur < voters.length && visited.has(cur)) {
+            let c = cur;
+            do {
+                inCycle.add(c);
+                c = voters[c].delegate;
+            } while (c !== cur);
+        }
+    }
+    return inCycle;
+}
+
+function computeResults() {
+    const cycles = detectCycles();
+    let yes = 0, no = 0, abstain = 0, lost = 0;
+
+    for (let i = 0; i < voters.length; i++) {
+        if (voters[i].delegate >= 0) continue;
+        const weight = getEffectiveWeight(i);
+        if (voters[i].vote === 'yes') yes += weight;
+        else if (voters[i].vote === 'no') no += weight;
+        else abstain += weight;
+    }
+    lost = cycles.size;
+
+    return { yes, no, abstain, lost, cycles };
+}
+
+function updateStats() {
+    const r = computeResults();
+    const total = voters.length;
+    const voting = r.yes + r.no;
+    const area = document.getElementById('statsArea');
+
+    let directVoters = 0, delegates = 0;
+    voters.forEach(v => { if (v.delegate < 0) directVoters++; else delegates++; });
+
+    let maxWeight = 0, maxDelegate = '';
+    for (let i = 0; i < voters.length; i++) {
+        if (voters[i].delegate >= 0) continue;
+        const w = getEffectiveWeight(i);
+        if (w > maxWeight) { maxWeight = w; maxDelegate = voters[i].name; }
+    }
+
+    area.innerHTML = `
+        <div class="stat" style="font-size:13px;color:#7eb8f0;font-weight:bold;">Results</div>
+        <div class="stat" style="color:#50d890;">Yes: ${r.yes} votes (${voting > 0 ? (r.yes/voting*100).toFixed(0) : 0}%)</div>
+        <div class="stat" style="color:#f06070;">No: ${r.no} votes (${voting > 0 ? (r.no/voting*100).toFixed(0) : 0}%)</div>
+        <div class="stat">Abstain: ${r.abstain}</div>
+        ${r.lost > 0 ? `<div class="stat cycle-warn">Lost in cycles: ${r.lost}</div>` : ''}
+        <div class="stat" style="margin-top:6px;">Direct voters: ${directVoters} | Delegating: ${delegates}</div>
+        ${maxWeight > 1 ? `<div class="stat" style="color:#f0c040;">Top delegate: ${maxDelegate} (${maxWeight} votes)</div>` : ''}
+        <div class="stat" style="margin-top:6px;font-weight:bold;color:${r.yes > r.no ? '#50d890' : r.no > r.yes ? '#f06070' : '#8090a0'};">
+            ${r.yes > r.no ? 'PROPOSAL PASSES' : r.no > r.yes ? 'PROPOSAL FAILS' : 'TIE'}
+        </div>
+    `;
+}
+
+// Interaction
+let isDragging = false;
+let dragFrom = -1;
+
+canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    for (let i = 0; i < voters.length; i++) {
+        const dx = mx - voters[i].x;
+        const dy = my - voters[i].y;
+        if (dx * dx + dy * dy < 625) { // 25^2
+            isDragging = true;
+            dragFrom = i;
+            mouseX = mx;
+            mouseY = my;
+            return;
+        }
+    }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    mouseX = e.clientX - rect.left;
+    mouseY = e.clientY - rect.top;
+
+    hoveredVoter = -1;
+    for (let i = 0; i < voters.length; i++) {
+        const dx = mouseX - voters[i].x;
+        const dy = mouseY - voters[i].y;
+        if (dx * dx + dy * dy < 625) {
+            hoveredVoter = i;
+            break;
+        }
+    }
+});
+
+canvas.addEventListener('mouseup', (e) => {
+    if (!isDragging || dragFrom < 0) {
+        isDragging = false;
+        dragFrom = -1;
+        return;
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    let target = -1;
+    for (let i = 0; i < voters.length; i++) {
+        if (i === dragFrom) continue;
+        const dx = mx - voters[i].x;
+        const dy = my - voters[i].y;
+        if (dx * dx + dy * dy < 625) {
+            target = i;
+            break;
+        }
+    }
+
+    if (target >= 0) {
+        // Create delegation
+        voters[dragFrom].delegate = target;
+    } else {
+        // Click on same voter - cycle vote
+        const dx = mx - voters[dragFrom].x;
+        const dy = my - voters[dragFrom].y;
+        if (dx * dx + dy * dy < 625) {
+            // Remove delegation if any, or cycle vote
+            if (voters[dragFrom].delegate >= 0) {
+                voters[dragFrom].delegate = -1;
+            } else {
+                const cycle = ['yes', 'no', 'abstain'];
+                const ci = cycle.indexOf(voters[dragFrom].vote);
+                voters[dragFrom].vote = cycle[(ci + 1) % 3];
+            }
+        }
+    }
+
+    isDragging = false;
+    dragFrom = -1;
+    updateStats();
+});
+
+// Controls
+document.getElementById('numVoters').addEventListener('input', function() {
+    document.getElementById('voterCount').textContent = this.value;
+    initVoters(parseInt(this.value));
+    updateStats();
+});
+
+document.getElementById('clearDelegations').addEventListener('click', () => {
+    voters.forEach(v => v.delegate = -1);
+    updateStats();
+});
+
+document.getElementById('randomDelegations').addEventListener('click', () => {
+    voters.forEach((v, i) => {
+        if (Math.random() < 0.45) {
+            let target;
+            do { target = Math.floor(Math.random() * voters.length); } while (target === i);
+            v.delegate = target;
+        } else {
+            v.delegate = -1;
+        }
+    });
+    updateStats();
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => window.reset());
+document.getElementById('proposal').addEventListener('change', () => updateStats());
+
+function drawArrow(x1, y1, x2, y2, color, width, dashed) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 1) return;
+    const nx = dx / len;
+    const ny = dy / len;
+
+    // Shorten to node edges
+    const r = 22;
+    const sx = x1 + nx * r;
+    const sy = y1 + ny * r;
+    const ex = x2 - nx * r;
+    const ey = y2 - ny * r;
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    if (dashed) ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+    if (dashed) ctx.setLineDash([]);
+
+    // Arrowhead
+    const aLen = 10;
+    const aW = 5;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(ex, ey);
+    ctx.lineTo(ex - nx * aLen + ny * aW, ey - ny * aLen - nx * aW);
+    ctx.lineTo(ex - nx * aLen - ny * aW, ey - ny * aLen + nx * aW);
+    ctx.closePath();
+    ctx.fill();
+}
+
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+    animT += 0.008;
+
+    // Grid bg
+    ctx.strokeStyle = 'rgba(60,80,120,0.08)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+    // Smooth movement
+    voters.forEach(v => {
+        v.x += (v.tx - v.x) * 0.08;
+        v.y += (v.ty - v.y) * 0.08;
+    });
+
+    const cycles = detectCycles();
+
+    // Title
+    ctx.fillStyle = '#c0d4f0';
+    ctx.font = 'bold 18px system-ui';
+    ctx.textAlign = 'center';
+    const cx = Math.min(W * 0.38, W - 360);
+    ctx.fillText('Liquid Democracy Network', cx, 35);
+    ctx.font = '12px system-ui';
+    ctx.fillStyle = '#6080a0';
+    ctx.fillText('Click = cycle vote | Drag to another = delegate | Click delegator = remove', cx, 53);
+
+    // Draw delegation edges
+    for (let i = 0; i < voters.length; i++) {
+        const v = voters[i];
+        if (v.delegate < 0 || v.delegate >= voters.length) continue;
+        const target = voters[v.delegate];
+        const isCycle = cycles.has(i);
+
+        // Animated flow particles
+        const color = isCycle ? 'rgba(240,96,112,0.6)' : 'rgba(240,192,64,0.5)';
+        drawArrow(v.x, v.y, target.x, target.y, color, isCycle ? 2.5 : 2, isCycle);
+
+        // Flow particle
+        if (!isCycle) {
+            const t = (animT * 2 + i * 0.3) % 1;
+            const px = v.x + (target.x - v.x) * t;
+            const py = v.y + (target.y - v.y) * t;
+            ctx.fillStyle = 'rgba(240,192,64,0.8)';
+            ctx.beginPath();
+            ctx.arc(px, py, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Draw drag line
+    if (isDragging && dragFrom >= 0) {
+        ctx.strokeStyle = 'rgba(240,192,64,0.5)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(voters[dragFrom].x, voters[dragFrom].y);
+        ctx.lineTo(mouseX, mouseY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // Draw voters
+    for (let i = 0; i < voters.length; i++) {
+        const v = voters[i];
+        const isDelegating = v.delegate >= 0;
+        const isCycle = cycles.has(i);
+        const isHovered = i === hoveredVoter;
+        const weight = isDelegating ? 0 : getEffectiveWeight(i);
+
+        // Node size based on weight
+        const baseR = 20;
+        const r = baseR + (weight > 1 ? Math.min(weight * 3, 18) : 0);
+
+        // Glow for high-weight nodes
+        if (weight > 2) {
+            const grad = ctx.createRadialGradient(v.x, v.y, r, v.x, v.y, r + 15);
+            let glowColor;
+            if (v.vote === 'yes') glowColor = '80,216,144';
+            else if (v.vote === 'no') glowColor = '240,96,112';
+            else glowColor = '128,144,160';
+            grad.addColorStop(0, `rgba(${glowColor},0.3)`);
+            grad.addColorStop(1, `rgba(${glowColor},0)`);
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(v.x, v.y, r + 15, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Node fill
+        let fillColor;
+        if (isCycle) fillColor = 'rgba(50,30,40,0.8)';
+        else if (isDelegating) fillColor = 'rgba(60,55,30,0.8)';
+        else if (v.vote === 'yes') fillColor = 'rgba(30,70,50,0.8)';
+        else if (v.vote === 'no') fillColor = 'rgba(70,30,35,0.8)';
+        else fillColor = 'rgba(40,45,55,0.8)';
+
+        ctx.fillStyle = fillColor;
+        ctx.beginPath();
+        ctx.arc(v.x, v.y, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Border
+        let borderColor;
+        if (isCycle) borderColor = '#f06070';
+        else if (isDelegating) borderColor = '#f0c040';
+        else if (v.vote === 'yes') borderColor = '#50d890';
+        else if (v.vote === 'no') borderColor = '#f06070';
+        else borderColor = '#8090a0';
+
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = isHovered ? 3 : (isCycle ? 2.5 : 2);
+        if (isCycle) {
+            ctx.setLineDash([4, 3]);
+        }
+        ctx.beginPath();
+        ctx.arc(v.x, v.y, r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Name
+        ctx.fillStyle = '#e0e8f0';
+        ctx.font = 'bold 11px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(v.name, v.x, v.y - 3);
+
+        // Vote or delegation info
+        ctx.font = '10px system-ui';
+        if (isDelegating) {
+            ctx.fillStyle = '#f0c040';
+            ctx.fillText('->' + voters[v.delegate].name, v.x, v.y + 10);
+        } else {
+            ctx.fillStyle = borderColor;
+            const label = v.vote === 'yes' ? 'YES' : v.vote === 'no' ? 'NO' : '---';
+            ctx.fillText(label, v.x, v.y + 10);
+        }
+
+        // Weight badge
+        if (weight > 1) {
+            ctx.fillStyle = 'rgba(240,192,64,0.9)';
+            ctx.font = 'bold 10px system-ui';
+            ctx.fillText('x' + weight, v.x + r - 2, v.y - r + 6);
+        }
+    }
+
+    // Hovered voter tooltip
+    if (hoveredVoter >= 0) {
+        const v = voters[hoveredVoter];
+        const tx = v.x + 30;
+        const ty = v.y - 40;
+        const isDelegating = v.delegate >= 0;
+        const weight = isDelegating ? 0 : getEffectiveWeight(hoveredVoter);
+
+        ctx.fillStyle = 'rgba(15,20,35,0.92)';
+        const boxW = 160;
+        const boxH = isDelegating ? 55 : 70;
+        ctx.fillRect(tx, ty, boxW, boxH);
+        ctx.strokeStyle = 'rgba(100,140,200,0.4)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(tx, ty, boxW, boxH);
+
+        ctx.fillStyle = '#e0e8f0';
+        ctx.font = 'bold 12px system-ui';
+        ctx.textAlign = 'left';
+        ctx.fillText(v.name, tx + 8, ty + 16);
+
+        ctx.font = '11px system-ui';
+        ctx.fillStyle = '#a0b4d0';
+        if (isDelegating) {
+            ctx.fillText('Delegates to: ' + voters[v.delegate].name, tx + 8, ty + 32);
+            if (cycles.has(hoveredVoter)) {
+                ctx.fillStyle = '#f06070';
+                ctx.fillText('IN CYCLE - vote lost!', tx + 8, ty + 47);
+            }
+        } else {
+            ctx.fillText('Vote: ' + v.vote.toUpperCase(), tx + 8, ty + 32);
+            ctx.fillText('Effective weight: ' + weight, tx + 8, ty + 47);
+            const chain = getChainTo(hoveredVoter).filter(j => j !== hoveredVoter);
+            if (chain.length > 0) {
+                ctx.fillText('Delegators: ' + chain.map(j => voters[j].name).join(', '), tx + 8, ty + 62);
+            }
+        }
+    }
+
+    requestAnimationFrame(draw);
+}
+
+window.reset = function() {
+    const n = parseInt(document.getElementById('numVoters').value) || 15;
+    initVoters(n);
+    updateStats();
+};
+
+initVoters(15);
+updateStats();
+draw();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

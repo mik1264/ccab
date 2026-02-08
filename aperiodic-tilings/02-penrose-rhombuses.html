@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Penrose P3: Thick & Thin Rhombuses</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; top: 20px; right: 20px; z-index: 100;
+    background: rgba(10, 14, 30, 0.85); backdrop-filter: blur(10px);
+    border: 1px solid rgba(100, 140, 255, 0.3); border-radius: 12px;
+    padding: 18px; min-width: 240px; color: #c8d8ff;
+}
+#controls h3 { margin-bottom: 12px; color: #8af; font-size: 1em; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85em; }
+.ctrl-row span { color: #8aa; }
+.ctrl-row .val { color: #ffd866; font-weight: bold; }
+input[type="range"] {
+    width: 100%; accent-color: #8af; margin: 4px 0;
+}
+label { font-size: 0.8em; color: #8aa; display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 8px; }
+label input { accent-color: #8af; }
+.section { border-top: 1px solid rgba(100, 140, 255, 0.15); padding-top: 10px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:20px;left:20px;color:#8af;text-decoration:none;z-index:100;font-size:1.2em">&#8592; Back</a>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <h3>RHOMBUSES (P3)</h3>
+    <div class="ctrl-row"><span>Subdivision level:</span><span class="val" id="levelVal">5</span></div>
+    <input type="range" id="levelSlider" min="3" max="8" value="5">
+    <div class="ctrl-row"><span>Thick:</span><span class="val" id="thickCount">0</span></div>
+    <div class="ctrl-row"><span>Thin:</span><span class="val" id="thinCount">0</span></div>
+    <div class="ctrl-row"><span>Thick/Thin:</span><span class="val" id="ratioVal">0</span></div>
+    <div class="ctrl-row"><span>Golden ratio:</span><span class="val">1.6180...</span></div>
+    <div class="section">
+        <label><input type="checkbox" id="showAmmann"> Ammann bars</label>
+        <label><input type="checkbox" id="showTriangles"> Robinson triangles</label>
+        <label><input type="checkbox" id="showGlow" checked> Glow effects</label>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const PHI = (1 + Math.sqrt(5)) / 2;
+const INV_PHI = 1 / PHI;
+
+let level = 5;
+let triangles = [];
+let rhombuses = [];
+let ammannLines = [];
+let camX = 0, camY = 0, camZoom = 1;
+let dragging = false, dragStartX, dragStartY, camStartX, camStartY;
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function lerp(p1, p2, t) {
+    return [p1[0] + (p2[0] - p1[0]) * t, p1[1] + (p2[1] - p1[1]) * t];
+}
+
+function dist(a, b) {
+    return Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2);
+}
+
+function makeInitialTriangles() {
+    let tris = [];
+    for (let i = 0; i < 10; i++) {
+        let angle1 = (2 * Math.PI * i) / 10 - Math.PI / 2;
+        let angle2 = (2 * Math.PI * (i + 1)) / 10 - Math.PI / 2;
+        let r = 300;
+        let a = [0, 0];
+        let b = [r * Math.cos(angle1), r * Math.sin(angle1)];
+        let c = [r * Math.cos(angle2), r * Math.sin(angle2)];
+        if (i % 2 === 0) {
+            tris.push({ type: 'B', vertices: [a, b, c] });
+        } else {
+            tris.push({ type: 'B', vertices: [a, c, b] });
+        }
+    }
+    return tris;
+}
+
+function subdivide(tris) {
+    let result = [];
+    for (let t of tris) {
+        let [a, b, c] = t.vertices;
+        if (t.type === 'B') {
+            let p = lerp(a, c, INV_PHI);
+            let q = lerp(b, a, INV_PHI);
+            result.push({ type: 'B', vertices: [q, p, b] });
+            result.push({ type: 'B', vertices: [p, q, a] });
+            result.push({ type: 'A', vertices: [c, p, b] });
+        } else {
+            let p = lerp(b, a, INV_PHI);
+            result.push({ type: 'A', vertices: [p, c, a] });
+            result.push({ type: 'B', vertices: [c, p, b] });
+        }
+    }
+    return result;
+}
+
+function edgeKey(p1, p2) {
+    let ax = Math.round(p1[0] * 100) / 100;
+    let ay = Math.round(p1[1] * 100) / 100;
+    let bx = Math.round(p2[0] * 100) / 100;
+    let by = Math.round(p2[1] * 100) / 100;
+    if (ax < bx || (ax === bx && ay < by)) return `${ax},${ay}-${bx},${by}`;
+    return `${bx},${by}-${ax},${ay}`;
+}
+
+function pairIntoRhombuses() {
+    rhombuses = [];
+    let edgeMap = new Map();
+    let paired = new Set();
+
+    for (let i = 0; i < triangles.length; i++) {
+        let t = triangles[i];
+        let [a, b, c] = t.vertices;
+        let key = edgeKey(b, c);
+        if (edgeMap.has(key)) {
+            let j = edgeMap.get(key);
+            if (!paired.has(j)) {
+                let t2 = triangles[j];
+                if (t.type === t2.type) {
+                    let kind = t.type === 'B' ? 'thick' : 'thin';
+                    rhombuses.push({
+                        kind: kind,
+                        vertices: [t.vertices[0], t.vertices[1], t2.vertices[0], t.vertices[2]],
+                        triangles: [t, t2]
+                    });
+                    paired.add(i);
+                    paired.add(j);
+                }
+            }
+            if (!paired.has(i)) edgeMap.set(key, i);
+        } else {
+            edgeMap.set(key, i);
+        }
+    }
+
+    for (let i = 0; i < triangles.length; i++) {
+        if (!paired.has(i)) {
+            let t = triangles[i];
+            rhombuses.push({
+                kind: t.type === 'B' ? 'thick' : 'thin',
+                vertices: t.vertices,
+                triangles: [t],
+                single: true
+            });
+        }
+    }
+}
+
+function computeAmmannLines() {
+    ammannLines = [];
+    let segments = [];
+
+    for (let rhombus of rhombuses) {
+        if (rhombus.single) continue;
+        let [v0, v1, v2, v3] = rhombus.vertices;
+
+        if (rhombus.kind === 'thick') {
+            let m1 = lerp(v0, v1, INV_PHI);
+            let m2 = lerp(v0, v3, INV_PHI);
+            segments.push([m1, m2]);
+            let m3 = lerp(v2, v1, INV_PHI);
+            let m4 = lerp(v2, v3, INV_PHI);
+            segments.push([m3, m4]);
+        } else {
+            let m1 = lerp(v1, v0, INV_PHI);
+            let m2 = lerp(v1, v2, INV_PHI);
+            segments.push([m1, m2]);
+            let m3 = lerp(v3, v0, INV_PHI);
+            let m4 = lerp(v3, v2, INV_PHI);
+            segments.push([m3, m4]);
+        }
+    }
+    ammannLines = segments;
+}
+
+function generateTiling(lev) {
+    let tris = makeInitialTriangles();
+    for (let i = 0; i < lev; i++) {
+        tris = subdivide(tris);
+    }
+    triangles = tris;
+    pairIntoRhombuses();
+    computeAmmannLines();
+    updateStats();
+}
+
+function updateStats() {
+    let thick = 0, thin = 0;
+    for (let r of rhombuses) {
+        if (r.kind === 'thick') thick++;
+        else thin++;
+    }
+    document.getElementById('thickCount').textContent = thick;
+    document.getElementById('thinCount').textContent = thin;
+    document.getElementById('ratioVal').textContent = thin > 0 ? (thick / thin).toFixed(4) : '-';
+    document.getElementById('levelVal').textContent = level;
+}
+
+function worldToScreen(x, y) {
+    return [(x - camX) * camZoom + canvas.width / 2, (y - camY) * camZoom + canvas.height / 2];
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    let showTri = document.getElementById('showTriangles').checked;
+    let showGlow = document.getElementById('showGlow').checked;
+
+    if (showTri) {
+        for (let tri of triangles) {
+            let [a, b, c] = tri.vertices;
+            let [sx0, sy0] = worldToScreen(a[0], a[1]);
+            let [sx1, sy1] = worldToScreen(b[0], b[1]);
+            let [sx2, sy2] = worldToScreen(c[0], c[1]);
+            ctx.beginPath();
+            ctx.moveTo(sx0, sy0);
+            ctx.lineTo(sx1, sy1);
+            ctx.lineTo(sx2, sy2);
+            ctx.closePath();
+            ctx.fillStyle = tri.type === 'B' ? 'rgba(30, 80, 60, 0.7)' : 'rgba(80, 50, 30, 0.7)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(150, 220, 180, 0.4)';
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+        }
+    } else {
+        for (let rhombus of rhombuses) {
+            let verts = rhombus.vertices;
+            let [sx0, sy0] = worldToScreen(verts[0][0], verts[0][1]);
+            ctx.beginPath();
+            ctx.moveTo(sx0, sy0);
+            for (let i = 1; i < verts.length; i++) {
+                let [sx, sy] = worldToScreen(verts[i][0], verts[i][1]);
+                ctx.lineTo(sx, sy);
+            }
+            ctx.closePath();
+
+            if (rhombus.kind === 'thick') {
+                ctx.fillStyle = 'rgba(20, 70, 110, 0.85)';
+            } else {
+                ctx.fillStyle = 'rgba(110, 40, 80, 0.85)';
+            }
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(120, 180, 255, 0.35)';
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+
+            if (showGlow) {
+                ctx.beginPath();
+                ctx.moveTo(sx0, sy0);
+                for (let i = 1; i < verts.length; i++) {
+                    let [sx, sy] = worldToScreen(verts[i][0], verts[i][1]);
+                    ctx.lineTo(sx, sy);
+                }
+                ctx.closePath();
+                ctx.strokeStyle = rhombus.kind === 'thick' ? 'rgba(60, 160, 255, 0.12)' : 'rgba(255, 100, 180, 0.12)';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+        }
+    }
+
+    if (document.getElementById('showAmmann').checked) {
+        ctx.strokeStyle = 'rgba(255, 220, 80, 0.5)';
+        ctx.lineWidth = 1.2;
+        for (let seg of ammannLines) {
+            let [sx1, sy1] = worldToScreen(seg[0][0], seg[0][1]);
+            let [sx2, sy2] = worldToScreen(seg[1][0], seg[1][1]);
+            ctx.beginPath();
+            ctx.moveTo(sx1, sy1);
+            ctx.lineTo(sx2, sy2);
+            ctx.stroke();
+        }
+    }
+
+    requestAnimationFrame(draw);
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 0) {
+        dragging = true;
+        dragStartX = e.clientX;
+        dragStartY = e.clientY;
+        camStartX = camX;
+        camStartY = camY;
+    }
+});
+canvas.addEventListener('mousemove', (e) => {
+    if (dragging) {
+        camX = camStartX - (e.clientX - dragStartX) / camZoom;
+        camY = camStartY - (e.clientY - dragStartY) / camZoom;
+    }
+});
+canvas.addEventListener('mouseup', () => { dragging = false; });
+canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    let factor = e.deltaY > 0 ? 0.9 : 1.1;
+    let mx = (e.clientX - canvas.width / 2) / camZoom + camX;
+    let my = (e.clientY - canvas.height / 2) / camZoom + camY;
+    camZoom *= factor;
+    camZoom = Math.max(0.05, Math.min(50, camZoom));
+    camX = mx - (e.clientX - canvas.width / 2) / camZoom;
+    camY = my - (e.clientY - canvas.height / 2) / camZoom;
+}, { passive: false });
+
+document.getElementById('levelSlider').addEventListener('input', (e) => {
+    level = parseInt(e.target.value);
+    generateTiling(level);
+});
+
+window.reset = function() {
+    level = 5;
+    document.getElementById('levelSlider').value = 5;
+    camX = 0; camY = 0; camZoom = 1;
+    generateTiling(level);
+};
+
+generateTiling(level);
+requestAnimationFrame(draw);
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

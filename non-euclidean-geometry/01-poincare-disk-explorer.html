@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Poincaré Disk Explorer</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    canvas { display: block; cursor: crosshair; }
+    #controls {
+        position: fixed; top: 20px; right: 20px; z-index: 100;
+        background: rgba(10, 14, 30, 0.85);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border: 1px solid rgba(100, 160, 255, 0.2);
+        border-radius: 12px;
+        padding: 20px;
+        color: #c8d8f0;
+        min-width: 240px;
+    }
+    #controls h3 { color: #8af; margin-bottom: 12px; font-size: 1.1em; }
+    .info-row { margin: 6px 0; font-size: 0.85em; color: #8a9ab0; }
+    .info-row span { color: #adf; font-family: monospace; }
+    .btn {
+        background: rgba(100, 160, 255, 0.15);
+        border: 1px solid rgba(100, 160, 255, 0.3);
+        color: #8af; padding: 8px 16px; border-radius: 6px;
+        cursor: pointer; margin: 4px; font-size: 0.85em;
+        transition: all 0.2s;
+    }
+    .btn:hover { background: rgba(100, 160, 255, 0.3); }
+    .btn-row { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 4px; }
+    #distance-display {
+        margin-top: 10px; padding: 8px; border-radius: 6px;
+        background: rgba(100, 200, 255, 0.08);
+        font-size: 0.9em; text-align: center;
+        min-height: 40px; display: flex; align-items: center; justify-content: center;
+    }
+    label { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 0.85em; cursor: pointer; }
+    input[type="checkbox"] { accent-color: #8af; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:20px;left:20px;color:#8af;text-decoration:none;z-index:100;font-size:1.2em">&#8592; Back</a>
+
+<canvas id="canvas"></canvas>
+
+<div id="controls">
+    <h3>Poincar&eacute; Disk Explorer</h3>
+    <div class="info-row">Click inside the disk to place points</div>
+    <div class="info-row">Two points &rarr; geodesic arc</div>
+    <div id="coords" class="info-row" style="margin-top:10px;">Point: --</div>
+    <div id="distance-display">Place two points to measure distance</div>
+    <label><input type="checkbox" id="showGrid" checked> Show reference grid</label>
+    <label><input type="checkbox" id="showLabels" checked> Show coordinates</label>
+    <div class="btn-row">
+        <button class="btn" id="clearBtn">Clear All</button>
+        <button class="btn" id="undoBtn">Undo</button>
+        <button class="btn" id="presetBtn">Preset Grid</button>
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H, cx, cy, diskR;
+let points = [];
+let geodesics = [];
+let pendingPoint = null;
+let hoverPos = null;
+let showGrid = true;
+let showLabels = true;
+let colorIndex = 0;
+
+const palette = [
+    '#ff6b9d', '#c084fc', '#60a5fa', '#34d399',
+    '#fbbf24', '#fb923c', '#f87171', '#a78bfa',
+    '#38bdf8', '#4ade80', '#facc15', '#f472b6'
+];
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cx = W / 2;
+    cy = H / 2;
+    diskR = Math.min(W, H) * 0.38;
+}
+resize();
+window.addEventListener('resize', resize);
+
+function toDisk(px, py) {
+    return { x: (px - cx) / diskR, y: (py - cy) / diskR };
+}
+
+function toCanvas(dx, dy) {
+    return { x: cx + dx * diskR, y: cy + dy * diskR };
+}
+
+function complexConj(z) { return { x: z.x, y: -z.y }; }
+function complexMul(a, b) { return { x: a.x*b.x - a.y*b.y, y: a.x*b.y + a.y*b.x }; }
+function complexDiv(a, b) {
+    const d = b.x*b.x + b.y*b.y;
+    return { x: (a.x*b.x + a.y*b.y)/d, y: (a.y*b.x - a.x*b.y)/d };
+}
+function norm2(z) { return z.x*z.x + z.y*z.y; }
+function dist2(a, b) { return (a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y); }
+
+function hyperbolicDistance(z1, z2) {
+    const n1 = norm2(z1), n2 = norm2(z2);
+    if (n1 >= 1 || n2 >= 1) return Infinity;
+    const d2 = dist2(z1, z2);
+    const val = 1 + 2 * d2 / ((1 - n1) * (1 - n2));
+    return Math.acosh(val);
+}
+
+function computeGeodesicArc(p1, p2) {
+    const cross = p1.x * p2.y - p1.y * p2.x;
+    if (Math.abs(cross) < 1e-8) {
+        return { type: 'line', p1, p2 };
+    }
+    const p1s = { x: p1.x / norm2(p1), y: -p1.y / norm2(p1) };
+    const ax = p2.x - p1.x, ay = p2.y - p1.y;
+    const bx = p1s.x - p1.x, by = p1s.y - p1.y;
+    const mx1 = (p1.x + p2.x)/2, my1 = (p1.y + p2.y)/2;
+    const mx2 = (p1.x + p1s.x)/2, my2 = (p1.y + p1s.y)/2;
+    const det = (-ay) * (-by) - (ax) * (bx);
+    if (Math.abs(det) < 1e-12) {
+        const det2 = ay * bx - ax * by;
+        if (Math.abs(det2) < 1e-12) return { type: 'line', p1, p2 };
+    }
+    const d1x = -ay, d1y = ax;
+    const d2x = -by, d2y = bx;
+    const dx = mx2 - mx1, dy = my2 - my1;
+    const det3 = d1x * d2y - d1y * d2x;
+    if (Math.abs(det3) < 1e-12) return { type: 'line', p1, p2 };
+    const t = (dx * d2y - dy * d2x) / det3;
+    const ccx = mx1 + t * d1x;
+    const ccy = my1 + t * d1y;
+    const r = Math.sqrt(dist2({x:ccx,y:ccy}, p1));
+    let a1 = Math.atan2(p1.y - ccy, p1.x - ccx);
+    let a2 = Math.atan2(p2.y - ccy, p2.x - ccx);
+    let diff = a2 - a1;
+    if (diff > Math.PI) diff -= 2*Math.PI;
+    if (diff < -Math.PI) diff += 2*Math.PI;
+    return { type: 'arc', center: {x:ccx, y:ccy}, radius: r, startAngle: a1, sweep: diff };
+}
+
+function drawGeodesic(geo, color, lineWidth) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth || 2;
+    ctx.beginPath();
+    if (geo.type === 'line') {
+        const scale = 2;
+        const dx = geo.p2.x - geo.p1.x, dy = geo.p2.y - geo.p1.y;
+        const len = Math.sqrt(dx*dx + dy*dy);
+        if (len < 1e-10) return;
+        const nx = dx/len, ny = dy/len;
+        const c1 = toCanvas(geo.p1.x - nx*scale, geo.p1.y - ny*scale);
+        const c2 = toCanvas(geo.p1.x + nx*scale, geo.p1.y + ny*scale);
+        ctx.moveTo(c1.x, c1.y);
+        ctx.lineTo(c2.x, c2.y);
+    } else {
+        const cc = toCanvas(geo.center.x, geo.center.y);
+        const r = geo.radius * diskR;
+        const endAngle = geo.startAngle + geo.sweep;
+        ctx.arc(cc.x, cc.y, r, geo.startAngle, endAngle, geo.sweep < 0);
+    }
+    ctx.stroke();
+}
+
+function drawDisk() {
+    const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, diskR);
+    gradient.addColorStop(0, 'rgba(15, 20, 40, 1)');
+    gradient.addColorStop(0.7, 'rgba(10, 15, 35, 1)');
+    gradient.addColorStop(0.95, 'rgba(20, 30, 60, 1)');
+    gradient.addColorStop(1, 'rgba(40, 60, 120, 0.3)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, diskR, 0, Math.PI * 2);
+    ctx.fillStyle = gradient;
+    ctx.fill();
+
+    for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, diskR + i, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(100, 160, 255, ${0.6 - i * 0.15})`;
+        ctx.lineWidth = 2 - i * 0.5;
+        ctx.stroke();
+    }
+    ctx.shadowColor = '#4488ff';
+    ctx.shadowBlur = 15;
+    ctx.beginPath();
+    ctx.arc(cx, cy, diskR, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(80, 140, 255, 0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+}
+
+function drawReferenceGrid() {
+    if (!showGrid) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, diskR - 1, 0, Math.PI * 2);
+    ctx.clip();
+
+    for (let i = 0; i < 8; i++) {
+        const angle = (i / 8) * Math.PI;
+        const p1 = { x: Math.cos(angle) * 0.99, y: Math.sin(angle) * 0.99 };
+        const p2 = { x: -p1.x, y: -p1.y };
+        const geo = computeGeodesicArc(p1, p2);
+        drawGeodesic(geo, 'rgba(60, 90, 140, 0.2)', 0.5);
+    }
+
+    const offsets = [0.3, 0.5, 0.7];
+    for (const off of offsets) {
+        for (let i = 0; i < 12; i++) {
+            const angle = (i / 12) * Math.PI * 2;
+            const px = off * Math.cos(angle);
+            const py = off * Math.sin(angle);
+            const perp = angle + Math.PI / 2;
+            const len = 0.3;
+            const p1 = { x: px + len * Math.cos(perp), y: py + len * Math.sin(perp) };
+            const p2 = { x: px - len * Math.cos(perp), y: py - len * Math.sin(perp) };
+            if (norm2(p1) < 0.99 && norm2(p2) < 0.99) {
+                const geo = computeGeodesicArc(p1, p2);
+                drawGeodesic(geo, 'rgba(60, 90, 140, 0.12)', 0.5);
+            }
+        }
+    }
+
+    for (const r of [0.3, 0.5, 0.7, 0.85]) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r * diskR, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(60, 90, 140, 0.15)';
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function drawPoint(p, color, label) {
+    const cp = toCanvas(p.x, p.y);
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(cp.x, cp.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.beginPath();
+    ctx.arc(cp.x, cp.y, 8, 0, Math.PI * 2);
+    ctx.strokeStyle = color.replace(')', ', 0.4)').replace('rgb', 'rgba');
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    if (showLabels && label) {
+        ctx.font = '11px monospace';
+        ctx.fillStyle = 'rgba(200, 220, 255, 0.7)';
+        ctx.fillText(label, cp.x + 12, cp.y - 8);
+    }
+}
+
+function render() {
+    ctx.clearRect(0, 0, W, H);
+    drawDisk();
+    drawReferenceGrid();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, diskR - 1, 0, Math.PI * 2);
+    ctx.clip();
+
+    for (let i = 0; i < geodesics.length; i++) {
+        const g = geodesics[i];
+        drawGeodesic(g.arc, g.color, 2.5);
+    }
+
+    if (pendingPoint && hoverPos) {
+        const hd = toDisk(hoverPos.x, hoverPos.y);
+        if (norm2(hd) < 1) {
+            const previewArc = computeGeodesicArc(pendingPoint, hd);
+            drawGeodesic(previewArc, 'rgba(255, 255, 255, 0.3)', 1);
+        }
+    }
+    ctx.restore();
+
+    for (let i = 0; i < geodesics.length; i++) {
+        const g = geodesics[i];
+        const label1 = `(${g.p1.x.toFixed(2)}, ${g.p1.y.toFixed(2)})`;
+        const label2 = `(${g.p2.x.toFixed(2)}, ${g.p2.y.toFixed(2)})`;
+        drawPoint(g.p1, g.color, showLabels ? label1 : null);
+        drawPoint(g.p2, g.color, showLabels ? label2 : null);
+    }
+
+    if (pendingPoint) {
+        const label = `(${pendingPoint.x.toFixed(2)}, ${pendingPoint.y.toFixed(2)})`;
+        drawPoint(pendingPoint, '#ffffff', showLabels ? label : null);
+    }
+
+    requestAnimationFrame(render);
+}
+
+canvas.addEventListener('mousemove', (e) => {
+    hoverPos = { x: e.clientX, y: e.clientY };
+    const d = toDisk(e.clientX, e.clientY);
+    if (norm2(d) < 1) {
+        const coordEl = document.getElementById('coords');
+        coordEl.innerHTML = `Point: <span>(${d.x.toFixed(3)}, ${d.y.toFixed(3)})</span>`;
+    }
+});
+
+canvas.addEventListener('click', (e) => {
+    const d = toDisk(e.clientX, e.clientY);
+    if (norm2(d) >= 0.98) return;
+
+    if (!pendingPoint) {
+        pendingPoint = d;
+    } else {
+        const arc = computeGeodesicArc(pendingPoint, d);
+        const color = palette[colorIndex % palette.length];
+        colorIndex++;
+        const hDist = hyperbolicDistance(pendingPoint, d);
+        geodesics.push({ p1: pendingPoint, p2: d, arc, color, dist: hDist });
+
+        const distEl = document.getElementById('distance-display');
+        distEl.innerHTML = `Hyperbolic distance: <span style="color:${color};font-weight:bold;">${hDist.toFixed(4)}</span>` +
+            `<br><span style="font-size:0.8em;color:#8a9ab0;">Euclidean: ${Math.sqrt(dist2(pendingPoint, d)).toFixed(4)}</span>`;
+        pendingPoint = null;
+    }
+});
+
+document.getElementById('clearBtn').addEventListener('click', () => {
+    points = [];
+    geodesics = [];
+    pendingPoint = null;
+    colorIndex = 0;
+    document.getElementById('distance-display').textContent = 'Place two points to measure distance';
+});
+
+document.getElementById('undoBtn').addEventListener('click', () => {
+    if (pendingPoint) {
+        pendingPoint = null;
+    } else if (geodesics.length > 0) {
+        geodesics.pop();
+        colorIndex = Math.max(0, colorIndex - 1);
+    }
+});
+
+document.getElementById('presetBtn').addEventListener('click', () => {
+    geodesics = [];
+    colorIndex = 0;
+    pendingPoint = null;
+    const presets = [
+        [{x:0, y:-0.8}, {x:0, y:0.8}],
+        [{x:-0.8, y:0}, {x:0.8, y:0}],
+        [{x:-0.6, y:-0.6}, {x:0.6, y:0.6}],
+        [{x:0.6, y:-0.6}, {x:-0.6, y:0.6}],
+        [{x:0.3, y:-0.7}, {x:-0.7, y:0.3}],
+        [{x:-0.3, y:-0.7}, {x:0.7, y:0.3}],
+    ];
+    for (const [p1, p2] of presets) {
+        const arc = computeGeodesicArc(p1, p2);
+        const color = palette[colorIndex % palette.length];
+        colorIndex++;
+        geodesics.push({ p1, p2, arc, color, dist: hyperbolicDistance(p1, p2) });
+    }
+});
+
+document.getElementById('showGrid').addEventListener('change', (e) => { showGrid = e.target.checked; });
+document.getElementById('showLabels').addEventListener('change', (e) => { showLabels = e.target.checked; });
+
+window.reset = function() {
+    points = [];
+    geodesics = [];
+    pendingPoint = null;
+    colorIndex = 0;
+    document.getElementById('distance-display').textContent = 'Place two points to measure distance';
+};
+
+render();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

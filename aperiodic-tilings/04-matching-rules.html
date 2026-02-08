@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matching Rules Explorer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+canvas { display: block; cursor: crosshair; }
+#controls {
+    position: fixed; top: 20px; right: 20px; z-index: 100;
+    background: rgba(10, 14, 30, 0.85); backdrop-filter: blur(10px);
+    border: 1px solid rgba(100, 140, 255, 0.3); border-radius: 12px;
+    padding: 18px; min-width: 240px; color: #c8d8ff;
+}
+#controls h3 { margin-bottom: 10px; color: #8af; font-size: 1em; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85em; }
+.ctrl-row span { color: #8aa; }
+.ctrl-row .val { color: #ffd866; font-weight: bold; }
+button.btn {
+    background: rgba(80, 120, 255, 0.2); border: 1px solid rgba(100, 140, 255, 0.4);
+    color: #8af; padding: 8px 14px; border-radius: 6px; cursor: pointer;
+    font-size: 0.85em; transition: all 0.2s; width: 100%; margin-bottom: 6px;
+}
+button.btn:hover { background: rgba(80, 120, 255, 0.4); }
+button.btn.active { background: rgba(80, 200, 120, 0.3); border-color: rgba(80, 200, 120, 0.5); color: #8f8; }
+.tile-picker { display: flex; gap: 8px; margin-bottom: 12px; }
+.tile-btn {
+    flex: 1; padding: 10px 8px; border-radius: 8px; cursor: pointer;
+    text-align: center; font-size: 0.8em; border: 2px solid transparent; transition: all 0.2s;
+}
+.tile-btn.kite { background: rgba(30, 80, 160, 0.5); color: #8bf; }
+.tile-btn.dart { background: rgba(160, 100, 20, 0.5); color: #fc8; }
+.tile-btn.selected { border-color: #fff; box-shadow: 0 0 12px rgba(255,255,255,0.3); }
+.msg { font-size: 0.75em; color: #7a9; line-height: 1.4; margin-top: 8px; padding: 8px; background: rgba(80,200,120,0.1); border-radius: 6px; }
+.section { border-top: 1px solid rgba(100, 140, 255, 0.15); padding-top: 10px; margin-top: 10px; }
+label { font-size: 0.8em; color: #8aa; display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 6px; }
+label input { accent-color: #8af; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:20px;left:20px;color:#8af;text-decoration:none;z-index:100;font-size:1.2em">&#8592; Back</a>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <h3>MATCHING RULES</h3>
+    <div class="tile-picker">
+        <div class="tile-btn kite selected" id="pickKite" onclick="selectTile('kite')">KITE</div>
+        <div class="tile-btn dart" id="pickDart" onclick="selectTile('dart')">DART</div>
+    </div>
+    <div class="ctrl-row"><span>Placed tiles:</span><span class="val" id="placedCount">0</span></div>
+    <div class="ctrl-row"><span>Score:</span><span class="val" id="score">0</span></div>
+    <button class="btn" id="hintBtn">Show Hint</button>
+    <button class="btn" id="undoBtn">Undo Last</button>
+    <button class="btn" id="startOverBtn">Start Over</button>
+    <div class="section">
+        <label><input type="checkbox" id="showArcs" checked> Matching arcs</label>
+        <label><input type="checkbox" id="showGrid"> Guide grid</label>
+    </div>
+    <div class="msg">The matching rules FORCE aperiodicity -- you cannot make a repeating pattern!</div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const PHI = (1 + Math.sqrt(5)) / 2;
+const INV_PHI = 1 / PHI;
+
+const SIDE = 60;
+let selectedTile = 'kite';
+let placedTiles = [];
+let ghostTile = null;
+let hintTile = null;
+let mouseX = 0, mouseY = 0;
+let camX = 0, camY = 0, camZoom = 1;
+let dragging = false, dragStartX, dragStartY, camStartX, camStartY;
+let rightDragging = false;
+let ghostAngle = 0;
+let scoreVal = 0;
+
+// Precomputed reference tiling for valid placements
+let refTriangles = [];
+let refTiles = [];
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function lerp(p1, p2, t) {
+    return [p1[0] + (p2[0] - p1[0]) * t, p1[1] + (p2[1] - p1[1]) * t];
+}
+
+function dist(a, b) {
+    return Math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2);
+}
+
+function rotatePoint(p, center, angle) {
+    let dx = p[0] - center[0], dy = p[1] - center[1];
+    let cos = Math.cos(angle), sin = Math.sin(angle);
+    return [center[0] + dx * cos - dy * sin, center[1] + dx * sin + dy * cos];
+}
+
+// Generate a reference Penrose tiling for snap validation
+function generateReferenceTiling() {
+    let tris = [];
+    for (let i = 0; i < 10; i++) {
+        let angle1 = (2 * Math.PI * i) / 10 - Math.PI / 2;
+        let angle2 = (2 * Math.PI * (i + 1)) / 10 - Math.PI / 2;
+        let r = 300;
+        let a = [0, 0];
+        let b = [r * Math.cos(angle1), r * Math.sin(angle1)];
+        let c = [r * Math.cos(angle2), r * Math.sin(angle2)];
+        if (i % 2 === 0) {
+            tris.push({ type: 'B', vertices: [a, b, c] });
+        } else {
+            tris.push({ type: 'B', vertices: [a, c, b] });
+        }
+    }
+    for (let i = 0; i < 5; i++) {
+        let newTris = [];
+        for (let t of tris) {
+            let [a, b, c] = t.vertices;
+            if (t.type === 'B') {
+                let p = lerp(a, c, INV_PHI);
+                let q = lerp(b, a, INV_PHI);
+                newTris.push({ type: 'B', vertices: [q, p, b] });
+                newTris.push({ type: 'B', vertices: [p, q, a] });
+                newTris.push({ type: 'A', vertices: [c, p, b] });
+            } else {
+                let p = lerp(b, a, INV_PHI);
+                newTris.push({ type: 'A', vertices: [p, c, a] });
+                newTris.push({ type: 'B', vertices: [c, p, b] });
+            }
+        }
+        tris = newTris;
+    }
+    refTriangles = tris;
+
+    // Pair into tiles
+    let edgeMap = new Map();
+    let paired = new Set();
+    refTiles = [];
+
+    function edgeKey(p1, p2) {
+        let ax = Math.round(p1[0] * 10) / 10;
+        let ay = Math.round(p1[1] * 10) / 10;
+        let bx = Math.round(p2[0] * 10) / 10;
+        let by = Math.round(p2[1] * 10) / 10;
+        if (ax < bx || (ax === bx && ay < by)) return `${ax},${ay}-${bx},${by}`;
+        return `${bx},${by}-${ax},${ay}`;
+    }
+
+    for (let i = 0; i < tris.length; i++) {
+        let t = tris[i];
+        let key = edgeKey(t.vertices[1], t.vertices[2]);
+        if (edgeMap.has(key)) {
+            let j = edgeMap.get(key);
+            if (!paired.has(j) && tris[j].type === t.type) {
+                let kind = t.type === 'B' ? 'kite' : 'dart';
+                refTiles.push({
+                    kind: kind,
+                    vertices: [t.vertices[0], t.vertices[1], tris[j].vertices[0], t.vertices[2]],
+                    center: [
+                        (t.vertices[0][0] + t.vertices[1][0] + tris[j].vertices[0][0] + t.vertices[2][0]) / 4,
+                        (t.vertices[0][1] + t.vertices[1][1] + tris[j].vertices[0][1] + t.vertices[2][1]) / 4
+                    ],
+                    placed: false
+                });
+                paired.add(i);
+                paired.add(j);
+            } else {
+                edgeMap.set(key, i);
+            }
+        } else {
+            edgeMap.set(key, i);
+        }
+    }
+}
+
+function selectTile(type) {
+    selectedTile = type;
+    document.getElementById('pickKite').classList.toggle('selected', type === 'kite');
+    document.getElementById('pickDart').classList.toggle('selected', type === 'dart');
+}
+
+function worldToScreen(x, y) {
+    return [(x - camX) * camZoom + canvas.width / 2, (y - camY) * camZoom + canvas.height / 2];
+}
+
+function screenToWorld(sx, sy) {
+    return [(sx - canvas.width / 2) / camZoom + camX, (sy - canvas.height / 2) / camZoom + camY];
+}
+
+function findNearestRefTile(wx, wy) {
+    let best = null, bestDist = 40;
+    for (let tile of refTiles) {
+        if (tile.placed) continue;
+        if (tile.kind !== selectedTile) continue;
+        let d = dist([wx, wy], tile.center);
+        if (d < bestDist) {
+            bestDist = d;
+            best = tile;
+        }
+    }
+    return best;
+}
+
+function findHintTile() {
+    // Find a tile adjacent to placed ones
+    if (placedTiles.length === 0) {
+        // Suggest center tile
+        for (let tile of refTiles) {
+            if (dist(tile.center, [0, 0]) < 30) return tile;
+        }
+        return refTiles[0];
+    }
+
+    for (let placed of placedTiles) {
+        for (let tile of refTiles) {
+            if (tile.placed) continue;
+            // Check if shares an edge
+            let shared = 0;
+            for (let v of tile.vertices) {
+                for (let pv of placed.vertices) {
+                    if (dist(v, pv) < 1) shared++;
+                }
+            }
+            if (shared >= 2) return tile;
+        }
+    }
+    return null;
+}
+
+function drawTileShape(vertices, fillColor, strokeColor, alpha, isGhost) {
+    if (!vertices || vertices.length < 3) return;
+    let [sx0, sy0] = worldToScreen(vertices[0][0], vertices[0][1]);
+    ctx.beginPath();
+    ctx.moveTo(sx0, sy0);
+    for (let i = 1; i < vertices.length; i++) {
+        let [sx, sy] = worldToScreen(vertices[i][0], vertices[i][1]);
+        ctx.lineTo(sx, sy);
+    }
+    ctx.closePath();
+
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = isGhost ? 2 : 1;
+    ctx.stroke();
+
+    if (document.getElementById('showArcs').checked && !isGhost) {
+        // Draw matching arcs at certain vertices
+        let r = 8 * camZoom;
+        if (r > 2) {
+            let [sx1, sy1] = worldToScreen(vertices[0][0], vertices[0][1]);
+            ctx.beginPath();
+            ctx.arc(sx1, sy1, r, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255, 100, 100, 0.7)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            if (vertices.length >= 3) {
+                let [sx2, sy2] = worldToScreen(vertices[2][0], vertices[2][1]);
+                ctx.beginPath();
+                ctx.arc(sx2, sy2, r * 0.6, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(100, 255, 100, 0.7)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+    }
+    ctx.globalAlpha = 1;
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw guide grid
+    if (document.getElementById('showGrid').checked) {
+        ctx.globalAlpha = 0.06;
+        for (let tile of refTiles) {
+            if (tile.placed) continue;
+            let [sx0, sy0] = worldToScreen(tile.vertices[0][0], tile.vertices[0][1]);
+            ctx.beginPath();
+            ctx.moveTo(sx0, sy0);
+            for (let i = 1; i < tile.vertices.length; i++) {
+                let [sx, sy] = worldToScreen(tile.vertices[i][0], tile.vertices[i][1]);
+                ctx.lineTo(sx, sy);
+            }
+            ctx.closePath();
+            ctx.strokeStyle = '#8af';
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // Draw placed tiles
+    for (let tile of placedTiles) {
+        let fillColor = tile.kind === 'kite' ? 'rgba(25, 60, 140, 0.9)' : 'rgba(160, 110, 20, 0.9)';
+        let strokeColor = tile.kind === 'kite' ? 'rgba(80, 150, 255, 0.6)' : 'rgba(255, 200, 80, 0.6)';
+        drawTileShape(tile.vertices, fillColor, strokeColor, 1, false);
+
+        // Glow
+        let [sx0, sy0] = worldToScreen(tile.vertices[0][0], tile.vertices[0][1]);
+        ctx.beginPath();
+        ctx.moveTo(sx0, sy0);
+        for (let i = 1; i < tile.vertices.length; i++) {
+            let [sx, sy] = worldToScreen(tile.vertices[i][0], tile.vertices[i][1]);
+            ctx.lineTo(sx, sy);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = tile.kind === 'kite' ? 'rgba(80, 150, 255, 0.15)' : 'rgba(255, 200, 80, 0.15)';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+    }
+
+    // Draw hint
+    if (hintTile) {
+        let [sx0, sy0] = worldToScreen(hintTile.vertices[0][0], hintTile.vertices[0][1]);
+        ctx.beginPath();
+        ctx.moveTo(sx0, sy0);
+        for (let i = 1; i < hintTile.vertices.length; i++) {
+            let [sx, sy] = worldToScreen(hintTile.vertices[i][0], hintTile.vertices[i][1]);
+            ctx.lineTo(sx, sy);
+        }
+        ctx.closePath();
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = 'rgba(100, 255, 150, 0.6)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(100, 255, 150, 0.1)';
+        ctx.fill();
+    }
+
+    // Draw ghost tile at cursor
+    if (ghostTile) {
+        let fillColor = ghostTile.kind === 'kite' ? 'rgba(25, 60, 140, 0.4)' : 'rgba(160, 110, 20, 0.4)';
+        let strokeColor = 'rgba(255, 255, 255, 0.5)';
+        drawTileShape(ghostTile.vertices, fillColor, strokeColor, 0.6, true);
+    }
+
+    requestAnimationFrame(draw);
+}
+
+canvas.addEventListener('mousemove', (e) => {
+    mouseX = e.clientX;
+    mouseY = e.clientY;
+
+    if (rightDragging) {
+        camX = camStartX - (e.clientX - dragStartX) / camZoom;
+        camY = camStartY - (e.clientY - dragStartY) / camZoom;
+        return;
+    }
+
+    let [wx, wy] = screenToWorld(e.clientX, e.clientY);
+    let nearest = findNearestRefTile(wx, wy);
+    if (nearest) {
+        ghostTile = { kind: nearest.kind, vertices: nearest.vertices };
+    } else {
+        ghostTile = null;
+    }
+});
+
+canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 2 || e.button === 1) {
+        rightDragging = true;
+        dragStartX = e.clientX; dragStartY = e.clientY;
+        camStartX = camX; camStartY = camY;
+        e.preventDefault();
+        return;
+    }
+
+    let [wx, wy] = screenToWorld(e.clientX, e.clientY);
+    let nearest = findNearestRefTile(wx, wy);
+    if (nearest) {
+        // Check adjacency if we have placed tiles
+        if (placedTiles.length > 0) {
+            let adjacent = false;
+            for (let placed of placedTiles) {
+                let shared = 0;
+                for (let v of nearest.vertices) {
+                    for (let pv of placed.vertices) {
+                        if (dist(v, pv) < 1.5) shared++;
+                    }
+                }
+                if (shared >= 2) { adjacent = true; break; }
+            }
+            if (!adjacent) return; // Must place adjacent to existing
+        }
+
+        nearest.placed = true;
+        placedTiles.push(nearest);
+        scoreVal += 10;
+        hintTile = null;
+        ghostTile = null;
+        updateStats();
+    }
+});
+
+canvas.addEventListener('mouseup', (e) => {
+    if (e.button === 2 || e.button === 1) rightDragging = false;
+});
+
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    let factor = e.deltaY > 0 ? 0.9 : 1.1;
+    let mx = (e.clientX - canvas.width / 2) / camZoom + camX;
+    let my = (e.clientY - canvas.height / 2) / camZoom + camY;
+    camZoom *= factor;
+    camZoom = Math.max(0.2, Math.min(10, camZoom));
+    camX = mx - (e.clientX - canvas.width / 2) / camZoom;
+    camY = my - (e.clientY - canvas.height / 2) / camZoom;
+}, { passive: false });
+
+function updateStats() {
+    document.getElementById('placedCount').textContent = placedTiles.length;
+    document.getElementById('score').textContent = scoreVal;
+}
+
+document.getElementById('hintBtn').addEventListener('click', () => {
+    hintTile = findHintTile();
+    if (hintTile) {
+        selectTile(hintTile.kind);
+    }
+});
+
+document.getElementById('undoBtn').addEventListener('click', () => {
+    if (placedTiles.length > 0) {
+        let last = placedTiles.pop();
+        last.placed = false;
+        scoreVal = Math.max(0, scoreVal - 5);
+        hintTile = null;
+        updateStats();
+    }
+});
+
+document.getElementById('startOverBtn').addEventListener('click', () => {
+    window.reset();
+});
+
+window.reset = function() {
+    for (let tile of refTiles) tile.placed = false;
+    placedTiles = [];
+    ghostTile = null;
+    hintTile = null;
+    scoreVal = 0;
+    camX = 0; camY = 0; camZoom = 1;
+    updateStats();
+};
+
+generateReferenceTiling();
+updateStats();
+requestAnimationFrame(draw);
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

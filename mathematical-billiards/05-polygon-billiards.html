@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Polygon Billiards - Regular & Irregular</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; color: #c8d8e8; }
+canvas { display: block; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+#controls {
+  position: fixed; top: 20px; right: 20px; z-index: 100;
+  background: rgba(10,14,30,0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(120,160,255,0.15); border-radius: 12px;
+  padding: 16px 20px; min-width: 230px;
+}
+#controls h3 { color: #8af; margin-bottom: 10px; font-size: 0.95em; text-transform: uppercase; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; }
+.ctrl-row label { display: block; font-size: 0.8em; color: #8ab; margin-bottom: 3px; }
+.ctrl-row input[type=range] { width: 100%; accent-color: #6af; }
+.ctrl-row .val { float: right; font-size: 0.8em; color: #adf; }
+.btn { background: rgba(100,160,255,0.15); border: 1px solid rgba(100,160,255,0.3); color: #8af; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8em; margin: 2px; }
+.btn:hover { background: rgba(100,160,255,0.3); }
+.btn.active { background: rgba(100,200,150,0.25); border-color: rgba(100,200,150,0.5); color: #8fa; }
+#stats { position: fixed; bottom: 20px; left: 20px; z-index: 100; font-size: 0.85em; color: #6a8; background: rgba(10,14,30,0.6); backdrop-filter: blur(10px); padding: 8px 14px; border-radius: 8px; }
+.preset-row { margin-top: 6px; }
+</style>
+</head>
+<body>
+<a href="index.html">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+  <h3>Polygon Billiards</h3>
+  <div class="ctrl-row">
+    <label>Sides <span class="val" id="vSides">6</span></label>
+    <input type="range" id="sSides" min="3" max="20" step="1" value="6">
+  </div>
+  <div class="ctrl-row">
+    <label>Speed <span class="val" id="vSpeed">3</span></label>
+    <input type="range" id="sSpeed" min="1" max="10" step="0.5" value="3">
+  </div>
+  <div class="ctrl-row">
+    <label>Trail Length <span class="val" id="vTrail">4000</span></label>
+    <input type="range" id="sTrail" min="100" max="15000" step="100" value="4000">
+  </div>
+  <div style="margin-top:10px;">
+    <button class="btn" id="bDrag">Drag Vertices</button>
+    <button class="btn" id="bRegular">Reset Regular</button>
+  </div>
+  <div class="preset-row">
+    <span style="font-size:0.72em; color:#6a8;">Star orbits:</span><br>
+    <button class="btn" id="pStar">Star</button>
+    <button class="btn" id="pEveryOther">Every-other-edge</button>
+    <button class="btn" id="pRandom">Random</button>
+  </div>
+  <div style="margin-top:8px; font-size:0.72em; color:#6a8;">Click inside + drag for ball direction.</div>
+</div>
+<div id="stats">Bounces: <span id="bounceCount">0</span> | <span id="periodic">--</span></div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, cx, cy, R;
+let numSides = 6;
+let verts = [];
+let ball = { x: 0, y: 0, vx: 0, vy: 0 };
+let trail = [];
+let maxTrail = 4000;
+let speed = 3;
+let bounces = 0;
+let paused = false;
+let dragMode = false;
+let dragVert = -1;
+let draggingBall = false, dragStart = null;
+let periodicCheckPositions = [];
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  cx = W / 2; cy = H / 2;
+  R = Math.min(W, H) * 0.36;
+}
+
+function makeRegular(n) {
+  verts = [];
+  for (let i = 0; i < n; i++) {
+    const ang = -Math.PI / 2 + (i * 2 * Math.PI / n);
+    verts.push({ x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang) });
+  }
+}
+
+function centroid() {
+  let sx = 0, sy = 0;
+  for (const v of verts) { sx += v.x; sy += v.y; }
+  return { x: sx / verts.length, y: sy / verts.length };
+}
+
+function pointInPolygon(px, py) {
+  let inside = false;
+  const n = verts.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = verts[i].x, yi = verts[i].y;
+    const xj = verts[j].x, yj = verts[j].y;
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function segIntersect(px, py, dx, dy, ax, ay, bx, by) {
+  const ex = bx - ax, ey = by - ay;
+  const denom = dx * ey - dy * ex;
+  if (Math.abs(denom) < 1e-12) return Infinity;
+  const t = ((ax - px) * ey - (ay - py) * ex) / denom;
+  const u = ((ax - px) * dy - (ay - py) * dx) / denom;
+  if (u >= 0 && u <= 1 && t > 0.001) return t;
+  return Infinity;
+}
+
+function edgeOutNormal(i) {
+  const a = verts[i], b = verts[(i + 1) % verts.length];
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  let nx = -dy / len, ny = dx / len;
+  // Ensure outward (away from centroid)
+  const c = centroid();
+  const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+  if (nx * (c.x - mx) + ny * (c.y - my) > 0) {
+    nx = -nx; ny = -ny;
+  }
+  return { x: nx, y: ny };
+}
+
+resize();
+makeRegular(numSides);
+
+function initBall() {
+  trail = []; bounces = 0;
+  periodicCheckPositions = [];
+  const c = centroid();
+  ball.x = c.x + (Math.random() - 0.5) * R * 0.3;
+  ball.y = c.y + (Math.random() - 0.5) * R * 0.3;
+  const ang = Math.random() * Math.PI * 2;
+  ball.vx = Math.cos(ang);
+  ball.vy = Math.sin(ang);
+  trail.push({ x: ball.x, y: ball.y });
+}
+
+function launchStar() {
+  trail = []; bounces = 0; periodicCheckPositions = [];
+  const n = verts.length;
+  // Aim from midpoint of edge 0 toward midpoint of edge floor(n/2)
+  const a0 = verts[0], b0 = verts[1];
+  const skip = Math.floor(n / 2);
+  const a1 = verts[skip], b1 = verts[(skip + 1) % n];
+  ball.x = (a0.x + b0.x) / 2;
+  ball.y = (a0.y + b0.y) / 2;
+  const tx = (a1.x + b1.x) / 2, ty = (a1.y + b1.y) / 2;
+  const dx = tx - ball.x, dy = ty - ball.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  ball.vx = dx / len; ball.vy = dy / len;
+  // Nudge inward
+  const n0 = edgeOutNormal(0);
+  ball.x -= n0.x * 2; ball.y -= n0.y * 2;
+  trail.push({ x: ball.x, y: ball.y });
+}
+
+function launchEveryOther() {
+  trail = []; bounces = 0; periodicCheckPositions = [];
+  const n = verts.length;
+  if (n % 2 !== 0) { initBall(); return; }
+  // Aim from midpoint of edge 0 toward midpoint of edge 2
+  const a0 = verts[0], b0 = verts[1];
+  const a2 = verts[2], b2 = verts[3];
+  ball.x = (a0.x + b0.x) / 2;
+  ball.y = (a0.y + b0.y) / 2;
+  const tx = (a2.x + b2.x) / 2, ty = (a2.y + b2.y) / 2;
+  const dx = tx - ball.x, dy = ty - ball.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  ball.vx = dx / len; ball.vy = dy / len;
+  const n0 = edgeOutNormal(0);
+  ball.x -= n0.x * 2; ball.y -= n0.y * 2;
+  trail.push({ x: ball.x, y: ball.y });
+}
+
+initBall();
+
+function checkPeriodic() {
+  // Record position every N bounces, check if it returns near start
+  if (bounces > 0 && bounces % verts.length === 0) {
+    periodicCheckPositions.push({ x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy });
+    if (periodicCheckPositions.length >= 2) {
+      const first = periodicCheckPositions[0];
+      const last = periodicCheckPositions[periodicCheckPositions.length - 1];
+      const dx = last.x - first.x, dy = last.y - first.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 5) {
+        document.getElementById('periodic').textContent = 'Periodic orbit detected!';
+        return;
+      }
+    }
+  }
+  if (bounces > 200) {
+    document.getElementById('periodic').textContent = 'Dense trajectory';
+  } else {
+    document.getElementById('periodic').textContent = `Checking periodicity...`;
+  }
+}
+
+function update() {
+  if (paused) return;
+  const n = verts.length;
+  for (let s = 0; s < speed * 2; s++) {
+    let minT = Infinity, hitEdge = -1;
+    for (let i = 0; i < n; i++) {
+      const a = verts[i], b = verts[(i + 1) % n];
+      const t = segIntersect(ball.x, ball.y, ball.vx, ball.vy, a.x, a.y, b.x, b.y);
+      if (t < minT) { minT = t; hitEdge = i; }
+    }
+    const step = Math.min(2, minT - 0.1);
+    if (step > 0.01) {
+      ball.x += ball.vx * step;
+      ball.y += ball.vy * step;
+    }
+    if (minT < 2.5 && hitEdge >= 0) {
+      ball.x += ball.vx * (minT - 0.5);
+      ball.y += ball.vy * (minT - 0.5);
+      const norm = edgeOutNormal(hitEdge);
+      const dot = ball.vx * norm.x + ball.vy * norm.y;
+      ball.vx -= 2 * dot * norm.x;
+      ball.vy -= 2 * dot * norm.y;
+      ball.x -= norm.x * 0.5;
+      ball.y -= norm.y * 0.5;
+      bounces++;
+      checkPeriodic();
+    }
+    trail.push({ x: ball.x, y: ball.y });
+    if (trail.length > maxTrail) trail.shift();
+  }
+  document.getElementById('bounceCount').textContent = bounces;
+}
+
+function draw() {
+  ctx.fillStyle = 'rgba(10,14,30,0.16)';
+  ctx.fillRect(0, 0, W, H);
+
+  const n = verts.length;
+  const hueBase = 200 + (n - 3) * 8;
+
+  // Polygon with glow
+  ctx.shadowColor = `hsl(${hueBase}, 70%, 50%)`;
+  ctx.shadowBlur = 12;
+  ctx.beginPath();
+  ctx.moveTo(verts[0].x, verts[0].y);
+  for (let i = 1; i < n; i++) ctx.lineTo(verts[i].x, verts[i].y);
+  ctx.closePath();
+  ctx.strokeStyle = `hsla(${hueBase}, 60%, 55%, 0.4)`;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Subtle fill
+  ctx.fillStyle = `hsla(${hueBase}, 40%, 15%, 0.08)`;
+  ctx.fill();
+
+  // Vertex handles in drag mode
+  if (dragMode) {
+    for (let i = 0; i < n; i++) {
+      ctx.beginPath();
+      ctx.arc(verts[i].x, verts[i].y, 8, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(200,220,255,0.15)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(200,220,255,0.4)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+  }
+
+  // Trail with gradient
+  if (trail.length > 1) {
+    const len = trail.length;
+    for (let i = 1; i < len; i++) {
+      const t = i / len;
+      const hue = hueBase - 40 + t * 80;
+      ctx.beginPath();
+      ctx.moveTo(trail[i - 1].x, trail[i - 1].y);
+      ctx.lineTo(trail[i].x, trail[i].y);
+      ctx.strokeStyle = `hsla(${hue % 360}, 75%, 60%, ${t * 0.65})`;
+      ctx.lineWidth = 0.8 + t * 1.5;
+      ctx.stroke();
+    }
+  }
+
+  // Ball
+  ctx.shadowColor = '#88ccff';
+  ctx.shadowBlur = 18;
+  ctx.beginPath();
+  ctx.arc(ball.x, ball.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#bbddff';
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Side count label
+  ctx.fillStyle = 'rgba(200,220,255,0.25)';
+  ctx.font = '13px sans-serif';
+  ctx.fillText(`${n}-gon`, cx - 15, cy + R + 30);
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Controls
+document.getElementById('sSides').addEventListener('input', function() {
+  numSides = parseInt(this.value);
+  document.getElementById('vSides').textContent = numSides;
+  makeRegular(numSides);
+  initBall();
+  ctx.clearRect(0, 0, W, H);
+});
+document.getElementById('sSpeed').addEventListener('input', function() {
+  speed = parseFloat(this.value);
+  document.getElementById('vSpeed').textContent = speed;
+});
+document.getElementById('sTrail').addEventListener('input', function() {
+  maxTrail = parseInt(this.value);
+  document.getElementById('vTrail').textContent = maxTrail;
+});
+document.getElementById('bDrag').addEventListener('click', function() {
+  dragMode = !dragMode;
+  this.classList.toggle('active');
+});
+document.getElementById('bRegular').addEventListener('click', function() {
+  makeRegular(numSides);
+  initBall();
+  ctx.clearRect(0, 0, W, H);
+});
+document.getElementById('pStar').addEventListener('click', launchStar);
+document.getElementById('pEveryOther').addEventListener('click', launchEveryOther);
+document.getElementById('pRandom').addEventListener('click', function() { initBall(); ctx.clearRect(0, 0, W, H); });
+
+// Mouse interaction
+canvas.addEventListener('mousedown', function(e) {
+  if (dragMode) {
+    for (let i = 0; i < verts.length; i++) {
+      const dx = e.clientX - verts[i].x, dy = e.clientY - verts[i].y;
+      if (dx * dx + dy * dy < 400) { dragVert = i; return; }
+    }
+  }
+  if (pointInPolygon(e.clientX, e.clientY)) {
+    draggingBall = true;
+    dragStart = { x: e.clientX, y: e.clientY };
+  }
+});
+canvas.addEventListener('mousemove', function(e) {
+  if (dragVert >= 0) {
+    verts[dragVert].x = e.clientX;
+    verts[dragVert].y = e.clientY;
+  }
+});
+canvas.addEventListener('mouseup', function(e) {
+  if (dragVert >= 0) {
+    dragVert = -1;
+    if (!pointInPolygon(ball.x, ball.y)) initBall();
+  }
+  if (draggingBall && dragStart) {
+    const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len > 5) {
+      trail = []; bounces = 0; periodicCheckPositions = [];
+      ball.x = dragStart.x; ball.y = dragStart.y;
+      ball.vx = dx / len; ball.vy = dy / len;
+      trail.push({ x: ball.x, y: ball.y });
+      ctx.clearRect(0, 0, W, H);
+    }
+    draggingBall = false; dragStart = null;
+  }
+});
+
+window.addEventListener('resize', function() {
+  const oldCx = cx, oldCy = cy;
+  resize();
+  const dx = cx - oldCx, dy = cy - oldCy;
+  for (const v of verts) { v.x += dx; v.y += dy; }
+  ball.x += dx; ball.y += dy;
+  for (const p of trail) { p.x += dx; p.y += dy; }
+});
+window.addEventListener('keydown', function(e) {
+  if (e.code === 'Space') { e.preventDefault(); paused = !paused; }
+});
+
+window.reset = function() {
+  makeRegular(numSides);
+  initBall();
+  ctx.clearRect(0, 0, W, H);
+};
+
+requestAnimationFrame(loop);
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lyapunov Exponents - Quantifying Chaos</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; color: #c8d8e8; }
+canvas { display: block; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+#controls {
+  position: fixed; top: 20px; right: 20px; z-index: 100;
+  background: rgba(10, 14, 30, 0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(120, 160, 255, 0.15); border-radius: 12px;
+  padding: 16px 20px; min-width: 220px;
+}
+#controls h3 { color: #8af; margin-bottom: 10px; font-size: 0.95em; text-transform: uppercase; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; }
+.ctrl-row label { display: block; font-size: 0.8em; color: #8ab; margin-bottom: 3px; }
+.ctrl-row input[type=range] { width: 100%; accent-color: #6af; }
+.ctrl-row .val { float: right; font-size: 0.8em; color: #adf; }
+.btn { background: rgba(100,160,255,0.15); border: 1px solid rgba(100,160,255,0.3); color: #8af; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8em; margin: 2px; }
+.btn:hover { background: rgba(100,160,255,0.3); }
+.btn.active { background: rgba(100,200,150,0.25); border-color: rgba(100,200,150,0.5); color: #8fa; }
+#info { position: fixed; bottom: 20px; left: 20px; right: 20px; z-index: 100; font-size: 0.8em; color: #7a9ab8; background: rgba(10,14,30,0.7); backdrop-filter: blur(10px); padding: 10px 16px; border-radius: 8px; text-align: center; max-width: 700px; margin: 0 auto; }
+#lyapValue {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  z-index: 90; font-size: 1.4em; font-weight: bold; padding: 10px 20px;
+  background: rgba(10,14,30,0.7); backdrop-filter: blur(10px); border-radius: 10px;
+  border: 1px solid rgba(120,160,255,0.2); pointer-events: none; text-align: center;
+  display: none;
+}
+.divider { width: 100%; height: 1px; background: rgba(120,160,255,0.15); margin: 10px 0; }
+</style>
+</head>
+<body>
+<a href="index.html">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+  <h3>Lyapunov Exponents</h3>
+  <div class="ctrl-row">
+    <label>Table Shape</label>
+    <div>
+      <button class="btn" data-shape="circle">Circle</button>
+      <button class="btn active" data-shape="stadium">Stadium</button>
+      <button class="btn" data-shape="sinai">Sinai</button>
+      <button class="btn" data-shape="mushroom">Mushroom</button>
+    </div>
+  </div>
+  <div class="ctrl-row">
+    <label>Initial Separation (log10) <span class="val" id="vEps">-3</span></label>
+    <input type="range" id="sEps" min="-6" max="-1" step="1" value="-3">
+  </div>
+  <div class="ctrl-row">
+    <label>Ball Speed <span class="val" id="vSpeed">3</span></label>
+    <input type="range" id="sSpeed" min="1" max="10" step="1" value="3">
+  </div>
+  <div class="ctrl-row">
+    <label>Trials <span class="val" id="vTrials">1</span></label>
+    <input type="range" id="sTrials" min="1" max="5" step="1" value="1">
+  </div>
+  <div class="divider"></div>
+  <div>
+    <button class="btn" id="bReset">Reset & Re-run</button>
+    <button class="btn" id="bAddTrial">Add Trial</button>
+  </div>
+</div>
+<div id="lyapValue"></div>
+<div id="info">The Lyapunov exponent measures the rate of separation of infinitesimally close trajectories. A positive value (&lambda; > 0) is the mathematical definition of chaos.</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+let shape = 'stadium';
+let epsilon = 1e-3;
+let ballSpeed = 3;
+let numTrials = 1;
+let paused = false;
+let trials = [];
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function getR() { return Math.min(W * 0.22, H * 0.35); }
+
+function isInside(shape, x, y, R) {
+  if (shape === 'circle') return x * x + y * y < R * R;
+  if (shape === 'stadium') {
+    const straight = R * 0.5, r = R * 0.5;
+    if (x >= -straight && x <= straight && Math.abs(y) <= r) return true;
+    if (x > straight) return (x - straight) * (x - straight) + y * y < r * r;
+    if (x < -straight) return (x + straight) * (x + straight) + y * y < r * r;
+    return false;
+  }
+  if (shape === 'sinai') {
+    const s = R * 0.85;
+    const innerR = R * 0.25;
+    return Math.abs(x) < s && Math.abs(y) < s && x * x + y * y > innerR * innerR;
+  }
+  if (shape === 'mushroom') {
+    const r = R * 0.7, capCy = -R * 0.1;
+    const stemW = R * 0.3, stemBottom = capCy + R * 0.8;
+    const inCap = (x * x + (y - capCy) * (y - capCy) < r * r) && y < capCy;
+    const inStem = Math.abs(x) < stemW && y >= capCy && y < stemBottom;
+    return inCap || inStem;
+  }
+  return false;
+}
+
+function getNormal(shape, x, y, R) {
+  if (shape === 'circle') {
+    const len = Math.sqrt(x * x + y * y);
+    return { nx: -x / len, ny: -y / len };
+  }
+  if (shape === 'stadium') {
+    const straight = R * 0.5;
+    if (x > straight) {
+      const dx = x - straight, dy = y;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      return { nx: -dx / len, ny: -dy / len };
+    }
+    if (x < -straight) {
+      const dx = x + straight, dy = y;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      return { nx: -dx / len, ny: -dy / len };
+    }
+    return y > 0 ? { nx: 0, ny: -1 } : { nx: 0, ny: 1 };
+  }
+  if (shape === 'sinai') {
+    const s = R * 0.85, innerR = R * 0.25;
+    const distC = Math.sqrt(x * x + y * y);
+    if (distC < innerR + 3) return { nx: x / distC, ny: y / distC };
+    if (Math.abs(x - s) < 3) return { nx: -1, ny: 0 };
+    if (Math.abs(x + s) < 3) return { nx: 1, ny: 0 };
+    if (Math.abs(y - s) < 3) return { nx: 0, ny: -1 };
+    return { nx: 0, ny: 1 };
+  }
+  if (shape === 'mushroom') {
+    const r = R * 0.7, capCy = -R * 0.1;
+    const dx = x, dy = y - capCy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dy < 0 && dist > r * 0.9) return { nx: -dx / dist, ny: -dy / dist };
+    const stemW = R * 0.3, stemBottom = capCy + R * 0.8;
+    if (Math.abs(y - stemBottom) < 3) return { nx: 0, ny: -1 };
+    if (x > 0) return { nx: -1, ny: 0 };
+    return { nx: 1, ny: 0 };
+  }
+  return { nx: 0, ny: -1 };
+}
+
+function reflect(vx, vy, nx, ny) {
+  const dot = vx * nx + vy * ny;
+  return { vx: vx - 2 * dot * nx, vy: vy - 2 * dot * ny };
+}
+
+function stepBall(ball, R) {
+  ball.x += ball.vx;
+  ball.y += ball.vy;
+  if (!isInside(shape, ball.x, ball.y, R)) {
+    ball.x -= ball.vx;
+    ball.y -= ball.vy;
+    let lo = 0, hi = 1;
+    for (let i = 0; i < 20; i++) {
+      const mid = (lo + hi) / 2;
+      if (isInside(shape, ball.x + ball.vx * mid, ball.y + ball.vy * mid, R)) lo = mid;
+      else hi = mid;
+    }
+    ball.x += ball.vx * lo;
+    ball.y += ball.vy * lo;
+    const n = getNormal(shape, ball.x, ball.y, R);
+    const ref = reflect(ball.vx, ball.vy, n.nx, n.ny);
+    ball.vx = ref.vx;
+    ball.vy = ref.vy;
+    ball.x += ball.vx * (1 - lo);
+    ball.y += ball.vy * (1 - lo);
+    ball.bounces++;
+  }
+  ball.trail.push({ x: ball.x, y: ball.y });
+  if (ball.trail.length > 800) ball.trail.shift();
+}
+
+function createTrial(index) {
+  const R = getR();
+  const angle = 0.3 + index * 0.7;
+  let sx, sy;
+  if (shape === 'sinai') {
+    sx = R * 0.4;
+    sy = R * 0.4;
+  } else {
+    sx = R * 0.1;
+    sy = R * 0.1;
+  }
+  const spd = 1.5;
+  const ball1 = {
+    x: sx, y: sy,
+    vx: spd * Math.cos(angle), vy: spd * Math.sin(angle),
+    trail: [{ x: sx, y: sy }], bounces: 0
+  };
+  const ball2 = {
+    x: sx + epsilon * Math.cos(angle + 0.1),
+    y: sy + epsilon * Math.sin(angle + 0.1),
+    vx: spd * Math.cos(angle), vy: spd * Math.sin(angle),
+    trail: [{ x: sx + epsilon, y: sy }], bounces: 0
+  };
+  return {
+    ball1, ball2,
+    distances: [],
+    times: [],
+    lyapunov: 0,
+    color1: index === 0 ? '#ff6b6b' : `hsl(${index * 80}, 70%, 60%)`,
+    color2: index === 0 ? '#339af0' : `hsl(${index * 80 + 40}, 70%, 60%)`
+  };
+}
+
+function initTrials() {
+  trials = [];
+  for (let i = 0; i < numTrials; i++) {
+    trials.push(createTrial(i));
+  }
+}
+
+function drawTable(cx, cy, R) {
+  ctx.strokeStyle = 'rgba(120,180,255,0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (shape === 'circle') {
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  } else if (shape === 'stadium') {
+    const straight = R * 0.5, r = R * 0.5;
+    ctx.arc(cx + straight, cy, r, -Math.PI / 2, Math.PI / 2);
+    ctx.lineTo(cx - straight, cy + r);
+    ctx.arc(cx - straight, cy, r, Math.PI / 2, 3 * Math.PI / 2);
+    ctx.lineTo(cx + straight, cy - r);
+  } else if (shape === 'sinai') {
+    const s = R * 0.85;
+    ctx.rect(cx - s, cy - s, 2 * s, 2 * s);
+    ctx.moveTo(cx + R * 0.25, cy);
+    ctx.arc(cx, cy, R * 0.25, 0, Math.PI * 2, true);
+  } else if (shape === 'mushroom') {
+    const r = R * 0.7;
+    ctx.arc(cx, cy - R * 0.1, r, Math.PI, 2 * Math.PI);
+    const stemW = R * 0.3, stemH = R * 0.8;
+    ctx.lineTo(cx + stemW, cy - R * 0.1);
+    ctx.lineTo(cx + stemW, cy - R * 0.1 + stemH);
+    ctx.lineTo(cx - stemW, cy - R * 0.1 + stemH);
+    ctx.lineTo(cx - stemW, cy - R * 0.1);
+    ctx.closePath();
+  }
+  ctx.stroke();
+}
+
+function drawGraph() {
+  const graphX = W * 0.52;
+  const graphW = W * 0.42;
+  const graphY = 60;
+  const graphH = H * 0.42;
+  const margin = 40;
+
+  // Background
+  ctx.fillStyle = 'rgba(10,14,30,0.4)';
+  ctx.fillRect(graphX, graphY, graphW, graphH);
+
+  // Axes
+  ctx.strokeStyle = 'rgba(120,180,255,0.3)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(graphX + margin, graphY + 10);
+  ctx.lineTo(graphX + margin, graphY + graphH - 10);
+  ctx.lineTo(graphX + graphW - 10, graphY + graphH - 10);
+  ctx.stroke();
+
+  // Labels
+  ctx.fillStyle = '#8af';
+  ctx.font = 'bold 12px Segoe UI';
+  ctx.textAlign = 'center';
+  ctx.fillText('log(distance) vs. bounces', graphX + graphW / 2, graphY + 15);
+
+  ctx.fillStyle = '#6a8ab8';
+  ctx.font = '10px Segoe UI';
+  ctx.fillText('bounces', graphX + graphW / 2, graphY + graphH);
+  ctx.save();
+  ctx.translate(graphX + 12, graphY + graphH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('log(d)', 0, 0);
+  ctx.restore();
+
+  // Plot data
+  const plotX = graphX + margin + 5;
+  const plotW = graphW - margin - 15;
+  const plotY = graphY + 25;
+  const plotH = graphH - 45;
+
+  for (const trial of trials) {
+    if (trial.distances.length < 2) continue;
+    const logDists = trial.distances.map(d => Math.log(Math.max(d, 1e-20)));
+    const minLog = Math.min(...logDists);
+    const maxLog = Math.max(...logDists);
+    const range = maxLog - minLog || 1;
+    const n = logDists.length;
+
+    ctx.strokeStyle = trial.color1;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = plotX + (i / Math.max(n - 1, 1)) * plotW;
+      const y = plotY + plotH - ((logDists[i] - minLog) / range) * plotH;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Linear fit line for Lyapunov estimate
+    if (n > 10) {
+      let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+      for (let i = 0; i < n; i++) {
+        sumX += i; sumY += logDists[i];
+        sumXY += i * logDists[i]; sumX2 += i * i;
+      }
+      const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+      const intercept = (sumY - slope * sumX) / n;
+      trial.lyapunov = slope;
+
+      ctx.strokeStyle = 'rgba(255,255,100,0.4)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      const y0 = plotY + plotH - ((intercept - minLog) / range) * plotH;
+      const y1 = plotY + plotH - ((intercept + slope * (n - 1) - minLog) / range) * plotH;
+      ctx.moveTo(plotX, y0);
+      ctx.lineTo(plotX + plotW, y1);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // Lyapunov value display
+  const lyapEl = document.getElementById('lyapValue');
+  if (trials.length > 0 && trials[0].distances.length > 20) {
+    const avgLyap = trials.reduce((s, t) => s + t.lyapunov, 0) / trials.length;
+    const isChao = avgLyap > 0.001;
+    lyapEl.style.display = 'block';
+    lyapEl.style.color = isChao ? '#ff6b6b' : '#339af0';
+    lyapEl.style.borderColor = isChao ? 'rgba(255,100,100,0.3)' : 'rgba(50,150,240,0.3)';
+    lyapEl.innerHTML = `&lambda; &approx; ${avgLyap.toFixed(4)}<br><span style="font-size:0.7em">${isChao ? 'CHAOTIC (&lambda; > 0)' : 'REGULAR (&lambda; &approx; 0)'}</span>`;
+    lyapEl.style.top = '55%';
+    lyapEl.style.left = '73%';
+  } else {
+    lyapEl.style.display = 'none';
+  }
+
+  // Bounces graph (bottom half of right panel)
+  const graph2Y = graphY + graphH + 30;
+  const graph2H = H - graph2Y - 80;
+  if (graph2H < 100) return;
+
+  ctx.fillStyle = 'rgba(10,14,30,0.4)';
+  ctx.fillRect(graphX, graph2Y, graphW, graph2H);
+
+  ctx.fillStyle = '#8af';
+  ctx.font = 'bold 12px Segoe UI';
+  ctx.textAlign = 'center';
+  ctx.fillText('Distance Between Trajectories vs. Time', graphX + graphW / 2, graph2Y + 15);
+
+  const p2X = graphX + margin + 5;
+  const p2W = graphW - margin - 15;
+  const p2Y = graph2Y + 25;
+  const p2H = graph2H - 40;
+
+  for (const trial of trials) {
+    if (trial.distances.length < 2) continue;
+    const maxD = Math.max(...trial.distances);
+    const n = trial.distances.length;
+
+    ctx.strokeStyle = trial.color2;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = p2X + (i / Math.max(n - 1, 1)) * p2W;
+      const y = p2Y + p2H - (trial.distances[i] / (maxD || 1)) * p2H;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = '#6a8ab8';
+  ctx.font = '10px Segoe UI';
+  ctx.textAlign = 'center';
+  ctx.fillText('time steps', graphX + graphW / 2, graph2Y + graph2H - 2);
+}
+
+function draw() {
+  ctx.fillStyle = '#0a0e1a';
+  ctx.fillRect(0, 0, W, H);
+
+  const R = getR();
+  const tableCx = W * 0.24;
+  const tableCy = H * 0.5;
+
+  if (!paused) {
+    for (let s = 0; s < ballSpeed; s++) {
+      for (const trial of trials) {
+        stepBall(trial.ball1, R);
+        stepBall(trial.ball2, R);
+        const dx = trial.ball1.x - trial.ball2.x;
+        const dy = trial.ball1.y - trial.ball2.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        trial.distances.push(dist);
+        trial.times.push(trial.distances.length);
+        if (trial.distances.length > 2000) {
+          trial.distances.shift();
+          trial.times.shift();
+        }
+      }
+    }
+  }
+
+  // Draw table
+  drawTable(tableCx, tableCy, R);
+  ctx.fillStyle = '#8af';
+  ctx.font = 'bold 13px Segoe UI';
+  ctx.textAlign = 'center';
+  ctx.fillText('Billiard Table (' + shape + ')', tableCx, 30);
+
+  // Draw balls and trails
+  for (const trial of trials) {
+    // Ball 1
+    ctx.strokeStyle = trial.color1;
+    ctx.lineWidth = 0.7;
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    for (let i = 0; i < trial.ball1.trail.length; i++) {
+      const t = trial.ball1.trail[i];
+      if (i === 0) ctx.moveTo(tableCx + t.x, tableCy + t.y);
+      else ctx.lineTo(tableCx + t.x, tableCy + t.y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = trial.color1;
+    ctx.beginPath();
+    ctx.arc(tableCx + trial.ball1.x, tableCy + trial.ball1.y, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ball 2
+    ctx.strokeStyle = trial.color2;
+    ctx.lineWidth = 0.7;
+    ctx.globalAlpha = 0.35;
+    ctx.beginPath();
+    for (let i = 0; i < trial.ball2.trail.length; i++) {
+      const t = trial.ball2.trail[i];
+      if (i === 0) ctx.moveTo(tableCx + t.x, tableCy + t.y);
+      else ctx.lineTo(tableCx + t.x, tableCy + t.y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = trial.color2;
+    ctx.beginPath();
+    ctx.arc(tableCx + trial.ball2.x, tableCy + trial.ball2.y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Divider
+  ctx.strokeStyle = 'rgba(120,180,255,0.2)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(W * 0.48, 0);
+  ctx.lineTo(W * 0.48, H);
+  ctx.stroke();
+
+  drawGraph();
+
+  // Legend
+  const legX = tableCx - R * 0.8;
+  const legY = tableCy + R + 30;
+  ctx.font = '11px Segoe UI';
+  ctx.textAlign = 'left';
+  if (trials.length > 0) {
+    ctx.fillStyle = trials[0].color1;
+    ctx.fillRect(legX, legY, 12, 3);
+    ctx.fillText('Ball 1 (reference)', legX + 18, legY + 4);
+    ctx.fillStyle = trials[0].color2;
+    ctx.fillRect(legX, legY + 14, 12, 3);
+    ctx.fillText('Ball 2 (perturbed)', legX + 18, legY + 18);
+    ctx.fillStyle = '#6a8ab8';
+    ctx.fillText(`\u03B5 = ${epsilon.toExponential(0)}`, legX, legY + 36);
+    ctx.fillText(`Bounces: ${trials[0].ball1.bounces}`, legX + 80, legY + 36);
+  }
+
+  requestAnimationFrame(draw);
+}
+
+// Controls
+document.querySelectorAll('[data-shape]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-shape]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    shape = btn.dataset.shape;
+    initTrials();
+  });
+});
+
+document.getElementById('sEps').addEventListener('input', e => {
+  const exp = parseInt(e.target.value);
+  epsilon = Math.pow(10, exp);
+  document.getElementById('vEps').textContent = exp;
+  initTrials();
+});
+
+document.getElementById('sSpeed').addEventListener('input', e => {
+  ballSpeed = parseInt(e.target.value);
+  document.getElementById('vSpeed').textContent = ballSpeed;
+});
+
+document.getElementById('sTrials').addEventListener('input', e => {
+  numTrials = parseInt(e.target.value);
+  document.getElementById('vTrials').textContent = numTrials;
+  initTrials();
+});
+
+document.getElementById('bReset').addEventListener('click', () => initTrials());
+
+document.getElementById('bAddTrial').addEventListener('click', () => {
+  trials.push(createTrial(trials.length));
+  numTrials = trials.length;
+  document.getElementById('sTrials').value = numTrials;
+  document.getElementById('vTrials').textContent = numTrials;
+});
+
+window.reset = function() {
+  shape = 'stadium';
+  epsilon = 1e-3;
+  ballSpeed = 3;
+  numTrials = 1;
+  document.getElementById('sEps').value = -3;
+  document.getElementById('vEps').textContent = '-3';
+  document.getElementById('sSpeed').value = 3;
+  document.getElementById('vSpeed').textContent = '3';
+  document.getElementById('sTrials').value = 1;
+  document.getElementById('vTrials').textContent = '1';
+  document.querySelectorAll('[data-shape]').forEach(b => b.classList.remove('active'));
+  document.querySelector('[data-shape="stadium"]').classList.add('active');
+  initTrials();
+};
+
+initTrials();
+draw();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

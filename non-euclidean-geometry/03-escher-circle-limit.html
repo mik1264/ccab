@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Escher Circle Limit</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    canvas { display: block; }
+    #controls {
+        position: fixed; top: 20px; right: 20px; z-index: 100;
+        background: rgba(10, 14, 30, 0.85);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border: 1px solid rgba(100, 160, 255, 0.2);
+        border-radius: 12px;
+        padding: 20px;
+        color: #c8d8f0;
+        min-width: 240px;
+    }
+    #controls h3 { color: #8af; margin-bottom: 10px; font-size: 1.1em; }
+    .ctrl-row { margin: 8px 0; display: flex; align-items: center; gap: 10px; font-size: 0.85em; }
+    .ctrl-row label { min-width: 80px; color: #8a9ab0; }
+    input[type="range"] { flex: 1; accent-color: #8af; }
+    select {
+        flex: 1; background: rgba(20, 30, 50, 0.8); color: #adf;
+        border: 1px solid rgba(100, 160, 255, 0.3); border-radius: 4px; padding: 4px 8px;
+    }
+    .val { color: #adf; font-family: monospace; min-width: 30px; text-align: right; }
+    .btn {
+        background: rgba(100, 160, 255, 0.15); border: 1px solid rgba(100, 160, 255, 0.3);
+        color: #8af; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 0.85em;
+    }
+    .btn:hover { background: rgba(100, 160, 255, 0.3); }
+    .info { font-size: 0.78em; color: #6a7a9a; margin-top: 10px; line-height: 1.4; }
+    label.check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    input[type="checkbox"] { accent-color: #8af; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:20px;left:20px;color:#8af;text-decoration:none;z-index:100;font-size:1.2em">&#8592; Back</a>
+
+<canvas id="canvas"></canvas>
+
+<div id="controls">
+    <h3>Escher Circle Limit</h3>
+    <div class="ctrl-row">
+        <label>Pattern:</label>
+        <select id="pattern">
+            <option value="fish">Fish motif</option>
+            <option value="arrow">Arrow motif</option>
+            <option value="star">Star motif</option>
+        </select>
+    </div>
+    <div class="ctrl-row">
+        <label>Tiling:</label>
+        <select id="tiling">
+            <option value="6,4">{6,4}</option>
+            <option value="8,3">{8,3}</option>
+            <option value="5,4">{5,4}</option>
+            <option value="7,3">{7,3}</option>
+        </select>
+    </div>
+    <div class="ctrl-row">
+        <label>Speed:</label>
+        <input type="range" id="speed" min="0" max="100" value="25">
+        <span class="val" id="speedVal">25</span>
+    </div>
+    <div class="ctrl-row">
+        <label>Depth:</label>
+        <input type="range" id="depth" min="2" max="6" value="4">
+        <span class="val" id="depthVal">4</span>
+    </div>
+    <div class="ctrl-row">
+        <label class="check"><input type="checkbox" id="showEdges" checked> Show edges</label>
+    </div>
+    <div class="ctrl-row" style="justify-content:center;">
+        <button class="btn" id="pauseBtn">Pause</button>
+        <button class="btn" id="resetBtn">Reset</button>
+    </div>
+    <div class="info">Inspired by M.C. Escher's Circle Limit series. Regular tilings of the hyperbolic plane fill the Poincar&eacute; disk with infinitely many tiles that shrink near the boundary.</div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H, cx, cy, diskR;
+let rotAngle = 0;
+let rotSpeed = 0.0025;
+let paused = false;
+let showEdges = true;
+let patternType = 'fish';
+let tilingP = 6, tilingQ = 4;
+let maxDepth = 4;
+let tiles = [];
+let needsRebuild = true;
+
+const colorSchemes = {
+    fish: ['#1a4a7a', '#c04040', '#2a7a5a', '#c0a030'],
+    arrow: ['#2a2a6a', '#6a2a6a', '#2a6a6a', '#6a6a2a'],
+    star: ['#1a3a6a', '#6a1a3a', '#3a6a1a', '#5a3a6a']
+};
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cx = W / 2;
+    cy = H / 2;
+    diskR = Math.min(W, H) * 0.42;
+    needsRebuild = true;
+}
+resize();
+window.addEventListener('resize', resize);
+
+function norm2(z) { return z.x * z.x + z.y * z.y; }
+
+function reflectAcrossGeodesic(z, p1, p2) {
+    const w = mobiusTransform(z, p1);
+    const q1 = mobiusTransform(p2, p1);
+    const angle = Math.atan2(q1.y, q1.x);
+    const c = Math.cos(-angle), s = Math.sin(-angle);
+    const rotated = { x: w.x * c - w.y * s, y: w.x * s + w.y * c };
+    const reflected = { x: rotated.x, y: -rotated.y };
+    const c2 = Math.cos(angle), s2 = Math.sin(angle);
+    const rotBack = { x: reflected.x * c2 - reflected.y * s2, y: reflected.x * s2 + reflected.y * c2 };
+    return mobiusInverse(rotBack, p1);
+}
+
+function mobiusTransform(z, a) {
+    const num = { x: z.x - a.x, y: z.y - a.y };
+    const ca = { x: a.x, y: -a.y };
+    const den = { x: 1 - (ca.x * z.x - ca.y * z.y), y: -(ca.x * z.y + ca.y * z.x) };
+    const d2 = den.x * den.x + den.y * den.y;
+    if (d2 < 1e-15) return { x: 0, y: 0 };
+    return { x: (num.x * den.x + num.y * den.y) / d2, y: (num.y * den.x - num.x * den.y) / d2 };
+}
+
+function mobiusInverse(w, a) {
+    const num = { x: w.x + a.x, y: w.y + a.y };
+    const ca = { x: a.x, y: -a.y };
+    const den = { x: 1 + (ca.x * w.x - ca.y * w.y), y: ca.x * w.y + ca.y * w.x };
+    const d2 = den.x * den.x + den.y * den.y;
+    if (d2 < 1e-15) return { x: 0, y: 0 };
+    return { x: (num.x * den.x + num.y * den.y) / d2, y: (num.y * den.x - num.x * den.y) / d2 };
+}
+
+function buildTessellation() {
+    tiles = [];
+    const angleP = Math.PI / tilingP;
+    const angleQ = Math.PI / tilingQ;
+    const cosP = Math.cos(angleP), sinP = Math.sin(angleP);
+    const cosQ = Math.cos(angleQ);
+    const r = Math.sqrt((cosQ * cosQ - sinP * sinP) / (1 - sinP * sinP));
+    if (isNaN(r) || r <= 0 || r >= 1) return;
+
+    function getCentralPoly() {
+        const verts = [];
+        for (let i = 0; i < tilingP; i++) {
+            const ang = (2 * Math.PI * i / tilingP) + Math.PI / 2;
+            verts.push({ x: r * Math.cos(ang), y: r * Math.sin(ang) });
+        }
+        return verts;
+    }
+
+    function polyKey(verts) {
+        const cx = verts.reduce((s, v) => s + v.x, 0) / verts.length;
+        const cy = verts.reduce((s, v) => s + v.y, 0) / verts.length;
+        return `${(cx * 1000) | 0},${(cy * 1000) | 0}`;
+    }
+
+    const visited = new Set();
+    const queue = [];
+    const central = getCentralPoly();
+    visited.add(polyKey(central));
+    tiles.push({ verts: central, depth: 0 });
+    queue.push({ verts: central, depth: 0 });
+
+    while (queue.length > 0) {
+        const { verts, depth } = queue.shift();
+        if (depth >= maxDepth) continue;
+
+        for (let i = 0; i < tilingP; i++) {
+            const i2 = (i + 1) % tilingP;
+            const reflected = verts.map(v => reflectAcrossGeodesic(v, verts[i], verts[i2]));
+            let valid = true;
+            for (const rv of reflected) {
+                if (norm2(rv) >= 0.999 || isNaN(rv.x) || isNaN(rv.y)) { valid = false; break; }
+            }
+            if (!valid) continue;
+            const key = polyKey(reflected);
+            if (visited.has(key)) continue;
+            visited.add(key);
+            tiles.push({ verts: reflected, depth: depth + 1 });
+            queue.push({ verts: reflected, depth: depth + 1 });
+            if (tiles.length > 5000) return;
+        }
+    }
+}
+
+function geodesicPoints(p1, p2, n) {
+    n = n || 20;
+    const cross = p1.x * p2.y - p1.y * p2.x;
+    const pts = [];
+    if (Math.abs(cross) < 1e-6) {
+        for (let i = 0; i <= n; i++) {
+            const t = i / n;
+            pts.push({ x: p1.x + (p2.x - p1.x) * t, y: p1.y + (p2.y - p1.y) * t });
+        }
+        return pts;
+    }
+    const p1inv = { x: p1.x / norm2(p1), y: -p1.y / norm2(p1) };
+    const ax = p2.x - p1.x, ay = p2.y - p1.y;
+    const bx = p1inv.x - p1.x, by = p1inv.y - p1.y;
+    const mx1 = (p1.x + p2.x) / 2, my1 = (p1.y + p2.y) / 2;
+    const mx2 = (p1.x + p1inv.x) / 2, my2 = (p1.y + p1inv.y) / 2;
+    const det = (-ay) * (-by) - (ax) * (bx);
+    if (Math.abs(det) < 1e-12) {
+        for (let i = 0; i <= n; i++) {
+            const t = i / n;
+            pts.push({ x: p1.x + (p2.x - p1.x) * t, y: p1.y + (p2.y - p1.y) * t });
+        }
+        return pts;
+    }
+    const d1x = -ay, d1y = ax, d2x = -by, d2y = bx;
+    const dx = mx2 - mx1, dy = my2 - my1;
+    const t = (dx * d2y - dy * d2x) / (d1x * d2y - d1y * d2x);
+    const ccx = mx1 + t * d1x, ccy = my1 + t * d1y;
+    const rad = Math.sqrt((p1.x - ccx) ** 2 + (p1.y - ccy) ** 2);
+    let a1 = Math.atan2(p1.y - ccy, p1.x - ccx);
+    let a2 = Math.atan2(p2.y - ccy, p2.x - ccx);
+    let diff = a2 - a1;
+    if (diff > Math.PI) diff -= 2 * Math.PI;
+    if (diff < -Math.PI) diff += 2 * Math.PI;
+    for (let i = 0; i <= n; i++) {
+        const tt = i / n;
+        const a = a1 + diff * tt;
+        pts.push({ x: ccx + rad * Math.cos(a), y: ccy + rad * Math.sin(a) });
+    }
+    return pts;
+}
+
+function drawMotif(verts, color, idx) {
+    const n = verts.length;
+    const centroid = { x: 0, y: 0 };
+    verts.forEach(v => { centroid.x += v.x; centroid.y += v.y; });
+    centroid.x /= n; centroid.y /= n;
+
+    // Draw filled tile with geodesic edges
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+        const i2 = (i + 1) % n;
+        const rv1 = { x: verts[i].x, y: verts[i].y };
+        const rv2 = { x: verts[i2].x, y: verts[i2].y };
+        const pts = geodesicPoints(rv1, rv2, 12);
+        for (let j = 0; j < pts.length; j++) {
+            const cp = { x: cx + pts[j].x * diskR, y: cy + pts[j].y * diskR };
+            if (i === 0 && j === 0) ctx.moveTo(cp.x, cp.y);
+            else ctx.lineTo(cp.x, cp.y);
+        }
+    }
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    if (showEdges) {
+        ctx.strokeStyle = 'rgba(180, 200, 255, 0.15)';
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+    }
+
+    // Draw motif inside tile
+    const cc = { x: cx + centroid.x * diskR, y: cy + centroid.y * diskR };
+    const scale = Math.sqrt((1 - norm2(centroid)) * 0.5) * diskR * 0.15;
+    if (scale < 1.5) return;
+
+    ctx.save();
+    ctx.translate(cc.x, cc.y);
+    const angle = Math.atan2(verts[0].y - centroid.y, verts[0].x - centroid.x);
+    ctx.rotate(angle);
+
+    if (patternType === 'fish') {
+        // Fish-like shape
+        ctx.beginPath();
+        ctx.moveTo(scale, 0);
+        ctx.quadraticCurveTo(scale * 0.3, scale * 0.6, -scale * 0.5, scale * 0.8);
+        ctx.quadraticCurveTo(-scale * 0.2, 0, -scale * 0.5, -scale * 0.8);
+        ctx.quadraticCurveTo(scale * 0.3, -scale * 0.6, scale, 0);
+        ctx.fillStyle = lightenColor(color, 30);
+        ctx.fill();
+        // Eye
+        if (scale > 4) {
+            ctx.beginPath();
+            ctx.arc(scale * 0.4, -scale * 0.15, scale * 0.12, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff';
+            ctx.fill();
+        }
+    } else if (patternType === 'arrow') {
+        ctx.beginPath();
+        ctx.moveTo(scale, 0);
+        ctx.lineTo(-scale * 0.3, scale * 0.6);
+        ctx.lineTo(0, 0);
+        ctx.lineTo(-scale * 0.3, -scale * 0.6);
+        ctx.closePath();
+        ctx.fillStyle = lightenColor(color, 25);
+        ctx.fill();
+    } else {
+        // Star
+        const spikes = 5;
+        ctx.beginPath();
+        for (let i = 0; i < spikes * 2; i++) {
+            const r = (i % 2 === 0) ? scale : scale * 0.4;
+            const a = (i * Math.PI / spikes) - Math.PI / 2;
+            if (i === 0) ctx.moveTo(r * Math.cos(a), r * Math.sin(a));
+            else ctx.lineTo(r * Math.cos(a), r * Math.sin(a));
+        }
+        ctx.closePath();
+        ctx.fillStyle = lightenColor(color, 30);
+        ctx.fill();
+    }
+    ctx.restore();
+}
+
+function lightenColor(hex, amt) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgb(${Math.min(255, r + amt)}, ${Math.min(255, g + amt)}, ${Math.min(255, b + amt)})`;
+}
+
+function render() {
+    ctx.clearRect(0, 0, W, H);
+
+    if (needsRebuild) {
+        buildTessellation();
+        needsRebuild = false;
+    }
+
+    // Disk background
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, diskR);
+    grad.addColorStop(0, '#0d1428');
+    grad.addColorStop(1, '#060a14');
+    ctx.beginPath();
+    ctx.arc(cx, cy, diskR, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, diskR - 1, 0, Math.PI * 2);
+    ctx.clip();
+
+    const cosR = Math.cos(rotAngle), sinR = Math.sin(rotAngle);
+    const colors = colorSchemes[patternType];
+
+    for (let i = 0; i < tiles.length; i++) {
+        const tile = tiles[i];
+        const verts = tile.verts.map(v => ({
+            x: v.x * cosR - v.y * sinR,
+            y: v.x * sinR + v.y * cosR
+        }));
+        const colorIdx = (tile.depth + i) % colors.length;
+        drawMotif(verts, colors[colorIdx], i);
+    }
+
+    ctx.restore();
+
+    // Glow border
+    ctx.shadowColor = '#4488ff';
+    ctx.shadowBlur = 20;
+    ctx.beginPath();
+    ctx.arc(cx, cy, diskR, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(80, 140, 255, 0.6)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    if (!paused) rotAngle += rotSpeed;
+    requestAnimationFrame(render);
+}
+
+// Controls
+document.getElementById('speed').addEventListener('input', (e) => {
+    rotSpeed = parseInt(e.target.value) * 0.0001;
+    document.getElementById('speedVal').textContent = e.target.value;
+});
+
+document.getElementById('depth').addEventListener('input', (e) => {
+    maxDepth = parseInt(e.target.value);
+    document.getElementById('depthVal').textContent = maxDepth;
+    needsRebuild = true;
+});
+
+document.getElementById('pattern').addEventListener('change', (e) => {
+    patternType = e.target.value;
+});
+
+document.getElementById('tiling').addEventListener('change', (e) => {
+    const parts = e.target.value.split(',');
+    tilingP = parseInt(parts[0]);
+    tilingQ = parseInt(parts[1]);
+    needsRebuild = true;
+});
+
+document.getElementById('showEdges').addEventListener('change', (e) => {
+    showEdges = e.target.checked;
+});
+
+document.getElementById('pauseBtn').addEventListener('click', () => {
+    paused = !paused;
+    document.getElementById('pauseBtn').textContent = paused ? 'Play' : 'Pause';
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+    rotAngle = 0;
+    needsRebuild = true;
+});
+
+window.reset = function() {
+    rotAngle = 0; rotSpeed = 0.0025; paused = false;
+    patternType = 'fish'; tilingP = 6; tilingQ = 4; maxDepth = 4;
+    showEdges = true;
+    document.getElementById('speed').value = 25;
+    document.getElementById('speedVal').textContent = '25';
+    document.getElementById('depth').value = 4;
+    document.getElementById('depthVal').textContent = '4';
+    document.getElementById('pattern').value = 'fish';
+    document.getElementById('tiling').value = '6,4';
+    document.getElementById('showEdges').checked = true;
+    document.getElementById('pauseBtn').textContent = 'Pause';
+    needsRebuild = true;
+};
+
+render();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

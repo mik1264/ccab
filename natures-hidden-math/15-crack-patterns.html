@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Desiccation Crack Patterns</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; cursor: crosshair; }
+        .back-link {
+            position: fixed; top: 18px; left: 18px; z-index: 100;
+            color: #8A9A5B; text-decoration: none; font-size: 14px; font-weight: 600;
+            background: rgba(10,14,26,0.8); padding: 10px 20px; border-radius: 25px;
+            border: 2px solid #8A9A5B; transition: all 0.3s ease;
+        }
+        .back-link:hover { background: #8A9A5B; color: #0a0e1a; }
+        .controls {
+            position: fixed; top: 18px; right: 18px; z-index: 100;
+            background: rgba(10,14,26,0.85); backdrop-filter: blur(10px);
+            border-radius: 10px; padding: 20px; color: #c8d0e0;
+            max-width: 300px; border: 1px solid rgba(138,154,91,0.3);
+        }
+        .controls h2 { color: #DDA15E; font-size: 16px; margin-bottom: 4px; }
+        .controls p.desc { font-size: 11px; color: #8899aa; margin-bottom: 12px; line-height: 1.4; }
+        .control-row { margin-bottom: 10px; }
+        .control-row label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; color: #a0b0c0; }
+        .control-row label span { color: #DDA15E; font-family: monospace; }
+        input[type="range"] {
+            width: 100%; height: 4px; -webkit-appearance: none; appearance: none;
+            background: #1a2035; border-radius: 2px; outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+            background: #8A9A5B; cursor: pointer;
+        }
+        .btn {
+            background: rgba(138,154,91,0.2); color: #8A9A5B; border: 1px solid rgba(138,154,91,0.4);
+            padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+            transition: all 0.2s;
+        }
+        .btn:hover { background: rgba(138,154,91,0.4); }
+        .btn-row { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+        .stat-line { font-size: 11px; color: #6688aa; margin-top: 8px; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Nature's Hidden Math</a>
+    <div class="controls">
+        <h2>Desiccation Cracks</h2>
+        <p class="desc">Mud dries and contracts, building tensile stress. When stress exceeds material strength, cracks nucleate and propagate, relieving stress perpendicular to the crack. Click to add crack seeds.</p>
+        <div class="control-row">
+            <label>Stress rate <span id="stressVal">0.15</span></label>
+            <input type="range" id="stressRate" min="0.02" max="0.5" step="0.01" value="0.15">
+        </div>
+        <div class="control-row">
+            <label>Toughness <span id="toughVal">1.20</span></label>
+            <input type="range" id="toughness" min="0.3" max="3.0" step="0.05" value="1.20">
+        </div>
+        <div class="control-row">
+            <label>Initial seeds <span id="seedVal">8</span></label>
+            <input type="range" id="seeds" min="2" max="30" step="1" value="8">
+        </div>
+        <div class="control-row">
+            <label>Crack speed <span id="crackSpeedVal">3</span></label>
+            <input type="range" id="crackSpeed" min="1" max="8" step="1" value="3">
+        </div>
+        <div class="btn-row">
+            <button class="btn" onclick="window.reset()">Reset</button>
+        </div>
+        <div class="stat-line" id="stats">Cracks: 0 | Step: 0</div>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Grid-based stress field
+        const CELL = 4; // pixel size of each grid cell
+        let cols, rows;
+        let stressX, stressY; // stress tensor components (simplified: x and y tension)
+        let cracked; // 0 = intact, 1 = cracked
+        let crackAge; // when the crack formed (for color variation)
+        let crackTips; // active crack tips: [{x, y, dx, dy}]
+        let running = true;
+        let stepCount = 0;
+
+        let stressRateParam = 0.15;
+        let toughnessParam = 1.2;
+        let numSeeds = 8;
+        let crackSpeedParam = 3;
+
+        function init() {
+            cols = Math.ceil(canvas.width / CELL);
+            rows = Math.ceil(canvas.height / CELL);
+            const size = cols * rows;
+
+            stressX = new Float64Array(size);
+            stressY = new Float64Array(size);
+            cracked = new Uint8Array(size);
+            crackAge = new Float64Array(size);
+            crackTips = [];
+            stepCount = 0;
+
+            // Initial uniform stress with some noise
+            for (let i = 0; i < size; i++) {
+                stressX[i] = 0.3 + Math.random() * 0.2;
+                stressY[i] = 0.3 + Math.random() * 0.2;
+            }
+
+            // Seed cracks from edges and random interior points
+            for (let s = 0; s < numSeeds; s++) {
+                let x, y;
+                if (s < numSeeds / 2) {
+                    // Edge seeds
+                    const side = Math.floor(Math.random() * 4);
+                    if (side === 0) { x = 0; y = Math.floor(Math.random() * rows); }
+                    else if (side === 1) { x = cols - 1; y = Math.floor(Math.random() * rows); }
+                    else if (side === 2) { x = Math.floor(Math.random() * cols); y = 0; }
+                    else { x = Math.floor(Math.random() * cols); y = rows - 1; }
+                } else {
+                    // Interior seeds
+                    x = Math.floor(cols * 0.15 + Math.random() * cols * 0.7);
+                    y = Math.floor(rows * 0.15 + Math.random() * rows * 0.7);
+                }
+
+                const angle = Math.random() * Math.PI * 2;
+                const dx = Math.cos(angle);
+                const dy = Math.sin(angle);
+
+                const idx = y * cols + x;
+                cracked[idx] = 1;
+                crackAge[idx] = 0;
+
+                // Add tip going both directions
+                crackTips.push({ x: x, y: y, dx: dx, dy: dy });
+                crackTips.push({ x: x, y: y, dx: -dx, dy: -dy });
+            }
+        }
+
+        function idx(x, y) {
+            if (x < 0 || x >= cols || y < 0 || y >= rows) return -1;
+            return y * cols + x;
+        }
+
+        function step() {
+            // 1. Increase stress globally (drying)
+            const size = cols * rows;
+            for (let i = 0; i < size; i++) {
+                if (!cracked[i]) {
+                    stressX[i] += stressRateParam * 0.01;
+                    stressY[i] += stressRateParam * 0.01;
+                }
+            }
+
+            // 2. Propagate active crack tips
+            const newTips = [];
+            for (const tip of crackTips) {
+                for (let s = 0; s < crackSpeedParam; s++) {
+                    // Advance tip by one cell
+                    const nx = Math.round(tip.x + tip.dx);
+                    const ny = Math.round(tip.y + tip.dy);
+
+                    // Bounds check
+                    if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
+
+                    const ni = idx(nx, ny);
+                    if (ni < 0) continue;
+
+                    // If already cracked, this tip dies
+                    if (cracked[ni]) {
+                        // Check if we should stop (crack meets crack at ~120 degrees)
+                        continue;
+                    }
+
+                    // Check stress at this cell - crack propagates in direction of max stress
+                    const totalStress = stressX[ni] + stressY[ni];
+                    if (totalStress < toughnessParam * 0.5) continue; // not enough stress
+
+                    // Crack this cell
+                    cracked[ni] = 1;
+                    crackAge[ni] = stepCount;
+
+                    // Relieve stress perpendicular to crack direction in a radius
+                    const reliefR = 8;
+                    const perpX = -tip.dy;
+                    const perpY = tip.dx;
+                    for (let dr = -reliefR; dr <= reliefR; dr++) {
+                        for (let dc = -reliefR; dc <= reliefR; dc++) {
+                            const rx = nx + dc;
+                            const ry = ny + dr;
+                            const ri = idx(rx, ry);
+                            if (ri < 0) continue;
+                            const dist = Math.sqrt(dc * dc + dr * dr);
+                            if (dist > reliefR) continue;
+                            const relief = (1 - dist / reliefR) * 0.6;
+                            // Relieve stress perpendicular to crack
+                            stressX[ri] *= (1 - relief * Math.abs(perpX));
+                            stressY[ri] *= (1 - relief * Math.abs(perpY));
+                        }
+                    }
+
+                    // Update tip position
+                    tip.x = nx;
+                    tip.y = ny;
+
+                    // Slightly perturb direction based on local stress gradient
+                    const sLeft = idx(nx - 1, ny) >= 0 ? stressX[idx(nx - 1, ny)] + stressY[idx(nx - 1, ny)] : 0;
+                    const sRight = idx(nx + 1, ny) >= 0 ? stressX[idx(nx + 1, ny)] + stressY[idx(nx + 1, ny)] : 0;
+                    const sUp = idx(nx, ny - 1) >= 0 ? stressX[idx(nx, ny - 1)] + stressY[idx(nx, ny - 1)] : 0;
+                    const sDown = idx(nx, ny + 1) >= 0 ? stressX[idx(nx, ny + 1)] + stressY[idx(nx, ny + 1)] : 0;
+
+                    const gradX = (sRight - sLeft) * 0.3;
+                    const gradY = (sDown - sUp) * 0.3;
+
+                    tip.dx += gradX + (Math.random() - 0.5) * 0.3;
+                    tip.dy += gradY + (Math.random() - 0.5) * 0.3;
+
+                    // Normalize direction
+                    const len = Math.sqrt(tip.dx * tip.dx + tip.dy * tip.dy);
+                    if (len > 0) {
+                        tip.dx /= len;
+                        tip.dy /= len;
+                    }
+                }
+
+                // Keep tip alive if still in bounds and not terminated
+                const cx = Math.round(tip.x);
+                const cy = Math.round(tip.y);
+                if (cx >= 0 && cx < cols && cy >= 0 && cy < rows) {
+                    newTips.push(tip);
+                }
+            }
+
+            crackTips = newTips;
+
+            // 3. Spontaneous crack nucleation in high-stress regions
+            if (stepCount % 10 === 0) {
+                let maxStress = 0;
+                let maxIdx = -1;
+                // Sample random locations for efficiency
+                for (let attempt = 0; attempt < 50; attempt++) {
+                    const rx = Math.floor(Math.random() * cols);
+                    const ry = Math.floor(Math.random() * rows);
+                    const ri = idx(rx, ry);
+                    if (ri >= 0 && !cracked[ri]) {
+                        const s = stressX[ri] + stressY[ri];
+                        if (s > maxStress) {
+                            maxStress = s;
+                            maxIdx = ri;
+                        }
+                    }
+                }
+
+                if (maxStress > toughnessParam && maxIdx >= 0) {
+                    const mx = maxIdx % cols;
+                    const my = Math.floor(maxIdx / cols);
+                    cracked[maxIdx] = 1;
+                    crackAge[maxIdx] = stepCount;
+
+                    // Direction perpendicular to max stress
+                    const sx = stressX[maxIdx];
+                    const sy = stressY[maxIdx];
+                    let angle;
+                    if (sx > sy) {
+                        angle = Math.PI / 2 + (Math.random() - 0.5) * 0.4; // crack along Y to relieve X stress
+                    } else {
+                        angle = (Math.random() - 0.5) * 0.4; // crack along X to relieve Y stress
+                    }
+
+                    crackTips.push({ x: mx, y: my, dx: Math.cos(angle), dy: Math.sin(angle) });
+                    crackTips.push({ x: mx, y: my, dx: -Math.cos(angle), dy: -Math.sin(angle) });
+                }
+            }
+
+            stepCount++;
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        function draw() {
+            const W = canvas.width;
+            const H = canvas.height;
+
+            const imgData = ctx.createImageData(W, H);
+            const pixels = imgData.data;
+
+            // Draw the mud surface with cracks
+            for (let gy = 0; gy < rows; gy++) {
+                for (let gx = 0; gx < cols; gx++) {
+                    const gi = gy * cols + gx;
+                    const isCracked = cracked[gi];
+
+                    // Pixel region for this cell
+                    const x0 = gx * CELL;
+                    const y0 = gy * CELL;
+
+                    let r, g, b;
+                    if (isCracked) {
+                        // Crack: dark brown/black
+                        const age = Math.min((stepCount - crackAge[gi]) * 0.01, 1);
+                        r = Math.floor(25 + 15 * age);
+                        g = Math.floor(18 + 10 * age);
+                        b = Math.floor(12 + 8 * age);
+                    } else {
+                        // Mud surface: earthy brown with subtle variation
+                        const stress = (stressX[gi] + stressY[gi]) * 0.3;
+                        const noise = ((gx * 7 + gy * 13) % 17) / 17 * 0.1;
+                        r = Math.floor(160 + stress * 20 + noise * 20);
+                        g = Math.floor(120 + stress * 10 + noise * 15);
+                        b = Math.floor(80 + stress * 5 + noise * 10);
+                    }
+
+                    // Fill cell pixels
+                    for (let py = y0; py < Math.min(y0 + CELL, H); py++) {
+                        for (let px = x0; px < Math.min(x0 + CELL, W); px++) {
+                            const pi = (py * W + px) * 4;
+                            pixels[pi] = r;
+                            pixels[pi + 1] = g;
+                            pixels[pi + 2] = b;
+                            pixels[pi + 3] = 255;
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imgData, 0, 0);
+
+            // Draw active crack tips as subtle glowing points
+            ctx.fillStyle = 'rgba(255, 200, 150, 0.6)';
+            for (const tip of crackTips) {
+                ctx.beginPath();
+                ctx.arc(tip.x * CELL, tip.y * CELL, 2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            const crackCount = crackTips.length;
+            document.getElementById('stats').textContent = 'Active tips: ' + crackCount + ' | Step: ' + stepCount;
+        }
+
+        // Click to add crack seeds
+        canvas.addEventListener('click', function(e) {
+            const rect = canvas.getBoundingClientRect();
+            const mx = Math.floor((e.clientX - rect.left) / CELL);
+            const my = Math.floor((e.clientY - rect.top) / CELL);
+            const mi = idx(mx, my);
+            if (mi >= 0) {
+                cracked[mi] = 1;
+                crackAge[mi] = stepCount;
+                const angle = Math.random() * Math.PI;
+                crackTips.push({ x: mx, y: my, dx: Math.cos(angle), dy: Math.sin(angle) });
+                crackTips.push({ x: mx, y: my, dx: -Math.cos(angle), dy: -Math.sin(angle) });
+            }
+        });
+
+        // Controls
+        document.getElementById('stressRate').addEventListener('input', function() {
+            stressRateParam = parseFloat(this.value);
+            document.getElementById('stressVal').textContent = stressRateParam.toFixed(2);
+        });
+        document.getElementById('toughness').addEventListener('input', function() {
+            toughnessParam = parseFloat(this.value);
+            document.getElementById('toughVal').textContent = toughnessParam.toFixed(2);
+        });
+        document.getElementById('seeds').addEventListener('input', function() {
+            numSeeds = parseInt(this.value);
+            document.getElementById('seedVal').textContent = numSeeds;
+        });
+        document.getElementById('crackSpeed').addEventListener('input', function() {
+            crackSpeedParam = parseInt(this.value);
+            document.getElementById('crackSpeedVal').textContent = crackSpeedParam;
+        });
+
+        window.reset = function() {
+            init();
+        };
+
+        function animate() {
+            if (running) {
+                step();
+                draw();
+            }
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', function() {
+            resize();
+            init();
+        });
+
+        resize();
+        init();
+        animate();
+    })();
+    </script>
+    <script src="../assets/js/enhance.js"></script>
+</body>
+</html>

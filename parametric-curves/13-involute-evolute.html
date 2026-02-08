@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Involute & Evolute - Unwinding Strings from Curves</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; }
+canvas { display: block; }
+a.back { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a.back:hover { color: #bdf; }
+#controls {
+  position: fixed; top: 20px; right: 20px; background: rgba(10,14,26,0.8);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  padding: 18px; border-radius: 12px; color: #cde; z-index: 100;
+  border: 1px solid rgba(138,170,255,0.15); min-width: 210px; font-size: 0.9em;
+}
+#controls h3 { margin-bottom: 10px; color: #8af; font-size: 1.05em; }
+.ctrl-row { margin-bottom: 8px; }
+.ctrl-row label { display: block; margin-bottom: 3px; font-size: 0.85em; color: #9ab; }
+.ctrl-row select, .ctrl-row input[type=range] { width: 100%; }
+select { background: #161c30; color: #cde; border: 1px solid #335; padding: 4px; border-radius: 4px; }
+input[type=range] { accent-color: #8af; }
+.ctrl-row .cb { display: flex; align-items: center; gap: 6px; }
+.ctrl-row .cb input { accent-color: #8af; }
+.legend { margin-top: 10px; font-size: 0.8em; }
+.legend div { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.legend .dot { width: 10px; height: 10px; border-radius: 50%; }
+#info {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: rgba(10,14,26,0.8); backdrop-filter: blur(10px);
+  padding: 12px 20px; border-radius: 10px; color: #9ab; font-size: 0.82em;
+  border: 1px solid rgba(138,170,255,0.1); text-align: center; max-width: 600px; z-index: 100;
+}
+</style>
+</head>
+<body>
+<a href="index.html" class="back">&#8592; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+  <h3>Involute & Evolute</h3>
+  <div class="ctrl-row">
+    <label>Base Curve</label>
+    <select id="baseCurve">
+      <option value="circle">Circle</option>
+      <option value="ellipse">Ellipse</option>
+      <option value="cardioid">Cardioid</option>
+      <option value="parabola">Parabola</option>
+    </select>
+  </div>
+  <div class="ctrl-row">
+    <label>Speed: <span id="speedVal">1.0</span></label>
+    <input type="range" id="speed" min="0.2" max="3" step="0.1" value="1">
+  </div>
+  <div class="ctrl-row">
+    <label>Show</label>
+    <select id="showMode">
+      <option value="both">Involute + Evolute</option>
+      <option value="involute">Involute Only</option>
+      <option value="evolute">Evolute Only</option>
+    </select>
+  </div>
+  <div class="ctrl-row">
+    <div class="cb"><input type="checkbox" id="showString" checked><label>Show String</label></div>
+  </div>
+  <div class="legend">
+    <div><span class="dot" style="background:#4488ff"></span> Base curve</div>
+    <div><span class="dot" style="background:#ffcc44"></span> Involute</div>
+    <div><span class="dot" style="background:#ff4466"></span> Evolute</div>
+  </div>
+</div>
+<div id="info">
+  The involute of a circle is used in gear tooth profiles.
+  The evolute is the locus of all centers of curvature of a curve.
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const baseCurveEl = document.getElementById('baseCurve');
+const speedEl = document.getElementById('speed');
+const showModeEl = document.getElementById('showMode');
+const showStringEl = document.getElementById('showString');
+
+speedEl.oninput = () => document.getElementById('speedVal').textContent = parseFloat(speedEl.value).toFixed(1);
+
+let t = 0;
+
+// Curve definitions: return {x, y} for parameter theta
+// Also return tangent and normal for evolute computation
+function curvePoint(type, theta, scale) {
+  const s = scale;
+  switch (type) {
+    case 'circle': return { x: s * Math.cos(theta), y: s * Math.sin(theta) };
+    case 'ellipse': return { x: s * 1.5 * Math.cos(theta), y: s * Math.sin(theta) };
+    case 'cardioid': {
+      const r = s * 0.6 * (1 + Math.cos(theta));
+      return { x: r * Math.cos(theta), y: r * Math.sin(theta) };
+    }
+    case 'parabola': {
+      const pt = theta * 0.8;
+      return { x: s * 0.15 * pt * pt, y: s * 0.5 * pt };
+    }
+  }
+}
+
+function curveDeriv(type, theta, scale) {
+  const dt = 0.0001;
+  const p1 = curvePoint(type, theta - dt, scale);
+  const p2 = curvePoint(type, theta + dt, scale);
+  return { dx: (p2.x - p1.x) / (2 * dt), dy: (p2.y - p1.y) / (2 * dt) };
+}
+
+function curveDeriv2(type, theta, scale) {
+  const dt = 0.0001;
+  const d1 = curveDeriv(type, theta - dt, scale);
+  const d2 = curveDeriv(type, theta + dt, scale);
+  return { ddx: (d2.dx - d1.dx) / (2 * dt), ddy: (d2.dy - d1.dy) / (2 * dt) };
+}
+
+// Involute: unwinding a string from the curve
+function involutePoint(type, theta, scale) {
+  const p = curvePoint(type, theta, scale);
+  const d = curveDeriv(type, theta, scale);
+  const speed = Math.sqrt(d.dx * d.dx + d.dy * d.dy);
+  if (speed < 0.001) return p;
+
+  // Arc length from 0 to theta (numerical)
+  let arcLen = 0;
+  const steps = 200;
+  for (let i = 1; i <= steps; i++) {
+    const t1 = theta * (i - 1) / steps;
+    const t2 = theta * i / steps;
+    const p1 = curvePoint(type, t1, scale);
+    const p2 = curvePoint(type, t2, scale);
+    arcLen += Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2);
+  }
+
+  // Unit tangent
+  const tx = d.dx / speed, ty = d.dy / speed;
+  return { x: p.x + arcLen * tx, y: p.y + arcLen * ty };
+}
+
+// Evolute: center of curvature
+function evolutePoint(type, theta, scale) {
+  const p = curvePoint(type, theta, scale);
+  const d = curveDeriv(type, theta, scale);
+  const d2 = curveDeriv2(type, theta, scale);
+
+  const denom = d.dx * d2.ddy - d.dy * d2.ddx;
+  if (Math.abs(denom) < 0.0001) return null;
+
+  const speed2 = d.dx * d.dx + d.dy * d.dy;
+  const R = Math.pow(speed2, 1.5) / denom;
+
+  const speed = Math.sqrt(speed2);
+  // Normal direction (rotated tangent 90 degrees)
+  const nx = -d.dy / speed, ny = d.dx / speed;
+
+  return { x: p.x + R * nx, y: p.y + R * ny };
+}
+
+function drawCurve(cx, cy, type, scale, color, lw) {
+  const range = type === 'parabola' ? { min: -4, max: 4 } : { min: 0, max: Math.PI * 2 };
+  ctx.beginPath();
+  const steps = 500;
+  for (let i = 0; i <= steps; i++) {
+    const theta = range.min + (i / steps) * (range.max - range.min);
+    const p = curvePoint(type, theta, scale);
+    i === 0 ? ctx.moveTo(cx + p.x, cy + p.y) : ctx.lineTo(cx + p.x, cy + p.y);
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lw;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 10;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function drawInvolute(cx, cy, type, scale, maxTheta) {
+  const range = type === 'parabola' ? { min: 0.1, max: maxTheta } : { min: 0.01, max: maxTheta };
+  ctx.beginPath();
+  const steps = 400;
+  let started = false;
+  for (let i = 0; i <= steps; i++) {
+    const theta = range.min + (i / steps) * (range.max - range.min);
+    const p = involutePoint(type, theta, scale);
+    if (!started) { ctx.moveTo(cx + p.x, cy + p.y); started = true; }
+    else ctx.lineTo(cx + p.x, cy + p.y);
+  }
+  ctx.strokeStyle = '#ffcc44';
+  ctx.lineWidth = 2.5;
+  ctx.shadowColor = '#ffcc44';
+  ctx.shadowBlur = 12;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function drawEvolute(cx, cy, type, scale) {
+  const range = type === 'parabola' ? { min: -3.5, max: 3.5 } : { min: 0, max: Math.PI * 2 };
+  ctx.beginPath();
+  const steps = 500;
+  let started = false;
+  for (let i = 0; i <= steps; i++) {
+    const theta = range.min + (i / steps) * (range.max - range.min);
+    const p = evolutePoint(type, theta, scale);
+    if (!p) { started = false; continue; }
+    if (!started) { ctx.moveTo(cx + p.x, cy + p.y); started = true; }
+    else ctx.lineTo(cx + p.x, cy + p.y);
+  }
+  ctx.strokeStyle = '#ff4466';
+  ctx.lineWidth = 2;
+  ctx.shadowColor = '#ff4466';
+  ctx.shadowBlur = 10;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function animate() {
+  const spd = parseFloat(speedEl.value);
+  const type = baseCurveEl.value;
+  const mode = showModeEl.value;
+
+  t += 0.008 * spd;
+  const maxTheta = type === 'parabola' ? (t % 6) + 0.1 : (t % (Math.PI * 4)) + 0.01;
+
+  ctx.fillStyle = 'rgba(10,14,26,0.12)';
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = W * 0.45, cy = H * 0.48;
+  const scale = Math.min(W, H) * 0.2;
+
+  // Base curve
+  drawCurve(cx, cy, type, scale, '#4488ff', 2);
+
+  // Involute
+  if (mode === 'involute' || mode === 'both') {
+    drawInvolute(cx, cy, type, scale, maxTheta);
+
+    // Current involute point and string
+    const endTheta = type === 'parabola' ? Math.min(maxTheta, 3.8) : maxTheta;
+    const invPt = involutePoint(type, endTheta, scale);
+    const basePt = curvePoint(type, endTheta, scale);
+
+    // String from base to involute
+    if (showStringEl.checked) {
+      ctx.beginPath();
+      ctx.moveTo(cx + basePt.x, cy + basePt.y);
+      ctx.lineTo(cx + invPt.x, cy + invPt.y);
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Involute tip
+    ctx.beginPath();
+    ctx.arc(cx + invPt.x, cy + invPt.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffcc44';
+    ctx.shadowColor = '#ffcc44';
+    ctx.shadowBlur = 15;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Contact point
+    ctx.beginPath();
+    ctx.arc(cx + basePt.x, cy + basePt.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+  }
+
+  // Evolute
+  if (mode === 'evolute' || mode === 'both') {
+    drawEvolute(cx, cy, type, scale);
+
+    // Current center of curvature
+    const curTheta = type === 'parabola' ? Math.sin(t * 0.5) * 3 : t % (Math.PI * 2);
+    const evPt = evolutePoint(type, curTheta, scale);
+    const basePt2 = curvePoint(type, curTheta, scale);
+
+    if (evPt) {
+      ctx.beginPath();
+      ctx.arc(cx + evPt.x, cy + evPt.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff4466';
+      ctx.shadowColor = '#ff4466';
+      ctx.shadowBlur = 12;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      // Radius of curvature line
+      ctx.beginPath();
+      ctx.moveTo(cx + basePt2.x, cy + basePt2.y);
+      ctx.lineTo(cx + evPt.x, cy + evPt.y);
+      ctx.strokeStyle = 'rgba(255,68,102,0.3)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Point on base curve
+      ctx.beginPath();
+      ctx.arc(cx + basePt2.x, cy + basePt2.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#4488ff';
+      ctx.fill();
+    }
+  }
+
+  // Labels
+  ctx.fillStyle = 'rgba(200,220,240,0.4)';
+  ctx.font = '14px "Segoe UI", sans-serif';
+  ctx.textAlign = 'center';
+  const names = {
+    circle: 'Circle: evolute is a point, involute is a spiral',
+    ellipse: 'Ellipse: evolute is an astroid-like curve',
+    cardioid: 'Cardioid: beautiful spiral involute',
+    parabola: 'Parabola: evolute is a semicubical parabola'
+  };
+  ctx.fillText(names[type], W / 2, H * 0.92);
+
+  requestAnimationFrame(animate);
+}
+
+window.reset = function() {
+  t = 0;
+  ctx.clearRect(0, 0, W, H);
+};
+
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ant Colony Optimization - Shortest Path</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 20px; left: 20px; z-index: 100;
+            color: #8A9A5B; background: rgba(10,14,26,0.8); border-radius: 25px;
+            border: 2px solid #8A9A5B; padding: 10px 20px; text-decoration: none;
+            font-size: 14px; transition: all 0.3s ease;
+        }
+        .back-link:hover { background: rgba(138,154,91,0.3); }
+        .controls {
+            position: fixed; top: 20px; right: 20px; z-index: 100;
+            background: rgba(10,14,26,0.85); backdrop-filter: blur(10px);
+            border-radius: 10px; padding: 20px; max-width: 300px;
+            color: #c0c8e0; font-size: 13px;
+        }
+        .controls h3 { color: #8A9A5B; margin-bottom: 12px; font-size: 15px; }
+        .control-group { margin-bottom: 10px; }
+        .control-group label { display: block; margin-bottom: 4px; color: #9aa0b8; }
+        .control-group input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+        .control-group .value { float: right; color: #8A9A5B; font-weight: bold; }
+        .metric { margin-top: 8px; padding: 8px; background: rgba(138,154,91,0.1); border-radius: 6px; }
+        .metric .label { color: #9aa0b8; font-size: 11px; }
+        .metric .val { color: #DDA15E; font-size: 18px; font-weight: bold; }
+        .btn { background: rgba(138,154,91,0.2); color: #8A9A5B; border: 1px solid #8A9A5B;
+            padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; margin-top: 8px; }
+        .btn:hover { background: rgba(138,154,91,0.4); }
+        .hint { color: #666; font-size: 11px; margin-top: 8px; font-style: italic; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&#8592; Collective Intelligence</a>
+    <div class="controls">
+        <h3>Ant Colony Optimization</h3>
+        <div class="control-group">
+            <label>Ants <span class="value" id="antCountVal">200</span></label>
+            <input type="range" id="antCount" min="50" max="500" value="200" step="10">
+        </div>
+        <div class="control-group">
+            <label>Pheromone Strength <span class="value" id="pheroStrVal">1.0</span></label>
+            <input type="range" id="pheroStr" min="0.2" max="3.0" value="1.0" step="0.1">
+        </div>
+        <div class="control-group">
+            <label>Evaporation Rate <span class="value" id="evapVal">0.02</span></label>
+            <input type="range" id="evapRate" min="0.005" max="0.08" value="0.02" step="0.005">
+        </div>
+        <div class="control-group">
+            <label><input type="checkbox" id="showPhero" checked> Show Pheromone Trails</label>
+        </div>
+        <button class="btn" id="resetBtn">Reset</button>
+        <div class="metric">
+            <div class="label">Best Path Length</div>
+            <div class="val" id="bestPath">--</div>
+        </div>
+        <div class="metric">
+            <div class="label">Food Collected</div>
+            <div class="val" id="foodCount">0</div>
+        </div>
+        <p class="hint">Click to add/remove obstacles</p>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Grid for pheromones
+        const CELL = 6;
+        let cols, rows, pheromone, obstacles;
+
+        function initGrid() {
+            cols = Math.ceil(W / CELL);
+            rows = Math.ceil(H / CELL);
+            pheromone = new Float32Array(cols * rows);
+            obstacles = new Uint8Array(cols * rows);
+        }
+        initGrid();
+
+        // Nest and food positions
+        let nest = { x: W * 0.15, y: H * 0.5 };
+        let food = { x: W * 0.85, y: H * 0.5 };
+
+        // Default obstacles
+        function placeDefaultObstacles() {
+            const cx1 = W * 0.38, cy1 = H * 0.35, r1 = Math.min(W, H) * 0.12;
+            const cx2 = W * 0.55, cy2 = H * 0.65, r2 = Math.min(W, H) * 0.10;
+            const cx3 = W * 0.68, cy3 = H * 0.38, r3 = Math.min(W, H) * 0.08;
+            for (let gy = 0; gy < rows; gy++) {
+                for (let gx = 0; gx < cols; gx++) {
+                    const px = gx * CELL + CELL / 2;
+                    const py = gy * CELL + CELL / 2;
+                    const d1 = Math.hypot(px - cx1, py - cy1);
+                    const d2 = Math.hypot(px - cx2, py - cy2);
+                    const d3 = Math.hypot(px - cx3, py - cy3);
+                    if (d1 < r1 || d2 < r2 || d3 < r3) {
+                        obstacles[gy * cols + gx] = 1;
+                    }
+                }
+            }
+        }
+        placeDefaultObstacles();
+
+        // Controls
+        const antCountEl = document.getElementById('antCount');
+        const pheroStrEl = document.getElementById('pheroStr');
+        const evapRateEl = document.getElementById('evapRate');
+        const showPheroEl = document.getElementById('showPhero');
+        const bestPathEl = document.getElementById('bestPath');
+        const foodCountEl = document.getElementById('foodCount');
+
+        antCountEl.oninput = function() { document.getElementById('antCountVal').textContent = this.value; };
+        pheroStrEl.oninput = function() { document.getElementById('pheroStrVal').textContent = parseFloat(this.value).toFixed(1); };
+        evapRateEl.oninput = function() { document.getElementById('evapVal').textContent = parseFloat(this.value).toFixed(3); };
+
+        // Click to toggle obstacles
+        canvas.addEventListener('click', function(e) {
+            const gx = Math.floor(e.clientX / CELL);
+            const gy = Math.floor(e.clientY / CELL);
+            const brushR = 4;
+            for (let dy = -brushR; dy <= brushR; dy++) {
+                for (let dx = -brushR; dx <= brushR; dx++) {
+                    if (dx * dx + dy * dy > brushR * brushR) continue;
+                    const nx = gx + dx, ny = gy + dy;
+                    if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                        const idx = ny * cols + nx;
+                        obstacles[idx] = obstacles[idx] ? 0 : 1;
+                    }
+                }
+            }
+        });
+
+        // Ant class
+        class Ant {
+            constructor() {
+                this.reset();
+            }
+            reset() {
+                this.x = nest.x + (Math.random() - 0.5) * 20;
+                this.y = nest.y + (Math.random() - 0.5) * 20;
+                this.angle = Math.random() * Math.PI * 2;
+                this.hasFood = false;
+                this.pathLen = 0;
+                this.speed = 1.8 + Math.random() * 0.8;
+                this.trail = [];
+            }
+        }
+
+        let ants = [];
+        let bestPathLen = Infinity;
+        let foodCollected = 0;
+
+        function initAnts() {
+            const count = parseInt(antCountEl.value);
+            ants = [];
+            for (let i = 0; i < count; i++) {
+                ants.push(new Ant());
+            }
+            bestPathLen = Infinity;
+            foodCollected = 0;
+            pheromone.fill(0);
+        }
+        initAnts();
+
+        function isObstacle(x, y) {
+            const gx = Math.floor(x / CELL);
+            const gy = Math.floor(y / CELL);
+            if (gx < 0 || gx >= cols || gy < 0 || gy >= rows) return true;
+            return obstacles[gy * cols + gx] === 1;
+        }
+
+        function getPheromone(x, y) {
+            const gx = Math.floor(x / CELL);
+            const gy = Math.floor(y / CELL);
+            if (gx < 0 || gx >= cols || gy < 0 || gy >= rows) return 0;
+            return pheromone[gy * cols + gx];
+        }
+
+        function depositPheromone(x, y, amount) {
+            const gx = Math.floor(x / CELL);
+            const gy = Math.floor(y / CELL);
+            if (gx >= 0 && gx < cols && gy >= 0 && gy < rows && !obstacles[gy * cols + gx]) {
+                pheromone[gy * cols + gx] = Math.min(pheromone[gy * cols + gx] + amount, 10);
+            }
+        }
+
+        function updateAnt(ant) {
+            const target = ant.hasFood ? nest : food;
+            const dx = target.x - ant.x;
+            const dy = target.y - ant.y;
+            const dist = Math.hypot(dx, dy);
+
+            // Reached target?
+            if (dist < 20) {
+                if (ant.hasFood) {
+                    // Reached nest with food
+                    foodCollected++;
+                    if (ant.pathLen < bestPathLen) bestPathLen = ant.pathLen;
+                    // Deposit pheromone along trail (stronger for shorter paths)
+                    const strength = parseFloat(pheroStrEl.value) * (500 / Math.max(ant.pathLen, 1));
+                    for (let i = 0; i < ant.trail.length; i++) {
+                        depositPheromone(ant.trail[i].x, ant.trail[i].y, strength);
+                    }
+                    ant.hasFood = false;
+                    ant.pathLen = 0;
+                    ant.trail = [];
+                } else {
+                    // Reached food
+                    ant.hasFood = true;
+                    ant.pathLen = 0;
+                    ant.trail = [];
+                    ant.angle = Math.atan2(nest.y - ant.y, nest.x - ant.x);
+                }
+            }
+
+            // Sense pheromones ahead (3 sensors)
+            const senseAngle = 0.5;
+            const senseDist = CELL * 4;
+            const leftX = ant.x + Math.cos(ant.angle - senseAngle) * senseDist;
+            const leftY = ant.y + Math.sin(ant.angle - senseAngle) * senseDist;
+            const fwdX = ant.x + Math.cos(ant.angle) * senseDist;
+            const fwdY = ant.y + Math.sin(ant.angle) * senseDist;
+            const rightX = ant.x + Math.cos(ant.angle + senseAngle) * senseDist;
+            const rightY = ant.y + Math.sin(ant.angle + senseAngle) * senseDist;
+
+            const leftP = getPheromone(leftX, leftY);
+            const fwdP = getPheromone(fwdX, fwdY);
+            const rightP = getPheromone(rightX, rightY);
+
+            // Bias toward target
+            const targetAngle = Math.atan2(dy, dx);
+            let angleDiff = targetAngle - ant.angle;
+            while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+            while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+
+            // Steer by pheromone gradient + target bias + random
+            let turnRate = 0;
+            if (fwdP > leftP && fwdP > rightP) {
+                turnRate = 0; // go straight
+            } else if (leftP > rightP) {
+                turnRate = -0.15;
+            } else if (rightP > leftP) {
+                turnRate = 0.15;
+            }
+
+            const pheroInfluence = Math.min((leftP + fwdP + rightP) * 0.5, 1.0);
+            ant.angle += turnRate * pheroInfluence;
+            ant.angle += angleDiff * 0.04; // bias toward target
+            ant.angle += (Math.random() - 0.5) * 0.6 * (1 - pheroInfluence * 0.5); // random wander
+
+            // Move
+            const nx = ant.x + Math.cos(ant.angle) * ant.speed;
+            const ny = ant.y + Math.sin(ant.angle) * ant.speed;
+
+            if (!isObstacle(nx, ny) && nx > 0 && nx < W && ny > 0 && ny < H) {
+                ant.x = nx;
+                ant.y = ny;
+            } else {
+                // Bounce off obstacle
+                ant.angle += Math.PI * 0.5 + (Math.random() - 0.5) * Math.PI;
+            }
+
+            ant.pathLen += ant.speed;
+
+            // Record trail
+            if (ant.trail.length === 0 || Math.hypot(ant.x - ant.trail[ant.trail.length - 1].x, ant.y - ant.trail[ant.trail.length - 1].y) > CELL) {
+                ant.trail.push({ x: ant.x, y: ant.y });
+                if (ant.trail.length > 2000) ant.trail.shift();
+            }
+
+            // Carrying ants deposit light pheromone
+            if (ant.hasFood) {
+                depositPheromone(ant.x, ant.y, parseFloat(pheroStrEl.value) * 0.05);
+            }
+        }
+
+        function evaporatePheromone() {
+            const rate = 1 - parseFloat(evapRateEl.value);
+            for (let i = 0; i < pheromone.length; i++) {
+                pheromone[i] *= rate;
+                if (pheromone[i] < 0.001) pheromone[i] = 0;
+            }
+        }
+
+        // Drawing
+        let pheroImageData;
+
+        function drawPheromone() {
+            if (!showPheroEl.checked) return;
+            if (!pheroImageData || pheroImageData.width !== W || pheroImageData.height !== H) {
+                pheroImageData = ctx.createImageData(W, H);
+            }
+            const data = pheroImageData.data;
+            data.fill(0);
+
+            for (let gy = 0; gy < rows; gy++) {
+                for (let gx = 0; gx < cols; gx++) {
+                    const p = pheromone[gy * cols + gx];
+                    if (p < 0.01) continue;
+                    const brightness = Math.min(p / 3, 1);
+                    const r = Math.floor(30 * brightness);
+                    const g = Math.floor(200 * brightness);
+                    const b = Math.floor(60 * brightness);
+                    const a = Math.floor(180 * brightness);
+
+                    const px0 = gx * CELL;
+                    const py0 = gy * CELL;
+                    for (let py = py0; py < py0 + CELL && py < H; py++) {
+                        for (let px = px0; px < px0 + CELL && px < W; px++) {
+                            const idx = (py * W + px) * 4;
+                            data[idx] = r;
+                            data[idx + 1] = g;
+                            data[idx + 2] = b;
+                            data[idx + 3] = a;
+                        }
+                    }
+                }
+            }
+            ctx.putImageData(pheroImageData, 0, 0);
+        }
+
+        function drawObstacles() {
+            ctx.fillStyle = '#1a2040';
+            for (let gy = 0; gy < rows; gy++) {
+                for (let gx = 0; gx < cols; gx++) {
+                    if (obstacles[gy * cols + gx]) {
+                        ctx.fillRect(gx * CELL, gy * CELL, CELL, CELL);
+                    }
+                }
+            }
+            // Obstacle edges
+            ctx.strokeStyle = '#2a3060';
+            ctx.lineWidth = 1;
+            for (let gy = 0; gy < rows; gy++) {
+                for (let gx = 0; gx < cols; gx++) {
+                    if (!obstacles[gy * cols + gx]) continue;
+                    const hasNeighbor = (dx, dy) => {
+                        const nx = gx + dx, ny = gy + dy;
+                        return nx >= 0 && nx < cols && ny >= 0 && ny < rows && obstacles[ny * cols + nx];
+                    };
+                    if (!hasNeighbor(-1, 0) || !hasNeighbor(1, 0) || !hasNeighbor(0, -1) || !hasNeighbor(0, 1)) {
+                        ctx.strokeRect(gx * CELL, gy * CELL, CELL, CELL);
+                    }
+                }
+            }
+        }
+
+        function drawCircle(x, y, r, color, glowColor) {
+            ctx.save();
+            ctx.shadowColor = glowColor;
+            ctx.shadowBlur = 20;
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.restore();
+        }
+
+        let animId;
+        let paused = false;
+
+        function animate() {
+            animId = requestAnimationFrame(animate);
+            if (paused) return;
+
+            // Adjust ant count
+            const targetCount = parseInt(antCountEl.value);
+            while (ants.length < targetCount) ants.push(new Ant());
+            while (ants.length > targetCount) ants.pop();
+
+            // Update
+            for (let i = 0; i < ants.length; i++) {
+                updateAnt(ants[i]);
+            }
+            evaporatePheromone();
+
+            // Draw
+            ctx.fillStyle = '#0a0e1a';
+            ctx.fillRect(0, 0, W, H);
+
+            drawPheromone();
+            drawObstacles();
+
+            // Nest
+            drawCircle(nest.x, nest.y, 18, '#4a8a3a', '#4a8a3a');
+            ctx.fillStyle = '#fff';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('NEST', nest.x, nest.y + 3);
+
+            // Food
+            drawCircle(food.x, food.y, 18, '#DDA15E', '#DDA15E');
+            ctx.fillStyle = '#fff';
+            ctx.fillText('FOOD', food.x, food.y + 3);
+
+            // Ants
+            for (let i = 0; i < ants.length; i++) {
+                const ant = ants[i];
+                ctx.beginPath();
+                ctx.arc(ant.x, ant.y, 1.5, 0, Math.PI * 2);
+                ctx.fillStyle = ant.hasFood ? '#DDA15E' : '#c0d8a0';
+                ctx.fill();
+            }
+
+            // Metrics
+            bestPathEl.textContent = bestPathLen < Infinity ? Math.round(bestPathLen) + 'px' : '--';
+            foodCountEl.textContent = foodCollected;
+        }
+
+        animate();
+
+        // Reset
+        function reset() {
+            initGrid();
+            placeDefaultObstacles();
+            initAnts();
+            nest = { x: W * 0.15, y: H * 0.5 };
+            food = { x: W * 0.85, y: H * 0.5 };
+        }
+
+        document.getElementById('resetBtn').onclick = reset;
+        window.reset = reset;
+
+        window.addEventListener('resize', function() {
+            resize();
+            initGrid();
+            placeDefaultObstacles();
+            nest = { x: W * 0.15, y: H * 0.5 };
+            food = { x: W * 0.85, y: H * 0.5 };
+        });
+
+        // Pause/play via enhance.js
+        window.addEventListener('keydown', function(e) {
+            if (e.code === 'Space' && e.target === document.body) {
+                paused = !paused;
+            }
+        });
+    })();
+    </script>
+    <script src="../assets/js/enhance.js"></script>
+</body>
+</html>

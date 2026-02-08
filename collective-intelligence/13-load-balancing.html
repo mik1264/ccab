@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed Load Balancing - Collective Intelligence - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0e1a;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+            color: #ccc;
+        }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 15px; left: 15px; z-index: 100;
+            color: #8A9A5B; background: rgba(10,14,26,0.8);
+            border-radius: 25px; border: 2px solid #8A9A5B;
+            padding: 10px 20px; text-decoration: none; font-size: 14px;
+            transition: all 0.3s ease;
+        }
+        .back-link:hover { background: rgba(138,154,91,0.2); transform: translateX(-4px); }
+        #controls {
+            position: fixed; top: 15px; right: 15px; z-index: 100;
+            background: rgba(10,14,26,0.85); backdrop-filter: blur(10px);
+            border-radius: 10px; padding: 20px; max-width: 300px;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #fff; margin-bottom: 12px; font-size: 15px; }
+        .control-row { margin: 8px 0; }
+        .control-row label { display: block; font-size: 11px; color: #8A9A5B; margin-bottom: 3px; }
+        .control-row input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+        .control-row .val { float: right; color: #aaa; font-size: 11px; }
+        .control-row select {
+            width: 100%; background: rgba(10,14,26,0.9); color: #8A9A5B;
+            border: 1px solid rgba(138,154,91,0.4); border-radius: 4px;
+            padding: 4px; font-size: 12px;
+        }
+        .stat { margin: 4px 0; font-size: 12px; }
+        .stat-label { color: #888; font-size: 11px; }
+        .stat-value { color: #8A9A5B; font-weight: bold; }
+        button {
+            background: rgba(138,154,91,0.15); border: 1px solid rgba(138,154,91,0.4);
+            color: #8A9A5B; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+            font-size: 12px; margin-top: 6px; transition: all 0.3s;
+        }
+        button:hover { background: rgba(138,154,91,0.3); }
+        hr { border: none; border-top: 1px solid rgba(138,154,91,0.2); margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Collective Intelligence</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Distributed Load Balancing</h3>
+        <div class="control-row">
+            <label>Task Arrival Rate <span class="val" id="arrivalVal">3</span></label>
+            <input type="range" id="arrivalRate" min="1" max="15" value="3">
+        </div>
+        <div class="control-row">
+            <label>Processing Speed <span class="val" id="procVal">2</span></label>
+            <input type="range" id="procSpeed" min="1" max="10" value="2">
+        </div>
+        <div class="control-row">
+            <label>Sharing Threshold <span class="val" id="threshVal">2</span></label>
+            <input type="range" id="shareThresh" min="1" max="8" value="2">
+        </div>
+        <div class="control-row">
+            <label>Topology</label>
+            <select id="topology">
+                <option value="grid">Grid (5x5)</option>
+                <option value="ring">Ring</option>
+                <option value="random">Random</option>
+            </select>
+        </div>
+        <hr>
+        <div class="stat"><span class="stat-label">Max Load:</span> <span class="stat-value" id="maxLoad">0</span></div>
+        <div class="stat"><span class="stat-label">Min Load:</span> <span class="stat-value" id="minLoad">0</span></div>
+        <div class="stat"><span class="stat-label">Std Dev:</span> <span class="stat-value" id="stdDev">0</span></div>
+        <div class="stat"><span class="stat-label">Total Tasks:</span> <span class="stat-value" id="totalTasks">0</span></div>
+        <div class="stat"><span class="stat-label">Tasks Shared:</span> <span class="stat-value" id="tasksShared">0</span></div>
+        <button id="resetBtn">Reset</button>
+        <button id="burstBtn">Burst (x20)</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const GRID = 5;
+        const N = GRID * GRID;
+        let servers = [];
+        let edges = [];
+        let taskTransfers = []; // animations
+        let tasksShared = 0;
+        let incomingTasks = []; // visual animation of arriving tasks
+
+        function getNeighbors_grid(idx) {
+            const r = Math.floor(idx / GRID), c = idx % GRID;
+            const nb = [];
+            if (r > 0) nb.push(idx - GRID);
+            if (r < GRID - 1) nb.push(idx + GRID);
+            if (c > 0) nb.push(idx - 1);
+            if (c < GRID - 1) nb.push(idx + 1);
+            return nb;
+        }
+
+        function getNeighbors_ring(idx) {
+            return [(idx - 1 + N) % N, (idx + 1) % N];
+        }
+
+        let randomEdges = [];
+        function generateRandomEdges() {
+            randomEdges = [];
+            const adj = new Array(N).fill(null).map(() => new Set());
+            // Ensure connectivity with spanning tree
+            const visited = new Set([0]);
+            const remaining = [];
+            for (let i = 1; i < N; i++) remaining.push(i);
+            while (remaining.length > 0) {
+                const from = [...visited][Math.floor(Math.random() * visited.size)];
+                const toIdx = Math.floor(Math.random() * remaining.length);
+                const to = remaining[toIdx];
+                adj[from].add(to);
+                adj[to].add(from);
+                visited.add(to);
+                remaining.splice(toIdx, 1);
+            }
+            // Add some random edges
+            for (let i = 0; i < N; i++) {
+                const extra = Math.floor(Math.random() * 2) + 1;
+                for (let e = 0; e < extra; e++) {
+                    const j = Math.floor(Math.random() * N);
+                    if (j !== i) { adj[i].add(j); adj[j].add(i); }
+                }
+            }
+            for (let i = 0; i < N; i++) {
+                randomEdges[i] = [...adj[i]];
+            }
+        }
+
+        function getNeighbors(idx) {
+            const topo = document.getElementById('topology').value;
+            if (topo === 'grid') return getNeighbors_grid(idx);
+            if (topo === 'ring') return getNeighbors_ring(idx);
+            return randomEdges[idx] || [];
+        }
+
+        function buildEdges() {
+            edges = [];
+            const seen = new Set();
+            for (let i = 0; i < N; i++) {
+                const nb = getNeighbors(i);
+                nb.forEach(j => {
+                    const key = Math.min(i, j) + '-' + Math.max(i, j);
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        edges.push([i, j]);
+                    }
+                });
+            }
+        }
+
+        function getPositions() {
+            const topo = document.getElementById('topology').value;
+            const cx = W / 2 - 60, cy = H / 2;
+            const positions = [];
+
+            if (topo === 'grid') {
+                const spacing = Math.min((W - 400) / (GRID + 1), (H - 100) / (GRID + 1), 120);
+                const ox = cx - (GRID - 1) * spacing / 2;
+                const oy = cy - (GRID - 1) * spacing / 2;
+                for (let i = 0; i < N; i++) {
+                    const r = Math.floor(i / GRID), c = i % GRID;
+                    positions.push({ x: ox + c * spacing, y: oy + r * spacing });
+                }
+            } else if (topo === 'ring') {
+                const radius = Math.min(W - 400, H - 100) * 0.35;
+                for (let i = 0; i < N; i++) {
+                    const angle = (i / N) * Math.PI * 2 - Math.PI / 2;
+                    positions.push({ x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius });
+                }
+            } else {
+                // Random but seeded layout (use force-directed-like positions)
+                const radius = Math.min(W - 400, H - 100) * 0.35;
+                for (let i = 0; i < N; i++) {
+                    const angle = (i / N) * Math.PI * 2 + (i * 0.3);
+                    const r = radius * (0.4 + 0.6 * ((i * 7 + 3) % N) / N);
+                    positions.push({ x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r });
+                }
+            }
+            return positions;
+        }
+
+        function init() {
+            servers = [];
+            for (let i = 0; i < N; i++) {
+                servers.push({ queue: 0, processing: 0 });
+            }
+            taskTransfers = [];
+            incomingTasks = [];
+            tasksShared = 0;
+            generateRandomEdges();
+            buildEdges();
+        }
+
+        let frameCount = 0;
+        function update() {
+            frameCount++;
+            const arrivalRate = parseInt(document.getElementById('arrivalRate').value);
+            const procSpeed = parseInt(document.getElementById('procSpeed').value);
+            const threshold = parseInt(document.getElementById('shareThresh').value);
+            const positions = getPositions();
+
+            // Arrive tasks (non-uniform: some servers get more)
+            if (frameCount % Math.max(1, 10 - arrivalRate) === 0) {
+                // Pick random server with bias (some hotspots)
+                const hotspot = Math.floor(Math.random() * N);
+                const count = 1 + Math.floor(Math.random() * 2);
+                for (let c = 0; c < count; c++) {
+                    const target = Math.random() < 0.4 ? hotspot : Math.floor(Math.random() * N);
+                    servers[target].queue++;
+                    // Visual: incoming task
+                    const p = positions[target];
+                    const angle = Math.random() * Math.PI * 2;
+                    const dist = 100 + Math.random() * 80;
+                    incomingTasks.push({
+                        x: p.x + Math.cos(angle) * dist,
+                        y: p.y + Math.sin(angle) * dist,
+                        tx: p.x, ty: p.y,
+                        progress: 0, speed: 0.04 + Math.random() * 0.03
+                    });
+                }
+            }
+
+            // Process tasks
+            if (frameCount % Math.max(1, 12 - procSpeed) === 0) {
+                servers.forEach(s => {
+                    if (s.queue > 0) {
+                        s.queue--;
+                        s.processing = 5; // visual flash
+                    }
+                });
+            }
+
+            // Decay processing indicator
+            servers.forEach(s => { if (s.processing > 0) s.processing--; });
+
+            // Load sharing (local only)
+            if (frameCount % 5 === 0) {
+                for (let i = 0; i < N; i++) {
+                    const nb = getNeighbors(i);
+                    nb.forEach(j => {
+                        if (servers[i].queue - servers[j].queue > threshold && servers[i].queue > 1) {
+                            servers[i].queue--;
+                            servers[j].queue++;
+                            tasksShared++;
+                            // Animation
+                            const pi = positions[i], pj = positions[j];
+                            taskTransfers.push({
+                                x: pi.x, y: pi.y,
+                                tx: pj.x, ty: pj.y,
+                                progress: 0
+                            });
+                        }
+                    });
+                }
+            }
+
+            // Update transfer animations
+            taskTransfers.forEach(t => { t.progress += 0.05; });
+            taskTransfers = taskTransfers.filter(t => t.progress < 1);
+
+            incomingTasks.forEach(t => { t.progress += t.speed; });
+            incomingTasks = incomingTasks.filter(t => t.progress < 1);
+
+            // Update stats
+            const loads = servers.map(s => s.queue);
+            const maxL = Math.max(...loads);
+            const minL = Math.min(...loads);
+            const mean = loads.reduce((a, b) => a + b, 0) / loads.length;
+            const std = Math.sqrt(loads.reduce((a, b) => a + (b - mean) ** 2, 0) / loads.length);
+            document.getElementById('maxLoad').textContent = maxL;
+            document.getElementById('minLoad').textContent = minL;
+            document.getElementById('stdDev').textContent = std.toFixed(2);
+            document.getElementById('totalTasks').textContent = loads.reduce((a, b) => a + b, 0);
+            document.getElementById('tasksShared').textContent = tasksShared;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#0a0e1a';
+            ctx.fillRect(0, 0, W, H);
+
+            const positions = getPositions();
+            buildEdges();
+
+            // Draw edges
+            edges.forEach(([i, j]) => {
+                const pi = positions[i], pj = positions[j];
+                ctx.beginPath();
+                ctx.moveTo(pi.x, pi.y);
+                ctx.lineTo(pj.x, pj.y);
+                ctx.strokeStyle = 'rgba(138,154,91,0.15)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            });
+
+            // Draw transfer animations
+            taskTransfers.forEach(t => {
+                const x = t.x + (t.tx - t.x) * t.progress;
+                const y = t.y + (t.ty - t.y) * t.progress;
+                ctx.beginPath();
+                ctx.arc(x, y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(221,161,94,${1 - t.progress})`;
+                ctx.fill();
+            });
+
+            // Draw incoming tasks
+            incomingTasks.forEach(t => {
+                const x = t.x + (t.tx - t.x) * t.progress;
+                const y = t.y + (t.ty - t.y) * t.progress;
+                ctx.beginPath();
+                ctx.rect(x - 2, y - 2, 4, 4);
+                ctx.fillStyle = `rgba(138,154,91,${1 - t.progress})`;
+                ctx.fill();
+            });
+
+            // Draw servers
+            const maxQ = Math.max(1, ...servers.map(s => s.queue));
+            servers.forEach((s, i) => {
+                const p = positions[i];
+                const load = s.queue / maxQ;
+                const r = 15 + load * 25;
+
+                // Color: green (low) -> yellow (medium) -> red (high)
+                let color;
+                if (load < 0.33) {
+                    const t = load / 0.33;
+                    color = `rgb(${Math.floor(76 + 179 * t)}, ${Math.floor(175 - 30 * t)}, 80)`;
+                } else if (load < 0.66) {
+                    const t = (load - 0.33) / 0.33;
+                    color = `rgb(${Math.floor(255)}, ${Math.floor(145 - 100 * t)}, ${Math.floor(80 - 60 * t)})`;
+                } else {
+                    const t = (load - 0.66) / 0.34;
+                    color = `rgb(${Math.floor(255 - 35 * t)}, ${Math.floor(45 - 25 * t)}, ${Math.floor(20)})`;
+                }
+
+                // Glow
+                const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r + 15);
+                glow.addColorStop(0, color + '40');
+                glow.addColorStop(1, 'transparent');
+                ctx.fillStyle = glow;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, r + 15, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Server circle
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+                ctx.fillStyle = color + 'cc';
+                ctx.fill();
+                if (s.processing > 0) {
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+
+                // Queue count
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(s.queue, p.x, p.y);
+
+                // Small queue visualization (stacked squares)
+                const showQ = Math.min(s.queue, 8);
+                for (let q = 0; q < showQ; q++) {
+                    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                    ctx.fillRect(p.x - 3 + q * 4 - (showQ * 2), p.y + r + 5, 3, 3);
+                }
+            });
+
+            // Title
+            ctx.fillStyle = 'rgba(138,154,91,0.6)';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText('Each server only shares with direct neighbors — no global coordinator', W / 2 - 60, H - 30);
+        }
+
+        let paused = false;
+        function animate() {
+            if (!paused) update();
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        function reset() { init(); }
+        window.reset = reset;
+        document.getElementById('resetBtn').addEventListener('click', reset);
+        document.getElementById('topology').addEventListener('change', () => {
+            if (document.getElementById('topology').value === 'random') generateRandomEdges();
+            buildEdges();
+        });
+        document.getElementById('burstBtn').addEventListener('click', () => {
+            const target = Math.floor(Math.random() * N);
+            servers[target].queue += 20;
+        });
+
+        // Slider value displays
+        document.getElementById('arrivalRate').oninput = function() {
+            document.getElementById('arrivalVal').textContent = this.value;
+        };
+        document.getElementById('procSpeed').oninput = function() {
+            document.getElementById('procVal').textContent = this.value;
+        };
+        document.getElementById('shareThresh').oninput = function() {
+            document.getElementById('threshVal').textContent = this.value;
+        };
+
+        init();
+        animate();
+    </script>
+    <script src="../assets/js/enhance.js"></script>
+</body>
+</html>

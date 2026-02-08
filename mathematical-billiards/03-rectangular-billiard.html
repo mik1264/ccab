@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rectangular Billiard - The Unfolding Trick</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; color: #c8d8e8; }
+canvas { display: block; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+#controls {
+  position: fixed; top: 20px; right: 20px; z-index: 100;
+  background: rgba(10,14,30,0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(120,160,255,0.15); border-radius: 12px;
+  padding: 16px 20px; min-width: 230px;
+}
+#controls h3 { color: #8af; margin-bottom: 10px; font-size: 0.95em; text-transform: uppercase; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; }
+.ctrl-row label { display: block; font-size: 0.8em; color: #8ab; margin-bottom: 3px; }
+.ctrl-row input[type=range] { width: 100%; accent-color: #6af; }
+.ctrl-row .val { float: right; font-size: 0.8em; color: #adf; }
+.btn { background: rgba(100,160,255,0.15); border: 1px solid rgba(100,160,255,0.3); color: #8af; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8em; margin: 2px; }
+.btn:hover { background: rgba(100,160,255,0.3); }
+.btn.active { background: rgba(100,200,150,0.25); border-color: rgba(100,200,150,0.5); color: #8fa; }
+#stats { position: fixed; bottom: 20px; left: 20px; z-index: 100; font-size: 0.85em; color: #6a8; background: rgba(10,14,30,0.6); backdrop-filter: blur(10px); padding: 8px 14px; border-radius: 8px; }
+#info { position: fixed; bottom: 20px; right: 20px; z-index: 100; font-size: 0.78em; color: #8ab; background: rgba(10,14,30,0.6); backdrop-filter: blur(10px); padding: 8px 14px; border-radius: 8px; max-width: 260px; }
+</style>
+</head>
+<body>
+<a href="index.html">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+  <h3>Rectangular Billiard</h3>
+  <div class="ctrl-row">
+    <label>Aspect Ratio <span class="val" id="vAspect">1.50</span></label>
+    <input type="range" id="sAspect" min="0.5" max="3.0" step="0.01" value="1.50">
+  </div>
+  <div class="ctrl-row">
+    <label>Angle (rad/&pi;) <span class="val" id="vAngle">0.30</span></label>
+    <input type="range" id="sAngle" min="0.02" max="0.98" step="0.001" value="0.30">
+  </div>
+  <div class="ctrl-row">
+    <label>Speed <span class="val" id="vSpeed">3</span></label>
+    <input type="range" id="sSpeed" min="1" max="10" step="0.5" value="3">
+  </div>
+  <div style="margin-top:10px;">
+    <button class="btn active" id="bUnfold">Unfolded View</button>
+  </div>
+  <div style="margin-top:6px; font-size:0.72em; color:#6a8;">Click inside the left rectangle to set start. Drag for direction.</div>
+</div>
+<div id="stats">Bounces: <span id="bounceCount">0</span></div>
+<div id="info">
+  <div id="angleInfo">Slope: -- | Orbit: --</div>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+let aspect = 1.5;
+let angleParam = 0.3;
+let speed = 3;
+let showUnfold = true;
+let paused = false;
+let dragging = false, dragStart = null;
+
+// Table dimensions (computed from viewport)
+let tw, th, tx, ty; // table width, height, x, y (for billiard view)
+let uw, uh, ux, uy; // unfolded view position
+
+let ball = { x: 0, y: 0, vx: 0, vy: 0 };
+let trail = []; // relative to table origin (0,0)-(tw,th)
+let bounces = 0;
+const maxTrail = 5000;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  computeLayout();
+}
+
+function computeLayout() {
+  const margin = 60;
+  if (showUnfold) {
+    const halfW = (W - margin * 3) / 2;
+    const maxH = H - margin * 2;
+    th = Math.min(maxH, halfW / aspect) * 0.85;
+    tw = th * aspect;
+    tx = margin + (halfW - tw) / 2;
+    ty = (H - th) / 2;
+    ux = W / 2 + margin / 2;
+    uy = margin;
+    uw = halfW;
+    uh = H - margin * 2;
+  } else {
+    const maxH = H - margin * 2;
+    th = Math.min(maxH, (W - margin * 2) / aspect) * 0.7;
+    tw = th * aspect;
+    tx = (W - tw) / 2;
+    ty = (H - th) / 2;
+  }
+}
+
+resize();
+
+function initBall() {
+  trail = []; bounces = 0;
+  const angle = Math.PI * angleParam;
+  ball.x = tw * 0.2;
+  ball.y = th * 0.3;
+  ball.vx = Math.cos(angle);
+  ball.vy = Math.sin(angle);
+  trail.push({ x: ball.x, y: ball.y });
+  updateAngleInfo();
+}
+
+function updateAngleInfo() {
+  const slope = Math.abs(ball.vy / ball.vx) * aspect;
+  // Check if slope is approximately rational p/q
+  let orbitType = 'Dense (irrational)';
+  for (let q = 1; q <= 20; q++) {
+    for (let p = 1; p < q; p++) {
+      if (Math.abs(slope - p / q) < 0.01) {
+        orbitType = `Periodic (${p}/${q}) - returns after ${2 * q} bounces`;
+        break;
+      }
+    }
+  }
+  document.getElementById('angleInfo').textContent = `Slope: ${slope.toFixed(3)} | ${orbitType}`;
+}
+
+initBall();
+
+function update() {
+  if (paused) return;
+  for (let s = 0; s < speed * 3; s++) {
+    const step = 1.5;
+    ball.x += ball.vx * step;
+    ball.y += ball.vy * step;
+    let bounced = false;
+    if (ball.x <= 0) { ball.x = -ball.x; ball.vx = -ball.vx; bounced = true; }
+    if (ball.x >= tw) { ball.x = 2 * tw - ball.x; ball.vx = -ball.vx; bounced = true; }
+    if (ball.y <= 0) { ball.y = -ball.y; ball.vy = -ball.vy; bounced = true; }
+    if (ball.y >= th) { ball.y = 2 * th - ball.y; ball.vy = -ball.vy; bounced = true; }
+    if (bounced) bounces++;
+    trail.push({ x: ball.x, y: ball.y });
+    if (trail.length > maxTrail) trail.shift();
+  }
+  document.getElementById('bounceCount').textContent = bounces;
+}
+
+function drawRect(ox, oy, w, h, highlight) {
+  ctx.strokeStyle = highlight ? 'rgba(100,200,150,0.3)' : 'rgba(100,160,255,0.2)';
+  ctx.lineWidth = highlight ? 2 : 1;
+  ctx.strokeRect(ox, oy, w, h);
+}
+
+function draw() {
+  ctx.fillStyle = 'rgba(10,14,30,0.2)';
+  ctx.fillRect(0, 0, W, H);
+
+  // --- Billiard view (left) ---
+  // Table border glow
+  ctx.shadowColor = '#4488ff';
+  ctx.shadowBlur = 10;
+  drawRect(tx, ty, tw, th, true);
+  ctx.shadowBlur = 0;
+  drawRect(tx, ty, tw, th, true);
+
+  // Trail in billiard view
+  if (trail.length > 1) {
+    const len = trail.length;
+    for (let i = 1; i < len; i++) {
+      const t = i / len;
+      const seg = Math.floor(i * 30 / len);
+      const hue = 200 + seg * 7;
+      ctx.beginPath();
+      ctx.moveTo(tx + trail[i - 1].x, ty + trail[i - 1].y);
+      ctx.lineTo(tx + trail[i].x, ty + trail[i].y);
+      ctx.strokeStyle = `hsla(${hue % 360}, 75%, 60%, ${t * 0.65})`;
+      ctx.lineWidth = 1 + t * 1.2;
+      ctx.stroke();
+    }
+  }
+
+  // Ball
+  ctx.shadowColor = '#88ccff';
+  ctx.shadowBlur = 15;
+  ctx.beginPath();
+  ctx.arc(tx + ball.x, ty + ball.y, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#bbddff';
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // --- Unfolded view (right) ---
+  if (showUnfold) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ux, uy, uw, uh);
+    ctx.clip();
+
+    // Compute unfolded position: track cumulative reflections
+    // In unfolded view, the ball travels in a straight line through reflected copies
+    // Draw grid of reflected rectangles
+    const unfoldCx = ux + uw / 2;
+    const unfoldCy = uy + uh / 2;
+    // Scale to fit several copies
+    const scale = Math.min(uw / (tw * 6), uh / (th * 6));
+    const stw = tw * scale, sth = th * scale;
+
+    // Origin of the grid: center on the ball's unfolded position
+    let unfX = 0, unfY = 0;
+    let reflX = 0, reflY = 0;
+    // Compute unfolded ball position from trail
+    if (trail.length > 0) {
+      let ux2 = trail[0].x, uy2 = trail[0].y;
+      let rx = 0, ry = 0;
+      for (let i = 1; i < trail.length; i++) {
+        const dx = trail[i].x - trail[i - 1].x;
+        const dy = trail[i].y - trail[i - 1].y;
+        // Detect reflection
+        if (Math.abs(dx) > tw * 0.5) {
+          // x reflection happened, but we want unfolded: just accumulate
+        }
+        ux2 += dx; uy2 += dy;
+      }
+      unfX = ux2; unfY = uy2;
+    }
+
+    // Actually, for unfolding: just draw the ball moving in a straight line
+    // The unfolded position = start + velocity * time (no reflections)
+    const startX = trail[0] ? trail[0].x : tw / 2;
+    const startY = trail[0] ? trail[0].y : th / 2;
+    const totalDist = trail.length * 1.5; // approximate
+    const ufBallX = startX + ball.vx * totalDist;
+    const ufBallY = startY + ball.vy * totalDist;
+
+    // Center on midpoint of trajectory
+    const midX = (startX + ufBallX) / 2;
+    const midY = (startY + ufBallY) / 2;
+    const autoScale = Math.min(uw / (Math.abs(ufBallX - startX) + tw * 2), uh / (Math.abs(ufBallY - startY) + th * 2), uw / (tw * 4));
+    const sc = Math.max(autoScale, uw / (tw * 20));
+
+    const offX = unfoldCx - midX * sc;
+    const offY = unfoldCy - midY * sc;
+
+    // Draw grid of rectangles
+    const gridMinX = Math.floor((ux - offX) / (tw * sc)) - 1;
+    const gridMaxX = Math.ceil((ux + uw - offX) / (tw * sc)) + 1;
+    const gridMinY = Math.floor((uy - offY) / (th * sc)) - 1;
+    const gridMaxY = Math.ceil((uy + uh - offY) / (th * sc)) + 1;
+
+    for (let gx = gridMinX; gx <= gridMaxX; gx++) {
+      for (let gy = gridMinY; gy <= gridMaxY; gy++) {
+        const rx = offX + gx * tw * sc;
+        const ry = offY + gy * th * sc;
+        const isOrig = gx === 0 && gy === 0;
+        ctx.strokeStyle = isOrig ? 'rgba(100,200,150,0.35)' : 'rgba(80,120,180,0.12)';
+        ctx.lineWidth = isOrig ? 1.5 : 0.5;
+        ctx.strokeRect(rx, ry, tw * sc, th * sc);
+      }
+    }
+
+    // Straight line from start to current ball unfolded position
+    const sx = offX + startX * sc, sy = offY + startY * sc;
+    const ex = offX + ufBallX * sc, ey = offY + ufBallY * sc;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
+    ctx.strokeStyle = 'rgba(255,180,80,0.6)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Ball in unfolded view
+    ctx.shadowColor = '#ffaa44';
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    ctx.arc(ex, ey, 4, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffcc88';
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Label
+    ctx.fillStyle = 'rgba(200,220,255,0.4)';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Unfolded View', ux + 10, uy + 20);
+
+    ctx.restore();
+
+    // Divider
+    ctx.beginPath();
+    ctx.moveTo(W / 2, 0);
+    ctx.lineTo(W / 2, H);
+    ctx.strokeStyle = 'rgba(100,160,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(200,220,255,0.4)';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Billiard View', tx + 10, ty - 10);
+  }
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// Controls
+document.getElementById('sAspect').addEventListener('input', function() {
+  aspect = parseFloat(this.value);
+  document.getElementById('vAspect').textContent = aspect.toFixed(2);
+  computeLayout();
+  initBall();
+});
+document.getElementById('sAngle').addEventListener('input', function() {
+  angleParam = parseFloat(this.value);
+  document.getElementById('vAngle').textContent = angleParam.toFixed(3);
+  initBall();
+});
+document.getElementById('sSpeed').addEventListener('input', function() {
+  speed = parseFloat(this.value);
+  document.getElementById('vSpeed').textContent = speed;
+});
+document.getElementById('bUnfold').addEventListener('click', function() {
+  showUnfold = !showUnfold;
+  this.classList.toggle('active');
+  computeLayout();
+});
+
+canvas.addEventListener('mousedown', function(e) {
+  const lx = e.clientX - tx, ly = e.clientY - ty;
+  if (lx >= 0 && lx <= tw && ly >= 0 && ly <= th) {
+    dragging = true;
+    dragStart = { x: e.clientX, y: e.clientY };
+  }
+});
+canvas.addEventListener('mouseup', function(e) {
+  if (dragging && dragStart) {
+    const dx = e.clientX - dragStart.x, dy = e.clientY - dragStart.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len > 5) {
+      trail = []; bounces = 0;
+      ball.x = dragStart.x - tx;
+      ball.y = dragStart.y - ty;
+      ball.vx = dx / len;
+      ball.vy = dy / len;
+      trail.push({ x: ball.x, y: ball.y });
+      updateAngleInfo();
+    }
+    dragging = false; dragStart = null;
+  }
+});
+
+window.addEventListener('resize', resize);
+window.addEventListener('keydown', function(e) {
+  if (e.code === 'Space') { e.preventDefault(); paused = !paused; }
+});
+
+window.reset = function() {
+  initBall();
+  ctx.clearRect(0, 0, W, H);
+};
+
+requestAnimationFrame(loop);
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stadium Billiard - Bunimovich Stadium</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+        a.back:hover { color: #bdf; }
+        #controls {
+            position: fixed; top: 20px; right: 20px; z-index: 100;
+            background: rgba(10, 14, 26, 0.75); backdrop-filter: blur(10px);
+            border: 1px solid rgba(138, 170, 255, 0.15); border-radius: 12px;
+            padding: 16px; color: #cde; font-size: 13px; width: 220px;
+        }
+        #controls h3 { color: #8af; margin-bottom: 10px; font-size: 14px; }
+        .ctrl-row { margin-bottom: 8px; }
+        .ctrl-row label { display: block; margin-bottom: 2px; color: #9ab; font-size: 11px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #8af; }
+        .ctrl-row select, .ctrl-row button {
+            width: 100%; padding: 4px 8px; background: rgba(138,170,255,0.1);
+            border: 1px solid rgba(138,170,255,0.25); border-radius: 6px;
+            color: #cde; font-size: 12px; cursor: pointer;
+        }
+        .ctrl-row button:hover { background: rgba(138,170,255,0.2); }
+        #info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(10,14,26,0.8); backdrop-filter: blur(10px);
+            border: 1px solid rgba(138,170,255,0.15); border-radius: 10px;
+            padding: 10px 18px; color: #9ab; font-size: 12px; max-width: 600px;
+            text-align: center; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+<a href="index.html" class="back">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+    <h3>Stadium Billiard</h3>
+    <div class="ctrl-row">
+        <label>Flat Section Length: <span id="vFlat">1.0</span></label>
+        <input type="range" id="flat" min="0" max="2" step="0.05" value="1">
+    </div>
+    <div class="ctrl-row">
+        <label>Ball Speed: <span id="vSpeed">4</span></label>
+        <input type="range" id="speed" min="1" max="12" step="0.5" value="4">
+    </div>
+    <div class="ctrl-row">
+        <label>Trail Length: <span id="vTrail">800</span></label>
+        <input type="range" id="trail" min="100" max="3000" step="100" value="800">
+    </div>
+    <div class="ctrl-row">
+        <label>Mode</label>
+        <select id="mode">
+            <option value="single">Single Ball</option>
+            <option value="pair" selected>Diverging Pair</option>
+        </select>
+    </div>
+    <div class="ctrl-row">
+        <label><input type="checkbox" id="heatmap"> Show Heat Map</label>
+    </div>
+    <div class="ctrl-row">
+        <button id="resetBtn">Reset</button>
+    </div>
+</div>
+<div id="info">
+    Bunimovich proved in 1979 that this simple shape is ergodic, mixing, and has positive Lyapunov exponent.
+    At flat length = 0 it is a circle (integrable); any positive flat section produces full chaos.
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let W, H, cx, cy, R, flatLen;
+const HEAT_RES = 4;
+let heatGrid, heatMax;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    cx = W / 2; cy = H / 2;
+    R = Math.min(W, H) * 0.28;
+    initHeat();
+}
+
+function initHeat() {
+    const gw = Math.ceil(W / HEAT_RES), gh = Math.ceil(H / HEAT_RES);
+    heatGrid = new Float32Array(gw * gh);
+    heatMax = 1;
+}
+
+function heatColor(v) {
+    const t = Math.min(v / Math.max(heatMax * 0.6, 1), 1);
+    if (t < 0.25) return `rgb(${0},${Math.floor(t*4*80)},${Math.floor(t*4*180)})`;
+    if (t < 0.5) { const s = (t-0.25)*4; return `rgb(${0},${Math.floor(80+s*175)},${Math.floor(180-s*80)})`; }
+    if (t < 0.75) { const s = (t-0.5)*4; return `rgb(${Math.floor(s*255)},${255},${Math.floor(100-s*100)})`; }
+    const s = (t-0.75)*4; return `rgb(${255},${255},${Math.floor(s*255)})`;
+}
+
+// Stadium geometry: two semicircles of radius R connected by flat of length 2*flatLen*R
+// Center at (cx, cy), semicircles centered at (cx - flatLen*R, cy) and (cx + flatLen*R, cy)
+
+function getFlat() { return parseFloat(document.getElementById('flat').value); }
+function getSpeed() { return parseFloat(document.getElementById('speed').value); }
+function getTrail() { return parseInt(document.getElementById('trail').value); }
+function getMode() { return document.getElementById('mode').value; }
+function showHeat() { return document.getElementById('heatmap').checked; }
+
+class Ball {
+    constructor(x, y, vx, vy, color) {
+        this.x = x; this.y = y;
+        this.vx = vx; this.vy = vy;
+        this.color = color;
+        this.trail = [];
+    }
+}
+
+let balls = [];
+let bounceCount = 0;
+
+function initBalls() {
+    const f = getFlat();
+    const s = getSpeed();
+    const angle = Math.random() * Math.PI * 2;
+    const bx = cx + (Math.random() - 0.5) * f * R * 0.5;
+    const by = cy + (Math.random() - 0.5) * R * 0.5;
+    balls = [];
+    balls.push(new Ball(bx, by, Math.cos(angle) * s, Math.sin(angle) * s, '#ff4466'));
+    if (getMode() === 'pair') {
+        const eps = 0.001;
+        balls.push(new Ball(bx + eps, by + eps,
+            Math.cos(angle + eps) * s, Math.sin(angle + eps) * s, '#44aaff'));
+    }
+    bounceCount = 0;
+    initHeat();
+}
+
+// Collision detection with stadium boundary
+function collideStadium(ball) {
+    const f = getFlat() * R;
+    const leftCx = cx - f, rightCx = cx + f;
+
+    // Top flat wall: y = cy - R, from leftCx to rightCx
+    if (ball.y < cy - R + 1 && ball.x >= leftCx && ball.x <= rightCx) {
+        ball.y = cy - R + 1;
+        ball.vy = Math.abs(ball.vy);
+        bounceCount++;
+        return;
+    }
+    // Bottom flat wall
+    if (ball.y > cy + R - 1 && ball.x >= leftCx && ball.x <= rightCx) {
+        ball.y = cy + R - 1;
+        ball.vy = -Math.abs(ball.vy);
+        bounceCount++;
+        return;
+    }
+    // Left semicircle
+    const dlx = ball.x - leftCx, dly = ball.y - cy;
+    const distL = Math.sqrt(dlx * dlx + dly * dly);
+    if (ball.x <= leftCx && distL >= R - 1) {
+        const nx = dlx / distL, ny = dly / distL;
+        const dot = ball.vx * nx + ball.vy * ny;
+        if (dot < 0) return;
+        ball.vx -= 2 * dot * nx;
+        ball.vy -= 2 * dot * ny;
+        ball.x = leftCx + nx * (R - 2);
+        ball.y = cy + ny * (R - 2);
+        bounceCount++;
+        return;
+    }
+    // Right semicircle
+    const drx = ball.x - rightCx, dry = ball.y - cy;
+    const distR = Math.sqrt(drx * drx + dry * dry);
+    if (ball.x >= rightCx && distR >= R - 1) {
+        const nx = drx / distR, ny = dry / distR;
+        const dot = ball.vx * nx + ball.vy * ny;
+        if (dot < 0) return;
+        ball.vx -= 2 * dot * nx;
+        ball.vy -= 2 * dot * ny;
+        ball.x = rightCx + nx * (R - 2);
+        ball.y = cy + ny * (R - 2);
+        bounceCount++;
+        return;
+    }
+}
+
+function isInsideStadium(x, y) {
+    const f = getFlat() * R;
+    const leftCx = cx - f, rightCx = cx + f;
+    if (x >= leftCx && x <= rightCx) {
+        return Math.abs(y - cy) < R;
+    }
+    if (x < leftCx) {
+        const dx = x - leftCx, dy = y - cy;
+        return dx*dx + dy*dy < R*R;
+    }
+    const dx = x - rightCx, dy = y - cy;
+    return dx*dx + dy*dy < R*R;
+}
+
+function drawStadium() {
+    const f = getFlat() * R;
+    const leftCx = cx - f, rightCx = cx + f;
+    ctx.beginPath();
+    ctx.arc(leftCx, cy, R, Math.PI * 0.5, Math.PI * 1.5);
+    ctx.lineTo(rightCx, cy - R);
+    ctx.arc(rightCx, cy, R, -Math.PI * 0.5, Math.PI * 0.5);
+    ctx.lineTo(leftCx, cy + R);
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(138,170,255,0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+}
+
+function drawHeat() {
+    const gw = Math.ceil(W / HEAT_RES);
+    for (let i = 0; i < heatGrid.length; i++) {
+        if (heatGrid[i] <= 0) continue;
+        const gx = (i % gw) * HEAT_RES;
+        const gy = Math.floor(i / gw) * HEAT_RES;
+        ctx.fillStyle = heatColor(heatGrid[i]);
+        ctx.fillRect(gx, gy, HEAT_RES, HEAT_RES);
+    }
+}
+
+function updateHeat(x, y) {
+    const gw = Math.ceil(W / HEAT_RES);
+    const gi = Math.floor(x / HEAT_RES);
+    const gj = Math.floor(y / HEAT_RES);
+    if (gi >= 0 && gi < gw && gj >= 0 && gj < Math.ceil(H / HEAT_RES)) {
+        const idx = gj * gw + gi;
+        heatGrid[idx]++;
+        if (heatGrid[idx] > heatMax) heatMax = heatGrid[idx];
+    }
+}
+
+let running = true;
+
+function step() {
+    const spd = getSpeed();
+    const trailLen = getTrail();
+    const substeps = Math.ceil(spd);
+
+    for (const ball of balls) {
+        for (let s = 0; s < substeps; s++) {
+            const dt = 1 / substeps;
+            ball.x += ball.vx * dt;
+            ball.y += ball.vy * dt;
+            collideStadium(ball);
+            if (showHeat() && ball === balls[0]) {
+                updateHeat(ball.x, ball.y);
+            }
+        }
+        ball.trail.push({ x: ball.x, y: ball.y });
+        if (ball.trail.length > trailLen) ball.trail.shift();
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    if (showHeat()) drawHeat();
+
+    drawStadium();
+
+    for (const ball of balls) {
+        if (ball.trail.length < 2) continue;
+        const len = ball.trail.length;
+        for (let i = 1; i < len; i++) {
+            const alpha = (i / len) * 0.7 + 0.05;
+            ctx.beginPath();
+            ctx.moveTo(ball.trail[i-1].x, ball.trail[i-1].y);
+            ctx.lineTo(ball.trail[i].x, ball.trail[i].y);
+            ctx.strokeStyle = ball.color.replace(')', `,${alpha})`).replace('rgb', 'rgba');
+            // parse hex
+            const r = parseInt(ball.color.slice(1,3),16);
+            const g = parseInt(ball.color.slice(3,5),16);
+            const b = parseInt(ball.color.slice(5,7),16);
+            ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+
+        // Glow ball
+        const r = parseInt(ball.color.slice(1,3),16);
+        const g = parseInt(ball.color.slice(3,5),16);
+        const b = parseInt(ball.color.slice(5,7),16);
+        const grd = ctx.createRadialGradient(ball.x, ball.y, 0, ball.x, ball.y, 12);
+        grd.addColorStop(0, `rgba(${r},${g},${b},0.9)`);
+        grd.addColorStop(0.4, `rgba(${r},${g},${b},0.3)`);
+        grd.addColorStop(1, `rgba(${r},${g},${b},0)`);
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, 12, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Bounce counter
+    ctx.fillStyle = '#5a7a9a';
+    ctx.font = '12px monospace';
+    ctx.fillText(`Bounces: ${bounceCount}`, 20, H - 20);
+}
+
+function animate() {
+    if (running) {
+        step();
+        draw();
+    }
+    requestAnimationFrame(animate);
+}
+
+// Slider labels
+document.getElementById('flat').addEventListener('input', e => {
+    document.getElementById('vFlat').textContent = parseFloat(e.target.value).toFixed(2);
+});
+document.getElementById('speed').addEventListener('input', e => {
+    document.getElementById('vSpeed').textContent = e.target.value;
+    const spd = parseFloat(e.target.value);
+    for (const b of balls) {
+        const mag = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+        if (mag > 0) { b.vx = b.vx/mag*spd; b.vy = b.vy/mag*spd; }
+    }
+});
+document.getElementById('trail').addEventListener('input', e => {
+    document.getElementById('vTrail').textContent = e.target.value;
+});
+document.getElementById('mode').addEventListener('change', () => initBalls());
+document.getElementById('resetBtn').addEventListener('click', () => initBalls());
+
+window.addEventListener('resize', () => { resize(); initBalls(); });
+
+window.reset = function() { initBalls(); };
+
+resize();
+initBalls();
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

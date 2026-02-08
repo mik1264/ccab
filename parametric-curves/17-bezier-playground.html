@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bézier Playground</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+canvas { display: block; cursor: crosshair; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+#controls {
+    position: fixed; top: 20px; right: 20px; background: rgba(10,14,26,0.85);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(138,170,255,0.15); border-radius: 12px;
+    padding: 16px; color: #cde; z-index: 100; width: 240px; font-size: 13px;
+}
+#controls h3 { color: #8af; margin-bottom: 10px; font-size: 14px; }
+.ctrl-group { margin-bottom: 10px; }
+.ctrl-group label { display: block; margin-bottom: 3px; color: #9ab; font-size: 12px; }
+.ctrl-group select, .ctrl-group input[type=range] { width: 100%; }
+select { background: rgba(30,40,70,0.8); color: #cde; border: 1px solid rgba(138,170,255,0.2); border-radius: 6px; padding: 4px; }
+.toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.toggle-row input { accent-color: #8af; }
+.toggle-row label { color: #9ab; font-size: 12px; }
+.btn-row { display: flex; gap: 6px; margin-top: 8px; }
+.btn-row button {
+    flex: 1; padding: 5px 8px; background: rgba(60,80,140,0.4);
+    color: #8af; border: 1px solid rgba(138,170,255,0.2); border-radius: 6px;
+    cursor: pointer; font-size: 11px;
+}
+.btn-row button:hover { background: rgba(80,100,180,0.5); }
+.btn-row button.active { background: rgba(100,140,255,0.3); border-color: #8af; }
+#info {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+    color: #6d9; font-size: 13px; z-index: 100;
+    background: rgba(10,14,26,0.7); backdrop-filter: blur(10px);
+    padding: 8px 20px; border-radius: 16px; border: 1px solid rgba(138,170,255,0.1);
+}
+</style>
+</head>
+<body>
+<a href="index.html">&#8592; Back</a>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <h3>Bezier Playground</h3>
+    <div class="ctrl-group">
+        <label>Control Points: <span id="numPtsVal">4</span></label>
+        <input type="range" id="numPts" min="3" max="7" step="1" value="4">
+    </div>
+    <div class="ctrl-group">
+        <label>Parameter t: <span id="tVal">0.50</span></label>
+        <input type="range" id="tSlider" min="0" max="1" step="0.005" value="0.5">
+    </div>
+    <div class="toggle-row"><input type="checkbox" id="showPoly" checked><label for="showPoly">Control polygon</label></div>
+    <div class="toggle-row"><input type="checkbox" id="showCasteljau" checked><label for="showCasteljau">De Casteljau</label></div>
+    <div class="toggle-row"><input type="checkbox" id="showHull"><label for="showHull">Convex hull</label></div>
+    <div class="toggle-row"><input type="checkbox" id="showTangent"><label for="showTangent">Tangent/normal</label></div>
+    <div class="toggle-row"><input type="checkbox" id="curvatureColor"><label for="curvatureColor">Curvature color</label></div>
+    <div class="btn-row">
+        <button id="animateBtn">Animate t</button>
+        <button id="resetPtsBtn">Reset Points</button>
+    </div>
+</div>
+<div id="info">Drag control points to reshape the curve. The curve always lies within the convex hull.</div>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+let points = [];
+let dragging = -1;
+let animating = false;
+let animT = 0;
+let paused = false;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    if (points.length === 0) initPoints(4);
+}
+
+function initPoints(n) {
+    points = [];
+    const cx = W / 2, cy = H / 2;
+    const spread = Math.min(W, H) * 0.3;
+    for (let i = 0; i < n; i++) {
+        const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
+        const r = spread * (0.6 + 0.4 * Math.sin(i * 1.5));
+        points.push({
+            x: cx + Math.cos(angle) * r * 1.2,
+            y: cy + Math.sin(angle) * r + (i % 2 ? -80 : 80)
+        });
+    }
+}
+
+resize();
+window.addEventListener('resize', resize);
+
+function lerp(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
+
+function deCasteljau(pts, t) {
+    const levels = [pts.slice()];
+    let current = pts.slice();
+    while (current.length > 1) {
+        const next = [];
+        for (let i = 0; i < current.length - 1; i++) {
+            next.push(lerp(current[i], current[i + 1], t));
+        }
+        levels.push(next);
+        current = next;
+    }
+    return levels;
+}
+
+function bezierPoint(pts, t) {
+    let current = pts.slice();
+    while (current.length > 1) {
+        const next = [];
+        for (let i = 0; i < current.length - 1; i++) next.push(lerp(current[i], current[i + 1], t));
+        current = next;
+    }
+    return current[0];
+}
+
+function curvature(pts, t) {
+    const dt = 0.001;
+    const p0 = bezierPoint(pts, Math.max(0, t - dt));
+    const p1 = bezierPoint(pts, t);
+    const p2 = bezierPoint(pts, Math.min(1, t + dt));
+    const dx1 = p1.x - p0.x, dy1 = p1.y - p0.y;
+    const dx2 = p2.x - p1.x, dy2 = p2.y - p1.y;
+    const cross = dx1 * dy2 - dy1 * dx2;
+    const ds = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+    return ds > 0 ? Math.abs(cross) / (ds * ds * ds) * 1000 : 0;
+}
+
+function convexHull(pts) {
+    const sorted = pts.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    const lower = [];
+    for (const p of sorted) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+        lower.push(p);
+    }
+    const upper = [];
+    for (let i = sorted.length - 1; i >= 0; i--) {
+        const p = sorted[i];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+        upper.push(p);
+    }
+    upper.pop(); lower.pop();
+    return lower.concat(upper);
+}
+
+function hsl(h, s, l, a) { return `hsla(${h},${s}%,${l}%,${a || 1})`; }
+
+const levelColors = ['#f66', '#fa0', '#ff0', '#6f6', '#6df', '#c6f', '#f6c'];
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Subtle grid
+    ctx.strokeStyle = 'rgba(138,170,255,0.03)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 60) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y < H; y += 60) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+    const t = animating ? animT : parseFloat(document.getElementById('tSlider').value);
+    const showPoly = document.getElementById('showPoly').checked;
+    const showCast = document.getElementById('showCasteljau').checked;
+    const showHullFlag = document.getElementById('showHull').checked;
+    const showTan = document.getElementById('showTangent').checked;
+    const curvCol = document.getElementById('curvatureColor').checked;
+
+    // Convex hull
+    if (showHullFlag && points.length >= 3) {
+        const hull = convexHull(points);
+        ctx.beginPath();
+        ctx.moveTo(hull[0].x, hull[0].y);
+        for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(138,170,255,0.05)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(138,170,255,0.15)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([5, 5]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // Control polygon
+    if (showPoly) {
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+        for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+        ctx.strokeStyle = 'rgba(138,170,255,0.25)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+
+    // Main curve
+    const steps = 400;
+    for (let i = 0; i < steps; i++) {
+        const t1 = i / steps, t2 = (i + 1) / steps;
+        const p1 = bezierPoint(points, t1);
+        const p2 = bezierPoint(points, t2);
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        if (curvCol) {
+            const k = Math.min(curvature(points, (t1 + t2) / 2), 1);
+            ctx.strokeStyle = hsl(240 - k * 240, 80, 55);
+        } else {
+            ctx.strokeStyle = hsl(200 + (t1) * 60, 80, 60);
+        }
+        ctx.lineWidth = 3;
+        ctx.shadowColor = curvCol ? ctx.strokeStyle : '#8af';
+        ctx.shadowBlur = 8;
+        ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    // De Casteljau construction
+    if (showCast) {
+        const levels = deCasteljau(points, t);
+        for (let lv = 1; lv < levels.length; lv++) {
+            const col = levelColors[(lv - 1) % levelColors.length];
+            const alpha = 0.6;
+            ctx.beginPath();
+            ctx.moveTo(levels[lv][0].x, levels[lv][0].y);
+            for (let i = 1; i < levels[lv].length; i++) ctx.lineTo(levels[lv][i].x, levels[lv][i].y);
+            ctx.strokeStyle = col + '80';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            for (const p of levels[lv]) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, lv === levels.length - 1 ? 6 : 3, 0, Math.PI * 2);
+                ctx.fillStyle = col;
+                if (lv === levels.length - 1) {
+                    ctx.shadowColor = col;
+                    ctx.shadowBlur = 15;
+                }
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+    }
+
+    // Tangent and normal
+    if (showTan) {
+        const dt = 0.001;
+        const pt = bezierPoint(points, t);
+        const pt2 = bezierPoint(points, Math.min(1, t + dt));
+        const dx = pt2.x - pt.x, dy = pt2.y - pt.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len > 0) {
+            const tx = dx / len * 80, ty = dy / len * 80;
+            // Tangent
+            ctx.beginPath();
+            ctx.moveTo(pt.x - tx, pt.y - ty);
+            ctx.lineTo(pt.x + tx, pt.y + ty);
+            ctx.strokeStyle = '#ff6';
+            ctx.lineWidth = 2;
+            ctx.shadowColor = '#ff6';
+            ctx.shadowBlur = 10;
+            ctx.stroke();
+            // Normal
+            ctx.beginPath();
+            ctx.moveTo(pt.x - ty * 0.6, pt.y + tx * 0.6);
+            ctx.lineTo(pt.x + ty * 0.6, pt.y - tx * 0.6);
+            ctx.strokeStyle = '#f66';
+            ctx.lineWidth = 2;
+            ctx.shadowColor = '#f66';
+            ctx.shadowBlur = 10;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+        }
+    }
+
+    // Control points
+    for (let i = 0; i < points.length; i++) {
+        ctx.beginPath();
+        ctx.arc(points[i].x, points[i].y, 8, 0, Math.PI * 2);
+        ctx.fillStyle = '#0a0e1a';
+        ctx.fill();
+        ctx.strokeStyle = '#8af';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = '#8af';
+        ctx.shadowBlur = 12;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        ctx.fillStyle = '#8af';
+        ctx.font = '10px monospace';
+        ctx.fillText('P' + i, points[i].x + 12, points[i].y - 10);
+    }
+
+    // Animate t
+    if (animating && !paused) {
+        animT += 0.004;
+        if (animT > 1) animT = 0;
+        document.getElementById('tSlider').value = animT;
+        document.getElementById('tVal').textContent = animT.toFixed(2);
+    }
+
+    requestAnimationFrame(draw);
+}
+
+// Mouse interaction
+canvas.addEventListener('mousedown', e => {
+    const mx = e.clientX, my = e.clientY;
+    for (let i = 0; i < points.length; i++) {
+        const dx = points[i].x - mx, dy = points[i].y - my;
+        if (dx * dx + dy * dy < 400) { dragging = i; return; }
+    }
+});
+canvas.addEventListener('mousemove', e => {
+    if (dragging >= 0) {
+        points[dragging].x = e.clientX;
+        points[dragging].y = e.clientY;
+    }
+});
+canvas.addEventListener('mouseup', () => { dragging = -1; });
+canvas.addEventListener('mouseleave', () => { dragging = -1; });
+
+// Touch
+canvas.addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    const mx = t.clientX, my = t.clientY;
+    for (let i = 0; i < points.length; i++) {
+        const dx = points[i].x - mx, dy = points[i].y - my;
+        if (dx * dx + dy * dy < 600) { dragging = i; e.preventDefault(); return; }
+    }
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+    if (dragging >= 0) {
+        points[dragging].x = e.touches[0].clientX;
+        points[dragging].y = e.touches[0].clientY;
+        e.preventDefault();
+    }
+}, { passive: false });
+canvas.addEventListener('touchend', () => { dragging = -1; });
+
+document.getElementById('numPts').addEventListener('input', e => {
+    const n = parseInt(e.target.value);
+    document.getElementById('numPtsVal').textContent = n;
+    initPoints(n);
+});
+document.getElementById('tSlider').addEventListener('input', e => {
+    document.getElementById('tVal').textContent = parseFloat(e.target.value).toFixed(2);
+    animating = false;
+    document.getElementById('animateBtn').classList.remove('active');
+});
+document.getElementById('animateBtn').addEventListener('click', function() {
+    animating = !animating;
+    if (animating) animT = 0;
+    this.classList.toggle('active', animating);
+});
+document.getElementById('resetPtsBtn').addEventListener('click', () => {
+    initPoints(parseInt(document.getElementById('numPts').value));
+});
+
+window.reset = function() {
+    animating = false;
+    paused = false;
+    animT = 0;
+    document.getElementById('numPts').value = 4;
+    document.getElementById('numPtsVal').textContent = '4';
+    document.getElementById('tSlider').value = 0.5;
+    document.getElementById('tVal').textContent = '0.50';
+    document.getElementById('showPoly').checked = true;
+    document.getElementById('showCasteljau').checked = true;
+    document.getElementById('showHull').checked = false;
+    document.getElementById('showTangent').checked = false;
+    document.getElementById('curvatureColor').checked = false;
+    document.getElementById('animateBtn').classList.remove('active');
+    initPoints(4);
+};
+
+draw();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

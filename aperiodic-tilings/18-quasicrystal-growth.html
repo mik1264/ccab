@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quasicrystal Growth - Growing an Aperiodic Crystal</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; top: 20px; right: 20px; z-index: 100;
+    background: rgba(10, 14, 30, 0.85); backdrop-filter: blur(10px);
+    border: 1px solid rgba(100, 140, 255, 0.3); border-radius: 12px;
+    padding: 18px; min-width: 240px; color: #c8d8ff;
+}
+#controls h3 { margin-bottom: 12px; color: #8af; font-size: 1em; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85em; }
+.ctrl-row span { color: #8aa; }
+.ctrl-row .val { color: #ffd866; font-weight: bold; }
+input[type="range"] { width: 100%; accent-color: #8af; margin-top: 4px; }
+button.btn {
+    background: rgba(80, 120, 255, 0.2); border: 1px solid rgba(100, 140, 255, 0.4);
+    color: #8af; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    font-size: 0.85em; transition: all 0.2s;
+}
+button.btn:hover { background: rgba(80, 120, 255, 0.4); }
+.btn-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.info {
+    margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(100,140,255,0.2);
+    font-size: 0.75em; color: #6a8; line-height: 1.5;
+}
+label { font-size: 0.8em; color: #8aa; display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 4px; }
+label input { accent-color: #8af; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:20px;left:20px;color:#8af;text-decoration:none;z-index:100;font-size:1.2em">&#8592; Back</a>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <h3>QUASICRYSTAL GROWTH</h3>
+    <div class="ctrl-row"><span>Tiles placed:</span><span class="val" id="tileCount">1</span></div>
+    <div class="ctrl-row"><span>Conflicts:</span><span class="val" id="conflictCount">0</span></div>
+    <div class="ctrl-row"><span>Growth rate:</span><span class="val" id="growthRate">--</span></div>
+    <div class="ctrl-row"><span>Frontier edges:</span><span class="val" id="frontierCount">0</span></div>
+    <div class="ctrl-row"><span>Speed:</span></div>
+    <input type="range" id="speedSlider" min="1" max="50" value="10">
+    <div class="btn-row" style="margin-top:10px">
+        <button class="btn" id="stepBtn">Step</button>
+        <button class="btn" id="pauseBtn">Pause</button>
+        <button class="btn" id="resetBtn">Reset</button>
+    </div>
+    <label><input type="checkbox" id="showFrontier" checked> Show growth front</label>
+    <label><input type="checkbox" id="colorByAge" checked> Color by age</label>
+    <div class="info">
+        Watch a quasicrystal grow atom by atom. Each tile must obey local matching rules.
+        Red tiles are conflicts that get backtracked. How can local rules produce global aperiodic order?
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const PHI = (1 + Math.sqrt(5)) / 2;
+
+let W, H;
+let tiles = [];
+let frontier = [];
+let conflicts = 0;
+let paused = false;
+let time = 0;
+let startTime = 0;
+let camX = 0, camY = 0, camZoom = 1;
+let dragging = false, dragSX, dragSY, camSX, camSY;
+
+// 5 directions for Penrose-like quasicrystal
+const DIRS = [];
+for (let i = 0; i < 5; i++) {
+    let a = (i * Math.PI * 2) / 5;
+    DIRS.push([Math.cos(a), Math.sin(a)]);
+}
+const TILE_SIZE = 30;
+
+// Tile types: thick rhombus (72 deg) and thin rhombus (36 deg)
+function makeThickRhombus(cx, cy, orient) {
+    let d1 = orient % 5;
+    let d2 = (orient + 1) % 5;
+    let a1 = (d1 * Math.PI * 2) / 5;
+    let a2 = (d2 * Math.PI * 2) / 5;
+    let s = TILE_SIZE;
+    return {
+        type: 'thick',
+        cx, cy, orient,
+        verts: [
+            [cx, cy],
+            [cx + s * Math.cos(a1), cy + s * Math.sin(a1)],
+            [cx + s * Math.cos(a1) + s * Math.cos(a2), cy + s * Math.sin(a1) + s * Math.sin(a2)],
+            [cx + s * Math.cos(a2), cy + s * Math.sin(a2)]
+        ],
+        edges: []
+    };
+}
+
+function makeThinRhombus(cx, cy, orient) {
+    let d1 = orient % 5;
+    let d2 = (orient + 2) % 5;
+    let a1 = (d1 * Math.PI * 2) / 5;
+    let a2 = (d2 * Math.PI * 2) / 5;
+    let s = TILE_SIZE;
+    return {
+        type: 'thin',
+        cx, cy, orient,
+        verts: [
+            [cx, cy],
+            [cx + s * Math.cos(a1), cy + s * Math.sin(a1)],
+            [cx + s * Math.cos(a1) + s * Math.cos(a2), cy + s * Math.sin(a1) + s * Math.sin(a2)],
+            [cx + s * Math.cos(a2), cy + s * Math.sin(a2)]
+        ],
+        edges: []
+    };
+}
+
+function getEdges(tile) {
+    let v = tile.verts;
+    let edges = [];
+    for (let i = 0; i < 4; i++) {
+        let j = (i + 1) % 4;
+        let mx = (v[i][0] + v[j][0]) / 2;
+        let my = (v[i][1] + v[j][1]) / 2;
+        edges.push({ p1: v[i], p2: v[j], mx, my, idx: i });
+    }
+    return edges;
+}
+
+function edgeKey(mx, my) {
+    return Math.round(mx * 10) + ',' + Math.round(my * 10);
+}
+
+function overlaps(tile) {
+    for (let existing of tiles) {
+        if (existing.removed) continue;
+        let dx = Math.abs(tile.cx - existing.cx) + Math.abs(tile.cy - existing.cy);
+        if (dx < 2) return true; // Same position
+        // Check vertex overlap
+        let eCx = 0, eCy = 0, tCx = 0, tCy = 0;
+        for (let v of existing.verts) { eCx += v[0]; eCy += v[1]; }
+        for (let v of tile.verts) { tCx += v[0]; tCy += v[1]; }
+        eCx /= 4; eCy /= 4; tCx /= 4; tCy /= 4;
+        if (Math.hypot(eCx - tCx, eCy - tCy) < TILE_SIZE * 0.5) return true;
+    }
+    return false;
+}
+
+let usedEdges = {};
+
+function addTile(tile) {
+    tile.birthTime = time;
+    tile.removed = false;
+    tile.conflicted = false;
+    tiles.push(tile);
+
+    let edges = getEdges(tile);
+    for (let e of edges) {
+        let k = edgeKey(e.mx, e.my);
+        if (usedEdges[k]) {
+            usedEdges[k].paired = true;
+        } else {
+            usedEdges[k] = { tile: tiles.length - 1, edge: e, paired: false };
+            frontier.push(k);
+        }
+    }
+    updateFrontier();
+}
+
+function updateFrontier() {
+    frontier = frontier.filter(k => usedEdges[k] && !usedEdges[k].paired);
+}
+
+function tryGrow() {
+    if (frontier.length === 0) return;
+
+    // Pick random frontier edge
+    let attempts = 0;
+    while (attempts < 20 && frontier.length > 0) {
+        let idx = Math.floor(Math.random() * frontier.length);
+        let k = frontier[idx];
+        let info = usedEdges[k];
+        if (!info || info.paired) {
+            frontier.splice(idx, 1);
+            attempts++;
+            continue;
+        }
+
+        let e = info.edge;
+        // Try to place a tile on the other side of this edge
+        let dx = e.p2[0] - e.p1[0];
+        let dy = e.p2[1] - e.p1[1];
+        let nx = -dy, ny = dx; // Normal
+        let len = Math.hypot(nx, ny);
+        nx /= len; ny /= len;
+
+        // Try both thick and thin, multiple orientations
+        let placed = false;
+        let candidates = [];
+
+        for (let orient = 0; orient < 5; orient++) {
+            let thick = makeThickRhombus(e.mx + nx * TILE_SIZE * 0.5, e.my + ny * TILE_SIZE * 0.5, orient);
+            let thin = makeThinRhombus(e.mx + nx * TILE_SIZE * 0.5, e.my + ny * TILE_SIZE * 0.5, orient);
+            candidates.push(thick, thin);
+
+            thick = makeThickRhombus(e.mx - nx * TILE_SIZE * 0.5, e.my - ny * TILE_SIZE * 0.5, orient);
+            thin = makeThinRhombus(e.mx - nx * TILE_SIZE * 0.5, e.my - ny * TILE_SIZE * 0.5, orient);
+            candidates.push(thick, thin);
+        }
+
+        // Shuffle candidates
+        for (let i = candidates.length - 1; i > 0; i--) {
+            let j = Math.floor(Math.random() * (i + 1));
+            [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+        }
+
+        for (let cand of candidates) {
+            if (!overlaps(cand)) {
+                addTile(cand);
+                placed = true;
+                break;
+            }
+        }
+
+        if (!placed) {
+            // Conflict - mark and backtrack
+            conflicts++;
+            document.getElementById('conflictCount').textContent = conflicts;
+            frontier.splice(idx, 1);
+
+            // Create a brief visual conflict indicator
+            let conflictTile = makeThickRhombus(e.mx, e.my, 0);
+            conflictTile.conflicted = true;
+            conflictTile.birthTime = time;
+            conflictTile.removeTime = time + 0.3;
+            conflictTile.removed = false;
+            tiles.push(conflictTile);
+        }
+
+        attempts++;
+        if (placed) break;
+    }
+
+    document.getElementById('tileCount').textContent = tiles.filter(t => !t.removed && !t.conflicted).length;
+    document.getElementById('frontierCount').textContent = frontier.length;
+    if (startTime > 0) {
+        let elapsed = time - startTime;
+        let count = tiles.filter(t => !t.removed && !t.conflicted).length;
+        document.getElementById('growthRate').textContent = (count / Math.max(1, elapsed)).toFixed(1) + '/s';
+    }
+}
+
+function initGrowth() {
+    tiles = [];
+    frontier = [];
+    usedEdges = {};
+    conflicts = 0;
+    startTime = time;
+    document.getElementById('conflictCount').textContent = 0;
+    document.getElementById('tileCount').textContent = 1;
+    document.getElementById('frontierCount').textContent = 0;
+    document.getElementById('growthRate').textContent = '--';
+    camX = 0; camY = 0; camZoom = 1;
+
+    // Seed: one thick rhombus at center
+    let seed = makeThickRhombus(W / 2, H / 2, 0);
+    addTile(seed);
+}
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+window.reset = function() { initGrowth(); };
+document.getElementById('resetBtn').addEventListener('click', () => initGrowth());
+document.getElementById('pauseBtn').addEventListener('click', () => {
+    paused = !paused;
+    document.getElementById('pauseBtn').textContent = paused ? 'Play' : 'Pause';
+});
+document.getElementById('stepBtn').addEventListener('click', () => {
+    paused = true;
+    document.getElementById('pauseBtn').textContent = 'Play';
+    tryGrow();
+});
+
+// Pan and zoom
+canvas.addEventListener('mousedown', e => {
+    if (e.button === 0) { dragging = true; dragSX = e.clientX; dragSY = e.clientY; camSX = camX; camSY = camY; }
+});
+canvas.addEventListener('mousemove', e => {
+    if (dragging) { camX = camSX + (e.clientX - dragSX) / camZoom; camY = camSY + (e.clientY - dragSY) / camZoom; }
+});
+canvas.addEventListener('mouseup', () => { dragging = false; });
+canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    camZoom *= e.deltaY > 0 ? 0.9 : 1.1;
+    camZoom = Math.max(0.1, Math.min(8, camZoom));
+}, { passive: false });
+
+function drawTile(tile) {
+    if (tile.removed) return;
+
+    // Remove conflict tiles after timeout
+    if (tile.conflicted && time > tile.removeTime) {
+        tile.removed = true;
+        return;
+    }
+
+    let v = tile.verts;
+    ctx.beginPath();
+    ctx.moveTo(v[0][0], v[0][1]);
+    for (let i = 1; i < 4; i++) ctx.lineTo(v[i][0], v[i][1]);
+    ctx.closePath();
+
+    let colorByAge = document.getElementById('colorByAge').checked;
+    let age = time - tile.birthTime;
+
+    if (tile.conflicted) {
+        let alpha = Math.max(0, 1 - (time - tile.birthTime) / 0.3);
+        ctx.fillStyle = `rgba(255, 60, 60, ${alpha * 0.7})`;
+        ctx.shadowColor = '#f44';
+        ctx.shadowBlur = 15 * alpha;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = `rgba(255, 100, 100, ${alpha})`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        return;
+    }
+
+    if (colorByAge) {
+        let tileIdx = tiles.indexOf(tile);
+        let maxIdx = tiles.filter(t => !t.removed && !t.conflicted).length;
+        let t = tileIdx / Math.max(1, maxIdx);
+        // Warm (old) to cool (new)
+        let h, s, l;
+        if (tile.type === 'thick') {
+            h = 20 + t * 200; // orange to cyan
+            s = 70;
+            l = 35 + t * 15;
+        } else {
+            h = 40 + t * 200;
+            s = 60;
+            l = 30 + t * 15;
+        }
+        ctx.fillStyle = `hsl(${h}, ${s}%, ${l}%)`;
+    } else {
+        ctx.fillStyle = tile.type === 'thick' ? 'rgba(60, 130, 220, 0.6)' : 'rgba(200, 100, 60, 0.5)';
+    }
+
+    // New tiles glow
+    let glow = Math.max(0, 1 - age / 1.0);
+    if (glow > 0) {
+        ctx.shadowColor = tile.type === 'thick' ? '#4af' : '#fa6';
+        ctx.shadowBlur = 15 * glow;
+    }
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.strokeStyle = `rgba(180, 200, 255, ${0.2 + glow * 0.4})`;
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+}
+
+function drawFrontier() {
+    if (!document.getElementById('showFrontier').checked) return;
+    ctx.strokeStyle = `rgba(100, 255, 150, ${0.3 + 0.2 * Math.sin(time * 3)})`;
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#4fa';
+    ctx.shadowBlur = 8 + 4 * Math.sin(time * 3);
+
+    for (let k of frontier) {
+        let info = usedEdges[k];
+        if (!info || info.paired) continue;
+        let e = info.edge;
+        ctx.beginPath();
+        ctx.moveTo(e.p1[0], e.p1[1]);
+        ctx.lineTo(e.p2[0], e.p2[1]);
+        ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+    ctx.scale(camZoom, camZoom);
+    ctx.translate(camX - W / 2, camY - H / 2);
+
+    for (let tile of tiles) drawTile(tile);
+    drawFrontier();
+
+    ctx.restore();
+}
+
+let lastGrowTime = 0;
+
+function animate(t) {
+    time = t / 1000;
+    let speed = parseInt(document.getElementById('speedSlider').value);
+    let interval = 1.0 / speed;
+
+    if (!paused && time - lastGrowTime > interval) {
+        let steps = Math.min(speed, 10);
+        for (let i = 0; i < steps; i++) tryGrow();
+        lastGrowTime = time;
+    }
+
+    draw();
+    requestAnimationFrame(animate);
+}
+
+initGrowth();
+requestAnimationFrame(animate);
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

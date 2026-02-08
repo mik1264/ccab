@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fourier Drawing Machine</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+canvas { display: block; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+#controls {
+    position: fixed; top: 20px; right: 20px; background: rgba(10,14,26,0.85);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(138,170,255,0.15); border-radius: 12px;
+    padding: 16px; color: #cde; z-index: 100; width: 240px; font-size: 13px;
+}
+#controls h3 { color: #8af; margin-bottom: 10px; font-size: 14px; }
+.ctrl-group { margin-bottom: 10px; }
+.ctrl-group label { display: block; margin-bottom: 3px; color: #9ab; font-size: 12px; }
+.ctrl-group input[type=range] { width: 100%; }
+select { width: 100%; background: rgba(30,40,70,0.8); color: #cde; border: 1px solid rgba(138,170,255,0.2); border-radius: 6px; padding: 4px; }
+.toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.toggle-row input { accent-color: #8af; }
+.toggle-row label { color: #9ab; font-size: 12px; }
+.btn-row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.btn-row button {
+    flex: 1; min-width: 65px; padding: 5px 6px; background: rgba(60,80,140,0.4);
+    color: #8af; border: 1px solid rgba(138,170,255,0.2); border-radius: 6px;
+    cursor: pointer; font-size: 11px;
+}
+.btn-row button:hover { background: rgba(80,100,180,0.5); }
+#prompt {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    color: rgba(138,170,255,0.4); font-size: 22px; z-index: 50;
+    pointer-events: none; text-align: center;
+}
+#epicycleCount {
+    position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+    color: #8af; font-size: 14px; z-index: 100;
+    background: rgba(10,14,26,0.7); backdrop-filter: blur(10px);
+    padding: 8px 20px; border-radius: 16px; border: 1px solid rgba(138,170,255,0.1);
+}
+</style>
+</head>
+<body>
+<a href="index.html">&#8592; Back</a>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <h3>Fourier Drawing Machine</h3>
+    <div class="ctrl-group">
+        <label>Epicycles: <span id="numVal">50</span></label>
+        <input type="range" id="numEpi" min="1" max="200" step="1" value="50">
+    </div>
+    <div class="ctrl-group">
+        <label>Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.2" max="3" step="0.1" value="1">
+    </div>
+    <div class="toggle-row"><input type="checkbox" id="showCircles" checked><label for="showCircles">Show circles</label></div>
+    <div class="toggle-row"><input type="checkbox" id="showRadii" checked><label for="showRadii">Show radii</label></div>
+    <div class="ctrl-group">
+        <label>Preset Shapes</label>
+        <select id="presets">
+            <option value="">-- Draw your own --</option>
+            <option value="circle">Circle</option>
+            <option value="square">Square</option>
+            <option value="star">Star</option>
+            <option value="heart">Heart</option>
+            <option value="letterA">Letter A</option>
+        </select>
+    </div>
+    <div class="btn-row">
+        <button id="clearBtn">Draw New</button>
+    </div>
+</div>
+<div id="prompt">Draw a closed shape on the canvas</div>
+<div id="epicycleCount"></div>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+let drawing = false;
+let drawnPoints = [];
+let fourierCoeffs = [];
+let tracePoints = [];
+let time = 0;
+let mode = 'drawing'; // 'drawing' | 'animating'
+let paused = false;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+function dft(samples) {
+    const N = samples.length;
+    const result = [];
+    for (let k = 0; k < N; k++) {
+        let re = 0, im = 0;
+        for (let n = 0; n < N; n++) {
+            const phi = (2 * Math.PI * k * n) / N;
+            re += samples[n].x * Math.cos(phi) + samples[n].y * Math.sin(phi);
+            im += samples[n].y * Math.cos(phi) - samples[n].x * Math.sin(phi);
+        }
+        re /= N;
+        im /= N;
+        result.push({
+            freq: k,
+            amp: Math.sqrt(re * re + im * im),
+            phase: Math.atan2(im, re)
+        });
+    }
+    result.sort((a, b) => b.amp - a.amp);
+    return result;
+}
+
+function resamplePath(pts, n) {
+    if (pts.length < 2) return pts;
+    // Calculate total length
+    let totalLen = 0;
+    for (let i = 1; i < pts.length; i++) {
+        const dx = pts[i].x - pts[i-1].x, dy = pts[i].y - pts[i-1].y;
+        totalLen += Math.sqrt(dx*dx + dy*dy);
+    }
+    const step = totalLen / n;
+    const result = [{ x: pts[0].x, y: pts[0].y }];
+    let dist = 0, j = 1;
+    let nextDist = step;
+    while (result.length < n && j < pts.length) {
+        const dx = pts[j].x - pts[j-1].x, dy = pts[j].y - pts[j-1].y;
+        const segLen = Math.sqrt(dx*dx + dy*dy);
+        if (dist + segLen >= nextDist) {
+            const t = (nextDist - dist) / segLen;
+            result.push({ x: pts[j-1].x + t * dx, y: pts[j-1].y + t * dy });
+            nextDist += step;
+        } else {
+            dist += segLen;
+            j++;
+        }
+    }
+    while (result.length < n) result.push({ x: pts[pts.length-1].x, y: pts[pts.length-1].y });
+    return result;
+}
+
+function generatePreset(type) {
+    const pts = [];
+    const cx = W / 2, cy = H / 2;
+    const R = Math.min(W, H) * 0.25;
+    const N = 256;
+
+    switch (type) {
+        case 'circle':
+            for (let i = 0; i < N; i++) {
+                const t = (i / N) * Math.PI * 2;
+                pts.push({ x: cx + R * Math.cos(t), y: cy + R * Math.sin(t) });
+            }
+            break;
+        case 'square':
+            for (let i = 0; i < N; i++) {
+                const t = i / N;
+                let x, y;
+                if (t < 0.25) { x = -1 + 8 * t; y = -1; }
+                else if (t < 0.5) { x = 1; y = -1 + 8 * (t - 0.25); }
+                else if (t < 0.75) { x = 1 - 8 * (t - 0.5); y = 1; }
+                else { x = -1; y = 1 - 8 * (t - 0.75); }
+                pts.push({ x: cx + x * R, y: cy + y * R });
+            }
+            break;
+        case 'star': {
+            for (let i = 0; i < N; i++) {
+                const t = (i / N) * Math.PI * 2;
+                const r = R * (0.5 + 0.5 * ((Math.floor(i / N * 10) % 2 === 0) ? 1 : 0.45));
+                pts.push({ x: cx + r * Math.cos(t - Math.PI / 2), y: cy + r * Math.sin(t - Math.PI / 2) });
+            }
+            break;
+        }
+        case 'heart':
+            for (let i = 0; i < N; i++) {
+                const t = (i / N) * Math.PI * 2;
+                const x = 16 * Math.pow(Math.sin(t), 3);
+                const y = -(13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t));
+                pts.push({ x: cx + x * R / 18, y: cy + y * R / 18 });
+            }
+            break;
+        case 'letterA': {
+            const segments = [
+                // Left leg
+                ...Array.from({length: 40}, (_, i) => {
+                    const t = i / 39;
+                    return { x: cx - R * 0.5 + t * R * 0.5, y: cy + R * 0.8 - t * R * 1.6 };
+                }),
+                // Right leg
+                ...Array.from({length: 40}, (_, i) => {
+                    const t = i / 39;
+                    return { x: cx + t * R * 0.5, y: cy - R * 0.8 + t * R * 1.6 };
+                }),
+                // Bottom right to crossbar right
+                ...Array.from({length: 10}, (_, i) => {
+                    const t = i / 9;
+                    return { x: cx + R * 0.5 - t * R * 0.25, y: cy + R * 0.8 - t * R * 0.6 };
+                }),
+                // Crossbar
+                ...Array.from({length: 20}, (_, i) => {
+                    const t = i / 19;
+                    return { x: cx + R * 0.25 - t * R * 0.5, y: cy + R * 0.2 };
+                }),
+                // Back down
+                ...Array.from({length: 10}, (_, i) => {
+                    const t = i / 9;
+                    return { x: cx - R * 0.25 - t * R * 0.25, y: cy + R * 0.2 + t * R * 0.6 };
+                })
+            ];
+            for (const p of segments) pts.push(p);
+            break;
+        }
+    }
+    return pts;
+}
+
+function startAnimation(pts) {
+    const centered = pts.map(p => ({ x: p.x - W / 2, y: p.y - H / 2 }));
+    const resampled = resamplePath(centered, 256);
+    fourierCoeffs = dft(resampled);
+    tracePoints = [];
+    time = 0;
+    mode = 'animating';
+    document.getElementById('prompt').style.display = 'none';
+}
+
+// Mouse drawing
+canvas.addEventListener('mousedown', e => {
+    if (mode === 'animating') return;
+    drawing = true;
+    drawnPoints = [{ x: e.clientX, y: e.clientY }];
+    mode = 'drawing';
+});
+canvas.addEventListener('mousemove', e => {
+    if (!drawing) return;
+    drawnPoints.push({ x: e.clientX, y: e.clientY });
+});
+canvas.addEventListener('mouseup', () => {
+    if (!drawing) return;
+    drawing = false;
+    if (drawnPoints.length > 20) startAnimation(drawnPoints);
+});
+
+// Touch
+canvas.addEventListener('touchstart', e => {
+    if (mode === 'animating') return;
+    drawing = true;
+    const t = e.touches[0];
+    drawnPoints = [{ x: t.clientX, y: t.clientY }];
+    mode = 'drawing';
+    e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+    if (!drawing) return;
+    const t = e.touches[0];
+    drawnPoints.push({ x: t.clientX, y: t.clientY });
+    e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+    if (!drawing) return;
+    drawing = false;
+    if (drawnPoints.length > 20) startAnimation(drawnPoints);
+});
+
+function hsl(h, s, l, a) { return `hsla(${h},${s}%,${l}%,${a !== undefined ? a : 1})`; }
+
+function drawEpicycles(coeffs, numDraw, t) {
+    let x = W / 2, y = H / 2;
+    const showCirc = document.getElementById('showCircles').checked;
+    const showRad = document.getElementById('showRadii').checked;
+
+    for (let i = 0; i < numDraw && i < coeffs.length; i++) {
+        const c = coeffs[i];
+        const prevX = x, prevY = y;
+        const angle = c.freq * t * Math.PI * 2 + c.phase;
+        x += c.amp * Math.cos(angle);
+        y += c.amp * Math.sin(angle);
+
+        if (showCirc) {
+            ctx.beginPath();
+            ctx.arc(prevX, prevY, c.amp, 0, Math.PI * 2);
+            const alpha = Math.max(0.03, 0.2 - i * 0.003);
+            ctx.strokeStyle = `rgba(138,170,255,${alpha})`;
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+        }
+
+        if (showRad) {
+            ctx.beginPath();
+            ctx.moveTo(prevX, prevY);
+            ctx.lineTo(x, y);
+            const alpha = Math.max(0.1, 0.5 - i * 0.005);
+            ctx.strokeStyle = `rgba(200,220,255,${alpha})`;
+            ctx.lineWidth = 0.8;
+            ctx.stroke();
+        }
+    }
+    return { x, y };
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Background grid
+    ctx.strokeStyle = 'rgba(138,170,255,0.03)';
+    for (let gx = 0; gx < W; gx += 80) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke(); }
+    for (let gy = 0; gy < H; gy += 80) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke(); }
+
+    if (mode === 'drawing' && drawnPoints.length > 1) {
+        ctx.beginPath();
+        ctx.moveTo(drawnPoints[0].x, drawnPoints[0].y);
+        for (let i = 1; i < drawnPoints.length; i++) {
+            ctx.lineTo(drawnPoints[i].x, drawnPoints[i].y);
+        }
+        ctx.strokeStyle = 'rgba(138,170,255,0.5)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+
+    if (mode === 'animating' && fourierCoeffs.length > 0) {
+        const numEpi = parseInt(document.getElementById('numEpi').value);
+        const speed = parseFloat(document.getElementById('speed').value);
+
+        const pt = drawEpicycles(fourierCoeffs, numEpi, time);
+        tracePoints.push({ x: pt.x, y: pt.y });
+
+        // Draw traced path with glow
+        if (tracePoints.length > 1) {
+            for (let i = 1; i < tracePoints.length; i++) {
+                const t = i / tracePoints.length;
+                ctx.beginPath();
+                ctx.moveTo(tracePoints[i - 1].x, tracePoints[i - 1].y);
+                ctx.lineTo(tracePoints[i].x, tracePoints[i].y);
+                ctx.strokeStyle = hsl(200 + t * 80, 85, 60, 0.8);
+                ctx.lineWidth = 2.5;
+                ctx.shadowColor = hsl(200 + t * 80, 85, 60);
+                ctx.shadowBlur = 10;
+                ctx.stroke();
+            }
+            ctx.shadowBlur = 0;
+        }
+
+        // Tip glow
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.shadowColor = '#fff';
+        ctx.shadowBlur = 20;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        if (!paused) {
+            time += (1 / fourierCoeffs.length) * speed * 0.5;
+            if (time >= 1) {
+                time = 0;
+                tracePoints = [];
+            }
+        }
+
+        document.getElementById('epicycleCount').textContent =
+            numEpi + ' epicycles | ' + fourierCoeffs.length + ' points | ' + Math.floor(time * 100) + '% complete';
+    }
+
+    requestAnimationFrame(draw);
+}
+
+document.getElementById('numEpi').addEventListener('input', e => {
+    document.getElementById('numVal').textContent = e.target.value;
+});
+document.getElementById('speed').addEventListener('input', e => {
+    document.getElementById('speedVal').textContent = parseFloat(e.target.value).toFixed(1);
+});
+document.getElementById('clearBtn').addEventListener('click', () => {
+    mode = 'drawing';
+    drawnPoints = [];
+    tracePoints = [];
+    fourierCoeffs = [];
+    time = 0;
+    document.getElementById('prompt').style.display = 'block';
+    document.getElementById('presets').value = '';
+    document.getElementById('epicycleCount').textContent = '';
+});
+document.getElementById('presets').addEventListener('change', e => {
+    if (e.target.value) {
+        const pts = generatePreset(e.target.value);
+        startAnimation(pts);
+    }
+});
+
+window.reset = function() {
+    mode = 'drawing';
+    drawing = false;
+    drawnPoints = [];
+    fourierCoeffs = [];
+    tracePoints = [];
+    time = 0;
+    paused = false;
+    document.getElementById('numEpi').value = 50;
+    document.getElementById('numVal').textContent = '50';
+    document.getElementById('speed').value = 1;
+    document.getElementById('speedVal').textContent = '1.0';
+    document.getElementById('showCircles').checked = true;
+    document.getElementById('showRadii').checked = true;
+    document.getElementById('presets').value = '';
+    document.getElementById('prompt').style.display = 'block';
+    document.getElementById('epicycleCount').textContent = '';
+};
+
+// Start with heart preset
+setTimeout(() => {
+    const pts = generatePreset('heart');
+    startAnimation(pts);
+    document.getElementById('presets').value = 'heart';
+}, 500);
+
+draw();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Turing Spots - Gray-Scott Reaction-Diffusion</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 18px; left: 18px; z-index: 100;
+            color: #8A9A5B; text-decoration: none; font-size: 14px; font-weight: 600;
+            background: rgba(10,14,26,0.8); padding: 8px 18px; border-radius: 25px;
+            border: 2px solid #8A9A5B; transition: all 0.3s ease;
+        }
+        .back-link:hover { background: #8A9A5B; color: #0a0e1a; }
+        .controls {
+            position: fixed; top: 18px; right: 18px; z-index: 100;
+            background: rgba(10,14,26,0.85); backdrop-filter: blur(10px);
+            border-radius: 10px; padding: 18px; color: #c8d0e0;
+            min-width: 260px; border: 1px solid rgba(138,154,91,0.3);
+        }
+        .controls h2 { color: #DDA15E; font-size: 16px; margin-bottom: 4px; }
+        .controls p.desc { font-size: 11px; color: #8899aa; margin-bottom: 12px; line-height: 1.4; }
+        .control-row { margin-bottom: 10px; }
+        .control-row label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; color: #a0b0c0; }
+        .control-row label span { color: #DDA15E; font-family: monospace; }
+        input[type="range"] {
+            width: 100%; height: 4px; -webkit-appearance: none; appearance: none;
+            background: #1a2035; border-radius: 2px; outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+            background: #8A9A5B; cursor: pointer;
+        }
+        .btn {
+            background: rgba(138,154,91,0.2); color: #8A9A5B; border: 1px solid rgba(138,154,91,0.4);
+            padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+            transition: all 0.2s;
+        }
+        .btn:hover { background: rgba(138,154,91,0.4); }
+        .btn-row { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Nature's Hidden Math</a>
+    <div class="controls">
+        <h2>Turing Spots</h2>
+        <p class="desc">Gray-Scott reaction-diffusion model. Two chemicals interact and diffuse, spontaneously forming spotted patterns. Click anywhere to add chemical perturbation.</p>
+        <div class="control-row">
+            <label>Feed rate (F) <span id="fVal">0.035</span></label>
+            <input type="range" id="feedRate" min="0.01" max="0.08" step="0.001" value="0.035">
+        </div>
+        <div class="control-row">
+            <label>Kill rate (k) <span id="kVal">0.065</span></label>
+            <input type="range" id="killRate" min="0.03" max="0.08" step="0.001" value="0.065">
+        </div>
+        <div class="control-row">
+            <label>Steps/frame <span id="stepsVal">12</span></label>
+            <input type="range" id="stepsPerFrame" min="1" max="30" step="1" value="12">
+        </div>
+        <div class="btn-row">
+            <button class="btn" onclick="window.reset()">Reset</button>
+        </div>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Simulation grid size
+        const SIM_W = 256;
+        const SIM_H = 256;
+
+        // Parameters
+        let F = 0.035;
+        let k = 0.065;
+        const Du = 0.16;
+        const Dv = 0.08;
+        let stepsPerFrame = 12;
+        const dt = 1.0;
+
+        // Double-buffered grids
+        let U0 = new Float32Array(SIM_W * SIM_H);
+        let V0 = new Float32Array(SIM_W * SIM_H);
+        let U1 = new Float32Array(SIM_W * SIM_H);
+        let V1 = new Float32Array(SIM_W * SIM_H);
+
+        // Image data for rendering
+        let imageData;
+
+        function initGrid() {
+            // Fill U=1, V=0
+            for (let i = 0; i < SIM_W * SIM_H; i++) {
+                U0[i] = 1.0;
+                V0[i] = 0.0;
+            }
+            // Seed random square regions with V
+            const numSeeds = 12;
+            for (let s = 0; s < numSeeds; s++) {
+                const cx = Math.floor(Math.random() * (SIM_W - 20)) + 10;
+                const cy = Math.floor(Math.random() * (SIM_H - 20)) + 10;
+                const size = Math.floor(Math.random() * 6) + 4;
+                for (let dy = -size; dy <= size; dy++) {
+                    for (let dx = -size; dx <= size; dx++) {
+                        const x = cx + dx;
+                        const y = cy + dy;
+                        if (x >= 0 && x < SIM_W && y >= 0 && y < SIM_H) {
+                            const idx = y * SIM_W + x;
+                            U0[idx] = 0.5 + Math.random() * 0.1;
+                            V0[idx] = 0.25 + Math.random() * 0.1;
+                        }
+                    }
+                }
+            }
+        }
+
+        function simulationStep() {
+            for (let y = 0; y < SIM_H; y++) {
+                for (let x = 0; x < SIM_W; x++) {
+                    const idx = y * SIM_W + x;
+
+                    // Wrap-around neighbors for Laplacian
+                    const xm = ((x - 1) + SIM_W) % SIM_W;
+                    const xp = (x + 1) % SIM_W;
+                    const ym = ((y - 1) + SIM_H) % SIM_H;
+                    const yp = (y + 1) % SIM_H;
+
+                    const lapU = U0[ym * SIM_W + x] + U0[yp * SIM_W + x]
+                               + U0[y * SIM_W + xm] + U0[y * SIM_W + xp]
+                               - 4.0 * U0[idx];
+
+                    const lapV = V0[ym * SIM_W + x] + V0[yp * SIM_W + x]
+                               + V0[y * SIM_W + xm] + V0[y * SIM_W + xp]
+                               - 4.0 * V0[idx];
+
+                    const u = U0[idx];
+                    const v = V0[idx];
+                    const uvv = u * v * v;
+
+                    U1[idx] = u + dt * (Du * lapU - uvv + F * (1.0 - u));
+                    V1[idx] = v + dt * (Dv * lapV + uvv - (F + k) * v);
+
+                    // Clamp
+                    if (U1[idx] < 0) U1[idx] = 0;
+                    if (U1[idx] > 1) U1[idx] = 1;
+                    if (V1[idx] < 0) V1[idx] = 0;
+                    if (V1[idx] > 1) V1[idx] = 1;
+                }
+            }
+            // Swap buffers
+            const tmpU = U0; U0 = U1; U1 = tmpU;
+            const tmpV = V0; V0 = V1; V1 = tmpV;
+        }
+
+        // Warm color gradient: dark -> deep red -> amber -> bright yellow
+        function vToColor(v) {
+            const t = Math.min(v * 3.0, 1.0);
+            let r, g, b;
+            if (t < 0.33) {
+                const s = t / 0.33;
+                r = Math.floor(10 + s * 130);
+                g = Math.floor(5 + s * 30);
+                b = Math.floor(15 + s * 10);
+            } else if (t < 0.66) {
+                const s = (t - 0.33) / 0.33;
+                r = Math.floor(140 + s * 80);
+                g = Math.floor(35 + s * 100);
+                b = Math.floor(25 - s * 15);
+            } else {
+                const s = (t - 0.66) / 0.34;
+                r = Math.floor(220 + s * 35);
+                g = Math.floor(135 + s * 100);
+                b = Math.floor(10 + s * 40);
+            }
+            return [r, g, b];
+        }
+
+        function render() {
+            // Draw simulation at full canvas scale
+            const imgW = SIM_W;
+            const imgH = SIM_H;
+            if (!imageData || imageData.width !== imgW || imageData.height !== imgH) {
+                imageData = ctx.createImageData(imgW, imgH);
+            }
+            const data = imageData.data;
+            for (let i = 0; i < SIM_W * SIM_H; i++) {
+                const [r, g, b] = vToColor(V0[i]);
+                const p = i * 4;
+                data[p] = r;
+                data[p + 1] = g;
+                data[p + 2] = b;
+                data[p + 3] = 255;
+            }
+            // Scale up to canvas
+            ctx.imageSmoothingEnabled = false;
+            const tmpCanvas = document.createElement('canvas');
+            tmpCanvas.width = imgW;
+            tmpCanvas.height = imgH;
+            tmpCanvas.getContext('2d').putImageData(imageData, 0, 0);
+            ctx.drawImage(tmpCanvas, 0, 0, canvas.width, canvas.height);
+        }
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        // Mouse/touch interaction
+        function addChemical(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            const mx = (clientX - rect.left) / rect.width;
+            const my = (clientY - rect.top) / rect.height;
+            const gx = Math.floor(mx * SIM_W);
+            const gy = Math.floor(my * SIM_H);
+            const radius = 5;
+            for (let dy = -radius; dy <= radius; dy++) {
+                for (let dx = -radius; dx <= radius; dx++) {
+                    if (dx * dx + dy * dy > radius * radius) continue;
+                    const x = ((gx + dx) + SIM_W) % SIM_W;
+                    const y = ((gy + dy) + SIM_H) % SIM_H;
+                    const idx = y * SIM_W + x;
+                    U0[idx] = 0.5;
+                    V0[idx] = 0.5;
+                }
+            }
+        }
+
+        let isMouseDown = false;
+        canvas.addEventListener('mousedown', (e) => { isMouseDown = true; addChemical(e.clientX, e.clientY); });
+        canvas.addEventListener('mousemove', (e) => { if (isMouseDown) addChemical(e.clientX, e.clientY); });
+        window.addEventListener('mouseup', () => { isMouseDown = false; });
+        canvas.addEventListener('touchstart', (e) => { e.preventDefault(); addChemical(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+        canvas.addEventListener('touchmove', (e) => { e.preventDefault(); addChemical(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+
+        // Controls
+        const feedSlider = document.getElementById('feedRate');
+        const killSlider = document.getElementById('killRate');
+        const stepsSlider = document.getElementById('stepsPerFrame');
+        const fValEl = document.getElementById('fVal');
+        const kValEl = document.getElementById('kVal');
+        const stepsValEl = document.getElementById('stepsVal');
+
+        feedSlider.addEventListener('input', () => { F = parseFloat(feedSlider.value); fValEl.textContent = F.toFixed(3); });
+        killSlider.addEventListener('input', () => { k = parseFloat(killSlider.value); kValEl.textContent = k.toFixed(3); });
+        stepsSlider.addEventListener('input', () => { stepsPerFrame = parseInt(stepsSlider.value); stepsValEl.textContent = stepsPerFrame; });
+
+        // Reset
+        window.reset = function() {
+            initGrid();
+        };
+
+        // Resize
+        window.addEventListener('resize', resizeCanvas);
+
+        // Init
+        resizeCanvas();
+        initGrid();
+
+        // Animation loop
+        let animId;
+        function animate() {
+            for (let i = 0; i < stepsPerFrame; i++) {
+                simulationStep();
+            }
+            render();
+            animId = requestAnimationFrame(animate);
+        }
+        animate();
+    })();
+    </script>
+    <script src="../assets/js/enhance.js"></script>
+</body>
+</html>

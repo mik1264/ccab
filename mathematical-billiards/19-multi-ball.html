@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multi-Ball Collisions - Statistical Mechanics from Billiards</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Arial, sans-serif; color: #c8d8e8; }
+canvas { display: block; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+a:hover { color: #bdf; }
+#controls {
+  position: fixed; top: 20px; right: 20px; z-index: 100;
+  background: rgba(10, 14, 30, 0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(120, 160, 255, 0.15); border-radius: 12px;
+  padding: 16px 20px; min-width: 250px; max-height: 90vh; overflow-y: auto;
+}
+#controls h3 { color: #8af; margin-bottom: 10px; font-size: 0.95em; text-transform: uppercase; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; }
+.ctrl-row label { display: block; font-size: 0.8em; color: #8ab; margin-bottom: 3px; }
+.ctrl-row input[type=range] { width: 100%; accent-color: #6af; }
+.ctrl-row .val { float: right; font-size: 0.8em; color: #adf; }
+.btn { background: rgba(100,160,255,0.15); border: 1px solid rgba(100,160,255,0.3); color: #8af; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8em; margin: 2px; }
+.btn:hover { background: rgba(100,160,255,0.3); }
+.btn.active { background: rgba(100,200,150,0.25); border-color: rgba(100,200,150,0.5); color: #8fa; }
+#histogram {
+  position: fixed; bottom: 20px; right: 20px; z-index: 100;
+  background: rgba(10,14,30,0.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(120,160,255,0.15); border-radius: 12px;
+  padding: 12px;
+}
+#histogram h4 { color: #8af; font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+#info { position: fixed; bottom: 20px; left: 20px; z-index: 100; font-size: 0.8em; color: #6a8; background: rgba(10,14,30,0.6); backdrop-filter: blur(10px); padding: 10px 14px; border-radius: 8px; max-width: 380px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<a href="index.html">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+  <h3>Multi-Ball Collisions</h3>
+  <div class="ctrl-row">
+    <label>Number of Balls <span class="val" id="vN">40</span></label>
+    <input type="range" id="sN" min="2" max="100" step="1" value="40">
+  </div>
+  <div class="ctrl-row">
+    <label>Ball Radius <span class="val" id="vR">6</span></label>
+    <input type="range" id="sR" min="3" max="15" step="1" value="6">
+  </div>
+  <div class="ctrl-row">
+    <label>Initial Speed <span class="val" id="vSpeed">3.0</span></label>
+    <input type="range" id="sSpeed" min="0.5" max="8" step="0.25" value="3.0">
+  </div>
+  <div style="margin-top:8px;">
+    <label style="font-size:0.8em;color:#8ab;">Initial Config</label>
+    <div style="margin-top:4px;">
+      <button class="btn active" data-config="random">Random</button>
+      <button class="btn" data-config="ordered">Ordered</button>
+      <button class="btn" data-config="thermal">Thermalize</button>
+    </div>
+  </div>
+  <div style="margin-top:8px;">
+    <button class="btn" id="bTrails">Trails</button>
+    <button class="btn" id="bReset">Reset</button>
+  </div>
+  <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(100,160,255,0.1);">
+    <div style="font-size:0.75em;color:#8ab;">
+      Temperature (avg KE): <span id="vTemp" style="color:#fda;">--</span>
+    </div>
+    <div style="font-size:0.75em;color:#8ab;">
+      Collisions: <span id="vColl" style="color:#adf;">0</span>
+    </div>
+  </div>
+</div>
+<div id="histogram">
+  <h4>Speed Distribution</h4>
+  <canvas id="hc" width="220" height="130"></canvas>
+  <div style="font-size:0.65em;color:#68a;margin-top:4px;">Blue = current | Orange = Maxwell-Boltzmann</div>
+</div>
+<div id="info">
+  <strong style="color:#8af;">Statistical Mechanics:</strong> Multiple elastic balls in a box form the foundation of thermodynamics. Energy distributes among particles, and the speed distribution converges to the Maxwell-Boltzmann curve -- the emergence of temperature from simple collisions.
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const hCanvas = document.getElementById('hc');
+const hCtx = hCanvas.getContext('2d');
+let W, H;
+let numBalls = 40;
+let ballRadius = 6;
+let initSpeed = 3.0;
+let config = 'random';
+let showTrails = false;
+let paused = false;
+let balls = [];
+let collisionCount = 0;
+const margin = 60;
+
+function resize() {
+  W = canvas.width = innerWidth;
+  H = canvas.height = innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+function createBalls() {
+  balls = [];
+  collisionCount = 0;
+  const boxL = margin, boxR = W - margin;
+  const boxT = margin, boxB = H - margin;
+  const bw = boxR - boxL, bh = boxB - boxT;
+
+  if (config === 'ordered') {
+    // Grid arrangement
+    const cols = Math.ceil(Math.sqrt(numBalls * bw / bh));
+    const rows = Math.ceil(numBalls / cols);
+    const sx = bw / (cols + 1), sy = bh / (rows + 1);
+    for (let i = 0; i < numBalls; i++) {
+      const col = i % cols, row = Math.floor(i / cols);
+      balls.push({
+        x: boxL + sx * (col + 1),
+        y: boxT + sy * (row + 1),
+        vx: (Math.random() - 0.5) * initSpeed * 2,
+        vy: (Math.random() - 0.5) * initSpeed * 2,
+        trail: []
+      });
+    }
+  } else if (config === 'thermal') {
+    // One fast ball, rest stationary
+    for (let i = 0; i < numBalls; i++) {
+      const x = boxL + ballRadius + Math.random() * (bw - ballRadius * 2);
+      const y = boxT + ballRadius + Math.random() * (bh - ballRadius * 2);
+      balls.push({
+        x, y,
+        vx: i === 0 ? initSpeed * 5 : 0,
+        vy: i === 0 ? initSpeed * 5 : 0,
+        trail: []
+      });
+    }
+  } else {
+    // Random
+    for (let i = 0; i < numBalls; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const x = boxL + ballRadius + Math.random() * (bw - ballRadius * 2);
+      const y = boxT + ballRadius + Math.random() * (bh - ballRadius * 2);
+      balls.push({
+        x, y,
+        vx: Math.cos(angle) * initSpeed,
+        vy: Math.sin(angle) * initSpeed,
+        trail: []
+      });
+    }
+  }
+}
+
+function step() {
+  if (paused) return;
+  const boxL = margin, boxR = W - margin;
+  const boxT = margin, boxB = H - margin;
+
+  // Move balls
+  for (const b of balls) {
+    b.x += b.vx;
+    b.y += b.vy;
+  }
+
+  // Wall collisions
+  for (const b of balls) {
+    if (b.x - ballRadius < boxL) { b.x = boxL + ballRadius; b.vx = Math.abs(b.vx); }
+    if (b.x + ballRadius > boxR) { b.x = boxR - ballRadius; b.vx = -Math.abs(b.vx); }
+    if (b.y - ballRadius < boxT) { b.y = boxT + ballRadius; b.vy = Math.abs(b.vy); }
+    if (b.y + ballRadius > boxB) { b.y = boxB - ballRadius; b.vy = -Math.abs(b.vy); }
+  }
+
+  // Ball-ball elastic collisions
+  for (let i = 0; i < balls.length; i++) {
+    for (let j = i + 1; j < balls.length; j++) {
+      const a = balls[i], b = balls[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.hypot(dx, dy);
+      const minDist = ballRadius * 2;
+      if (dist < minDist && dist > 0.01) {
+        // Normal direction
+        const nx = dx / dist, ny = dy / dist;
+        // Relative velocity along normal
+        const dvx = a.vx - b.vx, dvy = a.vy - b.vy;
+        const dvn = dvx * nx + dvy * ny;
+        // Only collide if approaching
+        if (dvn > 0) {
+          // Equal mass elastic: exchange normal components
+          a.vx -= dvn * nx;
+          a.vy -= dvn * ny;
+          b.vx += dvn * nx;
+          b.vy += dvn * ny;
+          // Separate
+          const overlap = minDist - dist;
+          a.x -= nx * overlap * 0.5;
+          a.y -= ny * overlap * 0.5;
+          b.x += nx * overlap * 0.5;
+          b.y += ny * overlap * 0.5;
+          collisionCount++;
+        }
+      }
+    }
+  }
+
+  // Update trails
+  if (showTrails) {
+    for (const b of balls) {
+      b.trail.push({ x: b.x, y: b.y });
+      if (b.trail.length > 30) b.trail.shift();
+    }
+  }
+
+  // Update stats
+  let totalKE = 0;
+  for (const b of balls) {
+    totalKE += 0.5 * (b.vx * b.vx + b.vy * b.vy);
+  }
+  const temp = totalKE / balls.length;
+  document.getElementById('vTemp').textContent = temp.toFixed(2);
+  document.getElementById('vColl').textContent = collisionCount;
+}
+
+function speedColor(spd, maxSpd) {
+  const t = Math.min(1, spd / maxSpd);
+  // Blue -> Cyan -> Yellow -> Red
+  if (t < 0.33) {
+    const u = t / 0.33;
+    return `rgb(${30 + 20 * u}, ${80 + 120 * u}, ${220 - 20 * u})`;
+  } else if (t < 0.66) {
+    const u = (t - 0.33) / 0.33;
+    return `rgb(${50 + 180 * u}, ${200 + 55 * u}, ${200 - 160 * u})`;
+  } else {
+    const u = (t - 0.66) / 0.34;
+    return `rgb(${230 + 25 * u}, ${255 - 120 * u}, ${40 - 30 * u})`;
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#0a0e1a';
+  ctx.fillRect(0, 0, W, H);
+
+  const boxL = margin, boxR = W - margin;
+  const boxT = margin, boxB = H - margin;
+
+  // Box
+  ctx.strokeStyle = 'rgba(100,160,255,0.25)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(boxL, boxT, boxR - boxL, boxB - boxT);
+
+  // Find max speed for coloring
+  let maxSpd = initSpeed * 2;
+  for (const b of balls) {
+    const spd = Math.hypot(b.vx, b.vy);
+    if (spd > maxSpd) maxSpd = spd;
+  }
+
+  // Draw trails
+  if (showTrails) {
+    for (const b of balls) {
+      if (b.trail.length < 2) continue;
+      const spd = Math.hypot(b.vx, b.vy);
+      ctx.strokeStyle = speedColor(spd, maxSpd).replace('rgb', 'rgba').replace(')', ',0.3)');
+      ctx.lineWidth = ballRadius * 0.6;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(b.trail[0].x, b.trail[0].y);
+      for (let i = 1; i < b.trail.length; i++) {
+        ctx.lineTo(b.trail[i].x, b.trail[i].y);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // Draw balls
+  for (const b of balls) {
+    const spd = Math.hypot(b.vx, b.vy);
+    const col = speedColor(spd, maxSpd);
+
+    ctx.shadowColor = col;
+    ctx.shadowBlur = 6 + (spd / maxSpd) * 8;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, ballRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Velocity arrow for large balls
+    if (ballRadius >= 8) {
+      const arrowLen = Math.min(ballRadius * 2, spd * 3);
+      if (spd > 0.1) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y);
+        ctx.lineTo(b.x + b.vx / spd * arrowLen, b.y + b.vy / spd * arrowLen);
+        ctx.stroke();
+      }
+    }
+  }
+
+  drawHistogram();
+}
+
+function drawHistogram() {
+  const hw = hCanvas.width, hh = hCanvas.height;
+  hCtx.fillStyle = 'rgba(10,14,30,0.9)';
+  hCtx.fillRect(0, 0, hw, hh);
+
+  // Compute speed histogram
+  const bins = 20;
+  let maxSpd = initSpeed * 3;
+  for (const b of balls) {
+    const spd = Math.hypot(b.vx, b.vy);
+    if (spd > maxSpd) maxSpd = spd * 1.2;
+  }
+  const binWidth = maxSpd / bins;
+  const counts = new Array(bins).fill(0);
+  for (const b of balls) {
+    const spd = Math.hypot(b.vx, b.vy);
+    const idx = Math.min(bins - 1, Math.floor(spd / binWidth));
+    counts[idx]++;
+  }
+  const maxCount = Math.max(1, ...counts);
+
+  // Maxwell-Boltzmann distribution (2D)
+  // f(v) = (v / sigma^2) * exp(-v^2 / (2*sigma^2))
+  let totalKE = 0;
+  for (const b of balls) totalKE += 0.5 * (b.vx * b.vx + b.vy * b.vy);
+  const avgKE = totalKE / Math.max(1, balls.length);
+  const sigma2 = avgKE; // kT/m in our units
+  const sigma = Math.sqrt(sigma2);
+
+  const barW = (hw - 20) / bins;
+  const plotH = hh - 25;
+
+  // Draw MB curve first
+  hCtx.strokeStyle = 'rgba(255,180,80,0.7)';
+  hCtx.lineWidth = 1.5;
+  hCtx.beginPath();
+  let mbMax = 0;
+  const mbVals = [];
+  for (let i = 0; i < bins; i++) {
+    const v = (i + 0.5) * binWidth;
+    const fv = sigma > 0.01 ? (v / sigma2) * Math.exp(-v * v / (2 * sigma2)) : 0;
+    mbVals.push(fv);
+    if (fv > mbMax) mbMax = fv;
+  }
+  // Scale MB to match histogram
+  const mbScale = mbMax > 0 ? maxCount / mbMax : 0;
+  for (let i = 0; i < bins; i++) {
+    const x = 10 + i * barW + barW / 2;
+    const h = (mbVals[i] * mbScale / maxCount) * plotH;
+    if (i === 0) hCtx.moveTo(x, plotH - h);
+    else hCtx.lineTo(x, plotH - h);
+  }
+  hCtx.stroke();
+
+  // Draw histogram bars
+  for (let i = 0; i < bins; i++) {
+    const x = 10 + i * barW;
+    const h = (counts[i] / maxCount) * plotH;
+    const t = i / bins;
+    hCtx.fillStyle = `hsla(${200 + t * 40}, 70%, 55%, 0.6)`;
+    hCtx.fillRect(x, plotH - h, barW - 1, h);
+  }
+
+  // Axis labels
+  hCtx.fillStyle = '#68a';
+  hCtx.font = '9px sans-serif';
+  hCtx.fillText('0', 8, hh - 4);
+  hCtx.fillText(maxSpd.toFixed(1), hw - 30, hh - 4);
+  hCtx.fillText('Speed', hw / 2 - 15, hh - 4);
+}
+
+function animate() {
+  step();
+  draw();
+  requestAnimationFrame(animate);
+}
+
+// Controls
+document.getElementById('sN').addEventListener('input', e => {
+  numBalls = parseInt(e.target.value);
+  document.getElementById('vN').textContent = numBalls;
+});
+document.getElementById('sR').addEventListener('input', e => {
+  ballRadius = parseInt(e.target.value);
+  document.getElementById('vR').textContent = ballRadius;
+});
+document.getElementById('sSpeed').addEventListener('input', e => {
+  initSpeed = parseFloat(e.target.value);
+  document.getElementById('vSpeed').textContent = initSpeed.toFixed(1);
+});
+document.querySelectorAll('[data-config]').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-config]').forEach(bb => bb.classList.remove('active'));
+    b.classList.add('active');
+    config = b.dataset.config;
+    createBalls();
+  });
+});
+document.getElementById('bTrails').addEventListener('click', function() {
+  showTrails = !showTrails;
+  this.classList.toggle('active');
+  if (!showTrails) balls.forEach(b => b.trail = []);
+});
+document.getElementById('bReset').addEventListener('click', createBalls);
+
+// Note: sN/sR/sSpeed only take effect on reset
+document.getElementById('sN').addEventListener('change', createBalls);
+
+window.reset = function() {
+  createBalls();
+};
+
+createBalls();
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

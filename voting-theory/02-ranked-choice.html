@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ranked Choice Voting - Instant Runoff</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow: hidden; }
+canvas { display: block; }
+#controls {
+    position: fixed; top: 15px; right: 15px; z-index: 10;
+    background: rgba(20,20,40,0.85); backdrop-filter: blur(10px);
+    border: 1px solid rgba(100,140,255,0.2); border-radius: 12px;
+    padding: 18px; width: 300px; max-height: 90vh; overflow-y: auto;
+}
+#controls h2 { font-size: 16px; color: #7ba4ff; margin-bottom: 10px; }
+.btn {
+    display: inline-block; padding: 8px 14px; margin: 3px;
+    background: rgba(100,140,255,0.15); border: 1px solid rgba(100,140,255,0.3);
+    border-radius: 6px; color: #b0c8ff; cursor: pointer; font-size: 12px;
+    transition: all 0.2s;
+}
+.btn:hover { background: rgba(100,140,255,0.3); color: #fff; }
+.btn.active { background: rgba(100,255,140,0.2); border-color: rgba(100,255,140,0.4); color: #aaffcc; }
+#round-display {
+    margin-top: 10px; padding: 10px; border-radius: 8px;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+    font-size: 12px;
+}
+.round-row { display: flex; align-items: center; margin: 3px 0; }
+.round-row .cname { width: 65px; font-size: 11px; text-align: right; padding-right: 6px; }
+.round-row .bar-bg { flex: 1; height: 18px; background: rgba(255,255,255,0.04); border-radius: 3px; overflow: hidden; position: relative; }
+.round-row .bar-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; display: flex; align-items: center; padding-left: 5px; font-size: 10px; color: #fff; }
+.round-row .eliminated { text-decoration: line-through; opacity: 0.4; }
+.round-row .pct { width: 40px; text-align: right; font-size: 10px; color: #778; padding-left: 4px; }
+#winner-box {
+    margin-top: 10px; padding: 8px; border-radius: 8px;
+    background: rgba(100,255,140,0.08); border: 1px solid rgba(100,255,140,0.2);
+    font-size: 13px; text-align: center; color: #80ffaa;
+}
+#plurality-compare {
+    margin-top: 8px; padding: 8px; border-radius: 8px;
+    background: rgba(255,170,100,0.08); border: 1px solid rgba(255,170,100,0.15);
+    font-size: 11px; color: #ddaa77;
+}
+#info {
+    position: fixed; bottom: 15px; left: 15px; z-index: 10;
+    background: rgba(20,20,40,0.85); backdrop-filter: blur(10px);
+    border: 1px solid rgba(100,140,255,0.2); border-radius: 12px;
+    padding: 16px; width: 320px; font-size: 12px; line-height: 1.6;
+}
+#info h3 { color: #7ba4ff; margin-bottom: 8px; font-size: 14px; }
+#info p { color: #99aabb; margin-bottom: 6px; }
+#info .highlight { color: #ffaa66; font-weight: bold; }
+a.back { position: fixed; top: 15px; left: 15px; color: #7ba4ff; text-decoration: none; font-size: 13px; z-index: 20; }
+a.back:hover { color: #aaccff; }
+.label { font-size: 11px; color: #8899bb; margin-bottom: 6px; }
+.round-header { font-size: 12px; color: #9ab4e0; margin: 10px 0 4px; font-weight: bold; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back">← Back</a>
+<canvas id="c"></canvas>
+
+<div id="controls">
+    <h2>Ranked Choice Voting</h2>
+    <div class="label">Voters rank candidates by proximity. Click canvas to add voters.</div>
+    <div>
+        <button class="btn" onclick="addRandomVoters(30)">+30 Voters</button>
+        <button class="btn" onclick="addRandomVoters(80)">+80 Voters</button>
+    </div>
+    <div style="margin-top:6px">
+        <button class="btn active" id="btnAuto" onclick="runElection()">Run Election</button>
+        <button class="btn" onclick="stepRound()">Step Round</button>
+        <button class="btn" onclick="window.reset()">Reset</button>
+    </div>
+    <div id="round-display"></div>
+    <div id="winner-box">Add voters and run election</div>
+    <div id="plurality-compare"></div>
+</div>
+
+<div id="info">
+    <h3>How Ranked Choice Voting Works</h3>
+    <p>Voters <span class="highlight">rank all candidates</span> in order of preference (here: by proximity).</p>
+    <p><span class="highlight">Round 1:</span> Count first-choice votes. If someone has a majority (>50%), they win.</p>
+    <p><span class="highlight">Each round:</span> Eliminate the candidate with fewest votes. Their voters' ballots transfer to their next choice.</p>
+    <p>Quirk: RCV can sometimes <span class="highlight">eliminate a candidate who would beat every other head-to-head</span> (the Condorcet winner).</p>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+const COLORS = ['#4488ff', '#ff4466', '#44dd88', '#ffaa22', '#cc66ff'];
+const NAMES = ['Blue', 'Red', 'Green', 'Orange', 'Purple'];
+
+let candidates = [];
+let voters = [];
+let rounds = [];
+let currentRound = 0;
+let electionDone = false;
+let winner = null;
+let eliminated = new Set();
+let transfers = []; // for Sankey-like viz
+let dragging = null;
+let dragOffset = { x: 0, y: 0 };
+let animFrame;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+
+function dist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
+
+function initCandidates() {
+    const cx = W * 0.4, cy = H / 2;
+    candidates = [
+        { x: cx - 140, y: cy - 80, color: COLORS[0], name: NAMES[0], r: 20 },
+        { x: cx + 140, y: cy + 80, color: COLORS[1], name: NAMES[1], r: 20 },
+        { x: cx, y: cy - 150, color: COLORS[2], name: NAMES[2], r: 20 },
+        { x: cx - 80, y: cy + 120, color: COLORS[3], name: NAMES[3], r: 20 },
+    ];
+}
+
+function rankCandidatesForVoter(v) {
+    const active = candidates.filter((_, i) => !eliminated.has(i));
+    return active.map((c, _) => ({ idx: candidates.indexOf(c), d: dist(v, c) }))
+                 .sort((a, b) => a.d - b.d)
+                 .map(x => x.idx);
+}
+
+function computeRound() {
+    const active = candidates.map((_, i) => i).filter(i => !eliminated.has(i));
+    if (active.length <= 1) return null;
+
+    const votes = {};
+    for (const i of active) votes[i] = 0;
+    const voterChoices = [];
+
+    for (const v of voters) {
+        const ranking = rankCandidatesForVoter(v);
+        if (ranking.length > 0) {
+            votes[ranking[0]]++;
+            voterChoices.push({ voter: v, choice: ranking[0], ranking });
+        }
+    }
+
+    const total = voters.length;
+    const roundData = { votes: { ...votes }, active: [...active], total };
+
+    // Check for majority
+    for (const i of active) {
+        if (votes[i] > total / 2) {
+            roundData.winner = i;
+            return roundData;
+        }
+    }
+
+    // Find least votes
+    let minVotes = Infinity, minIdx = -1;
+    for (const i of active) {
+        if (votes[i] < minVotes) { minVotes = votes[i]; minIdx = i; }
+    }
+    roundData.eliminatedIdx = minIdx;
+
+    // Track transfers
+    const transferData = { from: minIdx, to: {} };
+    for (const vc of voterChoices) {
+        if (vc.choice === minIdx && vc.ranking.length > 1) {
+            const nextChoice = vc.ranking[1];
+            transferData.to[nextChoice] = (transferData.to[nextChoice] || 0) + 1;
+        }
+    }
+    roundData.transfers = transferData;
+
+    return roundData;
+}
+
+function stepRound() {
+    if (electionDone || voters.length === 0) return;
+    const rd = computeRound();
+    if (!rd) return;
+
+    rounds.push(rd);
+    currentRound++;
+
+    if (rd.winner !== undefined) {
+        winner = rd.winner;
+        electionDone = true;
+    } else if (rd.eliminatedIdx !== undefined) {
+        eliminated.add(rd.eliminatedIdx);
+        if (rd.transfers) transfers.push(rd.transfers);
+    }
+
+    updateDisplay();
+}
+
+function runElection() {
+    rounds = [];
+    currentRound = 0;
+    eliminated.clear();
+    transfers = [];
+    winner = null;
+    electionDone = false;
+
+    let safety = 0;
+    while (!electionDone && safety < 20) {
+        stepRound();
+        safety++;
+    }
+}
+
+function pluralityWinner() {
+    const votes = {};
+    for (const c of candidates) votes[candidates.indexOf(c)] = 0;
+    for (const v of voters) {
+        let best = -1, bestD = Infinity;
+        candidates.forEach((c, i) => {
+            const d = dist(v, c);
+            if (d < bestD) { bestD = d; best = i; }
+        });
+        if (best >= 0) votes[best]++;
+    }
+    let maxV = 0, maxI = 0;
+    for (const [i, v] of Object.entries(votes)) {
+        if (v > maxV) { maxV = v; maxI = parseInt(i); }
+    }
+    return { idx: maxI, votes: maxV };
+}
+
+function updateDisplay() {
+    const roundDiv = document.getElementById('round-display');
+    const winnerBox = document.getElementById('winner-box');
+    const plurBox = document.getElementById('plurality-compare');
+
+    if (rounds.length === 0) {
+        roundDiv.innerHTML = '';
+        winnerBox.textContent = 'Add voters and run election';
+        plurBox.innerHTML = '';
+        return;
+    }
+
+    let html = '';
+    rounds.forEach((rd, ri) => {
+        html += `<div class="round-header">Round ${ri + 1}${rd.winner !== undefined ? ' (Final)' : ''}</div>`;
+        const maxV = Math.max(...rd.active.map(i => rd.votes[i] || 0));
+        for (const i of rd.active) {
+            const c = candidates[i];
+            const v = rd.votes[i] || 0;
+            const pct = rd.total > 0 ? (v / rd.total * 100).toFixed(1) : 0;
+            const barW = maxV > 0 ? (v / maxV * 100) : 0;
+            const elim = rd.eliminatedIdx === i ? 'eliminated' : '';
+            html += `<div class="round-row">
+                <span class="cname ${elim}" style="color:${c.color}">${c.name}</span>
+                <span class="bar-bg"><span class="bar-fill" style="width:${barW}%;background:${c.color}${elim ? '66' : ''}">${v}</span></span>
+                <span class="pct">${pct}%</span>
+            </div>`;
+        }
+        if (rd.eliminatedIdx !== undefined) {
+            html += `<div style="font-size:10px;color:#ff6666;margin:2px 0">✗ ${candidates[rd.eliminatedIdx].name} eliminated</div>`;
+        }
+    });
+    roundDiv.innerHTML = html;
+
+    if (winner !== null) {
+        const c = candidates[winner];
+        const finalRd = rounds[rounds.length - 1];
+        const pct = (finalRd.votes[winner] / finalRd.total * 100).toFixed(1);
+        winnerBox.innerHTML = `<span style="color:${c.color}">&#9733; ${c.name}</span> wins with ${pct}% in round ${rounds.length}`;
+
+        const pl = pluralityWinner();
+        if (pl.idx !== winner) {
+            plurBox.innerHTML = `Plurality would elect <span style="color:${candidates[pl.idx].color};font-weight:bold">${candidates[pl.idx].name}</span> instead!`;
+        } else {
+            plurBox.innerHTML = `Same winner as plurality this time.`;
+        }
+    }
+}
+
+function addRandomVoters(n) {
+    const margin = 80;
+    for (let i = 0; i < n; i++) {
+        if (candidates.length > 0 && Math.random() < 0.65) {
+            const c = candidates[Math.floor(Math.random() * candidates.length)];
+            voters.push({ x: c.x + (Math.random() - 0.5) * 280, y: c.y + (Math.random() - 0.5) * 280 });
+        } else {
+            voters.push({ x: margin + Math.random() * (W * 0.6 - margin), y: margin + Math.random() * (H - 2 * margin) });
+        }
+    }
+    // Reset election state
+    rounds = []; currentRound = 0; eliminated.clear(); transfers = []; winner = null; electionDone = false;
+    updateDisplay();
+}
+
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Grid
+    ctx.strokeStyle = 'rgba(100,140,255,0.04)';
+    for (let x = 0; x < W; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y < H; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+    // Draw transfer flows (Sankey-like)
+    for (const t of transfers) {
+        const fromC = candidates[t.from];
+        for (const [toIdx, count] of Object.entries(t.to)) {
+            const toC = candidates[parseInt(toIdx)];
+            const thickness = Math.max(2, Math.min(count * 1.5, 20));
+            ctx.beginPath();
+            const mx = (fromC.x + toC.x) / 2;
+            const my = (fromC.y + toC.y) / 2 - 30;
+            ctx.moveTo(fromC.x, fromC.y);
+            ctx.quadraticCurveTo(mx, my, toC.x, toC.y);
+            ctx.strokeStyle = fromC.color + '40';
+            ctx.lineWidth = thickness;
+            ctx.stroke();
+
+            // Arrow at midpoint
+            ctx.fillStyle = fromC.color + '60';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(count + ' →', mx, my - 5);
+        }
+    }
+
+    // Voters colored by current first choice
+    for (const v of voters) {
+        const ranking = rankCandidatesForVoter(v);
+        const col = ranking.length > 0 ? candidates[ranking[0]].color : '#555';
+        ctx.beginPath();
+        ctx.arc(v.x, v.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = col + '88';
+        ctx.fill();
+    }
+
+    // Candidates
+    for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i];
+        const isElim = eliminated.has(i);
+        const alpha = isElim ? '44' : 'ff';
+
+        // Glow
+        if (!isElim) {
+            const grad = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, 45);
+            grad.addColorStop(0, c.color + '44');
+            grad.addColorStop(1, c.color + '00');
+            ctx.beginPath(); ctx.arc(c.x, c.y, 45, 0, Math.PI * 2); ctx.fillStyle = grad; ctx.fill();
+        }
+
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+        ctx.fillStyle = c.color + alpha;
+        ctx.fill();
+        if (!isElim) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+
+        if (isElim) {
+            ctx.beginPath();
+            ctx.moveTo(c.x - 12, c.y - 12); ctx.lineTo(c.x + 12, c.y + 12);
+            ctx.moveTo(c.x + 12, c.y - 12); ctx.lineTo(c.x - 12, c.y + 12);
+            ctx.strokeStyle = '#ff4444'; ctx.lineWidth = 3; ctx.stroke();
+        }
+
+        ctx.fillStyle = isElim ? '#666' : '#fff';
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(c.name, c.x, c.y - c.r - 8);
+
+        if (winner === i) {
+            ctx.fillStyle = '#80ffaa';
+            ctx.font = 'bold 12px sans-serif';
+            ctx.fillText('WINNER', c.x, c.y + c.r + 18);
+        }
+    }
+
+    animFrame = requestAnimationFrame(draw);
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    const mx = e.clientX, my = e.clientY;
+    for (const c of candidates) {
+        if (dist({ x: mx, y: my }, c) < c.r + 5) {
+            dragging = c; dragOffset.x = mx - c.x; dragOffset.y = my - c.y; return;
+        }
+    }
+    voters.push({ x: mx, y: my });
+    rounds = []; currentRound = 0; eliminated.clear(); transfers = []; winner = null; electionDone = false;
+    updateDisplay();
+});
+canvas.addEventListener('mousemove', (e) => {
+    if (dragging) {
+        dragging.x = e.clientX - dragOffset.x;
+        dragging.y = e.clientY - dragOffset.y;
+        rounds = []; currentRound = 0; eliminated.clear(); transfers = []; winner = null; electionDone = false;
+        updateDisplay();
+    }
+});
+canvas.addEventListener('mouseup', () => { dragging = null; });
+
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const t = e.touches[0]; const mx = t.clientX, my = t.clientY;
+    for (const c of candidates) {
+        if (dist({ x: mx, y: my }, c) < c.r + 15) {
+            dragging = c; dragOffset.x = mx - c.x; dragOffset.y = my - c.y; return;
+        }
+    }
+    voters.push({ x: mx, y: my });
+    rounds = []; currentRound = 0; eliminated.clear(); transfers = []; winner = null; electionDone = false;
+    updateDisplay();
+}, { passive: false });
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (dragging) { const t = e.touches[0]; dragging.x = t.clientX - dragOffset.x; dragging.y = t.clientY - dragOffset.y; }
+}, { passive: false });
+canvas.addEventListener('touchend', () => { dragging = null; });
+
+window.addEventListener('resize', resize);
+
+window.reset = function() {
+    cancelAnimationFrame(animFrame);
+    voters = []; rounds = []; currentRound = 0; eliminated.clear();
+    transfers = []; winner = null; electionDone = false;
+    resize(); initCandidates(); updateDisplay(); draw();
+};
+
+resize(); initCandidates();
+addRandomVoters(100);
+draw();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

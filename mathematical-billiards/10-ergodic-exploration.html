@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ergodic Exploration - The Ball Visits Everywhere</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; position: absolute; top: 0; left: 0; }
+        #heat { z-index: 1; }
+        #main { z-index: 2; }
+        a.back { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+        a.back:hover { color: #bdf; }
+        #controls {
+            position: fixed; top: 20px; right: 20px; z-index: 100;
+            background: rgba(10, 14, 26, 0.75); backdrop-filter: blur(10px);
+            border: 1px solid rgba(138, 170, 255, 0.15); border-radius: 12px;
+            padding: 16px; color: #cde; font-size: 13px; width: 220px;
+        }
+        #controls h3 { color: #8af; margin-bottom: 10px; font-size: 14px; }
+        .ctrl-row { margin-bottom: 8px; }
+        .ctrl-row label { display: block; margin-bottom: 2px; color: #9ab; font-size: 11px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #8af; }
+        .ctrl-row button {
+            width: 100%; padding: 5px 8px; background: rgba(138,170,255,0.1);
+            border: 1px solid rgba(138,170,255,0.25); border-radius: 6px;
+            color: #cde; font-size: 12px; cursor: pointer; margin-top: 2px;
+        }
+        .ctrl-row button:hover { background: rgba(138,170,255,0.25); }
+        .ctrl-row button.active { background: rgba(138,170,255,0.3); border-color: #8af; }
+        .shape-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+        .stats-box { margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.3); border-radius: 6px; font-size: 11px; color: #8ab; }
+        .stats-box div { margin-bottom: 3px; }
+        .stats-box .val { color: #cde; font-weight: 600; }
+        #histogram {
+            position: fixed; bottom: 80px; right: 20px; z-index: 100;
+            border: 1px solid rgba(138,170,255,0.2); border-radius: 8px;
+            background: rgba(10,14,26,0.8);
+        }
+        #info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(10,14,26,0.8); backdrop-filter: blur(10px);
+            border: 1px solid rgba(138,170,255,0.15); border-radius: 10px;
+            padding: 10px 18px; color: #9ab; font-size: 12px; max-width: 600px;
+            text-align: center; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+<a href="index.html" class="back">&larr; Back</a>
+<canvas id="heat"></canvas>
+<canvas id="main"></canvas>
+<canvas id="histogram" width="200" height="120"></canvas>
+<div id="controls">
+    <h3>Ergodic Exploration</h3>
+    <div class="ctrl-row">
+        <label>Table Shape</label>
+        <div class="shape-btns">
+            <button class="shapeBtn" data-shape="stadium" id="btnStadium">Stadium</button>
+            <button class="shapeBtn" data-shape="sinai" id="btnSinai">Sinai</button>
+            <button class="shapeBtn" data-shape="circle" id="btnCircle">Circle</button>
+            <button class="shapeBtn" data-shape="square" id="btnSquare">Square</button>
+        </div>
+    </div>
+    <div class="ctrl-row">
+        <label>Speed: <span id="vSpeed">6</span></label>
+        <input type="range" id="speed" min="2" max="20" step="1" value="6">
+    </div>
+    <div class="ctrl-row">
+        <button id="resetBtn">Reset</button>
+    </div>
+    <div class="stats-box">
+        <div>Bounces: <span class="val" id="sBounce">0</span></div>
+        <div>Visited: <span class="val" id="sVisited">0%</span></div>
+        <div>Shape: <span class="val" id="sShape">Stadium</span></div>
+    </div>
+</div>
+<div id="info">
+    Ergodicity means the time average equals the space average.
+    The ball spends equal time in equal areas -- watch the heat map converge to uniform.
+</div>
+
+<script>
+const heatCanvas = document.getElementById('heat');
+const hctx = heatCanvas.getContext('2d');
+const mainCanvas = document.getElementById('main');
+const ctx = mainCanvas.getContext('2d');
+const histCanvas = document.getElementById('histogram');
+const histCtx = histCanvas.getContext('2d');
+
+let W, H, cx, cy, R;
+const CELL = 5;
+let gridW, gridH, grid, cellInside;
+let shape = 'stadium';
+let ball = { x: 0, y: 0, vx: 0, vy: 0 };
+let bounceCount = 0;
+let totalInside = 0;
+
+function resize() {
+    W = heatCanvas.width = mainCanvas.width = window.innerWidth;
+    H = heatCanvas.height = mainCanvas.height = window.innerHeight;
+    cx = W / 2; cy = H / 2;
+    R = Math.min(W, H) * 0.3;
+    gridW = Math.ceil(W / CELL);
+    gridH = Math.ceil(H / CELL);
+    resetSim();
+}
+
+function resetSim() {
+    grid = new Float32Array(gridW * gridH);
+    cellInside = new Uint8Array(gridW * gridH);
+    totalInside = 0;
+    bounceCount = 0;
+
+    // Mark which cells are inside the shape
+    for (let gy = 0; gy < gridH; gy++) {
+        for (let gx = 0; gx < gridW; gx++) {
+            const px = gx * CELL + CELL / 2;
+            const py = gy * CELL + CELL / 2;
+            const inside = isInside(px, py) ? 1 : 0;
+            cellInside[gy * gridW + gx] = inside;
+            if (inside) totalInside++;
+        }
+    }
+
+    // Place ball
+    const spd = getSpeed();
+    let angle;
+    if (shape === 'square') {
+        // Use irrational angle for ergodic behavior
+        angle = Math.PI * (Math.sqrt(5) - 1) / 2;
+    } else {
+        angle = Math.random() * Math.PI * 2;
+    }
+    ball.x = cx + (Math.random() - 0.5) * R * 0.3;
+    ball.y = cy + (Math.random() - 0.5) * R * 0.3;
+    ball.vx = Math.cos(angle) * spd;
+    ball.vy = Math.sin(angle) * spd;
+
+    // Clear heat canvas
+    hctx.fillStyle = '#0a0e1a';
+    hctx.fillRect(0, 0, W, H);
+
+    updateShapeButtons();
+}
+
+function getSpeed() { return parseInt(document.getElementById('speed').value); }
+
+// Stadium shape params
+const stadiumFlat = 0.8;
+
+function isInside(x, y) {
+    switch (shape) {
+        case 'circle': {
+            const dx = x - cx, dy = y - cy;
+            return dx*dx + dy*dy < R*R;
+        }
+        case 'stadium': {
+            const f = stadiumFlat * R;
+            const lc = cx - f, rc = cx + f;
+            if (x >= lc && x <= rc) return Math.abs(y - cy) < R;
+            if (x < lc) { const dx = x - lc, dy = y - cy; return dx*dx + dy*dy < R*R; }
+            const dx = x - rc, dy = y - cy;
+            return dx*dx + dy*dy < R*R;
+        }
+        case 'sinai': {
+            const half = R;
+            if (x < cx - half || x > cx + half || y < cy - half || y > cy + half) return false;
+            const dr = R * 0.25;
+            const dx = x - cx, dy = y - cy;
+            return dx*dx + dy*dy > dr*dr;
+        }
+        case 'square': {
+            const half = R;
+            return x >= cx - half && x <= cx + half && y >= cy - half && y <= cy + half;
+        }
+    }
+    return false;
+}
+
+function collide() {
+    switch (shape) {
+        case 'circle': {
+            const dx = ball.x - cx, dy = ball.y - cy;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist >= R - 1) {
+                const nx = dx/dist, ny = dy/dist;
+                const dot = ball.vx*nx + ball.vy*ny;
+                if (dot > 0) {
+                    ball.vx -= 2*dot*nx; ball.vy -= 2*dot*ny;
+                    ball.x = cx + nx*(R-2); ball.y = cy + ny*(R-2);
+                    bounceCount++;
+                }
+            }
+            break;
+        }
+        case 'stadium': {
+            const f = stadiumFlat * R;
+            const lc = cx - f, rc = cx + f;
+            if (ball.y <= cy - R + 1 && ball.x >= lc && ball.x <= rc) {
+                ball.y = cy - R + 2; ball.vy = Math.abs(ball.vy); bounceCount++;
+            }
+            if (ball.y >= cy + R - 1 && ball.x >= lc && ball.x <= rc) {
+                ball.y = cy + R - 2; ball.vy = -Math.abs(ball.vy); bounceCount++;
+            }
+            if (ball.x <= lc) {
+                const dx = ball.x - lc, dy = ball.y - cy;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                if (dist >= R - 1) {
+                    const nx = dx/dist, ny = dy/dist;
+                    const dot = ball.vx*nx + ball.vy*ny;
+                    if (dot < 0) return;
+                    ball.vx -= 2*dot*nx; ball.vy -= 2*dot*ny;
+                    ball.x = lc + nx*(R-2); ball.y = cy + ny*(R-2);
+                    bounceCount++;
+                }
+            }
+            if (ball.x >= rc) {
+                const dx = ball.x - rc, dy = ball.y - cy;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                if (dist >= R - 1) {
+                    const nx = dx/dist, ny = dy/dist;
+                    const dot = ball.vx*nx + ball.vy*ny;
+                    if (dot < 0) return;
+                    ball.vx -= 2*dot*nx; ball.vy -= 2*dot*ny;
+                    ball.x = rc + nx*(R-2); ball.y = cy + ny*(R-2);
+                    bounceCount++;
+                }
+            }
+            break;
+        }
+        case 'sinai': {
+            const half = R;
+            if (ball.x <= cx - half + 1) { ball.x = cx - half + 2; ball.vx = Math.abs(ball.vx); bounceCount++; }
+            if (ball.x >= cx + half - 1) { ball.x = cx + half - 2; ball.vx = -Math.abs(ball.vx); bounceCount++; }
+            if (ball.y <= cy - half + 1) { ball.y = cy - half + 2; ball.vy = Math.abs(ball.vy); bounceCount++; }
+            if (ball.y >= cy + half - 1) { ball.y = cy + half - 2; ball.vy = -Math.abs(ball.vy); bounceCount++; }
+            const dr = R * 0.25;
+            const dx = ball.x - cx, dy = ball.y - cy;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist <= dr + 1) {
+                const nx = dx/dist, ny = dy/dist;
+                const dot = ball.vx*nx + ball.vy*ny;
+                if (dot < 0) {
+                    ball.vx -= 2*dot*nx; ball.vy -= 2*dot*ny;
+                    ball.x = cx + nx*(dr+2); ball.y = cy + ny*(dr+2);
+                    bounceCount++;
+                }
+            }
+            break;
+        }
+        case 'square': {
+            const half = R;
+            if (ball.x <= cx - half + 1) { ball.x = cx - half + 2; ball.vx = Math.abs(ball.vx); bounceCount++; }
+            if (ball.x >= cx + half - 1) { ball.x = cx + half - 2; ball.vx = -Math.abs(ball.vx); bounceCount++; }
+            if (ball.y <= cy - half + 1) { ball.y = cy - half + 2; ball.vy = Math.abs(ball.vy); bounceCount++; }
+            if (ball.y >= cy + half - 1) { ball.y = cy + half - 2; ball.vy = -Math.abs(ball.vy); bounceCount++; }
+            break;
+        }
+    }
+}
+
+function heatColor(v, max) {
+    const t = Math.min(v / Math.max(max * 0.5, 1), 1);
+    // dark blue -> teal -> green -> yellow -> white
+    let r, g, b;
+    if (t < 0.2) {
+        const s = t / 0.2;
+        r = 0; g = Math.floor(s * 40); b = Math.floor(30 + s * 120);
+    } else if (t < 0.4) {
+        const s = (t - 0.2) / 0.2;
+        r = 0; g = Math.floor(40 + s * 160); b = Math.floor(150 - s * 50);
+    } else if (t < 0.65) {
+        const s = (t - 0.4) / 0.25;
+        r = Math.floor(s * 220); g = Math.floor(200 + s * 55); b = Math.floor(100 - s * 100);
+    } else {
+        const s = (t - 0.65) / 0.35;
+        r = Math.floor(220 + s * 35); g = 255; b = Math.floor(s * 255);
+    }
+    return `rgb(${r},${g},${b})`;
+}
+
+function step() {
+    const spd = getSpeed();
+    const substeps = Math.ceil(spd * 2);
+
+    for (let s = 0; s < substeps; s++) {
+        ball.x += ball.vx / substeps;
+        ball.y += ball.vy / substeps;
+        collide();
+
+        // Record visit
+        const gx = Math.floor(ball.x / CELL);
+        const gy = Math.floor(ball.y / CELL);
+        if (gx >= 0 && gx < gridW && gy >= 0 && gy < gridH) {
+            const idx = gy * gridW + gx;
+            if (cellInside[idx]) {
+                grid[idx]++;
+            }
+        }
+    }
+}
+
+let heatDirty = 0;
+
+function drawHeat() {
+    heatDirty++;
+    if (heatDirty % 10 !== 0) return; // Only redraw heat every N frames for perf
+
+    let maxVal = 1;
+    for (let i = 0; i < grid.length; i++) {
+        if (grid[i] > maxVal) maxVal = grid[i];
+    }
+
+    hctx.fillStyle = '#0a0e1a';
+    hctx.fillRect(0, 0, W, H);
+
+    for (let gy = 0; gy < gridH; gy++) {
+        for (let gx = 0; gx < gridW; gx++) {
+            const idx = gy * gridW + gx;
+            if (!cellInside[idx]) continue;
+            if (grid[idx] > 0) {
+                hctx.fillStyle = heatColor(grid[idx], maxVal);
+                hctx.fillRect(gx * CELL, gy * CELL, CELL, CELL);
+            } else {
+                hctx.fillStyle = 'rgba(15,20,50,0.8)';
+                hctx.fillRect(gx * CELL, gy * CELL, CELL, CELL);
+            }
+        }
+    }
+}
+
+function drawShape() {
+    ctx.strokeStyle = 'rgba(138,170,255,0.3)';
+    ctx.lineWidth = 2;
+
+    switch (shape) {
+        case 'circle':
+            ctx.beginPath();
+            ctx.arc(cx, cy, R, 0, Math.PI * 2);
+            ctx.stroke();
+            break;
+        case 'stadium': {
+            const f = stadiumFlat * R;
+            ctx.beginPath();
+            ctx.arc(cx - f, cy, R, Math.PI * 0.5, Math.PI * 1.5);
+            ctx.lineTo(cx + f, cy - R);
+            ctx.arc(cx + f, cy, R, -Math.PI * 0.5, Math.PI * 0.5);
+            ctx.lineTo(cx - f, cy + R);
+            ctx.closePath();
+            ctx.stroke();
+            break;
+        }
+        case 'sinai': {
+            ctx.strokeRect(cx - R, cy - R, R * 2, R * 2);
+            ctx.beginPath();
+            ctx.arc(cx, cy, R * 0.25, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(60,80,120,0.2)';
+            ctx.fill();
+            ctx.stroke();
+            break;
+        }
+        case 'square':
+            ctx.strokeRect(cx - R, cy - R, R * 2, R * 2);
+            break;
+    }
+}
+
+function drawHistogram() {
+    histCtx.fillStyle = 'rgba(10,14,26,0.9)';
+    histCtx.fillRect(0, 0, 200, 120);
+    histCtx.strokeStyle = 'rgba(138,170,255,0.2)';
+    histCtx.strokeRect(2, 2, 196, 116);
+
+    histCtx.fillStyle = '#5a7a9a';
+    histCtx.font = '9px sans-serif';
+    histCtx.fillText('Visit Count Distribution', 45, 12);
+
+    // Build histogram of visit counts
+    const bins = 30;
+    let maxVal = 1;
+    for (let i = 0; i < grid.length; i++) {
+        if (cellInside[i] && grid[i] > maxVal) maxVal = grid[i];
+    }
+
+    const hist = new Float32Array(bins);
+    let total = 0;
+    for (let i = 0; i < grid.length; i++) {
+        if (!cellInside[i]) continue;
+        const bin = Math.min(Math.floor((grid[i] / maxVal) * bins), bins - 1);
+        hist[bin]++;
+        total++;
+    }
+
+    let histMax = 1;
+    for (let i = 0; i < bins; i++) {
+        if (hist[i] > histMax) histMax = hist[i];
+    }
+
+    for (let i = 0; i < bins; i++) {
+        const h = (hist[i] / histMax) * 85;
+        const x = 10 + i * 6;
+        histCtx.fillStyle = heatColor(i / bins * maxVal, maxVal);
+        histCtx.fillRect(x, 105 - h, 5, h);
+    }
+}
+
+function getVisitedPercent() {
+    let visited = 0;
+    for (let i = 0; i < grid.length; i++) {
+        if (cellInside[i] && grid[i] > 0) visited++;
+    }
+    return totalInside > 0 ? (visited / totalInside * 100).toFixed(1) : 0;
+}
+
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    drawHeat();
+    drawShape();
+
+    // Ball glow
+    const grd = ctx.createRadialGradient(ball.x, ball.y, 0, ball.x, ball.y, 8);
+    grd.addColorStop(0, 'rgba(255,255,255,0.95)');
+    grd.addColorStop(0.3, 'rgba(200,220,255,0.4)');
+    grd.addColorStop(1, 'rgba(138,170,255,0)');
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Update stats
+    document.getElementById('sBounce').textContent = bounceCount;
+    document.getElementById('sVisited').textContent = getVisitedPercent() + '%';
+
+    if (heatDirty % 30 === 0) drawHistogram();
+}
+
+let running = true;
+
+function animate() {
+    if (running) { step(); draw(); }
+    requestAnimationFrame(animate);
+}
+
+function updateShapeButtons() {
+    document.querySelectorAll('.shapeBtn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.shape === shape);
+    });
+    const names = { stadium: 'Stadium', sinai: 'Sinai', circle: 'Circle', square: 'Square' };
+    document.getElementById('sShape').textContent = names[shape];
+}
+
+// Controls
+document.querySelectorAll('.shapeBtn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        shape = btn.dataset.shape;
+        resetSim();
+    });
+});
+
+document.getElementById('speed').addEventListener('input', e => {
+    document.getElementById('vSpeed').textContent = e.target.value;
+    const spd = parseInt(e.target.value);
+    const mag = Math.sqrt(ball.vx*ball.vx + ball.vy*ball.vy);
+    if (mag > 0) { ball.vx = ball.vx/mag*spd; ball.vy = ball.vy/mag*spd; }
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => resetSim());
+
+window.addEventListener('resize', resize);
+
+window.reset = function() { resetSim(); };
+
+resize();
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

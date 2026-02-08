@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Color Constancy / The Dress</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; }
+canvas { display: block; }
+a { position: fixed; top: 20px; left: 20px; color: #8af; text-decoration: none; z-index: 100; font-size: 1.2em; }
+#controls {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: rgba(20,20,40,0.85); backdrop-filter: blur(10px);
+  padding: 18px 24px; border-radius: 14px; color: #ccd; z-index: 100;
+  display: flex; flex-wrap: wrap; gap: 14px; align-items: center; max-width: 780px;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+#controls label { font-size: 0.82em; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+#controls input[type=range] { width: 100px; accent-color: #8af; }
+button {
+  background: rgba(100,140,255,0.2); color: #8af; border: 1px solid rgba(100,140,255,0.3);
+  padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 0.82em;
+}
+button:hover { background: rgba(100,140,255,0.35); }
+button.active { background: rgba(100,255,140,0.2); color: #8fa; border-color: rgba(100,255,140,0.3); }
+#info {
+  position: fixed; top: 20px; right: 20px; background: rgba(20,20,40,0.85);
+  backdrop-filter: blur(10px); padding: 16px 20px; border-radius: 12px;
+  color: #aab; font-size: 0.82em; max-width: 310px; z-index: 100; line-height: 1.5;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+#info strong { color: #dde; }
+#mode-tabs {
+  position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 4px; z-index: 100;
+}
+#mode-tabs button { padding: 8px 18px; font-size: 0.9em; }
+#mode-tabs button.active { background: rgba(100,140,255,0.5); }
+</style>
+</head>
+<body>
+<a href="index.html">&#8592; Back</a>
+<canvas id="c"></canvas>
+
+<div id="info">
+  <strong>Color Constancy</strong><br><br>
+  Your brain guesses the illumination color and <em>subtracts</em> it, so objects appear to keep their "true" color. Different assumptions about lighting = different perceived colors.<br><br>
+  This is why people disagreed about <strong>The Dress</strong> (2015): different brains assumed different illumination.
+</div>
+
+<div id="mode-tabs">
+  <button class="active" id="tabScene">Scene</button>
+  <button id="tabDress">The Dress</button>
+</div>
+
+<div id="controls">
+  <label>Light color <input type="range" id="lightHue" min="0" max="360" value="40"></label>
+  <label>Light strength <input type="range" id="lightStr" min="0" max="100" value="50"></label>
+  <label>Assumed illumination <input type="range" id="assumed" min="-100" max="100" value="0"></label>
+  <button id="btnOverlay">Show True Colors</button>
+  <button id="btnReset">Reset</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+let mode = 'scene';
+
+let lightHue = 40;
+let lightStrength = 0.5;
+let assumedIllum = 0;
+let showTrue = false;
+
+const sceneObjects = [
+  { x: 0.2, y: 0.45, size: 0.1, shape: 'circle', trueColor: [220, 50, 50] },
+  { x: 0.4, y: 0.5, size: 0.12, shape: 'rect', trueColor: [50, 180, 50] },
+  { x: 0.6, y: 0.45, size: 0.1, shape: 'circle', trueColor: [50, 80, 220] },
+  { x: 0.8, y: 0.5, size: 0.11, shape: 'rect', trueColor: [220, 200, 50] },
+  { x: 0.3, y: 0.7, size: 0.09, shape: 'circle', trueColor: [200, 100, 220] },
+  { x: 0.5, y: 0.68, size: 0.1, shape: 'rect', trueColor: [50, 200, 200] },
+  { x: 0.7, y: 0.72, size: 0.09, shape: 'circle', trueColor: [240, 140, 50] },
+];
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+
+function hslToRgb(h, s, l) {
+  h /= 360; s /= 100; l /= 100;
+  let r, g, b;
+  if (s === 0) { r = g = b = l; }
+  else {
+    const hue2rgb = (p, q, t) => { if (t < 0) t += 1; if (t > 1) t -= 1; if (t < 1/6) return p + (q - p) * 6 * t; if (t < 1/2) return q; if (t < 2/3) return p + (q - p) * (2/3 - t) * 6; return p; };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3); g = hue2rgb(p, q, h); b = hue2rgb(p, q, h - 1/3);
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+function mixColor(baseRgb, lightRgb, strength) {
+  return baseRgb.map((c, i) => Math.round(c * (1 - strength) + lightRgb[i] * strength));
+}
+
+function clamp(v) { return Math.max(0, Math.min(255, Math.round(v))); }
+
+function applyIllumination(rgb) {
+  const lightRgb = hslToRgb(lightHue, 80, 60);
+  return rgb.map((c, i) => clamp(c * (1 - lightStrength) + lightRgb[i] * lightStrength));
+}
+
+function applyAssumedCorrection(rgb) {
+  // Simulate what the brain does: subtract assumed illumination
+  const t = assumedIllum / 100;
+  if (t === 0) return rgb;
+  const warmShift = hslToRgb(40, 80, 60);   // warm assumption
+  const coolShift = hslToRgb(220, 80, 60);   // cool assumption
+  const shift = t > 0 ? warmShift : coolShift;
+  const amt = Math.abs(t) * 0.4;
+  return rgb.map((c, i) => clamp(c + (c - shift[i]) * amt));
+}
+
+function drawScene() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Background with illumination
+  const bgBase = [80, 80, 100];
+  const bgLit = applyIllumination(bgBase);
+  const bgCorrected = applyAssumedCorrection(bgLit);
+  ctx.fillStyle = `rgb(${bgCorrected.join(',')})`;
+  ctx.fillRect(0, 0, W, H);
+
+  // Floor
+  const floorBase = [120, 110, 90];
+  const floorLit = applyIllumination(floorBase);
+  const floorCorrected = applyAssumedCorrection(floorLit);
+  ctx.fillStyle = `rgb(${floorCorrected.join(',')})`;
+  ctx.beginPath();
+  ctx.moveTo(0, H * 0.6);
+  ctx.lineTo(W, H * 0.6);
+  ctx.lineTo(W, H);
+  ctx.lineTo(0, H);
+  ctx.fill();
+
+  // Light source indicator
+  const lightRgb = hslToRgb(lightHue, 80, 70);
+  ctx.fillStyle = `rgb(${lightRgb.join(',')})`;
+  ctx.beginPath();
+  ctx.arc(W * 0.5, H * 0.12, 30, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Light source', W * 0.5, H * 0.12 + 50);
+
+  // Light rays
+  ctx.strokeStyle = `rgba(${lightRgb.join(',')}, 0.15)`;
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 12; i++) {
+    const angle = (i / 12) * Math.PI * 0.6 + Math.PI * 0.2 + Math.PI / 2;
+    ctx.beginPath();
+    ctx.moveTo(W * 0.5, H * 0.12);
+    ctx.lineTo(W * 0.5 + Math.cos(angle) * H * 0.8, H * 0.12 + Math.sin(angle) * H * 0.8);
+    ctx.stroke();
+  }
+
+  // Objects
+  sceneObjects.forEach(obj => {
+    const litColor = applyIllumination(obj.trueColor);
+    const displayColor = applyAssumedCorrection(litColor);
+    const x = obj.x * W;
+    const y = obj.y * H;
+    const s = obj.size * Math.min(W, H);
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.beginPath();
+    ctx.ellipse(x + 5, y + s / 2 + 5, s / 2, s / 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = `rgb(${displayColor.join(',')})`;
+    if (obj.shape === 'circle') {
+      ctx.beginPath();
+      ctx.arc(x, y, s / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillRect(x - s / 2, y - s / 2, s, s);
+    }
+
+    // Show true color overlay
+    if (showTrue) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      if (obj.shape === 'circle') {
+        ctx.beginPath();
+        ctx.arc(x, y, s / 2 + 4, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        ctx.strokeRect(x - s / 2 - 4, y - s / 2 - 4, s + 8, s + 8);
+      }
+
+      // True color swatch
+      ctx.fillStyle = `rgb(${obj.trueColor.join(',')})`;
+      ctx.fillRect(x - 12, y - s / 2 - 22, 24, 12);
+      ctx.strokeStyle = '#fff';
+      ctx.strokeRect(x - 12, y - s / 2 - 22, 24, 12);
+      ctx.fillStyle = '#fff';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`(${obj.trueColor.join(',')})`, x, y - s / 2 - 28);
+    }
+  });
+
+  // Illumination overlay indicator
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.font = '14px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(`Light hue: ${lightHue}   Strength: ${(lightStrength * 100).toFixed(0)}%`, 20, H - 80);
+  ctx.fillText(`Assumed illumination shift: ${assumedIllum > 0 ? '+' : ''}${assumedIllum}`, 20, H - 60);
+}
+
+function drawDress() {
+  ctx.clearRect(0, 0, W, H);
+
+  // The dress: ambiguous blue/black or white/gold
+  const dressW = Math.min(W * 0.35, 300);
+  const dressH = dressW * 2;
+  const dx = W / 2 - dressW / 2;
+  const dy = H / 2 - dressH / 2;
+
+  // Background with illumination ambiguity
+  const bgBright = 128 + assumedIllum * 0.5;
+  ctx.fillStyle = `rgb(${clamp(bgBright - 20)},${clamp(bgBright - 15)},${clamp(bgBright)})`;
+  ctx.fillRect(0, 0, W, H);
+
+  // Dress stripes - the actual pixels are ambiguous
+  const baseBlue = [100, 110, 170];   // The ambiguous color
+  const baseGold = [130, 120, 80];    // The other ambiguous color
+
+  // Apply assumed illumination correction
+  const t = assumedIllum / 100;
+  const correctedBlue = baseBlue.map((c, i) => {
+    if (t > 0) return clamp(c - t * 80);  // Subtract warm = see blue/black
+    return clamp(c + Math.abs(t) * 60);     // Subtract cool = see white/gold
+  });
+  const correctedGold = baseGold.map((c, i) => {
+    if (t > 0) return clamp(c - t * 50);
+    return clamp(c + Math.abs(t) * 80);
+  });
+
+  // Draw dress shape
+  const stripeH = dressH / 12;
+  for (let i = 0; i < 12; i++) {
+    const isBlue = i % 2 === 0;
+    const color = isBlue ? correctedBlue : correctedGold;
+    ctx.fillStyle = `rgb(${color.join(',')})`;
+
+    // Dress silhouette with slight taper
+    const taper = 1 - Math.abs(i - 6) / 30;
+    const sw = dressW * taper;
+    const sx = dx + (dressW - sw) / 2;
+    ctx.fillRect(sx, dy + i * stripeH, sw, stripeH);
+  }
+
+  // Dress outline
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(dx + dressW * 0.35, dy);
+  ctx.lineTo(dx + dressW * 0.65, dy);
+  ctx.lineTo(dx + dressW * 1.05, dy + dressH);
+  ctx.lineTo(dx - dressW * 0.05, dy + dressH);
+  ctx.closePath();
+  ctx.stroke();
+
+  // Labels
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 16px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('What colors do you see?', W / 2, dy - 30);
+
+  // Show actual pixel values
+  if (showTrue) {
+    ctx.font = '12px monospace';
+    ctx.fillStyle = '#8fa';
+    ctx.fillText(`Actual stripe pixels: rgb(${baseBlue.join(',')}) and rgb(${baseGold.join(',')})`, W / 2, dy + dressH + 30);
+    ctx.fillText(`After brain correction: rgb(${correctedBlue.join(',')}) and rgb(${correctedGold.join(',')})`, W / 2, dy + dressH + 50);
+
+    // Swatches
+    ctx.fillStyle = `rgb(${baseBlue.join(',')})`;
+    ctx.fillRect(W / 2 - 80, dy + dressH + 60, 30, 20);
+    ctx.fillStyle = `rgb(${baseGold.join(',')})`;
+    ctx.fillRect(W / 2 - 40, dy + dressH + 60, 30, 20);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('Actual', W / 2 - 50, dy + dressH + 95);
+
+    ctx.fillStyle = `rgb(${correctedBlue.join(',')})`;
+    ctx.fillRect(W / 2 + 20, dy + dressH + 60, 30, 20);
+    ctx.fillStyle = `rgb(${correctedGold.join(',')})`;
+    ctx.fillRect(W / 2 + 60, dy + dressH + 60, 30, 20);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('Perceived', W / 2 + 50, dy + dressH + 95);
+  }
+
+  // Illumination arrow
+  ctx.fillStyle = t > 0 ? '#ffa' : '#aaf';
+  ctx.font = '13px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(t > 0 ? 'Brain assumes warm light -> sees blue/black' : t < 0 ? 'Brain assumes cool light -> sees white/gold' : 'Neutral assumption', 20, H - 60);
+}
+
+function draw() {
+  if (mode === 'scene') drawScene();
+  else drawDress();
+}
+
+function animate() {
+  draw();
+  requestAnimationFrame(animate);
+}
+
+document.getElementById('lightHue').addEventListener('input', e => { lightHue = +e.target.value; });
+document.getElementById('lightStr').addEventListener('input', e => { lightStrength = e.target.value / 100; });
+document.getElementById('assumed').addEventListener('input', e => { assumedIllum = +e.target.value; });
+
+document.getElementById('btnOverlay').addEventListener('click', function() {
+  showTrue = !showTrue;
+  this.textContent = showTrue ? 'Hide True Colors' : 'Show True Colors';
+  this.classList.toggle('active', showTrue);
+});
+
+document.getElementById('tabScene').addEventListener('click', function() {
+  mode = 'scene';
+  this.classList.add('active');
+  document.getElementById('tabDress').classList.remove('active');
+});
+document.getElementById('tabDress').addEventListener('click', function() {
+  mode = 'dress';
+  this.classList.add('active');
+  document.getElementById('tabScene').classList.remove('active');
+});
+
+document.getElementById('btnReset').addEventListener('click', reset);
+
+function reset() {
+  lightHue = 40; lightStrength = 0.5; assumedIllum = 0; showTrue = false; mode = 'scene';
+  document.getElementById('lightHue').value = 40;
+  document.getElementById('lightStr').value = 50;
+  document.getElementById('assumed').value = 0;
+  document.getElementById('btnOverlay').textContent = 'Show True Colors';
+  document.getElementById('btnOverlay').classList.remove('active');
+  document.getElementById('tabScene').classList.add('active');
+  document.getElementById('tabDress').classList.remove('active');
+}
+window.reset = reset;
+
+window.addEventListener('resize', resize);
+resize();
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

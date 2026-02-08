@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hyperbolic Raycaster</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    canvas { display: block; }
+    #controls {
+        position: fixed; top: 20px; right: 20px; z-index: 100;
+        background: rgba(10, 14, 30, 0.85);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border: 1px solid rgba(100, 160, 255, 0.2);
+        border-radius: 12px;
+        padding: 20px;
+        color: #c8d8f0;
+        min-width: 250px;
+    }
+    #controls h3 { color: #8af; margin-bottom: 12px; font-size: 1.1em; }
+    .info-row { margin: 4px 0; font-size: 0.82em; color: #8a9ab0; }
+    .info-row span { color: #adf; font-family: monospace; }
+    .btn {
+        background: rgba(100, 160, 255, 0.15);
+        border: 1px solid rgba(100, 160, 255, 0.3);
+        color: #8af; padding: 6px 14px; border-radius: 6px;
+        cursor: pointer; font-size: 0.82em; transition: all 0.2s;
+    }
+    .btn:hover { background: rgba(100, 160, 255, 0.3); }
+    .btn-row { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .info-text { font-size: 0.78em; color: #6a7a90; margin-top: 12px; line-height: 1.5; border-top: 1px solid rgba(100,160,255,0.15); padding-top: 10px; }
+    .keys { display: inline-block; background: rgba(100,160,255,0.15); padding: 2px 6px; border-radius: 3px; font-family: monospace; font-size: 0.85em; color: #8af; }
+    #minimap {
+        position: fixed; bottom: 20px; left: 20px; z-index: 100;
+        border: 2px solid rgba(100, 160, 255, 0.3);
+        border-radius: 50%;
+    }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:20px;left:20px;color:#8af;text-decoration:none;z-index:100;font-size:1.2em">&#8592; Back</a>
+
+<canvas id="canvas"></canvas>
+<canvas id="minimap" width="220" height="220"></canvas>
+
+<div id="controls">
+    <h3>Hyperbolic Raycaster</h3>
+    <div class="info-row">Position: <span id="posInfo">0, 0</span></div>
+    <div class="info-row">Angle: <span id="angleInfo">0&deg;</span></div>
+    <div class="info-row">Visible rooms: <span id="roomInfo">--</span></div>
+    <div class="btn-row">
+        <button class="btn" id="resetBtn">Reset Position</button>
+    </div>
+    <div class="info-text">
+        First-person view of <strong style="color:#adf">hyperbolic space</strong>.
+        Rays follow geodesic arcs, not straight lines!
+        Rooms grow exponentially with distance.
+        <br><br>
+        <span class="keys">W/&#8593;</span> Forward
+        <span class="keys">S/&#8595;</span> Back
+        <span class="keys">A/&#8592;</span> Turn left
+        <span class="keys">D/&#8594;</span> Turn right
+    </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const minimap = document.getElementById('minimap');
+const mctx = minimap.getContext('2d');
+
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+// Hyperbolic geometry in the Poincare disk model
+// Points are complex numbers z with |z| < 1
+
+// Player state in the Poincare disk
+let playerX = 0, playerY = 0;
+let playerAngle = 0;
+
+// Mobius transformation: translate origin to point p
+// T_p(z) = (z + p) / (1 + conj(p)*z)
+function mobiusTranslate(zx, zy, px, py) {
+    // (zx + i*zy + px + i*py) / (1 + (px - i*py)(zx + i*zy))
+    const numX = zx + px;
+    const numY = zy + py;
+    const denX = 1 + px * zx + py * zy; // real part of 1 + conj(p)*z
+    const denY = -py * zx + px * zy;     // imag part
+    const denMag2 = denX * denX + denY * denY;
+    return [(numX * denX + numY * denY) / denMag2, (numY * denX - numX * denY) / denMag2];
+}
+
+// Hyperbolic distance
+function hypDist(x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const d2 = dx * dx + dy * dy;
+    const r1 = x1 * x1 + y1 * y1;
+    const r2 = x2 * x2 + y2 * y2;
+    const cross = 1 + 2 * d2 / ((1 - r1) * (1 - r2));
+    return Math.acosh(Math.max(1, cross));
+}
+
+// Generate a regular hyperbolic tiling {p,q} = {4,5}: square tiles, 5 meeting at each vertex
+// We'll use a simpler approach: generate walls as geodesic arcs in the disk
+
+// For the raycaster we use a grid in the hyperbolic plane
+// Generate walls using reflections of a fundamental domain
+
+// Simplified approach: Use {5,4} tiling (pentagons, 4 at each vertex) for visual variety
+// Actually let's use a simpler grid: regular walls at hyperbolic intervals
+
+// Wall segments stored as pairs of points in the disk
+const walls = [];
+
+// Generate a hyperbolic grid of "rooms" using exponential spacing
+function generateWalls() {
+    walls.length = 0;
+    // Create concentric rings of walls with connecting radial walls
+    const rings = 6;
+    const segsPerRing = [5, 8, 13, 21, 34, 55]; // Fibonacci-ish for exponential growth
+
+    for (let ring = 0; ring < rings; ring++) {
+        // Hyperbolic radius for this ring
+        const hDist = (ring + 1) * 0.8;
+        // Convert to Poincare disk radius: r = tanh(d/2)
+        const r = Math.tanh(hDist / 2);
+        const nSegs = segsPerRing[ring];
+
+        for (let s = 0; s < nSegs; s++) {
+            const a1 = (s / nSegs) * Math.PI * 2;
+            const a2 = ((s + 1) / nSegs) * Math.PI * 2;
+
+            // Ring wall segment
+            walls.push({
+                x1: r * Math.cos(a1), y1: r * Math.sin(a1),
+                x2: r * Math.cos(a2), y2: r * Math.sin(a2),
+                ring: ring
+            });
+
+            // Radial wall (connect to next ring, but only some of them for doorways)
+            if (ring < rings - 1 && s % 2 === 0) {
+                const r2 = Math.tanh((ring + 2) * 0.8 / 2);
+                const a = a1 + (a2 - a1) * 0.5;
+                walls.push({
+                    x1: r * Math.cos(a), y1: r * Math.sin(a),
+                    x2: r2 * Math.cos(a), y2: r2 * Math.sin(a),
+                    ring: ring
+                });
+            }
+        }
+    }
+
+    // Remove some walls to create doorways
+    const doorways = new Set();
+    for (let i = 0; i < walls.length * 0.25; i++) {
+        doorways.add(Math.floor(Math.random() * walls.length));
+    }
+    const filtered = walls.filter((_, i) => !doorways.has(i));
+    walls.length = 0;
+    walls.push(...filtered);
+}
+
+generateWalls();
+
+// Raycasting: cast a ray from player position in a direction
+// In the Poincare disk, geodesics are arcs of circles orthogonal to the boundary
+// For simplicity, we'll trace rays in small steps along geodesics
+
+function castRay(ox, oy, angle) {
+    const maxSteps = 200;
+    const stepSize = 0.008;
+    let rx = ox, ry = oy;
+
+    // Direction in the tangent space at (ox, oy)
+    // The metric at point z is ds = 2|dz|/(1-|z|^2)
+    // So the Euclidean step shrinks as we approach the boundary
+    const dirX = Math.cos(angle);
+    const dirY = Math.sin(angle);
+
+    for (let step = 0; step < maxSteps; step++) {
+        // Scale step by the conformal factor
+        const r2 = rx * rx + ry * ry;
+        if (r2 > 0.98) return { dist: 100, hit: false, ring: 0 }; // Boundary
+
+        const scale = (1 - r2) / 2; // Inverse of metric factor
+        const ex = dirX * stepSize * scale;
+        const ey = dirY * stepSize * scale;
+        const nx = rx + ex, ny = ry + ey;
+
+        // Check wall intersections
+        for (const wall of walls) {
+            if (lineSegIntersect(rx, ry, nx, ny, wall.x1, wall.y1, wall.x2, wall.y2)) {
+                const hd = hypDist(ox, oy, rx, ry);
+                return { dist: hd, hit: true, ring: wall.ring, x: rx, y: ry };
+            }
+        }
+
+        rx = nx; ry = ny;
+    }
+    return { dist: 100, hit: false, ring: 0 };
+}
+
+function lineSegIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+    const det = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx);
+    if (Math.abs(det) < 1e-10) return false;
+    const t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / det;
+    const u = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / det;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+}
+
+// Input
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; keys[e.code] = true; });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; keys[e.code] = false; });
+
+// Touch controls
+let touchStartX = 0, touchStartY = 0, touchActive = false;
+canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+    touchActive = true;
+}, {passive:false});
+canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (!touchActive) return;
+    const dx = e.touches[0].clientX - touchStartX;
+    const dy = e.touches[0].clientY - touchStartY;
+    if (Math.abs(dx) > 10) playerAngle += dx * 0.003;
+    if (dy < -20) { keys['_touchfwd'] = true; keys['_touchback'] = false; }
+    else if (dy > 20) { keys['_touchback'] = true; keys['_touchfwd'] = false; }
+    else { keys['_touchfwd'] = false; keys['_touchback'] = false; }
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+}, {passive:false});
+canvas.addEventListener('touchend', () => { touchActive = false; keys['_touchfwd'] = false; keys['_touchback'] = false; });
+
+let lastTime = performance.now();
+
+function animate(now) {
+    const dt = (now - lastTime) / 1000;
+    lastTime = now;
+
+    // Movement
+    const moveSpeed = 0.4 * dt;
+    const turnSpeed = 2.0 * dt;
+
+    if (keys['a'] || keys['arrowleft'] || keys['ArrowLeft']) playerAngle -= turnSpeed;
+    if (keys['d'] || keys['arrowright'] || keys['ArrowRight']) playerAngle += turnSpeed;
+
+    const fwd = keys['w'] || keys['arrowup'] || keys['ArrowUp'] || keys['_touchfwd'];
+    const back = keys['s'] || keys['arrowdown'] || keys['ArrowDown'] || keys['_touchback'];
+
+    if (fwd || back) {
+        const dir = fwd ? 1 : -1;
+        const r2 = playerX * playerX + playerY * playerY;
+        const scale = (1 - r2) / 2;
+        const nx = playerX + Math.cos(playerAngle) * moveSpeed * scale * dir;
+        const ny = playerY + Math.sin(playerAngle) * moveSpeed * scale * dir;
+
+        // Collision check
+        let blocked = false;
+        for (const wall of walls) {
+            if (lineSegIntersect(playerX, playerY, nx, ny, wall.x1, wall.y1, wall.x2, wall.y2)) {
+                blocked = true; break;
+            }
+        }
+        if (!blocked && nx * nx + ny * ny < 0.95) {
+            playerX = nx; playerY = ny;
+        }
+    }
+
+    // Clear
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Ceiling/floor gradient
+    const ceilGrad = ctx.createLinearGradient(0, 0, 0, H / 2);
+    ceilGrad.addColorStop(0, '#0a0e2a');
+    ceilGrad.addColorStop(1, '#141830');
+    ctx.fillStyle = ceilGrad;
+    ctx.fillRect(0, 0, W, H / 2);
+
+    const floorGrad = ctx.createLinearGradient(0, H / 2, 0, H);
+    floorGrad.addColorStop(0, '#0e1220');
+    floorGrad.addColorStop(1, '#060810');
+    ctx.fillStyle = floorGrad;
+    ctx.fillRect(0, H / 2, W, H / 2);
+
+    // Cast rays for first-person view
+    const numRays = Math.min(W, 400);
+    const fov = Math.PI * 0.6;
+    let visibleRooms = 0;
+    const rayResults = [];
+
+    for (let i = 0; i < numRays; i++) {
+        const rayAngle = playerAngle - fov / 2 + (i / numRays) * fov;
+        const result = castRay(playerX, playerY, rayAngle);
+        rayResults.push({ angle: rayAngle, result });
+
+        if (result.hit) {
+            // Correct for fisheye
+            const perpDist = result.dist * Math.cos(rayAngle - playerAngle);
+            const wallHeight = Math.min(H, H / (perpDist + 0.1));
+            const colWidth = W / numRays;
+            const x = (i / numRays) * W;
+            const top = (H - wallHeight) / 2;
+
+            // Color based on ring/distance
+            const ringColors = [
+                [100, 180, 255], [80, 255, 180], [255, 180, 80],
+                [255, 100, 160], [200, 100, 255], [100, 255, 255]
+            ];
+            const rc = ringColors[result.ring % ringColors.length];
+            const fogFactor = Math.max(0, 1 - perpDist / 5);
+            const r = Math.floor(rc[0] * fogFactor);
+            const g = Math.floor(rc[1] * fogFactor);
+            const b = Math.floor(rc[2] * fogFactor);
+
+            ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+            ctx.fillRect(x, top, colWidth + 1, wallHeight);
+
+            // Edge highlight
+            if (i > 0 && rayResults[i - 1].result.ring !== result.ring) {
+                ctx.fillStyle = `rgba(255,255,255,${fogFactor * 0.3})`;
+                ctx.fillRect(x, top, 2, wallHeight);
+            }
+
+            visibleRooms = Math.max(visibleRooms, result.ring + 1);
+        }
+    }
+
+    // Draw minimap (Poincare disk)
+    const mw = 220, mh = 220, mr = 100;
+    const mcx = mw / 2, mcy = mh / 2;
+
+    mctx.fillStyle = 'rgba(10, 14, 30, 0.9)';
+    mctx.beginPath();
+    mctx.arc(mcx, mcy, mr + 5, 0, Math.PI * 2);
+    mctx.fill();
+
+    // Disk boundary
+    mctx.beginPath();
+    mctx.arc(mcx, mcy, mr, 0, Math.PI * 2);
+    mctx.strokeStyle = 'rgba(100, 160, 255, 0.4)';
+    mctx.lineWidth = 2;
+    mctx.stroke();
+
+    // Fill disk
+    mctx.fillStyle = 'rgba(10, 20, 40, 0.8)';
+    mctx.beginPath();
+    mctx.arc(mcx, mcy, mr, 0, Math.PI * 2);
+    mctx.fill();
+
+    // Draw walls on minimap
+    for (const wall of walls) {
+        const sx1 = mcx + wall.x1 * mr, sy1 = mcy + wall.y1 * mr;
+        const sx2 = mcx + wall.x2 * mr, sy2 = mcy + wall.y2 * mr;
+        const ringColors = ['#4ab0ff', '#40ff90', '#ffb040', '#ff6090', '#c060ff', '#40ffff'];
+        mctx.beginPath();
+        mctx.moveTo(sx1, sy1);
+        mctx.lineTo(sx2, sy2);
+        mctx.strokeStyle = ringColors[wall.ring % ringColors.length] + '60';
+        mctx.lineWidth = 1;
+        mctx.stroke();
+    }
+
+    // Player on minimap
+    const mpx = mcx + playerX * mr, mpy = mcy + playerY * mr;
+    mctx.beginPath();
+    mctx.arc(mpx, mpy, 3, 0, Math.PI * 2);
+    mctx.fillStyle = '#fff';
+    mctx.fill();
+
+    // FOV cone on minimap
+    mctx.beginPath();
+    mctx.moveTo(mpx, mpy);
+    const rayLen = 20;
+    const r2 = playerX * playerX + playerY * playerY;
+    const sc = (1 - r2) / 2;
+    mctx.lineTo(mpx + Math.cos(playerAngle - fov/2) * rayLen * sc, mpy + Math.sin(playerAngle - fov/2) * rayLen * sc);
+    mctx.moveTo(mpx, mpy);
+    mctx.lineTo(mpx + Math.cos(playerAngle + fov/2) * rayLen * sc, mpy + Math.sin(playerAngle + fov/2) * rayLen * sc);
+    mctx.strokeStyle = 'rgba(255, 200, 80, 0.6)';
+    mctx.lineWidth = 1;
+    mctx.stroke();
+
+    // Direction indicator
+    mctx.beginPath();
+    mctx.moveTo(mpx, mpy);
+    mctx.lineTo(mpx + Math.cos(playerAngle) * rayLen * sc * 1.5, mpy + Math.sin(playerAngle) * rayLen * sc * 1.5);
+    mctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+    mctx.lineWidth = 2;
+    mctx.stroke();
+
+    // Update info
+    document.getElementById('posInfo').textContent = `${playerX.toFixed(3)}, ${playerY.toFixed(3)}`;
+    document.getElementById('angleInfo').textContent = `${(playerAngle * 180 / Math.PI).toFixed(0)}\u00B0`;
+    document.getElementById('roomInfo').textContent = visibleRooms + ' rings';
+
+    // Crosshair
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 10, H / 2); ctx.lineTo(W / 2 + 10, H / 2);
+    ctx.moveTo(W / 2, H / 2 - 10); ctx.lineTo(W / 2, H / 2 + 10);
+    ctx.stroke();
+
+    requestAnimationFrame(animate);
+}
+
+function resetAll() {
+    playerX = 0; playerY = 0; playerAngle = 0;
+    generateWalls();
+}
+
+document.getElementById('resetBtn').onclick = resetAll;
+window.reset = resetAll;
+
+requestAnimationFrame(animate);
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

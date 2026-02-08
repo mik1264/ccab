@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quasicrystal Diffraction</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; top: 20px; right: 20px; z-index: 100;
+    background: rgba(10, 14, 30, 0.85); backdrop-filter: blur(10px);
+    border: 1px solid rgba(100, 140, 255, 0.3); border-radius: 12px;
+    padding: 18px; min-width: 250px; color: #c8d8ff;
+    max-height: calc(100vh - 40px); overflow-y: auto;
+}
+#controls h3 { margin-bottom: 12px; color: #8af; font-size: 1em; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85em; }
+.ctrl-row span { color: #8aa; }
+.ctrl-row .val { color: #ffd866; font-weight: bold; }
+button.btn {
+    background: rgba(80, 120, 255, 0.2); border: 1px solid rgba(100, 140, 255, 0.4);
+    color: #8af; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    font-size: 0.85em; transition: all 0.2s;
+}
+button.btn:hover { background: rgba(80, 120, 255, 0.4); }
+button.btn.active { background: rgba(80, 120, 255, 0.5); border-color: #8af; }
+.btn-row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+label { font-size: 0.8em; color: #8aa; display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 6px; }
+label input { accent-color: #8af; }
+input[type="range"] { width: 100%; accent-color: #8af; margin: 4px 0; }
+select {
+    background: rgba(80, 120, 255, 0.2); border: 1px solid rgba(100, 140, 255, 0.4);
+    color: #8af; padding: 4px 8px; border-radius: 4px; font-size: 0.85em; width: 100%;
+}
+.section { border-top: 1px solid rgba(100,140,255,0.15); padding-top: 10px; margin-top: 10px; }
+.section h4 { color: #8af; font-size: 0.85em; margin-bottom: 8px; }
+.info-text { font-size: 0.72em; color: #6a8a9a; margin-top: 10px; line-height: 1.5; border-top: 1px solid rgba(100,140,255,0.15); padding-top: 8px; }
+#status { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); color: #ffd866; font-size: 0.85em; z-index: 100; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:20px;left:20px;color:#8af;text-decoration:none;z-index:100;font-size:1.2em">&#8592; Back</a>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <h3>QUASICRYSTAL DIFFRACTION</h3>
+    <div class="ctrl-row"><span>Vertices:</span><span class="val" id="vertCount">0</span></div>
+    <div class="ctrl-row"><span>Subdivision Level:</span><span class="val" id="levelVal">4</span></div>
+    <input type="range" id="levelSlider" min="2" max="6" value="4">
+
+    <div class="section">
+        <h4>Display Mode</h4>
+        <div class="btn-row">
+            <button class="btn active" id="btnTiling">Tiling</button>
+            <button class="btn" id="btnDiffract">Diffraction</button>
+            <button class="btn" id="btnBoth">Both</button>
+        </div>
+    </div>
+
+    <div class="section">
+        <h4>Color Map</h4>
+        <select id="colorMap">
+            <option value="heat">Heat (Black-Red-Yellow-White)</option>
+            <option value="ice">Ice (Black-Blue-Cyan-White)</option>
+            <option value="viridis">Viridis (Purple-Teal-Yellow)</option>
+            <option value="plasma">Plasma (Purple-Red-Yellow)</option>
+        </select>
+    </div>
+
+    <div class="ctrl-row"><span>Diffraction Zoom:</span><span class="val" id="dZoomVal">1.0</span></div>
+    <input type="range" id="dZoomSlider" min="5" max="50" value="15">
+
+    <label><input type="checkbox" id="showVertices"> Show atom positions</label>
+
+    <div class="info-text">
+        In 1982, Dan Shechtman observed electron diffraction patterns with 10-fold symmetry in an Al-Mn alloy -- "impossible" by classical crystallography. This won the 2011 Nobel Prize in Chemistry and proved quasicrystals exist.
+    </div>
+</div>
+<div id="status"></div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+const PHI = (1 + Math.sqrt(5)) / 2;
+let displayMode = 'tiling'; // 'tiling', 'diffraction', 'both'
+let level = 4;
+let vertices = [];
+let triangles = [];
+let diffractionData = null;
+let diffractionSize = 256;
+let needsRecompute = true;
+
+// Pan/zoom for tiling
+let camX = 0, camY = 0, camZoom = 1;
+let dragging = false, dragSX, dragSY, camSX, camSY;
+// Separate zoom for diffraction
+let dZoom = 15;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+
+// Robinson triangle decomposition for Penrose P3 (rhombuses)
+function lerp(a, b, t) {
+    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+
+function makeInitialTriangles() {
+    const tris = [];
+    const r = 250;
+    for (let i = 0; i < 10; i++) {
+        const a1 = (2 * Math.PI * i) / 10 - Math.PI / 2;
+        const a2 = (2 * Math.PI * (i + 1)) / 10 - Math.PI / 2;
+        const A = [0, 0];
+        const B = [r * Math.cos(a1), r * Math.sin(a1)];
+        const C = [r * Math.cos(a2), r * Math.sin(a2)];
+        if (i % 2 === 0) {
+            tris.push({ type: 0, A: A, B: B, C: C }); // acute (thick)
+        } else {
+            tris.push({ type: 0, A: A, B: C, C: B }); // mirror
+        }
+    }
+    return tris;
+}
+
+function subdivide(tris) {
+    const result = [];
+    for (const tri of tris) {
+        const { type, A, B, C } = tri;
+        if (type === 0) {
+            // Acute (thick) triangle -> 2 acute + 1 obtuse
+            const P = lerp(A, B, 1 / PHI);
+            result.push({ type: 0, A: C, B: P, C: A });
+            result.push({ type: 1, A: C, B: B, C: P });
+        } else {
+            // Obtuse (thin) triangle -> 1 acute + 1 obtuse
+            const Q = lerp(B, A, 1 / PHI);
+            result.push({ type: 1, A: Q, B: C, C: A });
+            result.push({ type: 0, A: B, B: Q, C: C });
+        }
+    }
+    return result;
+}
+
+function generateTiling(lvl) {
+    let tris = makeInitialTriangles();
+    for (let i = 0; i < lvl; i++) {
+        tris = subdivide(tris);
+    }
+    return tris;
+}
+
+function extractVertices(tris) {
+    const seen = new Set();
+    const verts = [];
+    for (const tri of tris) {
+        for (const p of [tri.A, tri.B, tri.C]) {
+            const key = `${Math.round(p[0] * 100)},${Math.round(p[1] * 100)}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                verts.push(p);
+            }
+        }
+    }
+    return verts;
+}
+
+function computeDiffraction() {
+    document.getElementById('status').textContent = 'Computing diffraction pattern...';
+    const size = diffractionSize;
+    const data = new Float64Array(size * size);
+    const kRange = dZoom;
+    let maxVal = 0;
+
+    // Use a subset of vertices for speed if there are too many
+    const verts = vertices.length > 2000 ?
+        vertices.filter((_, i) => i % Math.ceil(vertices.length / 2000) === 0) :
+        vertices;
+
+    for (let ky = 0; ky < size; ky++) {
+        const kyVal = (ky / size - 0.5) * kRange * 2;
+        for (let kx = 0; kx < size; kx++) {
+            const kxVal = (kx / size - 0.5) * kRange * 2;
+            let re = 0, im = 0;
+            for (let n = 0; n < verts.length; n++) {
+                const phase = kxVal * verts[n][0] + kyVal * verts[n][1];
+                re += Math.cos(phase);
+                im += Math.sin(phase);
+            }
+            const intensity = (re * re + im * im) / verts.length;
+            data[ky * size + kx] = intensity;
+            if (intensity > maxVal) maxVal = intensity;
+        }
+    }
+
+    diffractionData = { data, size, maxVal };
+    document.getElementById('status').textContent = '';
+}
+
+const colorMaps = {
+    heat: (t) => {
+        if (t < 0.33) return [Math.floor(t * 3 * 255), 0, 0];
+        if (t < 0.66) return [255, Math.floor((t - 0.33) * 3 * 255), 0];
+        return [255, 255, Math.floor((t - 0.66) * 3 * 255)];
+    },
+    ice: (t) => {
+        if (t < 0.33) return [0, 0, Math.floor(t * 3 * 255)];
+        if (t < 0.66) return [0, Math.floor((t - 0.33) * 3 * 255), 255];
+        return [Math.floor((t - 0.66) * 3 * 255), 255, 255];
+    },
+    viridis: (t) => {
+        const r = Math.floor(68 + t * (253 - 68));
+        const g = Math.floor(1 + t * (231 - 1));
+        const b = Math.floor(84 + (0.5 - Math.abs(t - 0.5)) * 2 * (150 - 84));
+        return [r, g, b];
+    },
+    plasma: (t) => {
+        const r = Math.floor(13 + t * (240 - 13));
+        const g = Math.floor(8 + t * t * 230);
+        const b = Math.floor(135 + (0.5 - t) * 270);
+        return [Math.min(255, r), Math.min(255, g), Math.max(0, b)];
+    }
+};
+
+function drawTiling(ox, oy, w, h) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ox, oy, w, h);
+    ctx.clip();
+
+    ctx.translate(ox + w / 2 + camX, oy + h / 2 + camY);
+    ctx.scale(camZoom, camZoom);
+
+    for (const tri of triangles) {
+        const { type, A, B, C } = tri;
+        ctx.beginPath();
+        ctx.moveTo(A[0], A[1]);
+        ctx.lineTo(B[0], B[1]);
+        ctx.lineTo(C[0], C[1]);
+        ctx.closePath();
+
+        if (type === 0) {
+            ctx.fillStyle = 'rgba(40, 80, 180, 0.7)';
+        } else {
+            ctx.fillStyle = 'rgba(180, 60, 40, 0.7)';
+        }
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(100, 160, 255, 0.25)';
+        ctx.lineWidth = 0.3 / camZoom;
+        ctx.stroke();
+    }
+
+    if (document.getElementById('showVertices').checked) {
+        ctx.fillStyle = '#ffd866';
+        for (const v of vertices) {
+            ctx.beginPath();
+            ctx.arc(v[0], v[1], 1.5 / camZoom, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    ctx.restore();
+}
+
+function drawDiffraction(ox, oy, w, h) {
+    if (!diffractionData) return;
+
+    const { data, size, maxVal } = diffractionData;
+    const mapName = document.getElementById('colorMap').value;
+    const cmap = colorMaps[mapName];
+    const imgData = ctx.createImageData(size, size);
+
+    for (let i = 0; i < size * size; i++) {
+        const t = Math.pow(data[i] / maxVal, 0.3); // gamma correction
+        const [r, g, b] = cmap(Math.min(t, 1));
+        imgData.data[i * 4] = r;
+        imgData.data[i * 4 + 1] = g;
+        imgData.data[i * 4 + 2] = b;
+        imgData.data[i * 4 + 3] = 255;
+    }
+
+    // Draw to offscreen canvas, then scale
+    const offscreen = document.createElement('canvas');
+    offscreen.width = size;
+    offscreen.height = size;
+    offscreen.getContext('2d').putImageData(imgData, 0, 0);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ox, oy, w, h);
+    ctx.clip();
+
+    const scale = Math.min(w, h) / size;
+    const dx = ox + (w - size * scale) / 2;
+    const dy = oy + (h - size * scale) / 2;
+    ctx.drawImage(offscreen, dx, dy, size * scale, size * scale);
+
+    // Label
+    ctx.fillStyle = 'rgba(10, 14, 30, 0.7)';
+    ctx.fillRect(ox, oy, w, 25);
+    ctx.fillStyle = '#8af';
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Diffraction Pattern (10-fold symmetry)', ox + 10, oy + 17);
+
+    ctx.restore();
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    if (displayMode === 'tiling') {
+        drawTiling(0, 0, W, H);
+    } else if (displayMode === 'diffraction') {
+        drawDiffraction(0, 0, W, H);
+    } else {
+        // Both side by side
+        const hw = Math.floor(W / 2);
+        drawTiling(0, 0, hw, H);
+        drawDiffraction(hw, 0, W - hw, H);
+
+        // Divider
+        ctx.strokeStyle = 'rgba(100, 140, 255, 0.3)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(hw, 0);
+        ctx.lineTo(hw, H);
+        ctx.stroke();
+    }
+}
+
+function regenerate() {
+    triangles = generateTiling(level);
+    vertices = extractVertices(triangles);
+    document.getElementById('vertCount').textContent = vertices.length;
+    needsRecompute = true;
+    if (displayMode !== 'tiling') {
+        computeDiffraction();
+    }
+}
+
+function animate() {
+    draw();
+    requestAnimationFrame(animate);
+}
+
+// Mode buttons
+['btnTiling', 'btnDiffract', 'btnBoth'].forEach(id => {
+    document.getElementById(id).addEventListener('click', () => {
+        document.querySelectorAll('.btn-row .btn').forEach(b => b.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+        const modes = { btnTiling: 'tiling', btnDiffract: 'diffraction', btnBoth: 'both' };
+        displayMode = modes[id];
+        if (displayMode !== 'tiling' && needsRecompute) {
+            computeDiffraction();
+            needsRecompute = false;
+        }
+    });
+});
+
+document.getElementById('levelSlider').addEventListener('input', e => {
+    level = parseInt(e.target.value);
+    document.getElementById('levelVal').textContent = level;
+    regenerate();
+});
+
+document.getElementById('dZoomSlider').addEventListener('input', e => {
+    dZoom = parseInt(e.target.value);
+    document.getElementById('dZoomVal').textContent = (dZoom / 10).toFixed(1);
+    if (displayMode !== 'tiling') {
+        computeDiffraction();
+    }
+});
+
+// Pan/zoom
+canvas.addEventListener('mousedown', e => {
+    dragging = true;
+    dragSX = e.clientX; dragSY = e.clientY;
+    camSX = camX; camSY = camY;
+});
+canvas.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    camX = camSX + (e.clientX - dragSX);
+    camY = camSY + (e.clientY - dragSY);
+});
+canvas.addEventListener('mouseup', () => dragging = false);
+canvas.addEventListener('mouseleave', () => dragging = false);
+canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const f = e.deltaY > 0 ? 0.9 : 1.1;
+    camZoom = Math.max(0.1, Math.min(20, camZoom * f));
+}, { passive: false });
+
+// Touch
+let lastTouchDist = 0;
+canvas.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+        dragging = true;
+        dragSX = e.touches[0].clientX; dragSY = e.touches[0].clientY;
+        camSX = camX; camSY = camY;
+    } else if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastTouchDist = Math.sqrt(dx * dx + dy * dy);
+    }
+    e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+    if (e.touches.length === 1 && dragging) {
+        camX = camSX + (e.touches[0].clientX - dragSX);
+        camY = camSY + (e.touches[0].clientY - dragSY);
+    } else if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (lastTouchDist > 0) camZoom = Math.max(0.1, Math.min(20, camZoom * dist / lastTouchDist));
+        lastTouchDist = dist;
+    }
+    e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchend', () => { dragging = false; lastTouchDist = 0; });
+
+window.reset = function() {
+    level = 4;
+    camX = camY = 0;
+    camZoom = 1;
+    displayMode = 'tiling';
+    document.getElementById('levelSlider').value = 4;
+    document.getElementById('levelVal').textContent = 4;
+    document.querySelectorAll('.btn-row .btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('btnTiling').classList.add('active');
+    regenerate();
+};
+
+resize();
+regenerate();
+requestAnimationFrame(animate);
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

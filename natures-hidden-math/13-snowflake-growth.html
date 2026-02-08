@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hexagonal Crystal Growth - Snowflake</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #050a18; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 18px; left: 18px; z-index: 100;
+            color: #8A9A5B; text-decoration: none; font-size: 14px; font-weight: 600;
+            background: rgba(10,14,26,0.8); padding: 10px 20px; border-radius: 25px;
+            border: 2px solid #8A9A5B; transition: all 0.3s ease;
+        }
+        .back-link:hover { background: #8A9A5B; color: #0a0e1a; }
+        .controls {
+            position: fixed; top: 18px; right: 18px; z-index: 100;
+            background: rgba(10,14,26,0.85); backdrop-filter: blur(10px);
+            border-radius: 10px; padding: 20px; color: #c8d0e0;
+            max-width: 300px; border: 1px solid rgba(138,154,91,0.3);
+        }
+        .controls h2 { color: #DDA15E; font-size: 16px; margin-bottom: 4px; }
+        .controls p.desc { font-size: 11px; color: #8899aa; margin-bottom: 12px; line-height: 1.4; }
+        .control-row { margin-bottom: 10px; }
+        .control-row label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; color: #a0b0c0; }
+        .control-row label span { color: #DDA15E; font-family: monospace; }
+        input[type="range"] {
+            width: 100%; height: 4px; -webkit-appearance: none; appearance: none;
+            background: #1a2035; border-radius: 2px; outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+            background: #8A9A5B; cursor: pointer;
+        }
+        .btn {
+            background: rgba(138,154,91,0.2); color: #8A9A5B; border: 1px solid rgba(138,154,91,0.4);
+            padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
+            transition: all 0.2s;
+        }
+        .btn:hover { background: rgba(138,154,91,0.4); }
+        .btn-row { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+        .stat-line { font-size: 11px; color: #6688aa; margin-top: 8px; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Nature's Hidden Math</a>
+    <div class="controls">
+        <h2>Hexagonal Crystal Growth</h2>
+        <p class="desc">Snowflake formation via vapor diffusion on a hexagonal grid. Each crystal has unique 6-fold symmetry determined by growth parameters. Vapor freezes at the crystal boundary, creating dendritic branches.</p>
+        <div class="control-row">
+            <label>Supersaturation <span id="satVal">0.40</span></label>
+            <input type="range" id="saturation" min="0.2" max="0.8" step="0.01" value="0.40">
+        </div>
+        <div class="control-row">
+            <label>Growth threshold <span id="threshVal">1.00</span></label>
+            <input type="range" id="threshold" min="0.3" max="2.5" step="0.05" value="1.00">
+        </div>
+        <div class="control-row">
+            <label>Sim speed <span id="speedVal">5</span></label>
+            <input type="range" id="speed" min="1" max="20" step="1" value="5">
+        </div>
+        <div class="btn-row">
+            <button class="btn" onclick="window.reset()">New Snowflake</button>
+        </div>
+        <div class="stat-line" id="stats">Ice cells: 1</div>
+    </div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Grid size - we simulate 1/6 wedge and mirror
+        const GRID_R = 200; // radius in hex cells
+        // We use axial coordinates (q, r) for hex grid
+        // For 6-fold symmetry, we compute one 60-degree wedge: q >= 0, r >= 0, q+r <= GRID_R
+
+        let ice;        // Uint8Array - 1 if frozen
+        let vapor;      // Float64Array - vapor concentration
+        let vaporNext;  // Float64Array - double buffer
+        let receptive;  // Float64Array - boundary layer
+        let iceCount = 0;
+        let running = true;
+        let generation = 0;
+        let stepsPerFrame = 5;
+        let supersaturation = 0.4;
+        let growthThreshold = 1.0;
+
+        // Wedge dimensions: we store a triangular region
+        // Index: for (q,r) with q in [0..GRID_R], r in [0..GRID_R-q]
+        // Total cells ~ GRID_R^2/2
+        const wedgeSize = (GRID_R + 1) * (GRID_R + 2) / 2;
+
+        function idx(q, r) {
+            // Map (q,r) to linear index in triangular storage
+            // q >= 0, r >= 0, q + r <= GRID_R
+            if (q < 0 || r < 0 || q + r > GRID_R) return -1;
+            return q * (GRID_R + 1) - (q * (q - 1)) / 2 + r;
+        }
+
+        function init() {
+            ice = new Uint8Array(wedgeSize);
+            vapor = new Float64Array(wedgeSize);
+            vaporNext = new Float64Array(wedgeSize);
+            receptive = new Float64Array(wedgeSize);
+
+            // Fill vapor with supersaturation background
+            vapor.fill(supersaturation);
+
+            // Seed: single ice cell at origin (0,0)
+            const i0 = idx(0, 0);
+            ice[i0] = 1;
+            vapor[i0] = 0;
+            iceCount = 1;
+            generation = 0;
+        }
+
+        // Hex neighbors in axial coords: (1,0), (-1,0), (0,1), (0,-1), (1,-1), (-1,1)
+        // For the wedge, we need to handle reflections at boundaries
+        function getNeighborVapor(q, r, nq, nr) {
+            // Map (nq, nr) back into the wedge using symmetry
+            // The 6 symmetry operations of the hex grid:
+            // Identity: (q, r)
+            // Reflect across q-axis: (q+r, -r) -> maps to (q+r, r) by |r|
+            // etc.
+
+            // If already in wedge, return directly
+            if (nq >= 0 && nr >= 0 && nq + nr <= GRID_R) {
+                const i = idx(nq, nr);
+                return { vapor: vapor[i], ice: ice[i] };
+            }
+
+            // Reflect: if nr < 0, reflect across q-axis: (q,r) -> (q+r, -r)
+            if (nr < 0) {
+                nq = nq + nr; // nq - |nr|
+                nr = -nr;
+            }
+            // If nq < 0, reflect across r-axis: (q,r) -> (-q, q+r)
+            if (nq < 0) {
+                nr = nq + nr;
+                nq = -nq;
+                // May need another reflection
+                if (nr < 0) {
+                    nq = nq + nr;
+                    nr = -nr;
+                }
+            }
+
+            if (nq >= 0 && nr >= 0 && nq + nr <= GRID_R) {
+                const i = idx(nq, nr);
+                return { vapor: vapor[i], ice: ice[i] };
+            }
+
+            // Beyond grid boundary - return background vapor
+            return { vapor: supersaturation, ice: 0 };
+        }
+
+        function step() {
+            // 1. Mark receptive cells (non-ice cells adjacent to ice)
+            receptive.fill(0);
+            for (let q = 0; q <= GRID_R; q++) {
+                for (let r = 0; r <= GRID_R - q; r++) {
+                    const i = idx(q, r);
+                    if (ice[i]) continue;
+
+                    // Check all 6 neighbors
+                    const neighbors = [
+                        [q+1, r], [q-1, r], [q, r+1], [q, r-1], [q+1, r-1], [q-1, r+1]
+                    ];
+                    for (const [nq, nr] of neighbors) {
+                        const n = getNeighborVapor(q, r, nq, nr);
+                        if (n.ice) {
+                            receptive[i] = 1;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 2. Diffusion of vapor (only on non-ice, non-receptive cells)
+            vaporNext.fill(0);
+            for (let q = 0; q <= GRID_R; q++) {
+                for (let r = 0; r <= GRID_R - q; r++) {
+                    const i = idx(q, r);
+                    if (ice[i]) {
+                        vaporNext[i] = 0;
+                        continue;
+                    }
+
+                    if (receptive[i]) {
+                        // Receptive cells don't diffuse - they accumulate
+                        vaporNext[i] = vapor[i];
+                        continue;
+                    }
+
+                    // Average with 6 neighbors (diffusion)
+                    const neighbors = [
+                        [q+1, r], [q-1, r], [q, r+1], [q, r-1], [q+1, r-1], [q-1, r+1]
+                    ];
+                    let sum = 0;
+                    let count = 0;
+                    for (const [nq, nr] of neighbors) {
+                        const n = getNeighborVapor(q, r, nq, nr);
+                        if (!n.ice) {
+                            sum += n.vapor;
+                            count++;
+                        }
+                    }
+                    if (count > 0) {
+                        // Diffusion: blend toward neighbor average
+                        vaporNext[i] = vapor[i] * (1 - 0.5) + (sum / count) * 0.5;
+                    } else {
+                        vaporNext[i] = vapor[i];
+                    }
+                }
+            }
+
+            // 3. Add vapor from boundary receptive cells and check freezing
+            for (let q = 0; q <= GRID_R; q++) {
+                for (let r = 0; r <= GRID_R - q; r++) {
+                    const i = idx(q, r);
+                    if (ice[i]) continue;
+
+                    if (receptive[i]) {
+                        // Add supersaturation input to receptive cells
+                        vaporNext[i] += supersaturation * 0.003;
+
+                        // Check freezing condition
+                        if (vaporNext[i] >= growthThreshold) {
+                            ice[i] = 1;
+                            vaporNext[i] = 0;
+                            // Count: this cell appears 6 times (or fewer at origin/axes)
+                            if (q === 0 && r === 0) iceCount += 1;
+                            else if (q === 0 || r === 0 || q === r) iceCount += 6; // on symmetry axis
+                            else iceCount += 6;
+                        }
+                    }
+                }
+            }
+
+            // Swap buffers
+            const tmp = vapor;
+            vapor = vaporNext;
+            vaporNext = tmp;
+            generation++;
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        function draw() {
+            const W = canvas.width;
+            const H = canvas.height;
+            ctx.fillStyle = '#050a18';
+            ctx.fillRect(0, 0, W, H);
+
+            const cx = W / 2;
+            const cy = H / 2;
+
+            // Cell size based on fitting the grid
+            const maxDim = Math.min(W, H) * 0.9;
+            const cellSize = maxDim / (GRID_R * 2);
+            const sqrt3 = Math.sqrt(3);
+
+            // Convert axial (q,r) to pixel position
+            function hexToPixel(q, r) {
+                const x = cellSize * (sqrt3 * q + sqrt3 / 2 * r);
+                const y = cellSize * (1.5 * r);
+                return [cx + x, cy + y];
+            }
+
+            // Draw subtle vapor field glow
+            const vaporGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxDim * 0.5);
+            vaporGrad.addColorStop(0, 'rgba(100,140,200,0.03)');
+            vaporGrad.addColorStop(1, 'rgba(100,140,200,0)');
+            ctx.fillStyle = vaporGrad;
+            ctx.fillRect(0, 0, W, H);
+
+            // We need to draw all 6 reflections of the wedge
+            // The 6 symmetry transforms for hex axial coords:
+            // (q,r), (r,q), (-r, q+r), (-q-r, q), (-q, -r), (r+q, -q) ...
+            // Actually for 6-fold: rotate by 60 degrees
+            // In axial coords, 60-degree rotation: (q,r) -> (-r, q+r)
+            // Reflection across q-axis: (q,r) -> (q+r, -r)  which in pixel is (x, -y)
+
+            // Simpler: we compute pixel coords and apply 6 rotations
+            const angle60 = Math.PI / 3;
+
+            // Pre-compute ice cells in the wedge, then draw all rotations
+            // Use imageData for speed
+            const imgData = ctx.createImageData(W, H);
+            const pixels = imgData.data;
+
+            // For each cell in the wedge, draw it in all 6 rotated positions
+            for (let q = 0; q <= GRID_R; q++) {
+                for (let r = 0; r <= GRID_R - q; r++) {
+                    const i = idx(q, r);
+                    if (!ice[i] && vapor[i] < 0.01) continue;
+
+                    // Get base pixel offset from center
+                    const bx = cellSize * (sqrt3 * q + sqrt3 / 2 * r);
+                    const by = cellSize * (1.5 * r);
+
+                    let R, G, B, A;
+                    if (ice[i]) {
+                        // Ice: white-blue, brighter near tips
+                        const dist = Math.sqrt(q * q + r * r + q * r) / GRID_R;
+                        R = Math.floor(180 + 75 * dist);
+                        G = Math.floor(200 + 55 * dist);
+                        B = 255;
+                        A = 255;
+                    } else {
+                        // Vapor: faint blue
+                        const v = Math.min(vapor[i] / supersaturation, 1);
+                        R = Math.floor(40 * v);
+                        G = Math.floor(60 * v);
+                        B = Math.floor(120 * v);
+                        A = Math.floor(80 * v);
+                    }
+
+                    // Draw in all 6 rotated positions
+                    for (let rot = 0; rot < 6; rot++) {
+                        const angle = rot * angle60;
+                        const cosA = Math.cos(angle);
+                        const sinA = Math.sin(angle);
+                        const px = Math.round(cx + bx * cosA - by * sinA);
+                        const py = Math.round(cy + bx * sinA + by * cosA);
+
+                        if (px >= 0 && px < W && py >= 0 && py < H) {
+                            const pi = (py * W + px) * 4;
+                            // Additive blend for glow
+                            if (ice[i]) {
+                                pixels[pi] = Math.min(255, pixels[pi] + R);
+                                pixels[pi + 1] = Math.min(255, pixels[pi + 1] + G);
+                                pixels[pi + 2] = Math.min(255, pixels[pi + 2] + B);
+                                pixels[pi + 3] = 255;
+
+                                // Subtle glow: draw neighboring pixels too
+                                const glowR = Math.floor(R * 0.3);
+                                const glowG = Math.floor(G * 0.3);
+                                const glowB = Math.floor(B * 0.4);
+                                for (let dx = -1; dx <= 1; dx++) {
+                                    for (let dy = -1; dy <= 1; dy++) {
+                                        if (dx === 0 && dy === 0) continue;
+                                        const gx = px + dx, gy = py + dy;
+                                        if (gx >= 0 && gx < W && gy >= 0 && gy < H) {
+                                            const gi = (gy * W + gx) * 4;
+                                            pixels[gi] = Math.min(255, pixels[gi] + glowR);
+                                            pixels[gi + 1] = Math.min(255, pixels[gi + 1] + glowG);
+                                            pixels[gi + 2] = Math.min(255, pixels[gi + 2] + glowB);
+                                            pixels[gi + 3] = Math.max(pixels[gi + 3], 200);
+                                        }
+                                    }
+                                }
+                            } else {
+                                pixels[pi] = Math.max(pixels[pi], R);
+                                pixels[pi + 1] = Math.max(pixels[pi + 1], G);
+                                pixels[pi + 2] = Math.max(pixels[pi + 2], B);
+                                pixels[pi + 3] = Math.max(pixels[pi + 3], A);
+                            }
+                        }
+
+                        // For cells not on an axis, also draw the reflection
+                        if (q !== r && q !== 0 && r !== 0) {
+                            // Reflect: swap q and r in the hex coords
+                            const rbx = cellSize * (sqrt3 * r + sqrt3 / 2 * q);
+                            const rby = cellSize * (1.5 * q);
+                            const rpx = Math.round(cx + rbx * cosA - rby * sinA);
+                            const rpy = Math.round(cy + rbx * sinA + rby * cosA);
+
+                            if (rpx >= 0 && rpx < W && rpy >= 0 && rpy < H) {
+                                const rpi = (rpy * W + rpx) * 4;
+                                if (ice[i]) {
+                                    pixels[rpi] = Math.min(255, pixels[rpi] + R);
+                                    pixels[rpi + 1] = Math.min(255, pixels[rpi + 1] + G);
+                                    pixels[rpi + 2] = Math.min(255, pixels[rpi + 2] + B);
+                                    pixels[rpi + 3] = 255;
+                                    for (let dx = -1; dx <= 1; dx++) {
+                                        for (let dy = -1; dy <= 1; dy++) {
+                                            if (dx === 0 && dy === 0) continue;
+                                            const gx = rpx + dx, gy = rpy + dy;
+                                            if (gx >= 0 && gx < W && gy >= 0 && gy < H) {
+                                                const gi = (gy * W + gx) * 4;
+                                                pixels[gi] = Math.min(255, pixels[gi] + Math.floor(R * 0.3));
+                                                pixels[gi + 1] = Math.min(255, pixels[gi + 1] + Math.floor(G * 0.3));
+                                                pixels[gi + 2] = Math.min(255, pixels[gi + 2] + Math.floor(B * 0.4));
+                                                pixels[gi + 3] = Math.max(pixels[gi + 3], 200);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    pixels[rpi] = Math.max(pixels[rpi], R);
+                                    pixels[rpi + 1] = Math.max(pixels[rpi + 1], G);
+                                    pixels[rpi + 2] = Math.max(pixels[rpi + 2], B);
+                                    pixels[rpi + 3] = Math.max(pixels[rpi + 3], A);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            ctx.putImageData(imgData, 0, 0);
+
+            document.getElementById('stats').textContent = 'Ice cells: ' + iceCount + ' | Gen: ' + generation;
+        }
+
+        // Controls
+        const satSlider = document.getElementById('saturation');
+        const threshSlider = document.getElementById('threshold');
+        const speedSlider = document.getElementById('speed');
+
+        satSlider.addEventListener('input', function() {
+            supersaturation = parseFloat(this.value);
+            document.getElementById('satVal').textContent = supersaturation.toFixed(2);
+        });
+        threshSlider.addEventListener('input', function() {
+            growthThreshold = parseFloat(this.value);
+            document.getElementById('threshVal').textContent = growthThreshold.toFixed(2);
+        });
+        speedSlider.addEventListener('input', function() {
+            stepsPerFrame = parseInt(this.value);
+            document.getElementById('speedVal').textContent = stepsPerFrame;
+        });
+
+        window.reset = function() {
+            // Randomize parameters slightly for variety
+            supersaturation = 0.3 + Math.random() * 0.3;
+            growthThreshold = 0.6 + Math.random() * 1.2;
+            satSlider.value = supersaturation;
+            threshSlider.value = growthThreshold;
+            document.getElementById('satVal').textContent = supersaturation.toFixed(2);
+            document.getElementById('threshVal').textContent = growthThreshold.toFixed(2);
+            init();
+        };
+
+        function animate() {
+            if (running) {
+                for (let i = 0; i < stepsPerFrame; i++) {
+                    step();
+                }
+                draw();
+            }
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', function() {
+            resize();
+            draw();
+        });
+
+        resize();
+        init();
+        animate();
+    })();
+    </script>
+    <script src="../assets/js/enhance.js"></script>
+</body>
+</html>

@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Penrose Inflation & Deflation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; top: 20px; right: 20px; z-index: 100;
+    background: rgba(10, 14, 30, 0.85); backdrop-filter: blur(10px);
+    border: 1px solid rgba(100, 140, 255, 0.3); border-radius: 12px;
+    padding: 18px; min-width: 230px; color: #c8d8ff;
+}
+#controls h3 { margin-bottom: 12px; color: #8af; font-size: 1em; letter-spacing: 1px; }
+.ctrl-row { margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85em; }
+.ctrl-row span { color: #8aa; }
+.ctrl-row .val { color: #ffd866; font-weight: bold; }
+button.btn {
+    background: rgba(80, 120, 255, 0.2); border: 1px solid rgba(100, 140, 255, 0.4);
+    color: #8af; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    font-size: 0.85em; transition: all 0.2s; flex: 1;
+}
+button.btn:hover { background: rgba(80, 120, 255, 0.4); }
+button.btn:disabled { opacity: 0.3; cursor: default; }
+.btn-row { display: flex; gap: 8px; margin-bottom: 10px; }
+label { font-size: 0.8em; color: #8aa; display: flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 6px; }
+label input { accent-color: #8af; }
+input[type="range"] { width: 100%; accent-color: #8af; }
+.section { border-top: 1px solid rgba(100, 140, 255, 0.15); padding-top: 10px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:20px;left:20px;color:#8af;text-decoration:none;z-index:100;font-size:1.2em">&#8592; Back</a>
+<canvas id="canvas"></canvas>
+<div id="controls">
+    <h3>INFLATION &amp; DEFLATION</h3>
+    <div class="ctrl-row"><span>Generation:</span><span class="val" id="genVal">0</span></div>
+    <div class="ctrl-row"><span>Tiles:</span><span class="val" id="tileCount">10</span></div>
+    <div class="ctrl-row"><span>Animating:</span><span class="val" id="animState">idle</span></div>
+    <div class="btn-row">
+        <button class="btn" id="inflateBtn">Inflate</button>
+        <button class="btn" id="deflateBtn">Deflate</button>
+    </div>
+    <div class="btn-row">
+        <button class="btn" id="autoBtn">Auto-Play</button>
+        <button class="btn" id="resetBtn">Reset</button>
+    </div>
+    <div class="section">
+        <div class="ctrl-row"><span>Animation speed:</span></div>
+        <input type="range" id="speedSlider" min="0.5" max="3" step="0.1" value="1">
+    </div>
+    <label><input type="checkbox" id="colorByGen" checked> Color by generation</label>
+    <label><input type="checkbox" id="showGlow" checked> Glow effects</label>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const PHI = (1 + Math.sqrt(5)) / 2;
+const INV_PHI = 1 / PHI;
+
+let generation = 0;
+let currentTriangles = [];
+let targetTriangles = [];
+let displayTriangles = [];
+let animProgress = 1;
+let animating = false;
+let autoPlay = false;
+let autoTimer = null;
+let camX = 0, camY = 0, camZoom = 1;
+let targetZoom = 1;
+let dragging = false, dragStartX, dragStartY, camStartX, camStartY;
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function lerp(p1, p2, t) {
+    return [p1[0] + (p2[0] - p1[0]) * t, p1[1] + (p2[1] - p1[1]) * t];
+}
+
+function lerpVal(a, b, t) { return a + (b - a) * t; }
+
+function makeInitialTriangles() {
+    let tris = [];
+    for (let i = 0; i < 10; i++) {
+        let angle1 = (2 * Math.PI * i) / 10 - Math.PI / 2;
+        let angle2 = (2 * Math.PI * (i + 1)) / 10 - Math.PI / 2;
+        let r = 200;
+        let a = [0, 0];
+        let b = [r * Math.cos(angle1), r * Math.sin(angle1)];
+        let c = [r * Math.cos(angle2), r * Math.sin(angle2)];
+        if (i % 2 === 0) {
+            tris.push({ type: 'B', vertices: [a, b, c], gen: 0 });
+        } else {
+            tris.push({ type: 'B', vertices: [a, c, b], gen: 0 });
+        }
+    }
+    return tris;
+}
+
+function subdivide(tris, newGen) {
+    let result = [];
+    for (let t of tris) {
+        let [a, b, c] = t.vertices;
+        if (t.type === 'B') {
+            let p = lerp(a, c, INV_PHI);
+            let q = lerp(b, a, INV_PHI);
+            result.push({ type: 'B', vertices: [q, p, b], gen: newGen, parentVerts: [a, b, c], parentType: 'B', childIdx: 0 });
+            result.push({ type: 'B', vertices: [p, q, a], gen: newGen, parentVerts: [a, b, c], parentType: 'B', childIdx: 1 });
+            result.push({ type: 'A', vertices: [c, p, b], gen: newGen, parentVerts: [a, b, c], parentType: 'B', childIdx: 2 });
+        } else {
+            let p = lerp(b, a, INV_PHI);
+            result.push({ type: 'A', vertices: [p, c, a], gen: newGen, parentVerts: [a, b, c], parentType: 'A', childIdx: 0 });
+            result.push({ type: 'B', vertices: [c, p, b], gen: newGen, parentVerts: [a, b, c], parentType: 'A', childIdx: 1 });
+        }
+    }
+    return result;
+}
+
+function getParentPosition(tri) {
+    if (!tri.parentVerts) return tri.vertices;
+    let [pa, pb, pc] = tri.parentVerts;
+    let cx = (pa[0] + pb[0] + pc[0]) / 3;
+    let cy = (pa[1] + pb[1] + pc[1]) / 3;
+    let scale = 0.3;
+    return tri.vertices.map(v => {
+        return [cx + (v[0] - cx) * scale, cy + (v[1] - cy) * scale];
+    });
+}
+
+function startInflation() {
+    if (animating || generation >= 8) return;
+    animating = true;
+    animProgress = 0;
+    let newGen = generation + 1;
+    targetTriangles = subdivide(currentTriangles, newGen);
+    generation = newGen;
+    targetZoom = camZoom * INV_PHI;
+    document.getElementById('animState').textContent = 'inflating';
+    disableButtons(true);
+}
+
+function startDeflation() {
+    if (animating || generation <= 0) return;
+    generation--;
+    camX = 0; camY = 0;
+    camZoom = 1;
+    targetZoom = 1;
+    let tris = makeInitialTriangles();
+    for (let i = 0; i < generation; i++) {
+        tris = subdivide(tris, i + 1);
+    }
+    currentTriangles = tris;
+    displayTriangles = tris;
+    targetTriangles = [];
+    animProgress = 1;
+    updateStats();
+}
+
+function disableButtons(disabled) {
+    document.getElementById('inflateBtn').disabled = disabled;
+    document.getElementById('deflateBtn').disabled = disabled;
+}
+
+function updateStats() {
+    document.getElementById('genVal').textContent = generation;
+    let count = animProgress >= 1 ? currentTriangles.length : targetTriangles.length;
+    document.getElementById('tileCount').textContent = count;
+}
+
+const genColors = [
+    [40, 180, 220], [60, 200, 120], [200, 180, 50],
+    [220, 120, 60], [180, 60, 160], [60, 100, 220],
+    [100, 220, 180], [220, 80, 80], [80, 220, 220]
+];
+
+function getGenColor(gen, alpha) {
+    let c = genColors[gen % genColors.length];
+    return `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${alpha})`;
+}
+
+function getTypeColor(type, alpha) {
+    if (type === 'B') return `rgba(30, 100, 180, ${alpha})`;
+    return `rgba(180, 100, 30, ${alpha})`;
+}
+
+function worldToScreen(x, y) {
+    return [(x - camX) * camZoom + canvas.width / 2, (y - camY) * camZoom + canvas.height / 2];
+}
+
+function drawTriangle(tri, alpha) {
+    let [a, b, c] = tri.vertices;
+    let [sx0, sy0] = worldToScreen(a[0], a[1]);
+    let [sx1, sy1] = worldToScreen(b[0], b[1]);
+    let [sx2, sy2] = worldToScreen(c[0], c[1]);
+
+    ctx.beginPath();
+    ctx.moveTo(sx0, sy0);
+    ctx.lineTo(sx1, sy1);
+    ctx.lineTo(sx2, sy2);
+    ctx.closePath();
+
+    let colorByGen = document.getElementById('colorByGen').checked;
+    if (colorByGen) {
+        ctx.fillStyle = getGenColor(tri.gen, alpha * 0.8);
+    } else {
+        ctx.fillStyle = getTypeColor(tri.type, alpha * 0.8);
+    }
+    ctx.fill();
+    ctx.strokeStyle = `rgba(150, 200, 255, ${alpha * 0.4})`;
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+
+    if (document.getElementById('showGlow').checked) {
+        ctx.beginPath();
+        ctx.moveTo(sx0, sy0);
+        ctx.lineTo(sx1, sy1);
+        ctx.lineTo(sx2, sy2);
+        ctx.closePath();
+        if (colorByGen) {
+            let gc = genColors[tri.gen % genColors.length];
+            ctx.strokeStyle = `rgba(${gc[0]}, ${gc[1]}, ${gc[2]}, ${alpha * 0.15})`;
+        } else {
+            ctx.strokeStyle = `rgba(150, 200, 255, ${alpha * 0.1})`;
+        }
+        ctx.lineWidth = 3;
+        ctx.stroke();
+    }
+}
+
+function drawAnimatingTriangle(tri, progress) {
+    let startVerts = getParentPosition(tri);
+    let endVerts = tri.vertices;
+
+    let t = easeInOutCubic(progress);
+    let verts = endVerts.map((v, i) => lerp(startVerts[i], v, t));
+
+    let [sx0, sy0] = worldToScreen(verts[0][0], verts[0][1]);
+    let [sx1, sy1] = worldToScreen(verts[1][0], verts[1][1]);
+    let [sx2, sy2] = worldToScreen(verts[2][0], verts[2][1]);
+
+    ctx.beginPath();
+    ctx.moveTo(sx0, sy0);
+    ctx.lineTo(sx1, sy1);
+    ctx.lineTo(sx2, sy2);
+    ctx.closePath();
+
+    let alpha = 0.3 + 0.7 * t;
+    let colorByGen = document.getElementById('colorByGen').checked;
+    if (colorByGen) {
+        ctx.fillStyle = getGenColor(tri.gen, alpha * 0.8);
+    } else {
+        ctx.fillStyle = getTypeColor(tri.type, alpha * 0.8);
+    }
+    ctx.fill();
+    ctx.strokeStyle = `rgba(150, 200, 255, ${alpha * 0.4})`;
+    ctx.lineWidth = 0.8;
+    ctx.stroke();
+}
+
+function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+let lastTime = 0;
+function draw(time) {
+    let dt = (time - lastTime) / 1000;
+    lastTime = time;
+    let speed = parseFloat(document.getElementById('speedSlider').value);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    if (animating && animProgress < 1) {
+        animProgress += dt * speed * 0.8;
+        if (animProgress >= 1) {
+            animProgress = 1;
+            currentTriangles = targetTriangles;
+            targetTriangles = [];
+            animating = false;
+            camZoom = targetZoom;
+            document.getElementById('animState').textContent = 'idle';
+            disableButtons(false);
+            updateStats();
+
+            if (autoPlay && generation < 8) {
+                autoTimer = setTimeout(() => startInflation(), 800);
+            } else if (autoPlay && generation >= 8) {
+                autoPlay = false;
+                document.getElementById('autoBtn').textContent = 'Auto-Play';
+            }
+        } else {
+            camZoom = lerpVal(camZoom, targetZoom, dt * speed * 0.5);
+        }
+
+        for (let tri of targetTriangles) {
+            drawAnimatingTriangle(tri, animProgress);
+        }
+    } else {
+        for (let tri of currentTriangles) {
+            drawTriangle(tri, 1);
+        }
+    }
+
+    updateStats();
+    requestAnimationFrame(draw);
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 0) {
+        dragging = true;
+        dragStartX = e.clientX; dragStartY = e.clientY;
+        camStartX = camX; camStartY = camY;
+    }
+});
+canvas.addEventListener('mousemove', (e) => {
+    if (dragging) {
+        camX = camStartX - (e.clientX - dragStartX) / camZoom;
+        camY = camStartY - (e.clientY - dragStartY) / camZoom;
+    }
+});
+canvas.addEventListener('mouseup', () => { dragging = false; });
+canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    let factor = e.deltaY > 0 ? 0.9 : 1.1;
+    let mx = (e.clientX - canvas.width / 2) / camZoom + camX;
+    let my = (e.clientY - canvas.height / 2) / camZoom + camY;
+    camZoom *= factor;
+    targetZoom = camZoom;
+    camZoom = Math.max(0.01, Math.min(50, camZoom));
+    camX = mx - (e.clientX - canvas.width / 2) / camZoom;
+    camY = my - (e.clientY - canvas.height / 2) / camZoom;
+}, { passive: false });
+
+document.getElementById('inflateBtn').addEventListener('click', startInflation);
+document.getElementById('deflateBtn').addEventListener('click', startDeflation);
+document.getElementById('resetBtn').addEventListener('click', () => {
+    autoPlay = false;
+    document.getElementById('autoBtn').textContent = 'Auto-Play';
+    if (autoTimer) clearTimeout(autoTimer);
+    window.reset();
+});
+document.getElementById('autoBtn').addEventListener('click', () => {
+    autoPlay = !autoPlay;
+    document.getElementById('autoBtn').textContent = autoPlay ? 'Stop' : 'Auto-Play';
+    if (autoPlay && !animating) {
+        startInflation();
+    }
+    if (!autoPlay && autoTimer) {
+        clearTimeout(autoTimer);
+    }
+});
+
+window.reset = function() {
+    generation = 0;
+    animating = false;
+    animProgress = 1;
+    autoPlay = false;
+    if (autoTimer) clearTimeout(autoTimer);
+    camX = 0; camY = 0; camZoom = 1; targetZoom = 1;
+    currentTriangles = makeInitialTriangles();
+    targetTriangles = [];
+    document.getElementById('animState').textContent = 'idle';
+    document.getElementById('autoBtn').textContent = 'Auto-Play';
+    disableButtons(false);
+    updateStats();
+};
+
+currentTriangles = makeInitialTriangles();
+updateStats();
+requestAnimationFrame(draw);
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>

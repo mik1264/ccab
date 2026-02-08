@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Double Auction Market - Collective Intelligence - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0e1a;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+            color: #ccc;
+        }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 15px; left: 15px; z-index: 100;
+            color: #8A9A5B; background: rgba(10,14,26,0.8);
+            border-radius: 25px; border: 2px solid #8A9A5B;
+            padding: 10px 20px; text-decoration: none; font-size: 14px;
+            transition: all 0.3s ease;
+        }
+        .back-link:hover { background: rgba(138,154,91,0.2); transform: translateX(-4px); }
+        #controls {
+            position: fixed; top: 15px; right: 15px; z-index: 100;
+            background: rgba(10,14,26,0.85); backdrop-filter: blur(10px);
+            border-radius: 10px; padding: 20px; max-width: 300px;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #fff; margin-bottom: 12px; font-size: 15px; }
+        .control-row { margin: 8px 0; }
+        .control-row label { display: block; font-size: 11px; color: #8A9A5B; margin-bottom: 3px; }
+        .control-row input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+        .control-row .val { float: right; color: #aaa; font-size: 11px; }
+        .stat { margin: 4px 0; font-size: 12px; }
+        .stat-label { color: #888; font-size: 11px; }
+        .stat-value { color: #8A9A5B; font-weight: bold; }
+        .checkbox-row { margin: 6px 0; font-size: 12px; color: #aaa; }
+        .checkbox-row input { accent-color: #8A9A5B; margin-right: 5px; }
+        button {
+            background: rgba(138,154,91,0.15); border: 1px solid rgba(138,154,91,0.4);
+            color: #8A9A5B; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+            font-size: 12px; margin-top: 6px; transition: all 0.3s;
+        }
+        button:hover { background: rgba(138,154,91,0.3); }
+        hr { border: none; border-top: 1px solid rgba(138,154,91,0.2); margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Collective Intelligence</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Double Auction Market</h3>
+        <div class="control-row">
+            <label>Traders per Side <span class="val" id="traderVal">50</span></label>
+            <input type="range" id="traderCount" min="10" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Price Range <span class="val" id="priceVal">100</span></label>
+            <input type="range" id="priceRange" min="20" max="200" value="100">
+        </div>
+        <div class="control-row">
+            <label>Speed <span class="val" id="speedVal">5</span></label>
+            <input type="range" id="speed" min="1" max="20" value="5">
+        </div>
+        <div class="checkbox-row">
+            <label><input type="checkbox" id="showCurves" checked> Show Supply/Demand</label>
+        </div>
+        <hr>
+        <div class="stat"><span class="stat-label">Avg Trade Price:</span> <span class="stat-value" id="avgPrice">-</span></div>
+        <div class="stat"><span class="stat-label">Equilibrium:</span> <span class="stat-value" id="eqPrice">-</span></div>
+        <div class="stat"><span class="stat-label">Price Variance:</span> <span class="stat-value" id="variance">-</span></div>
+        <div class="stat"><span class="stat-label">Trades:</span> <span class="stat-value" id="tradeCount">0</span></div>
+        <button id="resetBtn">Reset Market</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Sliders
+        const sliders = {
+            traderCount: document.getElementById('traderCount'),
+            priceRange: document.getElementById('priceRange'),
+            speed: document.getElementById('speed'),
+            showCurves: document.getElementById('showCurves')
+        };
+        const vals = {
+            traderVal: document.getElementById('traderVal'),
+            priceVal: document.getElementById('priceVal'),
+            speedVal: document.getElementById('speedVal')
+        };
+        sliders.traderCount.oninput = () => { vals.traderVal.textContent = sliders.traderCount.value; };
+        sliders.priceRange.oninput = () => { vals.priceVal.textContent = sliders.priceRange.value; };
+        sliders.speed.oninput = () => { vals.speedVal.textContent = sliders.speed.value; };
+
+        // State
+        let buyers = [], sellers = [], trades = [], tradeHistory = [];
+        let equilibrium = 0;
+        let animTrades = []; // recent trade animations
+
+        function init() {
+            const n = parseInt(sliders.traderCount.value);
+            const maxP = parseInt(sliders.priceRange.value);
+            buyers = [];
+            sellers = [];
+            trades = [];
+            tradeHistory = [];
+            animTrades = [];
+
+            // Buyers: valuations from high to low (willingness to pay)
+            for (let i = 0; i < n; i++) {
+                buyers.push({
+                    id: i,
+                    maxPrice: Math.random() * maxP,
+                    traded: false,
+                    x: 0, y: 0
+                });
+            }
+            // Sellers: costs from low to high (minimum acceptable)
+            for (let i = 0; i < n; i++) {
+                sellers.push({
+                    id: i,
+                    minPrice: Math.random() * maxP,
+                    traded: false,
+                    x: 0, y: 0
+                });
+            }
+
+            // Calculate theoretical equilibrium
+            const sortedBuyers = [...buyers].sort((a, b) => b.maxPrice - a.maxPrice);
+            const sortedSellers = [...sellers].sort((a, b) => a.minPrice - b.minPrice);
+            let eqIdx = 0;
+            for (let i = 0; i < Math.min(sortedBuyers.length, sortedSellers.length); i++) {
+                if (sortedBuyers[i].maxPrice >= sortedSellers[i].minPrice) {
+                    eqIdx = i;
+                } else break;
+            }
+            if (eqIdx > 0) {
+                equilibrium = (sortedBuyers[eqIdx].maxPrice + sortedSellers[eqIdx].minPrice) / 2;
+            } else {
+                equilibrium = maxP / 2;
+            }
+
+            document.getElementById('eqPrice').textContent = equilibrium.toFixed(1);
+            document.getElementById('tradeCount').textContent = '0';
+            document.getElementById('avgPrice').textContent = '-';
+            document.getElementById('variance').textContent = '-';
+        }
+
+        function doTrades() {
+            const n = parseInt(sliders.speed.value);
+            for (let t = 0; t < n; t++) {
+                // Pick random untraded buyer and seller
+                const availBuyers = buyers.filter(b => !b.traded);
+                const availSellers = sellers.filter(s => !s.traded);
+                if (availBuyers.length === 0 || availSellers.length === 0) return;
+
+                const buyer = availBuyers[Math.floor(Math.random() * availBuyers.length)];
+                const seller = availSellers[Math.floor(Math.random() * availSellers.length)];
+
+                if (buyer.maxPrice >= seller.minPrice) {
+                    const price = (buyer.maxPrice + seller.minPrice) / 2;
+                    trades.push(price);
+                    tradeHistory.push({ buyerId: buyer.id, sellerId: seller.id, price, time: Date.now() });
+                    buyer.traded = true;
+                    seller.traded = true;
+                    animTrades.push({ bx: buyer.x, by: buyer.y, sx: seller.x, sy: seller.y, price, alpha: 1.0 });
+                }
+            }
+
+            // Update stats
+            if (trades.length > 0) {
+                const avg = trades.reduce((a, b) => a + b, 0) / trades.length;
+                const variance = trades.reduce((a, b) => a + (b - avg) ** 2, 0) / trades.length;
+                document.getElementById('avgPrice').textContent = avg.toFixed(1);
+                document.getElementById('variance').textContent = variance.toFixed(2);
+                document.getElementById('tradeCount').textContent = trades.length;
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = '#0a0e1a';
+            ctx.fillRect(0, 0, W, H);
+
+            const maxP = parseInt(sliders.priceRange.value);
+            const n = parseInt(sliders.traderCount.value);
+
+            // Layout: left side = buyers, right side = sellers, center = trade graph
+            const agentAreaW = W * 0.2;
+            const graphX = agentAreaW + 30;
+            const graphW = W * 0.38;
+            const graphH = H * 0.55;
+            const graphY = H * 0.08;
+            const curveX = graphX + graphW + 40;
+            const curveW = W - curveX - 20;
+
+            // Draw buyers (left)
+            ctx.fillStyle = 'rgba(70,130,220,0.08)';
+            ctx.fillRect(0, 0, agentAreaW, H);
+            ctx.fillStyle = '#4682dc';
+            ctx.font = '13px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('BUYERS', agentAreaW / 2, 30);
+
+            const cols = Math.ceil(Math.sqrt(n));
+            const cellW = agentAreaW / (cols + 1);
+            const cellH = (H - 50) / (Math.ceil(n / cols) + 1);
+
+            buyers.forEach((b, i) => {
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                b.x = cellW * (col + 0.5) + 5;
+                b.y = 50 + cellH * (row + 0.5);
+                const r = 3 + (b.maxPrice / maxP) * 8;
+                ctx.beginPath();
+                ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+                ctx.fillStyle = b.traded ? 'rgba(70,130,220,0.2)' : `rgba(70,130,220,${0.4 + 0.6 * b.maxPrice / maxP})`;
+                ctx.fill();
+                if (!b.traded) {
+                    ctx.strokeStyle = '#4682dc';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            });
+
+            // Draw sellers (right of graph, before curves)
+            const sellerX0 = graphX + graphW + 5;
+            const sellerAreaW = 30;
+            // Actually put sellers in a narrow band or reuse right area
+            // Let me put sellers between the graph and curves panel
+
+            // Sellers area
+            const sellStartX = W - agentAreaW;
+            ctx.fillStyle = 'rgba(220,80,80,0.08)';
+            ctx.fillRect(sellStartX, 0, agentAreaW, H);
+            ctx.fillStyle = '#dc5050';
+            ctx.font = '13px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('SELLERS', sellStartX + agentAreaW / 2, 30);
+
+            sellers.forEach((s, i) => {
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                s.x = sellStartX + cellW * (col + 0.5) + 5;
+                s.y = 50 + cellH * (row + 0.5);
+                const r = 3 + (s.minPrice / maxP) * 8;
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+                ctx.fillStyle = s.traded ? 'rgba(220,80,80,0.2)' : `rgba(220,80,80,${0.4 + 0.6 * (1 - s.minPrice / maxP)})`;
+                ctx.fill();
+                if (!s.traded) {
+                    ctx.strokeStyle = '#dc5050';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            });
+
+            // Draw trade animations
+            animTrades.forEach(t => {
+                ctx.beginPath();
+                ctx.moveTo(t.bx, t.by);
+                ctx.lineTo(t.sx, t.sy);
+                ctx.strokeStyle = `rgba(138,154,91,${t.alpha * 0.5})`;
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                t.alpha -= 0.015;
+            });
+            animTrades = animTrades.filter(t => t.alpha > 0);
+
+            // Draw time-series price graph (center)
+            const gx = agentAreaW + 40;
+            const gy = graphY;
+            const gw = W - 2 * agentAreaW - 80;
+            const gh = graphH;
+
+            // Graph background
+            ctx.fillStyle = 'rgba(20,25,40,0.8)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.fillRect(gx, gy, gw, gh);
+            ctx.strokeRect(gx, gy, gw, gh);
+
+            // Title
+            ctx.fillStyle = '#fff';
+            ctx.font = 'bold 13px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Trade Prices Over Time', gx + gw / 2, gy - 8);
+
+            // Axis labels
+            ctx.fillStyle = '#888';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText(maxP.toString(), gx - 5, gy + 10);
+            ctx.fillText('0', gx - 5, gy + gh);
+
+            // Grid lines
+            for (let i = 0; i <= 4; i++) {
+                const y = gy + (gh * i) / 4;
+                ctx.beginPath();
+                ctx.moveTo(gx, y);
+                ctx.lineTo(gx + gw, y);
+                ctx.strokeStyle = 'rgba(138,154,91,0.1)';
+                ctx.stroke();
+            }
+
+            // Equilibrium line
+            const eqY = gy + gh - (equilibrium / maxP) * gh;
+            ctx.beginPath();
+            ctx.setLineDash([6, 4]);
+            ctx.moveTo(gx, eqY);
+            ctx.lineTo(gx + gw, eqY);
+            ctx.strokeStyle = 'rgba(221,161,94,0.7)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Equilibrium: ' + equilibrium.toFixed(1), gx + 5, eqY - 5);
+
+            // Plot trades
+            if (trades.length > 0) {
+                const step = gw / Math.max(trades.length, 1);
+                // Scatter dots
+                trades.forEach((p, i) => {
+                    const x = gx + i * step + step / 2;
+                    const y = gy + gh - (p / maxP) * gh;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(138,154,91,${0.3 + 0.7 * (i / trades.length)})`;
+                    ctx.fill();
+                });
+
+                // Moving average line
+                if (trades.length > 3) {
+                    ctx.beginPath();
+                    const winSize = Math.min(10, Math.floor(trades.length / 2));
+                    for (let i = winSize; i < trades.length; i++) {
+                        let avg = 0;
+                        for (let j = i - winSize; j <= i; j++) avg += trades[j];
+                        avg /= (winSize + 1);
+                        const x = gx + i * step + step / 2;
+                        const y = gy + gh - (avg / maxP) * gh;
+                        if (i === winSize) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    }
+                    ctx.strokeStyle = '#8A9A5B';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Supply/Demand curves
+            if (sliders.showCurves.checked) {
+                const cx = gx;
+                const cy = gy + gh + 40;
+                const cw = gw;
+                const ch = H - cy - 20;
+
+                if (ch > 80) {
+                    ctx.fillStyle = 'rgba(20,25,40,0.8)';
+                    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+                    ctx.lineWidth = 1;
+                    ctx.fillRect(cx, cy, cw, ch);
+                    ctx.strokeRect(cx, cy, cw, ch);
+
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 13px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Supply & Demand Curves', cx + cw / 2, cy - 8);
+
+                    // Sort demand (buyers by descending max price)
+                    const demandCurve = [...buyers].sort((a, b) => b.maxPrice - a.maxPrice);
+                    const supplyCurve = [...sellers].sort((a, b) => a.minPrice - b.minPrice);
+
+                    // Demand curve (blue, descending)
+                    ctx.beginPath();
+                    demandCurve.forEach((b, i) => {
+                        const x = cx + (i / (demandCurve.length - 1)) * cw;
+                        const y = cy + ch - (b.maxPrice / maxP) * ch;
+                        if (i === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    });
+                    ctx.strokeStyle = '#4682dc';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Supply curve (red, ascending)
+                    ctx.beginPath();
+                    supplyCurve.forEach((s, i) => {
+                        const x = cx + (i / (supplyCurve.length - 1)) * cw;
+                        const y = cy + ch - (s.minPrice / maxP) * ch;
+                        if (i === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    });
+                    ctx.strokeStyle = '#dc5050';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Labels
+                    ctx.font = '11px sans-serif';
+                    ctx.fillStyle = '#4682dc';
+                    ctx.textAlign = 'left';
+                    ctx.fillText('Demand', cx + 8, cy + 18);
+                    ctx.fillStyle = '#dc5050';
+                    ctx.fillText('Supply', cx + 8, cy + 32);
+
+                    // Equilibrium marker
+                    // Find intersection
+                    let intIdx = 0;
+                    for (let i = 0; i < Math.min(demandCurve.length, supplyCurve.length); i++) {
+                        if (demandCurve[i].maxPrice >= supplyCurve[i].minPrice) intIdx = i;
+                        else break;
+                    }
+                    const intX = cx + (intIdx / (demandCurve.length - 1)) * cw;
+                    const intY = cy + ch - (equilibrium / maxP) * ch;
+                    ctx.beginPath();
+                    ctx.arc(intX, intY, 6, 0, Math.PI * 2);
+                    ctx.fillStyle = '#DDA15E';
+                    ctx.fill();
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+
+                    // Axis labels
+                    ctx.fillStyle = '#888';
+                    ctx.font = '10px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Quantity →', cx + cw / 2, cy + ch + 15);
+                    ctx.save();
+                    ctx.translate(cx - 12, cy + ch / 2);
+                    ctx.rotate(-Math.PI / 2);
+                    ctx.fillText('Price →', 0, 0);
+                    ctx.restore();
+                }
+            }
+        }
+
+        let paused = false;
+        function animate() {
+            if (!paused) {
+                doTrades();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        function reset() {
+            init();
+        }
+        window.reset = reset;
+
+        document.getElementById('resetBtn').addEventListener('click', reset);
+        sliders.traderCount.addEventListener('change', reset);
+        sliders.priceRange.addEventListener('change', reset);
+
+        init();
+        animate();
+    </script>
+    <script src="../assets/js/enhance.js"></script>
+</body>
+</html>

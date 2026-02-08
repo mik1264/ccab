@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CymaScope 3D Water Surface - Cymatics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; color: #c8d0e0; }
+canvas { display: block; }
+.back-link {
+    position: fixed; top: 20px; left: 20px; z-index: 100;
+    color: #8A9A5B; text-decoration: none; font-size: 14px; font-weight: 600;
+    background: rgba(10,14,26,0.8); border-radius: 25px;
+    border: 2px solid #8A9A5B; padding: 10px 20px;
+    transition: all 0.3s ease;
+}
+.back-link:hover { background: #8A9A5B; color: #0a0e1a; }
+.controls {
+    position: fixed; top: 20px; right: 20px; z-index: 100;
+    background: rgba(10,14,26,0.85); backdrop-filter: blur(10px);
+    border-radius: 10px; padding: 20px; max-width: 300px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { color: #8A9A5B; margin-bottom: 12px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
+.control-row { margin-bottom: 10px; }
+.control-row label { display: block; font-size: 12px; color: #8a92a8; margin-bottom: 3px; }
+.control-row input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+.control-row .value { float: right; color: #DDA15E; font-size: 12px; font-weight: 600; }
+.info {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 100;
+    background: rgba(10,14,26,0.85); backdrop-filter: blur(10px);
+    border-radius: 10px; padding: 10px 20px;
+    border: 1px solid rgba(138,154,91,0.3);
+    font-size: 13px; color: #8a92a8; text-align: center;
+}
+.info span { color: #DDA15E; font-weight: 600; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&larr; Cymatics</a>
+
+<div class="controls">
+    <h3>CymaScope 3D</h3>
+    <div class="control-row">
+        <label>Driving Frequency <span class="value" id="freqVal">3</span></label>
+        <input type="range" id="freqSlider" min="1" max="8" value="3" step="1">
+    </div>
+    <div class="control-row">
+        <label>Amplitude <span class="value" id="ampVal">1.0</span></label>
+        <input type="range" id="ampSlider" min="1" max="30" value="10">
+    </div>
+    <div class="control-row">
+        <label>Grid Resolution <span class="value" id="resVal">40</span></label>
+        <input type="range" id="resSlider" min="20" max="60" value="40" step="5">
+    </div>
+    <div class="control-row">
+        <label>Animation Speed <span class="value" id="speedVal">1.0</span></label>
+        <input type="range" id="speedSlider" min="1" max="30" value="10">
+    </div>
+</div>
+
+<div class="info">
+    Drag to rotate view &mdash; Bessel modes J<sub>m</sub>(&alpha;<sub>mn</sub>r/R) cos(m&theta;)
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+let drivingFreq = 3;
+let amplitude = 1.0;
+let gridRes = 40;
+let speed = 1.0;
+let time = 0;
+let running = true;
+
+// View angles (mouse-draggable)
+let viewAngleX = 0.8; // tilt
+let viewAngleZ = 0.3; // rotation
+let isDragging = false;
+let lastMouseX, lastMouseY;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Bessel function J_n(x) via series approximation
+function besselJ(n, x) {
+    if (Math.abs(x) < 1e-10) return n === 0 ? 1 : 0;
+
+    let sum = 0;
+    const maxTerms = 25;
+    for (let k = 0; k < maxTerms; k++) {
+        const sign = (k % 2 === 0) ? 1 : -1;
+        const num = Math.pow(x / 2, 2 * k + n);
+        let denom = 1;
+        for (let j = 1; j <= k; j++) denom *= j;
+        for (let j = 1; j <= k + n; j++) denom *= j;
+        const term = sign * num / denom;
+        sum += term;
+        if (Math.abs(term) < 1e-15) break;
+    }
+    return sum;
+}
+
+// Zeros of Bessel functions (precomputed for J0-J4)
+const besselZeros = {
+    0: [2.4048, 5.5201, 8.6537, 11.7915],
+    1: [3.8317, 7.0156, 10.1735, 13.3237],
+    2: [5.1356, 8.4172, 11.6198, 14.7960],
+    3: [6.3802, 9.7610, 13.0152, 16.2235],
+    4: [7.5883, 11.0647, 14.3725, 17.6160]
+};
+
+// Surface height using Bessel modes
+function surfaceHeight(r, theta, t) {
+    if (r > 1) return 0;
+    let h = 0;
+    const freq = drivingFreq;
+
+    // Excite modes based on driving frequency
+    // More modes = higher frequency = more complex pattern
+    for (let m = 0; m <= freq; m++) {
+        const nModes = Math.max(1, freq - m + 1);
+        for (let n = 0; n < nModes && n < 3; n++) {
+            const zeros = besselZeros[m];
+            if (!zeros || !zeros[n]) continue;
+            const alpha = zeros[n];
+            const omega = alpha; // frequency proportional to zero
+
+            // Mode amplitude decreases with order
+            const modeAmp = 1.0 / (1 + m * 0.5 + n * 0.3);
+
+            // Bessel mode pattern
+            const radial = besselJ(m, alpha * r);
+            const angular = m === 0 ? 1 : Math.cos(m * theta);
+            const temporal = Math.cos(omega * t * 0.5);
+
+            h += modeAmp * radial * angular * temporal;
+        }
+    }
+
+    return h * amplitude * 0.3;
+}
+
+// 3D projection with perspective
+function project(x, y, z) {
+    const cosX = Math.cos(viewAngleX), sinX = Math.sin(viewAngleX);
+    const cosZ = Math.cos(viewAngleZ), sinZ = Math.sin(viewAngleZ);
+
+    // Rotate around Z axis
+    let rx = x * cosZ - y * sinZ;
+    let ry = x * sinZ + y * cosZ;
+    let rz = z;
+
+    // Tilt (rotate around X axis)
+    let ry2 = ry * cosX - rz * sinX;
+    let rz2 = ry * sinX + rz * cosX;
+
+    // Perspective projection
+    const dist = 4;
+    const scale = Math.min(W, H) * 0.35;
+    const perspective = dist / (dist + ry2 * 0.3);
+
+    return {
+        x: W / 2 + rx * scale * perspective,
+        y: H / 2 - rz2 * scale * perspective + 20,
+        z: ry2, // depth for sorting
+        perspective: perspective
+    };
+}
+
+function computeSurface() {
+    const N = gridRes;
+    const points = [];
+    const faces = [];
+
+    // Generate circular grid
+    for (let i = 0; i <= N; i++) {
+        const row = [];
+        for (let j = 0; j <= N; j++) {
+            const x = (i / N) * 2 - 1;
+            const y = (j / N) * 2 - 1;
+            const r = Math.sqrt(x * x + y * y);
+            const theta = Math.atan2(y, x);
+
+            const h = surfaceHeight(r, theta, time);
+            // Mask outside the circle
+            const mask = r <= 1 ? 1 : 0;
+
+            row.push({
+                x: x, y: y, z: h * mask,
+                r: r, mask: mask
+            });
+        }
+        points.push(row);
+    }
+
+    // Generate faces (quads as two triangles)
+    for (let i = 0; i < N; i++) {
+        for (let j = 0; j < N; j++) {
+            const p00 = points[i][j];
+            const p10 = points[i + 1][j];
+            const p01 = points[i][j + 1];
+            const p11 = points[i + 1][j + 1];
+
+            // Skip if all points outside circle
+            if (p00.mask === 0 && p10.mask === 0 && p01.mask === 0 && p11.mask === 0) continue;
+
+            // Project all points
+            const proj00 = project(p00.x, p00.y, p00.z);
+            const proj10 = project(p10.x, p10.y, p10.z);
+            const proj01 = project(p01.x, p01.y, p01.z);
+            const proj11 = project(p11.x, p11.y, p11.z);
+
+            // Average depth for sorting
+            const avgDepth = (proj00.z + proj10.z + proj01.z + proj11.z) / 4;
+
+            // Surface normal for lighting (approximate)
+            const dxX = p10.x - p00.x, dxY = p10.y - p00.y, dxZ = p10.z - p00.z;
+            const dyX = p01.x - p00.x, dyY = p01.y - p00.y, dyZ = p01.z - p00.z;
+            const nx = dxY * dyZ - dxZ * dyY;
+            const ny = dxZ * dyX - dxX * dyZ;
+            const nz = dxX * dyY - dxY * dyX;
+            const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+
+            // Light direction (from upper right)
+            const lx = 0.3, ly = -0.5, lz = 0.8;
+            const dot = (nx * lx + ny * ly + nz * lz) / nLen;
+            const lighting = Math.max(0.15, Math.min(1, dot * 0.6 + 0.5));
+
+            // Height for color
+            const avgHeight = (p00.z + p10.z + p01.z + p11.z) / 4;
+
+            faces.push({
+                pts: [proj00, proj10, proj11, proj01],
+                depth: avgDepth,
+                lighting: lighting,
+                height: avgHeight,
+                inCircle: (p00.r <= 1.05 || p10.r <= 1.05 || p01.r <= 1.05 || p11.r <= 1.05)
+            });
+        }
+    }
+
+    // Sort by depth (painter's algorithm)
+    faces.sort((a, b) => a.depth - b.depth);
+
+    return faces;
+}
+
+function drawSurface() {
+    const faces = computeSurface();
+
+    for (const face of faces) {
+        if (!face.inCircle) continue;
+
+        const pts = face.pts;
+        const h = face.height;
+        const lit = face.lighting;
+
+        // Water-like blue-teal with white highlights at peaks
+        const hNorm = Math.max(-1, Math.min(1, h / (amplitude * 0.3 + 0.01)));
+
+        let r, g, b;
+        if (hNorm > 0) {
+            // Peaks: teal to white
+            r = Math.floor((30 + hNorm * 200) * lit);
+            g = Math.floor((120 + hNorm * 135) * lit);
+            b = Math.floor((180 + hNorm * 75) * lit);
+        } else {
+            // Troughs: darker blue
+            const t = -hNorm;
+            r = Math.floor((30 - t * 20) * lit);
+            g = Math.floor((80 - t * 40) * lit);
+            b = Math.floor((160 - t * 40) * lit);
+        }
+
+        r = Math.max(0, Math.min(255, r));
+        g = Math.max(0, Math.min(255, g));
+        b = Math.max(0, Math.min(255, b));
+
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) {
+            ctx.lineTo(pts[i].x, pts[i].y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fill();
+
+        // Wireframe on top (subtle)
+        ctx.strokeStyle = `rgba(${Math.min(255, r + 30)},${Math.min(255, g + 30)},${Math.min(255, b + 30)},0.15)`;
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
+    }
+
+    // Draw circular rim
+    ctx.beginPath();
+    const rimPoints = 64;
+    for (let i = 0; i <= rimPoints; i++) {
+        const theta = (i / rimPoints) * Math.PI * 2;
+        const p = project(Math.cos(theta), Math.sin(theta), 0);
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+}
+
+function animate() {
+    if (running) {
+        time += 0.04 * speed;
+    }
+
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    drawSurface();
+
+    // Mode label
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = '13px Segoe UI, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Driving frequency level: ${drivingFreq} (exciting ${drivingFreq + 1} Bessel mode groups)`, W / 2, H * 0.08);
+
+    requestAnimationFrame(animate);
+}
+
+// Mouse drag for rotation
+canvas.addEventListener('mousedown', function(e) {
+    isDragging = true;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+});
+
+canvas.addEventListener('mousemove', function(e) {
+    if (!isDragging) return;
+    const dx = e.clientX - lastMouseX;
+    const dy = e.clientY - lastMouseY;
+    viewAngleZ += dx * 0.01;
+    viewAngleX += dy * 0.01;
+    viewAngleX = Math.max(0.2, Math.min(1.5, viewAngleX));
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+});
+
+canvas.addEventListener('mouseup', function() { isDragging = false; });
+canvas.addEventListener('mouseleave', function() { isDragging = false; });
+
+// Touch support for rotation
+canvas.addEventListener('touchstart', function(e) {
+    if (e.touches.length === 1) {
+        isDragging = true;
+        lastMouseX = e.touches[0].clientX;
+        lastMouseY = e.touches[0].clientY;
+    }
+}, { passive: true });
+
+canvas.addEventListener('touchmove', function(e) {
+    if (!isDragging || e.touches.length !== 1) return;
+    const dx = e.touches[0].clientX - lastMouseX;
+    const dy = e.touches[0].clientY - lastMouseY;
+    viewAngleZ += dx * 0.01;
+    viewAngleX += dy * 0.01;
+    viewAngleX = Math.max(0.2, Math.min(1.5, viewAngleX));
+    lastMouseX = e.touches[0].clientX;
+    lastMouseY = e.touches[0].clientY;
+}, { passive: true });
+
+canvas.addEventListener('touchend', function() { isDragging = false; });
+
+document.getElementById('freqSlider').addEventListener('input', function() {
+    drivingFreq = parseInt(this.value);
+    document.getElementById('freqVal').textContent = drivingFreq;
+});
+
+document.getElementById('ampSlider').addEventListener('input', function() {
+    amplitude = this.value / 10;
+    document.getElementById('ampVal').textContent = amplitude.toFixed(1);
+});
+
+document.getElementById('resSlider').addEventListener('input', function() {
+    gridRes = parseInt(this.value);
+    document.getElementById('resVal').textContent = gridRes;
+});
+
+document.getElementById('speedSlider').addEventListener('input', function() {
+    speed = this.value / 10;
+    document.getElementById('speedVal').textContent = speed.toFixed(1);
+});
+
+window.reset = function() {
+    drivingFreq = 3; amplitude = 1.0; gridRes = 40; speed = 1.0; time = 0;
+    viewAngleX = 0.8; viewAngleZ = 0.3;
+    document.getElementById('freqSlider').value = 3;
+    document.getElementById('ampSlider').value = 10;
+    document.getElementById('resSlider').value = 40;
+    document.getElementById('speedSlider').value = 10;
+    document.getElementById('freqVal').textContent = '3';
+    document.getElementById('ampVal').textContent = '1.0';
+    document.getElementById('resVal').textContent = '40';
+    document.getElementById('speedVal').textContent = '1.0';
+    resize();
+};
+
+window.togglePause = function() { running = !running; };
+
+animate();
+</script>
+<script src="../assets/js/enhance.js"></script>
+</body>
+</html>
