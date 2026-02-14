@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Colossus (1944) - Cryptography Machines - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1c14;
+            color: #c8c4a0;
+            font-family: 'Courier New', monospace;
+            overflow-x: hidden;
+            min-height: 100vh;
+        }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 10px; left: 10px; z-index: 1000;
+            background: rgba(40,42,30,0.85); padding: 6px 14px; border-radius: 20px;
+            text-decoration: none; color: #8A9A5B; font-weight: 600;
+            backdrop-filter: blur(10px); border: 1px solid rgba(138,154,91,0.3);
+        }
+        .info-panel {
+            position: fixed; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(40,42,30,0.9); padding: 12px 16px; border-radius: 12px;
+            backdrop-filter: blur(10px); border: 1px solid rgba(138,154,91,0.3);
+            max-width: 280px; font-size: 11px; line-height: 1.5; color: #9a9670;
+        }
+        .info-panel h3 { color: #DDA15E; margin-bottom: 6px; font-size: 13px; }
+        .info-panel .hist { font-style: italic; color: #7a7650; margin-top: 6px; font-size: 10px; }
+        .controls {
+            position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+            z-index: 1000; background: rgba(40,42,30,0.92); padding: 10px 16px;
+            border-radius: 12px; backdrop-filter: blur(10px);
+            border: 1px solid rgba(138,154,91,0.3); display: flex; gap: 10px;
+            align-items: center; flex-wrap: wrap; justify-content: center;
+            font-size: 11px;
+        }
+        .controls label { color: #9a9670; }
+        .controls select, .controls input {
+            background: #2a2c1e; color: #c8c4a0; border: 1px solid #4a4c3e;
+            padding: 3px 6px; border-radius: 4px; font-family: inherit; font-size: 11px;
+        }
+        .controls button {
+            background: #3d4423; color: #DDA15E; border: 1px solid #606C38;
+            padding: 4px 12px; border-radius: 4px; cursor: pointer;
+            font-family: inherit; font-size: 11px;
+        }
+        .controls button:hover { background: #4a5228; }
+        .status-bar {
+            position: fixed; top: 56px; left: 50%; transform: translateX(-50%);
+            z-index: 999; background: rgba(40,42,30,0.9); padding: 6px 16px;
+            border-radius: 8px; backdrop-filter: blur(10px);
+            border: 1px solid rgba(138,154,91,0.3); font-size: 12px;
+            text-align: center;
+        }
+        .status-bar .speed { color: #DDA15E; font-weight: bold; }
+        .status-bar .count { color: #8A9A5B; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back</a>
+    <div class="info-panel">
+        <h3>Colossus Mark II</h3>
+        Designed by Tommy Flowers at the Post Office Research Station, Dollis Hill.
+        The world's first programmable electronic computer, using 2,400 vacuum tubes (valves).
+        It read cipher tape at 5,000 characters per second through an optical reader,
+        comparing patterns against hypothesized Lorenz wheel settings.
+        <div class="hist">10 Colossi were built. Their existence was kept secret until the 1970s. All were dismantled after the war on Churchill's orders. Tommy Flowers was never properly recognized in his lifetime, and had to take out a personal loan to fund the project.</div>
+    </div>
+    <div class="status-bar">
+        <span class="count" id="countDisp">Characters: 0</span>
+        &nbsp;&nbsp;
+        <span class="speed" id="speedDisp">5,000 chars/sec</span>
+        &nbsp;&nbsp;
+        <span id="matchDisp" style="color:#BC6C25">Matches: 0</span>
+    </div>
+    <div class="controls">
+        <label>Chi wheel test:</label>
+        <select id="chiWheel">
+            <option value="0">Chi-1 (41 pins)</option>
+            <option value="1">Chi-2 (31 pins)</option>
+            <option value="2">Chi-3 (29 pins)</option>
+            <option value="3">Chi-4 (26 pins)</option>
+            <option value="4">Chi-5 (23 pins)</option>
+        </select>
+        <label>Threshold:</label>
+        <input id="threshold" type="number" min="1" max="100" value="30" style="width:50px">
+        <button id="runBtn">Feed Tape</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+    <canvas id="c"></canvas>
+
+    <script>
+    (function(){
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        // Vacuum tube grid
+        const TUBE_COLS = 20;
+        const TUBE_ROWS = 8;
+        const TOTAL_TUBES = TUBE_COLS * TUBE_ROWS;
+        let tubeStates = new Uint8Array(TOTAL_TUBES); // 0=off, 1=dim, 2=bright
+        let tubeFlicker = new Float32Array(TOTAL_TUBES);
+
+        // Tape simulation
+        let tapeChars = [];
+        let tapePos = 0;
+        let tapeSpeed = 0;
+        let running = false;
+        let charCount = 0;
+        let matchCount = 0;
+        let matchPositions = [];
+
+        // Thyratron counters (ring counters)
+        let ringCounters = new Array(5).fill(0);
+        const RING_SIZE = 10;
+
+        // Chi wheel pins
+        const CHI_SIZES = [41, 31, 29, 26, 23];
+        let chiPins = CHI_SIZES.map(s => {
+            const pins = [];
+            for (let i = 0; i < s; i++) pins.push(Math.random() > 0.5 ? 1 : 0);
+            return pins;
+        });
+
+        // Plug panel connections (simplified)
+        let plugConnections = [];
+        for (let i = 0; i < 8; i++) {
+            plugConnections.push({
+                from: Math.floor(Math.random() * 5),
+                to: Math.floor(Math.random() * 5),
+                op: ['AND', 'OR', 'XOR'][Math.floor(Math.random() * 3)]
+            });
+        }
+
+        function generateTape(length) {
+            tapeChars = [];
+            for (let i = 0; i < length; i++) {
+                tapeChars.push(Math.floor(Math.random() * 32)); // 5-bit ITA2
+            }
+        }
+
+        function processTapeChar() {
+            if (tapePos >= tapeChars.length) {
+                running = false;
+                document.getElementById('countDisp').textContent = 'COMPLETE: ' + charCount + ' chars';
+                return;
+            }
+
+            const ch = tapeChars[tapePos];
+            const chiIdx = parseInt(document.getElementById('chiWheel').value);
+            const chiPin = chiPins[chiIdx][tapePos % CHI_SIZES[chiIdx]];
+
+            // XOR character bit with chi wheel pin
+            const bit = (ch >> 0) & 1; // Test bit 0
+            const match = (bit ^ chiPin) === 0;
+
+            if (match) matchCount++;
+
+            // Update ring counters
+            ringCounters[0] = (ringCounters[0] + 1) % RING_SIZE;
+            if (ringCounters[0] === 0) ringCounters[1] = (ringCounters[1] + 1) % RING_SIZE;
+            if (ringCounters[1] === 0 && ringCounters[0] === 0) ringCounters[2] = (ringCounters[2] + 1) % RING_SIZE;
+
+            // Update tube states based on processing
+            for (let i = 0; i < TOTAL_TUBES; i++) {
+                if (Math.random() > 0.7) {
+                    tubeStates[i] = match ? 2 : (Math.random() > 0.5 ? 1 : 0);
+                }
+            }
+
+            // Check threshold
+            const threshold = parseInt(document.getElementById('threshold').value);
+            const ratio = (matchCount / (tapePos + 1)) * 100;
+            if (tapePos > 50 && ratio > threshold) {
+                matchPositions.push({pos: tapePos, ratio: ratio.toFixed(1)});
+            }
+
+            charCount++;
+            tapePos++;
+
+            document.getElementById('countDisp').textContent = 'Characters: ' + charCount;
+            document.getElementById('matchDisp').textContent = 'Matches: ' + matchCount +
+                ' (' + ((matchCount / charCount) * 100).toFixed(1) + '%)';
+        }
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+
+        function drawVacuumTube(x, y, w, h, state, flicker) {
+            // Glass envelope
+            const grad = ctx.createLinearGradient(x, y, x, y + h);
+            if (state === 2) {
+                grad.addColorStop(0, `rgba(221, 161, 94, ${0.3 + flicker * 0.2})`);
+                grad.addColorStop(0.5, `rgba(188, 108, 37, ${0.5 + flicker * 0.3})`);
+                grad.addColorStop(1, `rgba(140, 80, 30, ${0.2 + flicker * 0.1})`);
+            } else if (state === 1) {
+                grad.addColorStop(0, 'rgba(100, 80, 50, 0.15)');
+                grad.addColorStop(1, 'rgba(80, 60, 30, 0.1)');
+            } else {
+                grad.addColorStop(0, 'rgba(30, 30, 22, 0.8)');
+                grad.addColorStop(1, 'rgba(20, 20, 14, 0.9)');
+            }
+
+            // Tube shape (rounded top)
+            ctx.beginPath();
+            ctx.moveTo(x + w * 0.2, y + h);
+            ctx.lineTo(x + w * 0.2, y + h * 0.4);
+            ctx.quadraticCurveTo(x + w * 0.2, y, x + w * 0.5, y);
+            ctx.quadraticCurveTo(x + w * 0.8, y, x + w * 0.8, y + h * 0.4);
+            ctx.lineTo(x + w * 0.8, y + h);
+            ctx.closePath();
+            ctx.fillStyle = grad;
+            ctx.fill();
+            ctx.strokeStyle = state === 2 ? '#DDA15E' : '#3a3a2e';
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+
+            // Filament glow
+            if (state === 2) {
+                ctx.beginPath();
+                ctx.arc(x + w * 0.5, y + h * 0.45, w * 0.15, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(255, 180, 80, ${0.4 + flicker * 0.3})`;
+                ctx.fill();
+
+                // Outer glow
+                ctx.beginPath();
+                ctx.arc(x + w * 0.5, y + h * 0.45, w * 0.3, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(221, 161, 94, ${0.1 + flicker * 0.05})`;
+                ctx.fill();
+            }
+
+            // Base pins
+            for (let p = 0; p < 3; p++) {
+                const px = x + w * (0.3 + p * 0.2);
+                ctx.fillStyle = '#5a5a4a';
+                ctx.fillRect(px - 1, y + h, 2, 4);
+            }
+        }
+
+        function drawTapeReader(cx, cy, width, height) {
+            // Housing
+            ctx.fillStyle = '#222218';
+            ctx.strokeStyle = '#3a3a2e';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.roundRect(cx - width / 2, cy - height / 2, width, height, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            // Tape spool (left)
+            const spoolR = height * 0.35;
+            ctx.beginPath();
+            ctx.arc(cx - width * 0.3, cy, spoolR, 0, Math.PI * 2);
+            ctx.fillStyle = '#2a2a1e';
+            ctx.fill();
+            ctx.strokeStyle = '#4a4a3a';
+            ctx.stroke();
+
+            // Tape moving through reader
+            const tapeY = cy;
+            const tapeStart = cx - width * 0.3 + spoolR;
+            const tapeEnd = cx + width * 0.3 - spoolR;
+
+            ctx.fillStyle = '#c8c4a0';
+            ctx.fillRect(tapeStart, tapeY - 3, tapeEnd - tapeStart, 6);
+
+            // Holes in tape
+            const holeSpacing = 8;
+            const numHoles = Math.floor((tapeEnd - tapeStart) / holeSpacing);
+            const offset = running ? (Date.now() / 10) % holeSpacing : 0;
+
+            for (let i = 0; i < numHoles; i++) {
+                const hx = tapeStart + i * holeSpacing - offset;
+                if (hx < tapeStart || hx > tapeEnd) continue;
+                const charIdx = (tapePos + i) % tapeChars.length;
+                const bits = tapeChars[charIdx] || 0;
+
+                for (let b = 0; b < 5; b++) {
+                    if ((bits >> b) & 1) {
+                        ctx.fillStyle = '#1a1c14';
+                        ctx.beginPath();
+                        ctx.arc(hx, tapeY - 2 + b * 1.2, 0.8, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+            }
+
+            // Optical reader head
+            ctx.fillStyle = '#DDA15E';
+            ctx.fillRect(cx - 2, tapeY - 6, 4, 12);
+
+            // Light source indicator
+            if (running) {
+                ctx.beginPath();
+                ctx.arc(cx, tapeY, 8, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(221, 161, 94, 0.2)';
+                ctx.fill();
+            }
+
+            // Tape spool (right)
+            ctx.beginPath();
+            ctx.arc(cx + width * 0.3, cy, spoolR, 0, Math.PI * 2);
+            ctx.fillStyle = '#2a2a1e';
+            ctx.fill();
+            ctx.strokeStyle = '#4a4a3a';
+            ctx.stroke();
+
+            // Spool rotation
+            if (running) {
+                const angle = Date.now() / 200;
+                for (let s = 0; s < 2; s++) {
+                    const sx = s === 0 ? cx - width * 0.3 : cx + width * 0.3;
+                    for (let a = 0; a < 4; a++) {
+                        const ra = angle * (s === 0 ? -1 : 1) + a * Math.PI / 2;
+                        ctx.beginPath();
+                        ctx.moveTo(sx, cy);
+                        ctx.lineTo(sx + Math.cos(ra) * spoolR * 0.7, cy + Math.sin(ra) * spoolR * 0.7);
+                        ctx.strokeStyle = '#5a5a4a';
+                        ctx.lineWidth = 1;
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // Label
+            ctx.font = '10px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#5a5a4a';
+            ctx.fillText('OPTICAL TAPE READER', cx, cy + height / 2 + 14);
+            if (running) {
+                ctx.fillStyle = '#DDA15E';
+                ctx.fillText('5,000 chars/sec', cx, cy + height / 2 + 26);
+            }
+        }
+
+        function drawRingCounter(cx, cy, radius, value, label) {
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.fillStyle = '#1e1e16';
+            ctx.fill();
+            ctx.strokeStyle = '#3a3a2e';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            for (let i = 0; i < RING_SIZE; i++) {
+                const angle = (i / RING_SIZE) * Math.PI * 2 - Math.PI / 2;
+                const nx = cx + Math.cos(angle) * radius * 0.7;
+                const ny = cy + Math.sin(angle) * radius * 0.7;
+                const isActive = i === value;
+
+                ctx.beginPath();
+                ctx.arc(nx, ny, radius * 0.12, 0, Math.PI * 2);
+                ctx.fillStyle = isActive ? '#DDA15E' : '#2a2a1e';
+                ctx.fill();
+                if (isActive) {
+                    ctx.shadowColor = '#DDA15E';
+                    ctx.shadowBlur = 5;
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                }
+            }
+
+            ctx.font = `${Math.max(7, radius * 0.3)}px Courier New`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#7a7a60';
+            ctx.fillText(label, cx, cy);
+        }
+
+        function drawPlugPanel(cx, cy, width, height) {
+            ctx.fillStyle = '#222218';
+            ctx.strokeStyle = '#3a3a2e';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(cx - width / 2, cy - height / 2, width, height, 6);
+            ctx.fill();
+            ctx.stroke();
+
+            // Socket holes in grid
+            const cols = 8;
+            const rows = 4;
+            const gapX = width / (cols + 1);
+            const gapY = height / (rows + 1);
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const sx = cx - width / 2 + gapX * (c + 1);
+                    const sy = cy - height / 2 + gapY * (r + 1);
+
+                    ctx.beginPath();
+                    ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = '#1a1a12';
+                    ctx.fill();
+                    ctx.strokeStyle = '#4a4a3a';
+                    ctx.lineWidth = 0.5;
+                    ctx.stroke();
+                }
+            }
+
+            // Draw some "plugged" connections
+            for (const conn of plugConnections) {
+                const fromR = conn.from % rows;
+                const fromC = conn.from % cols;
+                const toR = conn.to % rows;
+                const toC = (conn.to + 3) % cols;
+
+                const x1 = cx - width / 2 + gapX * (fromC + 1);
+                const y1 = cy - height / 2 + gapY * (fromR + 1);
+                const x2 = cx - width / 2 + gapX * (toC + 1);
+                const y2 = cy - height / 2 + gapY * (toR + 1);
+
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.quadraticCurveTo((x1 + x2) / 2, (y1 + y2) / 2 + 10, x2, y2);
+                ctx.strokeStyle = running ? 'rgba(138, 154, 91, 0.5)' : 'rgba(100, 90, 60, 0.3)';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+
+                // Plug dots
+                ctx.beginPath();
+                ctx.arc(x1, y1, 3, 0, Math.PI * 2);
+                ctx.fillStyle = '#606C38';
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(x2, y2, 3, 0, Math.PI * 2);
+                ctx.fillStyle = '#606C38';
+                ctx.fill();
+            }
+
+            ctx.font = '9px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#5a5a4a';
+            ctx.fillText('PLUG PANEL (PROGRAMMING)', cx, cy + height / 2 + 12);
+        }
+
+        function draw(t) {
+            ctx.fillStyle = '#1a1c14';
+            ctx.fillRect(0, 0, W, H);
+
+            // Process multiple chars per frame when running
+            if (running) {
+                const charsPerFrame = 83; // ~5000/60fps
+                for (let i = 0; i < charsPerFrame; i++) {
+                    if (!running) break;
+                    processTapeChar();
+                }
+            }
+
+            // Update tube flicker
+            for (let i = 0; i < TOTAL_TUBES; i++) {
+                tubeFlicker[i] = Math.sin(t * 0.01 + i * 0.5) * 0.5 + 0.5;
+                if (!running && tubeStates[i] !== 0) {
+                    if (Math.random() > 0.99) tubeStates[i] = 0;
+                }
+            }
+
+            const topY = 90;
+
+            // Machine frame
+            ctx.fillStyle = '#1e1e16';
+            ctx.strokeStyle = '#3a3a2e';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.roundRect(15, topY, W - 30, H - topY - 60, 12);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.font = 'bold 14px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#5a5a4a';
+            ctx.fillText('COLOSSUS  MARK  II  -  2,400 VACUUM TUBES', W / 2, topY + 20);
+
+            // Vacuum tube banks
+            const tubeAreaY = topY + 34;
+            const tubeW = Math.min(22, (W - 80) / TUBE_COLS);
+            const tubeH = tubeW * 1.8;
+            const tubeGridW = TUBE_COLS * tubeW;
+            const tubeStartX = (W - tubeGridW) / 2;
+
+            for (let r = 0; r < TUBE_ROWS; r++) {
+                for (let c = 0; c < TUBE_COLS; c++) {
+                    const idx = r * TUBE_COLS + c;
+                    const tx = tubeStartX + c * tubeW;
+                    const ty = tubeAreaY + r * (tubeH + 4);
+                    drawVacuumTube(tx, ty, tubeW, tubeH, tubeStates[idx], tubeFlicker[idx]);
+                }
+            }
+
+            // Tape reader
+            const readerY = tubeAreaY + TUBE_ROWS * (tubeH + 4) + 40;
+            drawTapeReader(W / 2, readerY, Math.min(400, W - 100), 60);
+
+            // Ring counters (thyratrons)
+            const counterY = readerY + 70;
+            const counterR = 25;
+            const counterSpacing = counterR * 3;
+            const counterStartX = W / 2 - 2 * counterSpacing;
+
+            ctx.font = '10px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#7a7650';
+            ctx.fillText('THYRATRON RING COUNTERS', W / 2, counterY - counterR - 10);
+
+            for (let i = 0; i < 5; i++) {
+                drawRingCounter(counterStartX + i * counterSpacing, counterY, counterR, ringCounters[i], 'C' + (i + 1));
+            }
+
+            // Plug panel
+            const plugY = counterY + counterR + 60;
+            const plugW = Math.min(300, W - 100);
+            drawPlugPanel(W / 2, plugY, plugW, 70);
+
+            requestAnimationFrame(draw);
+        }
+
+        document.getElementById('runBtn').addEventListener('click', () => {
+            generateTape(5000);
+            tapePos = 0;
+            charCount = 0;
+            matchCount = 0;
+            matchPositions = [];
+            running = true;
+            tubeStates = new Uint8Array(TOTAL_TUBES);
+            for (let i = 0; i < TOTAL_TUBES; i++) tubeStates[i] = 1;
+            document.getElementById('speedDisp').textContent = '5,000 chars/sec';
+        });
+
+        window.reset = function() {
+            running = false;
+            tapePos = 0;
+            charCount = 0;
+            matchCount = 0;
+            matchPositions = [];
+            tubeStates = new Uint8Array(TOTAL_TUBES);
+            ringCounters = new Array(5).fill(0);
+            document.getElementById('countDisp').textContent = 'Characters: 0';
+            document.getElementById('speedDisp').textContent = '5,000 chars/sec';
+            document.getElementById('matchDisp').textContent = 'Matches: 0';
+        };
+
+        document.getElementById('resetBtn').addEventListener('click', window.reset);
+
+        window.addEventListener('resize', resize);
+        resize();
+        generateTape(5000);
+        requestAnimationFrame(draw);
+    })();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

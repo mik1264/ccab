@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kelvin's Harmonic Analyzer (1878) - Analog Computers</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: linear-gradient(135deg, #FEFAE0 0%, #F4F1DE 50%, #EDE8D5 100%);
+    color: #3d4423; font-family: 'Segoe UI', system-ui, sans-serif;
+    overflow: hidden; height: 100vh;
+}
+canvas { display: block; }
+
+.controls {
+    position: fixed; top: 70px; right: 16px; z-index: 100;
+    background: rgba(254,250,224,0.92); backdrop-filter: blur(10px);
+    border-radius: 12px; padding: 14px 16px; width: 240px;
+    border: 1px solid rgba(138,154,91,0.25); font-size: 12px;
+}
+.controls h3 { color: #606C38; font-size: 13px; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+.controls label { display: block; font-size: 11px; color: #606C38; margin-top: 4px; }
+.controls select, .controls input[type=range] { width: 100%; margin: 2px 0; accent-color: #606C38; }
+.controls select { padding: 4px; border-radius: 6px; border: 1px solid #8A9A5B; background: #FEFAE0; color: #3d4423; }
+.btn {
+    display: inline-block; margin: 3px 2px; padding: 5px 12px; border: none; border-radius: 6px;
+    background: #606C38; color: #FEFAE0; font-size: 11px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+.btn.active { background: #BC6C25; }
+.btn-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.harmonic-bar { display: flex; align-items: center; margin: 2px 0; }
+.harmonic-bar .label { width: 24px; font-size: 10px; color: #606C38; font-weight: 700; }
+.harmonic-bar .bar { height: 10px; background: #8A9A5B; border-radius: 3px; transition: width 0.2s; }
+.harmonic-bar .val { font-size: 9px; color: #BC6C25; margin-left: 4px; font-family: monospace; }
+
+.info-panel {
+    position: fixed; bottom: 16px; right: 16px; z-index: 100;
+    background: rgba(254,250,224,0.92); backdrop-filter: blur(10px);
+    border-radius: 12px; padding: 14px 18px; max-width: 300px;
+    border: 1px solid rgba(138,154,91,0.25); font-size: 12px; line-height: 1.6;
+}
+.info-panel h4 { color: #606C38; margin-bottom: 4px; }
+.info-panel .highlight { color: #BC6C25; font-weight: 600; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;z-index:1000;color:#606C38;text-decoration:none;font-weight:bold;background:rgba(255,255,255,0.8);padding:5px 12px;border-radius:15px;backdrop-filter:blur(10px)">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Harmonic Analyzer</h3>
+    <label>Waveform:</label>
+    <select id="waveSelect">
+        <option value="square">Square Wave</option>
+        <option value="sawtooth">Sawtooth Wave</option>
+        <option value="triangle">Triangle Wave</option>
+        <option value="pulse">Narrow Pulse</option>
+        <option value="custom">Draw Custom</option>
+    </select>
+    <label>Harmonics: <span id="numHarmonicsVal">12</span></label>
+    <input type="range" id="numHarmonics" min="1" max="24" value="12">
+    <label>Analysis speed:</label>
+    <input type="range" id="speedSlider" min="1" max="100" value="40">
+    <div class="btn-row">
+        <button class="btn" id="btnAnalyze">Analyze</button>
+        <button class="btn" id="btnClear">Clear Drawing</button>
+        <button class="btn" id="btnReset">Reset</button>
+    </div>
+    <div style="margin-top:10px">
+        <h3>Fourier Components</h3>
+        <div id="harmonicBars"></div>
+    </div>
+</div>
+
+<div class="info-panel">
+    <h4>Kelvin's Harmonic Analyzer (1878)</h4>
+    <p>The inverse of the tide predictor: this machine <span class="highlight">decomposes</span>
+    a periodic signal into its Fourier harmonics. Mechanical <span class="highlight">sphere-and-disc
+    integrators</span> compute the integral of the input signal times each harmonic frequency.</p>
+    <p style="margin-top:4px">Select a waveform or draw your own, then watch the analyzer extract
+    each harmonic's amplitude and phase.</p>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const N = 512; // sample points
+let waveform = new Float32Array(N);
+let harmonicAmps = [];
+let harmonicPhases = [];
+let numHarmonics = 12;
+let analysisProgress = 0;
+let analyzing = false;
+let drawingMode = false;
+let customWave = new Float32Array(N);
+let isDrawing = false;
+
+// Predefined waveforms
+function generateWaveform(type) {
+    for (let i = 0; i < N; i++) {
+        const t = i / N;
+        switch (type) {
+            case 'square':
+                waveform[i] = t < 0.5 ? 1 : -1;
+                break;
+            case 'sawtooth':
+                waveform[i] = 2 * t - 1;
+                break;
+            case 'triangle':
+                waveform[i] = t < 0.5 ? 4 * t - 1 : 3 - 4 * t;
+                break;
+            case 'pulse':
+                waveform[i] = (t < 0.1 || t > 0.9) ? 1 : -0.2;
+                break;
+            case 'custom':
+                waveform[i] = customWave[i];
+                break;
+        }
+    }
+}
+
+function computeFourier() {
+    harmonicAmps = [];
+    harmonicPhases = [];
+    for (let k = 1; k <= numHarmonics; k++) {
+        let cosSum = 0, sinSum = 0;
+        for (let i = 0; i < N; i++) {
+            const angle = 2 * Math.PI * k * i / N;
+            cosSum += waveform[i] * Math.cos(angle);
+            sinSum += waveform[i] * Math.sin(angle);
+        }
+        cosSum *= 2 / N;
+        sinSum *= 2 / N;
+        harmonicAmps.push(Math.sqrt(cosSum * cosSum + sinSum * sinSum));
+        harmonicPhases.push(Math.atan2(sinSum, cosSum));
+    }
+}
+
+function reconstructAt(progress) {
+    const result = new Float32Array(N);
+    const activeHarmonics = Math.ceil(progress * numHarmonics);
+    for (let k = 0; k < activeHarmonics; k++) {
+        const blend = k < activeHarmonics - 1 ? 1 : (progress * numHarmonics - k);
+        for (let i = 0; i < N; i++) {
+            const angle = 2 * Math.PI * (k + 1) * i / N;
+            result[i] += blend * harmonicAmps[k] * Math.cos(angle - harmonicPhases[k]);
+        }
+    }
+    return result;
+}
+
+// Initialize
+generateWaveform('square');
+computeFourier();
+
+// UI
+const waveSelect = document.getElementById('waveSelect');
+const numHarmonicsSlider = document.getElementById('numHarmonics');
+const speedSlider = document.getElementById('speedSlider');
+
+waveSelect.addEventListener('change', () => {
+    if (waveSelect.value === 'custom') {
+        drawingMode = true;
+        customWave.fill(0);
+        waveform.fill(0);
+    } else {
+        drawingMode = false;
+        generateWaveform(waveSelect.value);
+        computeFourier();
+        analysisProgress = 0;
+    }
+});
+
+numHarmonicsSlider.addEventListener('input', () => {
+    numHarmonics = parseInt(numHarmonicsSlider.value);
+    document.getElementById('numHarmonicsVal').textContent = numHarmonics;
+    computeFourier();
+    analysisProgress = 0;
+});
+
+document.getElementById('btnAnalyze').addEventListener('click', () => {
+    if (drawingMode) {
+        waveform = customWave.slice();
+        drawingMode = false;
+    }
+    computeFourier();
+    analysisProgress = 0;
+    analyzing = true;
+});
+
+document.getElementById('btnClear').addEventListener('click', () => {
+    customWave.fill(0);
+    waveform.fill(0);
+    harmonicAmps = [];
+    harmonicPhases = [];
+    analysisProgress = 0;
+    analyzing = false;
+});
+
+function resetAll() {
+    waveSelect.value = 'square';
+    numHarmonics = 12;
+    numHarmonicsSlider.value = 12;
+    document.getElementById('numHarmonicsVal').textContent = '12';
+    drawingMode = false;
+    generateWaveform('square');
+    computeFourier();
+    analysisProgress = 0;
+    analyzing = false;
+}
+window.reset = resetAll;
+document.getElementById('btnReset').addEventListener('click', resetAll);
+
+// Drawing on canvas
+canvas.addEventListener('mousedown', e => {
+    if (!drawingMode) return;
+    isDrawing = true;
+    drawPoint(e);
+});
+canvas.addEventListener('mousemove', e => {
+    if (!isDrawing || !drawingMode) return;
+    drawPoint(e);
+});
+canvas.addEventListener('mouseup', () => { isDrawing = false; });
+canvas.addEventListener('mouseleave', () => { isDrawing = false; });
+
+canvas.addEventListener('touchstart', e => {
+    if (!drawingMode) return;
+    e.preventDefault();
+    isDrawing = true;
+    drawPoint(e.touches[0]);
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+    if (!isDrawing || !drawingMode) return;
+    e.preventDefault();
+    drawPoint(e.touches[0]);
+}, { passive: false });
+canvas.addEventListener('touchend', () => { isDrawing = false; });
+
+function drawPoint(e) {
+    const waveLeft = 60;
+    const waveRight = W - 280;
+    const waveW = waveRight - waveLeft;
+    const waveTop = 80;
+    const waveH = (H - 120) * 0.4;
+    const midY = waveTop + waveH / 2;
+
+    const x = e.clientX;
+    const y = e.clientY;
+    const idx = Math.floor(((x - waveLeft) / waveW) * N);
+    if (idx >= 0 && idx < N) {
+        const val = -(y - midY) / (waveH / 2);
+        customWave[idx] = Math.max(-1, Math.min(1, val));
+        // Smooth nearby samples
+        for (let d = -3; d <= 3; d++) {
+            const ni = idx + d;
+            if (ni >= 0 && ni < N && d !== 0) {
+                customWave[ni] = customWave[ni] * 0.5 + val * 0.5;
+            }
+        }
+        waveform = customWave.slice();
+    }
+}
+
+function updateHarmonicBars() {
+    const container = document.getElementById('harmonicBars');
+    let html = '';
+    const maxAmp = Math.max(0.01, ...harmonicAmps);
+    const activeCount = Math.ceil(analysisProgress * numHarmonics);
+    for (let k = 0; k < numHarmonics; k++) {
+        const amp = k < harmonicAmps.length ? harmonicAmps[k] : 0;
+        const w = (amp / maxAmp) * 100;
+        const active = k < activeCount;
+        const barColor = active ? '#606C38' : '#ccc';
+        html += `<div class="harmonic-bar"><span class="label">${k + 1}</span><div class="bar" style="width:${w}%;background:${barColor}"></div><span class="val">${amp.toFixed(3)}</span></div>`;
+    }
+    container.innerHTML = html;
+}
+
+let lastTime = 0;
+function draw(timestamp) {
+    if (!lastTime) lastTime = timestamp;
+    const dt = (timestamp - lastTime) / 1000;
+    lastTime = timestamp;
+
+    if (analyzing && analysisProgress < 1) {
+        analysisProgress += dt * (parseInt(speedSlider.value) / 100);
+        if (analysisProgress >= 1) { analysisProgress = 1; analyzing = false; }
+    }
+
+    ctx.clearRect(0, 0, W, H);
+
+    const waveLeft = 60;
+    const waveRight = W - 280;
+    const waveW = waveRight - waveLeft;
+    const waveTop = 80;
+    const waveH = (H - 120) * 0.4;
+    const midY = waveTop + waveH / 2;
+
+    // Title
+    ctx.fillStyle = '#606C38';
+    ctx.font = 'bold 18px Georgia, serif';
+    ctx.textAlign = 'left';
+    ctx.fillText("Kelvin's Harmonic Analyzer (1878)", waveLeft, 45);
+
+    if (drawingMode) {
+        ctx.fillStyle = '#BC6C25';
+        ctx.font = '14px sans-serif';
+        ctx.fillText('Draw your waveform on the top panel, then click Analyze', waveLeft, 65);
+    }
+
+    // Input waveform panel
+    ctx.fillStyle = '#FFF8E7';
+    ctx.fillRect(waveLeft, waveTop, waveW, waveH);
+    ctx.strokeStyle = '#BC6C25';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(waveLeft, waveTop, waveW, waveH);
+
+    // Center line
+    ctx.strokeStyle = 'rgba(96,108,56,0.2)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(waveLeft, midY); ctx.lineTo(waveRight, midY); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Draw input waveform
+    ctx.strokeStyle = '#3d4423';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+        const x = waveLeft + (i / N) * waveW;
+        const y = midY - waveform[i] * (waveH / 2) * 0.9;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = '#606C38';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Input Waveform', waveLeft + 8, waveTop + 16);
+
+    // Reconstruction panel
+    const reconTop = waveTop + waveH + 30;
+    const reconH = waveH;
+    const reconMidY = reconTop + reconH / 2;
+
+    ctx.fillStyle = '#FFF8E7';
+    ctx.fillRect(waveLeft, reconTop, waveW, reconH);
+    ctx.strokeStyle = '#8A9A5B';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(waveLeft, reconTop, waveW, reconH);
+
+    // Center line
+    ctx.strokeStyle = 'rgba(96,108,56,0.2)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(waveLeft, reconMidY); ctx.lineTo(waveRight, reconMidY); ctx.stroke();
+    ctx.setLineDash([]);
+
+    if (harmonicAmps.length > 0) {
+        const recon = reconstructAt(analysisProgress);
+
+        // Draw individual harmonics (faint)
+        const activeCount = Math.ceil(analysisProgress * numHarmonics);
+        for (let k = 0; k < activeCount && k < harmonicAmps.length; k++) {
+            const hue = (k / numHarmonics) * 120;
+            ctx.strokeStyle = `hsla(${30 + hue}, 50%, 40%, 0.2)`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            const blend = k < activeCount - 1 ? 1 : (analysisProgress * numHarmonics - k);
+            for (let i = 0; i < N; i++) {
+                const x = waveLeft + (i / N) * waveW;
+                const angle = 2 * Math.PI * (k + 1) * i / N;
+                const val = blend * harmonicAmps[k] * Math.cos(angle - harmonicPhases[k]);
+                const y = reconMidY - val * (reconH / 2) * 0.9;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+
+        // Draw reconstruction
+        ctx.strokeStyle = '#606C38';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        for (let i = 0; i < N; i++) {
+            const x = waveLeft + (i / N) * waveW;
+            const y = reconMidY - recon[i] * (reconH / 2) * 0.9;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+
+    ctx.fillStyle = '#606C38';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    const activeH = Math.ceil(analysisProgress * numHarmonics);
+    ctx.fillText('Reconstruction (' + activeH + '/' + numHarmonics + ' harmonics)', waveLeft + 8, reconTop + 16);
+
+    // Sphere-and-disc integrator visualization
+    const integTop = reconTop + reconH + 25;
+    const integH = H - integTop - 20;
+    if (integH > 40) {
+        ctx.fillStyle = '#606C38';
+        ctx.font = 'bold 11px sans-serif';
+        ctx.fillText('Sphere-and-Disc Integrators', waveLeft, integTop + 12);
+
+        const spacing = Math.min(60, (waveW - 20) / numHarmonics);
+        for (let k = 0; k < numHarmonics; k++) {
+            const cx = waveLeft + 30 + k * spacing;
+            const cy = integTop + 40;
+            const radius = 15;
+            const amp = k < harmonicAmps.length ? harmonicAmps[k] : 0;
+            const phase = k < harmonicPhases.length ? harmonicPhases[k] : 0;
+            const active = k < Math.ceil(analysisProgress * numHarmonics);
+
+            // Disc
+            ctx.strokeStyle = active ? '#606C38' : '#ccc';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Sphere position (based on amplitude)
+            if (active && amp > 0.01) {
+                const angle = phase + (timestamp / 1000) * (k + 1);
+                const sx = cx + Math.cos(angle) * radius * 0.7;
+                const sy = cy + Math.sin(angle) * radius * 0.7;
+                ctx.fillStyle = '#BC6C25';
+                ctx.beginPath();
+                ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Label
+            ctx.fillStyle = active ? '#3d4423' : '#aaa';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('n=' + (k + 1), cx, cy + radius + 12);
+        }
+    }
+
+    updateHarmonicBars();
+    requestAnimationFrame(draw);
+}
+
+requestAnimationFrame(draw);
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

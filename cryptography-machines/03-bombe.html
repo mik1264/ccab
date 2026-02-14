@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Turing's Bombe (1940) - Cryptography Machines - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1c14;
+            color: #c8c4a0;
+            font-family: 'Courier New', monospace;
+            overflow-x: hidden;
+            min-height: 100vh;
+        }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 10px; left: 10px; z-index: 1000;
+            background: rgba(40,42,30,0.85); padding: 6px 14px; border-radius: 20px;
+            text-decoration: none; color: #8A9A5B; font-weight: 600;
+            backdrop-filter: blur(10px); border: 1px solid rgba(138,154,91,0.3);
+        }
+        .info-panel {
+            position: fixed; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(40,42,30,0.9); padding: 12px 16px; border-radius: 12px;
+            backdrop-filter: blur(10px); border: 1px solid rgba(138,154,91,0.3);
+            max-width: 280px; font-size: 11px; line-height: 1.5; color: #9a9670;
+        }
+        .info-panel h3 { color: #DDA15E; margin-bottom: 6px; font-size: 13px; }
+        .info-panel .hist { font-style: italic; color: #7a7650; margin-top: 6px; font-size: 10px; }
+        .controls {
+            position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+            z-index: 1000; background: rgba(40,42,30,0.92); padding: 10px 16px;
+            border-radius: 12px; backdrop-filter: blur(10px);
+            border: 1px solid rgba(138,154,91,0.3); display: flex; gap: 10px;
+            align-items: center; flex-wrap: wrap; justify-content: center;
+            font-size: 11px;
+        }
+        .controls label { color: #9a9670; }
+        .controls input {
+            background: #2a2c1e; color: #c8c4a0; border: 1px solid #4a4c3e;
+            padding: 4px 8px; border-radius: 4px; font-family: inherit; font-size: 11px;
+        }
+        .controls button {
+            background: #3d4423; color: #DDA15E; border: 1px solid #606C38;
+            padding: 4px 12px; border-radius: 4px; cursor: pointer;
+            font-family: inherit; font-size: 11px;
+        }
+        .controls button:hover { background: #4a5228; }
+        .status-bar {
+            position: fixed; top: 56px; left: 50%; transform: translateX(-50%);
+            z-index: 999; background: rgba(40,42,30,0.9); padding: 6px 16px;
+            border-radius: 8px; backdrop-filter: blur(10px);
+            border: 1px solid rgba(138,154,91,0.3); font-size: 12px;
+            text-align: center;
+        }
+        .status-bar .pos { color: #DDA15E; font-weight: bold; }
+        .status-bar .state { color: #8A9A5B; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back</a>
+    <div class="info-panel">
+        <h3>Turing's Bombe</h3>
+        Designed by Alan Turing and Gordon Welchman in 1940, the Bombe was an electromechanical
+        device that automated the search for Enigma rotor settings. It exploited "cribs" --
+        known or guessed plaintext-ciphertext pairs -- to eliminate impossible rotor configurations.
+        <div class="hist">Over 200 Bombes were built at Bletchley Park, each with 36 Enigma-equivalent units (108 rotors). They could test all 17,576 positions for three rotors in about 20 minutes, finding "stops" where the crib was consistent.</div>
+    </div>
+    <div class="status-bar">
+        <span class="state" id="stateDisp">IDLE - Set a crib and press Run</span>
+        &nbsp;&nbsp;
+        <span class="pos" id="posDisp"></span>
+    </div>
+    <div class="controls">
+        <label>Plaintext crib:</label>
+        <input id="cribPlain" type="text" value="WETTER" maxlength="12" style="width:80px">
+        <label>Ciphertext:</label>
+        <input id="cribCipher" type="text" value="BQMFKZ" maxlength="12" style="width:80px">
+        <button id="runBtn">Run Bombe</button>
+        <button id="stopBtn">Stop</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+    <canvas id="c"></canvas>
+
+    <script>
+    (function(){
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        const ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+        // 36 Enigma units in a 6x6 grid
+        const GRID_COLS = 6;
+        const GRID_ROWS = 6;
+        const TOTAL_UNITS = 36;
+
+        let unitStates = []; // 0=idle, 1=testing, 2=eliminated, 3=stop
+        let currentPos = [0, 0, 0]; // Rotor positions being tested
+        let running = false;
+        let found = false;
+        let testSpeed = 0;
+        let testTimer = 0;
+        let totalTested = 0;
+        let stops = [];
+        let drumAngles = new Float32Array(TOTAL_UNITS * 3); // 3 drums per unit
+        let menuLinks = []; // "Menu" diagram connections
+
+        function initMenu(plain, cipher) {
+            menuLinks = [];
+            for (let i = 0; i < Math.min(plain.length, cipher.length); i++) {
+                const p = ALPHA.indexOf(plain[i].toUpperCase());
+                const c = ALPHA.indexOf(cipher[i].toUpperCase());
+                if (p >= 0 && c >= 0) {
+                    menuLinks.push({from: p, to: c, pos: i});
+                }
+            }
+        }
+
+        function checkConsistency(pos) {
+            // Simplified consistency check:
+            // The Bombe checks if the assumed crib produces no contradiction.
+            // We simulate this by checking if our rotor position hypothesis
+            // leads to a consistent stecker (plugboard) assignment.
+            const stecker = {};
+            let consistent = true;
+
+            for (const link of menuLinks) {
+                // Simple simulated scrambler output based on position
+                const scrambled = (link.from + pos[0] * 7 + pos[1] * 3 + pos[2] + link.pos * 11) % 26;
+                const needed = link.to;
+
+                const ch1 = ALPHA[link.from];
+                const ch2 = ALPHA[scrambled];
+
+                if (stecker[ch1] !== undefined && stecker[ch1] !== ALPHA[needed]) {
+                    consistent = false;
+                    break;
+                }
+                if (stecker[ALPHA[needed]] !== undefined && stecker[ALPHA[needed]] !== ch1) {
+                    consistent = false;
+                    break;
+                }
+                stecker[ch1] = ALPHA[needed];
+                stecker[ALPHA[needed]] = ch1;
+            }
+            return consistent;
+        }
+
+        function stepBombe() {
+            if (!running) return;
+
+            // Test current position
+            totalTested++;
+            const consistent = checkConsistency(currentPos);
+
+            if (consistent) {
+                stops.push([...currentPos]);
+                found = true;
+                running = false;
+                document.getElementById('stateDisp').textContent = 'STOP FOUND!';
+                document.getElementById('posDisp').textContent =
+                    ALPHA[currentPos[0]] + ALPHA[currentPos[1]] + ALPHA[currentPos[2]];
+
+                // Mark a random unit as "stop"
+                unitStates[Math.floor(Math.random() * TOTAL_UNITS)] = 3;
+                return;
+            }
+
+            // Advance position
+            currentPos[2]++;
+            if (currentPos[2] >= 26) {
+                currentPos[2] = 0;
+                currentPos[1]++;
+                if (currentPos[1] >= 26) {
+                    currentPos[1] = 0;
+                    currentPos[0]++;
+                    if (currentPos[0] >= 26) {
+                        running = false;
+                        document.getElementById('stateDisp').textContent = 'COMPLETE - No stops found';
+                        return;
+                    }
+                }
+            }
+
+            // Update drum angles
+            for (let i = 0; i < TOTAL_UNITS; i++) {
+                drumAngles[i * 3] = (currentPos[0] + i * 3) * (Math.PI * 2 / 26);
+                drumAngles[i * 3 + 1] = (currentPos[1] + i * 5) * (Math.PI * 2 / 26);
+                drumAngles[i * 3 + 2] = (currentPos[2] + i * 7) * (Math.PI * 2 / 26);
+            }
+
+            // Randomly update unit states for visual effect
+            for (let i = 0; i < TOTAL_UNITS; i++) {
+                if (unitStates[i] !== 3) {
+                    unitStates[i] = Math.random() > 0.3 ? 1 : (Math.random() > 0.5 ? 2 : 0);
+                }
+            }
+
+            document.getElementById('stateDisp').textContent =
+                'TESTING... ' + totalTested + ' / 17,576';
+            document.getElementById('posDisp').textContent =
+                ALPHA[currentPos[0]] + ALPHA[currentPos[1]] + ALPHA[currentPos[2]];
+        }
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+
+        function drawUnit(x, y, w, h, idx) {
+            const state = unitStates[idx];
+            let bgColor, borderColor;
+            switch (state) {
+                case 0: bgColor = '#1e1e16'; borderColor = '#3a3a2e'; break;
+                case 1: bgColor = '#2a2c1e'; borderColor = '#606C38'; break;
+                case 2: bgColor = '#2a1e1e'; borderColor = '#6c3838'; break;
+                case 3: bgColor = '#2c2a1e'; borderColor = '#DDA15E'; break;
+            }
+
+            ctx.fillStyle = bgColor;
+            ctx.strokeStyle = borderColor;
+            ctx.lineWidth = state === 3 ? 2 : 1;
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, 4);
+            ctx.fill();
+            ctx.stroke();
+
+            // Three drums (rotors) per unit
+            const drumR = Math.min(w * 0.12, h * 0.15);
+            const drumY = y + h * 0.4;
+            const drumSpacing = w / 4;
+
+            for (let d = 0; d < 3; d++) {
+                const dx = x + drumSpacing * (d + 0.7);
+                const angle = drumAngles[idx * 3 + d];
+
+                // Drum body
+                ctx.beginPath();
+                ctx.arc(dx, drumY, drumR, 0, Math.PI * 2);
+                ctx.fillStyle = state === 3 ? '#4a4228' : '#2a2a1e';
+                ctx.fill();
+                ctx.strokeStyle = state === 1 ? '#8A9A5B' : '#4a4a3a';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Rotation indicator
+                ctx.beginPath();
+                ctx.moveTo(dx, drumY);
+                ctx.lineTo(dx + Math.cos(angle) * drumR * 0.8, drumY + Math.sin(angle) * drumR * 0.8);
+                ctx.strokeStyle = state === 3 ? '#DDA15E' : '#6a6a50';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            // Unit number
+            ctx.font = `${Math.max(7, w * 0.12)}px Courier New`;
+            ctx.textAlign = 'center';
+            ctx.fillStyle = state === 3 ? '#DDA15E' : '#5a5a4a';
+            ctx.fillText('#' + (idx + 1), x + w / 2, y + h * 0.8);
+
+            // Glow for stop
+            if (state === 3) {
+                ctx.beginPath();
+                ctx.arc(x + w / 2, y + h / 2, w * 0.4, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(221, 161, 94, 0.1)';
+                ctx.fill();
+            }
+        }
+
+        function drawMenuDiagram(cx, cy, radius) {
+            if (menuLinks.length === 0) return;
+
+            ctx.font = '9px Courier New';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            // Collect unique letters
+            const letters = new Set();
+            for (const link of menuLinks) {
+                letters.add(link.from);
+                letters.add(link.to);
+            }
+            const letterArr = [...letters];
+            const angleStep = (Math.PI * 2) / Math.max(letterArr.length, 1);
+
+            // Position letters in a circle
+            const positions = {};
+            letterArr.forEach((l, i) => {
+                const angle = i * angleStep - Math.PI / 2;
+                positions[l] = {
+                    x: cx + Math.cos(angle) * radius,
+                    y: cy + Math.sin(angle) * radius
+                };
+            });
+
+            // Draw connections
+            for (const link of menuLinks) {
+                const from = positions[link.from];
+                const to = positions[link.to];
+                if (!from || !to) continue;
+
+                ctx.beginPath();
+                ctx.moveTo(from.x, from.y);
+                ctx.lineTo(to.x, to.y);
+                ctx.strokeStyle = 'rgba(138, 154, 91, 0.4)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Position label on the link
+                ctx.fillStyle = '#7a7650';
+                ctx.fillText(link.pos.toString(), (from.x + to.x) / 2 + 5, (from.y + to.y) / 2 - 5);
+            }
+
+            // Draw letter nodes
+            for (const l of letterArr) {
+                const p = positions[l];
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+                ctx.fillStyle = '#2a2c1e';
+                ctx.fill();
+                ctx.strokeStyle = '#606C38';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.fillStyle = '#c8c4a0';
+                ctx.fillText(ALPHA[l], p.x, p.y);
+            }
+
+            // Label
+            ctx.fillStyle = '#5a5a4a';
+            ctx.font = '10px Courier New';
+            ctx.fillText('MENU DIAGRAM', cx, cy - radius - 14);
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1c14';
+            ctx.fillRect(0, 0, W, H);
+
+            // Machine housing
+            const margin = 30;
+            const topY = 90;
+            const botY = H - 70;
+            const machW = W - margin * 2;
+            const machH = botY - topY;
+
+            ctx.fillStyle = '#1e1e16';
+            ctx.strokeStyle = '#3a3a2e';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.roundRect(margin, topY, machW, machH, 12);
+            ctx.fill();
+            ctx.stroke();
+
+            // Title
+            ctx.font = 'bold 14px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#5a5a4a';
+            ctx.fillText('BOMBE  -  36 ENIGMA UNITS', W / 2, topY + 18);
+
+            // Grid of 36 units
+            const gridPad = 20;
+            const gridW = machW * 0.65;
+            const gridH = machH - 50;
+            const gridX = margin + gridPad;
+            const gridY = topY + 30;
+
+            const unitW = (gridW - (GRID_COLS - 1) * 4) / GRID_COLS;
+            const unitH = (gridH - (GRID_ROWS - 1) * 4) / GRID_ROWS;
+
+            for (let r = 0; r < GRID_ROWS; r++) {
+                for (let c = 0; c < GRID_COLS; c++) {
+                    const idx = r * GRID_COLS + c;
+                    const ux = gridX + c * (unitW + 4);
+                    const uy = gridY + r * (unitH + 4);
+                    drawUnit(ux, uy, unitW, unitH, idx);
+                }
+            }
+
+            // Menu diagram on the right
+            const menuCX = margin + gridW + gridPad + (machW - gridW - gridPad * 2) / 2;
+            const menuCY = topY + machH * 0.4;
+            const menuR = Math.min(80, (machW - gridW - gridPad * 3) / 2.5);
+            drawMenuDiagram(menuCX, menuCY, menuR);
+
+            // Stops list
+            if (stops.length > 0) {
+                ctx.font = '11px Courier New';
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#DDA15E';
+                const stopY = menuCY + menuR + 40;
+                ctx.fillText('STOPS:', menuCX, stopY);
+                stops.forEach((s, i) => {
+                    ctx.fillText(
+                        ALPHA[s[0]] + ALPHA[s[1]] + ALPHA[s[2]],
+                        menuCX, stopY + 16 + i * 14
+                    );
+                });
+            }
+
+            // Run animation steps
+            if (running) {
+                const stepsPerFrame = Math.max(1, Math.floor(testSpeed));
+                for (let i = 0; i < stepsPerFrame; i++) {
+                    stepBombe();
+                    if (!running) break;
+                }
+                testSpeed = Math.min(testSpeed + 0.5, 50);
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        document.getElementById('runBtn').addEventListener('click', () => {
+            const plain = document.getElementById('cribPlain').value.toUpperCase();
+            const cipher = document.getElementById('cribCipher').value.toUpperCase();
+            if (plain.length === 0 || cipher.length === 0) return;
+            if (plain.length !== cipher.length) {
+                document.getElementById('stateDisp').textContent = 'ERROR: Crib lengths must match';
+                return;
+            }
+
+            initMenu(plain, cipher);
+            currentPos = [0, 0, 0];
+            totalTested = 0;
+            stops = [];
+            found = false;
+            running = true;
+            testSpeed = 1;
+            unitStates = new Array(TOTAL_UNITS).fill(0);
+        });
+
+        document.getElementById('stopBtn').addEventListener('click', () => {
+            running = false;
+            document.getElementById('stateDisp').textContent = 'STOPPED';
+        });
+
+        window.reset = function() {
+            running = false;
+            found = false;
+            currentPos = [0, 0, 0];
+            totalTested = 0;
+            stops = [];
+            unitStates = new Array(TOTAL_UNITS).fill(0);
+            drumAngles = new Float32Array(TOTAL_UNITS * 3);
+            menuLinks = [];
+            document.getElementById('stateDisp').textContent = 'IDLE - Set a crib and press Run';
+            document.getElementById('posDisp').textContent = '';
+        };
+
+        document.getElementById('resetBtn').addEventListener('click', window.reset);
+
+        window.addEventListener('resize', resize);
+        resize();
+        unitStates = new Array(TOTAL_UNITS).fill(0);
+        requestAnimationFrame(draw);
+    })();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>
