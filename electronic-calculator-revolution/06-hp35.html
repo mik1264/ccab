@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HP-35 (1972) - The Calculator That Killed the Slide Rule</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0e0e12; color: #e0e0e8; font-family: 'Courier New', monospace; overflow: hidden; height: 100vh; }
+canvas { display: block; }
+
+a.back-link {
+    position: fixed; top: 12px; left: 12px; color: #DDA15E; text-decoration: none;
+    font-size: 13px; z-index: 200; opacity: 0.8; transition: opacity 0.2s;
+    background: rgba(10,10,14,0.7); padding: 4px 10px; border-radius: 8px;
+}
+a.back-link:hover { opacity: 1; }
+
+.info-panel {
+    position: fixed; bottom: 12px; right: 12px; z-index: 100;
+    background: rgba(14,14,18,0.94); backdrop-filter: blur(10px);
+    border-radius: 10px; padding: 14px 18px; max-width: 340px;
+    border: 1px solid rgba(100,140,200,0.2); font-size: 12px; line-height: 1.7; color: #90a0c0;
+}
+.info-panel h4 { color: #7098d0; margin-bottom: 6px; font-size: 13px; }
+.info-panel .highlight { color: #88bbff; }
+
+.stack-panel {
+    position: fixed; top: 60px; left: 12px; z-index: 100;
+    background: rgba(14,14,18,0.94); backdrop-filter: blur(10px);
+    border-radius: 10px; padding: 12px 16px; min-width: 140px;
+    border: 1px solid rgba(100,140,200,0.2); font-size: 11px; color: #7098d0;
+}
+.stack-panel h4 { margin-bottom: 6px; font-size: 11px; color: #5580b8; }
+.stack-panel .stack-line { font-family: monospace; margin: 2px 0; }
+.stack-panel .stack-x { color: #ff8844; font-weight: bold; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&#8592; HP-35</a>
+<canvas id="canvas"></canvas>
+
+<div class="stack-panel" id="stackPanel">
+    <h4>RPN STACK</h4>
+    <div class="stack-line">T: <span id="stackT">0</span></div>
+    <div class="stack-line">Z: <span id="stackZ">0</span></div>
+    <div class="stack-line">Y: <span id="stackY">0</span></div>
+    <div class="stack-line stack-x">X: <span id="stackX">0</span></div>
+</div>
+
+<div class="info-panel">
+    <h4>HP-35 (1972)</h4>
+    <p><span class="highlight">The calculator that killed the slide rule.</span> Bill Hewlett challenged his engineers: fit a scientific calculator into a shirt pocket. They delivered the HP-35&mdash;35 keys, all scientific functions, in a 9-ounce package.</p>
+    <p style="margin-top:6px;">It used <span class="highlight">Reverse Polish Notation (RPN)</span>: enter numbers, then the operator. No "=" key needed. The 4-level stack (T, Z, Y, X) made complex calculations elegant.</p>
+    <p style="margin-top:6px;">Price: <span class="highlight">$395</span> ($2,800 today). HP expected to sell 10,000. They sold 300,000 in the first three years. Keuffel &amp; Esser, the largest slide rule maker, ceased production.</p>
+    <p style="margin-top:6px;font-size:11px;opacity:0.7;">RPN: type number, press ENTER, type next, press operator &bull; Try: 2 ENTER 3 + = 5</p>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+// RPN Stack
+let stack = [0, 0, 0, 0]; // T, Z, Y, X (index 3 = X = display)
+let displayStr = '0';
+let newInput = true;
+let lastX = 0;
+let keyFlash = null, keyFlashTime = 0;
+let degMode = false; // false = radians
+
+function pushStack(val) {
+    stack[0] = stack[1]; // T = Z
+    stack[1] = stack[2]; // Z = Y
+    stack[2] = stack[3]; // Y = X
+    stack[3] = val;      // X = val
+}
+
+function dropStack() {
+    const x = stack[3];
+    stack[3] = stack[2];
+    stack[2] = stack[1];
+    stack[1] = stack[0];
+    return x;
+}
+
+function updateStackDisplay() {
+    document.getElementById('stackT').textContent = stack[0].toPrecision(8);
+    document.getElementById('stackZ').textContent = stack[1].toPrecision(8);
+    document.getElementById('stackY').textContent = stack[2].toPrecision(8);
+    document.getElementById('stackX').textContent = stack[3].toPrecision(8);
+}
+
+function formatDisplay(val) {
+    if (!isFinite(val)) return 'Error';
+    if (val === 0) return '0.';
+    let s;
+    if (Math.abs(val) >= 1e10 || (Math.abs(val) < 0.001 && val !== 0)) {
+        s = val.toExponential(8);
+    } else {
+        s = val.toPrecision(10);
+        if (s.includes('.')) s = s.replace(/0+$/, '');
+        if (!s.includes('.')) s += '.';
+    }
+    return s;
+}
+
+// HP-35 key layout: iconic blue/orange/white scheme
+// Row by row from top to bottom
+const hpKeys = [
+    // Function keys (top, blue labels)
+    [
+        { label: 'x^y', fn: 'pow', color: 'blue' },
+        { label: 'LOG', fn: 'log', color: 'blue' },
+        { label: 'LN', fn: 'ln', color: 'blue' },
+        { label: 'e^x', fn: 'exp', color: 'blue' },
+        { label: 'CLR', fn: 'clr', color: 'blue' }
+    ],
+    [
+        { label: '\u221Ax', fn: 'sqrt', color: 'blue' },
+        { label: 'SIN', fn: 'sin', color: 'blue' },
+        { label: 'COS', fn: 'cos', color: 'blue' },
+        { label: 'TAN', fn: 'tan', color: 'blue' },
+        { label: '1/x', fn: 'inv', color: 'blue' }
+    ],
+    [
+        { label: 'x\u2194y', fn: 'swap', color: 'orange' },
+        { label: 'R\u2193', fn: 'roll', color: 'orange' },
+        { label: 'STO', fn: 'sto', color: 'orange' },
+        { label: 'RCL', fn: 'rcl', color: 'orange' },
+        { label: 'DEG', fn: 'deg', color: 'orange' }
+    ],
+    [
+        { label: 'ENT', fn: 'enter', color: 'black', wide: true },
+        { label: 'CHS', fn: 'chs', color: 'black' },
+        { label: 'EEX', fn: 'eex', color: 'black' },
+        { label: 'CLX', fn: 'clx', color: 'black' }
+    ],
+    [
+        { label: '\u2212', fn: 'sub', color: 'orange' },
+        { label: '7', fn: '7', color: 'white' },
+        { label: '8', fn: '8', color: 'white' },
+        { label: '9', fn: '9', color: 'white' },
+        { label: '', fn: null, color: 'none' } // spacer
+    ],
+    [
+        { label: '+', fn: 'add', color: 'orange' },
+        { label: '4', fn: '4', color: 'white' },
+        { label: '5', fn: '5', color: 'white' },
+        { label: '6', fn: '6', color: 'white' },
+        { label: '\u00D7', fn: 'mul', color: 'orange' }
+    ],
+    [
+        { label: '\u03C0', fn: 'pi', color: 'blue' },
+        { label: '1', fn: '1', color: 'white' },
+        { label: '2', fn: '2', color: 'white' },
+        { label: '3', fn: '3', color: 'white' },
+        { label: '\u00F7', fn: 'div', color: 'orange' }
+    ],
+    [
+        { label: 'x\u00B2', fn: 'sq', color: 'blue' },
+        { label: '0', fn: '0', color: 'white' },
+        { label: '.', fn: 'dot', color: 'white' },
+        { label: '\u03A3+', fn: 'sigma', color: 'blue' },
+        { label: '', fn: null, color: 'none' } // spacer
+    ]
+];
+
+let mem = 0;
+
+function handleHP(fn) {
+    if (!fn) return;
+    keyFlash = fn; keyFlashTime = performance.now();
+
+    // Digit entry
+    if ('0123456789'.includes(fn)) {
+        if (newInput) {
+            stack[3] = 0;
+            displayStr = fn;
+            newInput = false;
+        } else {
+            displayStr += fn;
+        }
+        stack[3] = parseFloat(displayStr) || 0;
+        updateStackDisplay();
+        return;
+    }
+    if (fn === 'dot') {
+        if (newInput) { displayStr = '0.'; newInput = false; }
+        else if (!displayStr.includes('.')) displayStr += '.';
+        stack[3] = parseFloat(displayStr) || 0;
+        updateStackDisplay();
+        return;
+    }
+
+    // Finalize current input
+    if (!newInput) {
+        stack[3] = parseFloat(displayStr) || 0;
+        newInput = true;
+    }
+
+    const x = stack[3];
+    const y = stack[2];
+
+    switch(fn) {
+        case 'enter':
+            pushStack(x);
+            newInput = true;
+            break;
+        case 'add':
+            lastX = x;
+            dropStack();
+            stack[3] = y + x;
+            break;
+        case 'sub':
+            lastX = x;
+            dropStack();
+            stack[3] = y - x;
+            break;
+        case 'mul':
+            lastX = x;
+            dropStack();
+            stack[3] = y * x;
+            break;
+        case 'div':
+            lastX = x;
+            dropStack();
+            stack[3] = x !== 0 ? y / x : NaN;
+            break;
+        case 'pow':
+            lastX = x;
+            dropStack();
+            stack[3] = Math.pow(y, x);
+            break;
+        case 'sqrt':
+            lastX = x;
+            stack[3] = Math.sqrt(x);
+            break;
+        case 'sq':
+            lastX = x;
+            stack[3] = x * x;
+            break;
+        case 'inv':
+            lastX = x;
+            stack[3] = x !== 0 ? 1 / x : NaN;
+            break;
+        case 'sin': {
+            lastX = x;
+            const angle = degMode ? x * Math.PI / 180 : x;
+            stack[3] = Math.sin(angle);
+            break;
+        }
+        case 'cos': {
+            lastX = x;
+            const angle = degMode ? x * Math.PI / 180 : x;
+            stack[3] = Math.cos(angle);
+            break;
+        }
+        case 'tan': {
+            lastX = x;
+            const angle = degMode ? x * Math.PI / 180 : x;
+            stack[3] = Math.tan(angle);
+            break;
+        }
+        case 'log':
+            lastX = x;
+            stack[3] = Math.log10(x);
+            break;
+        case 'ln':
+            lastX = x;
+            stack[3] = Math.log(x);
+            break;
+        case 'exp':
+            lastX = x;
+            stack[3] = Math.exp(x);
+            break;
+        case 'pi':
+            pushStack(Math.PI);
+            break;
+        case 'chs':
+            stack[3] = -x;
+            break;
+        case 'swap':
+            stack[3] = y;
+            stack[2] = x;
+            break;
+        case 'roll':
+            const t = stack[0];
+            stack[0] = stack[1];
+            stack[1] = stack[2];
+            stack[2] = stack[3];
+            stack[3] = t;
+            break;
+        case 'clx':
+            stack[3] = 0;
+            displayStr = '0';
+            break;
+        case 'clr':
+            stack = [0, 0, 0, 0];
+            displayStr = '0';
+            newInput = true;
+            break;
+        case 'sto':
+            mem = x;
+            break;
+        case 'rcl':
+            pushStack(mem);
+            break;
+        case 'deg':
+            degMode = !degMode;
+            break;
+        case 'eex':
+            // Simplified EEX
+            if (newInput) displayStr = '1e';
+            else displayStr += 'e';
+            newInput = false;
+            return;
+        case 'sigma':
+            // Accumulate
+            mem += x;
+            break;
+    }
+
+    displayStr = formatDisplay(stack[3]);
+    newInput = true;
+    updateStackDisplay();
+}
+
+// Keyboard mapping
+document.addEventListener('keydown', (e) => {
+    const k = e.key;
+    if (k >= '0' && k <= '9') handleHP(k);
+    else if (k === '.') handleHP('dot');
+    else if (k === '+') handleHP('add');
+    else if (k === '-') handleHP('sub');
+    else if (k === '*') handleHP('mul');
+    else if (k === '/') { e.preventDefault(); handleHP('div'); }
+    else if (k === 'Enter') handleHP('enter');
+    else if (k === 'Escape') handleHP('clr');
+    else if (k === 'Backspace') handleHP('clx');
+    else if (k === 's') handleHP('sin');
+    else if (k === 'c') handleHP('cos');
+    else if (k === 't') handleHP('tan');
+    else if (k === 'l') handleHP('log');
+    else if (k === 'n') handleHP('ln');
+    else if (k === 'e') handleHP('exp');
+    else if (k === 'p') handleHP('pi');
+    else if (k === 'r') handleHP('sqrt');
+    else if (k === '^') handleHP('pow');
+});
+
+// Mouse clicks
+canvas.addEventListener('click', (e) => {
+    const layout = getLayout();
+    for (const k of layout.keys) {
+        if (k.fn && e.clientX >= k.x && e.clientX <= k.x + k.w && e.clientY >= k.y && e.clientY <= k.y + k.h) {
+            handleHP(k.fn);
+            return;
+        }
+    }
+});
+
+function getLayout() {
+    const calcW = Math.min(W * 0.4, 340);
+    const calcH = Math.min(H * 0.88, 660);
+    const calcX = (W - calcW) / 2;
+    const calcY = (H - calcH) / 2;
+    const dispH = 52;
+    const keyStartY = calcY + dispH + 30;
+    const keyAreaH = calcH - dispH - 40;
+    const rows = hpKeys.length;
+    const keyH = (keyAreaH - (rows - 1) * 3) / rows;
+    const result = [];
+
+    for (let r = 0; r < rows; r++) {
+        const row = hpKeys[r];
+        const validKeys = row.filter(k => k.color !== 'none');
+        const cols = row.length;
+        const keyW = (calcW - 30 - (cols - 1) * 3) / cols;
+
+        let colIdx = 0;
+        for (const k of row) {
+            if (k.color === 'none') { colIdx++; continue; }
+            const kw = k.wide ? keyW * 2 + 3 : keyW;
+            const nextColIdx = k.wide ? colIdx + 2 : colIdx + 1;
+            result.push({
+                label: k.label,
+                fn: k.fn,
+                color: k.color,
+                x: calcX + 15 + colIdx * (keyW + 3),
+                y: keyStartY + r * (keyH + 3),
+                w: kw,
+                h: keyH
+            });
+            colIdx = nextColIdx;
+        }
+    }
+
+    return { calcX, calcY, calcW, calcH, dispH, keys: result };
+}
+
+function drawLEDSegment(x, y, w, h, ch, brightness) {
+    // Red LED display character
+    if (ch === ' ') return;
+
+    const segs = {
+        '0': [1,1,1,1,1,1,0], '1': [0,1,1,0,0,0,0], '2': [1,1,0,1,1,0,1],
+        '3': [1,1,1,1,0,0,1], '4': [0,1,1,0,0,1,1], '5': [1,0,1,1,0,1,1],
+        '6': [1,0,1,1,1,1,1], '7': [1,1,1,0,0,0,0], '8': [1,1,1,1,1,1,1],
+        '9': [1,1,1,1,0,1,1], '-': [0,0,0,0,0,0,1], '.': [], 'E': [1,0,0,1,1,1,1],
+        'r': [0,0,0,0,1,0,1], 'o': [0,0,1,1,1,0,1], 'e': [1,0,0,1,1,1,1]
+    };
+
+    if (ch === '.') {
+        ctx.fillStyle = `rgba(255,60,40,${brightness})`;
+        ctx.beginPath();
+        ctx.arc(x + w * 0.5, y + h * 0.9, w * 0.1, 0, Math.PI * 2);
+        ctx.fill();
+        return;
+    }
+
+    const s = segs[ch];
+    if (!s) return;
+
+    const sw = w * 0.6;
+    const sh = h * 0.38;
+    const cx = x + w / 2;
+    const topY = y + h * 0.1;
+    const midY = y + h * 0.48;
+    const botY = y + h * 0.86;
+
+    ctx.shadowColor = `rgba(255,40,20,${brightness * 0.5})`;
+    ctx.shadowBlur = 6;
+    ctx.strokeStyle = `rgba(255,${50 + brightness * 30},${30 + brightness * 20},${brightness})`;
+    ctx.lineWidth = Math.max(1.5, w * 0.07);
+    ctx.lineCap = 'round';
+
+    if (s[0]) { ctx.beginPath(); ctx.moveTo(cx-sw/2,topY); ctx.lineTo(cx+sw/2,topY); ctx.stroke(); }
+    if (s[1]) { ctx.beginPath(); ctx.moveTo(cx+sw/2,topY); ctx.lineTo(cx+sw/2,midY); ctx.stroke(); }
+    if (s[2]) { ctx.beginPath(); ctx.moveTo(cx+sw/2,midY); ctx.lineTo(cx+sw/2,botY); ctx.stroke(); }
+    if (s[3]) { ctx.beginPath(); ctx.moveTo(cx-sw/2,botY); ctx.lineTo(cx+sw/2,botY); ctx.stroke(); }
+    if (s[4]) { ctx.beginPath(); ctx.moveTo(cx-sw/2,midY); ctx.lineTo(cx-sw/2,botY); ctx.stroke(); }
+    if (s[5]) { ctx.beginPath(); ctx.moveTo(cx-sw/2,topY); ctx.lineTo(cx-sw/2,midY); ctx.stroke(); }
+    if (s[6]) { ctx.beginPath(); ctx.moveTo(cx-sw/2,midY); ctx.lineTo(cx+sw/2,midY); ctx.stroke(); }
+
+    ctx.shadowBlur = 0;
+}
+
+function animate(t) {
+    ctx.fillStyle = '#0e0e12';
+    ctx.fillRect(0, 0, W, H);
+
+    const layout = getLayout();
+    const { calcX, calcY, calcW, calcH, dispH } = layout;
+    const now = performance.now();
+
+    // HP-35 body - dark charcoal plastic
+    const bodyGrad = ctx.createLinearGradient(calcX, calcY, calcX + calcW, calcY);
+    bodyGrad.addColorStop(0, '#2a2a30');
+    bodyGrad.addColorStop(0.5, '#323238');
+    bodyGrad.addColorStop(1, '#2a2a30');
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    ctx.roundRect(calcX, calcY, calcW, calcH, 16);
+    ctx.fill();
+
+    // Subtle body highlight
+    const bodyHi = ctx.createLinearGradient(calcX, calcY, calcX, calcY + 40);
+    bodyHi.addColorStop(0, 'rgba(255,255,255,0.04)');
+    bodyHi.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = bodyHi;
+    ctx.beginPath();
+    ctx.roundRect(calcX, calcY, calcW, 40, [16, 16, 0, 0]);
+    ctx.fill();
+
+    // HP logo
+    ctx.fillStyle = '#5a8ab8';
+    ctx.font = `bold ${Math.max(11, calcW * 0.04)}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.fillText('HEWLETT-PACKARD', calcX + 14, calcY + 14);
+    ctx.fillStyle = '#8ab8e0';
+    ctx.font = `bold ${Math.max(13, calcW * 0.05)}px sans-serif`;
+    ctx.fillText('HP-35', calcX + calcW - 80, calcY + 14);
+
+    // LED display area
+    const dispX = calcX + 12;
+    const dispY = calcY + 22;
+    const dispW = calcW - 24;
+
+    ctx.fillStyle = '#0a0202';
+    ctx.beginPath();
+    ctx.roundRect(dispX, dispY, dispW, dispH, 4);
+    ctx.fill();
+
+    // Red filter overlay
+    ctx.fillStyle = 'rgba(80,0,0,0.15)';
+    ctx.beginPath();
+    ctx.roundRect(dispX, dispY, dispW, dispH, 4);
+    ctx.fill();
+
+    // LED digits
+    let showStr = displayStr;
+    if (showStr.length > 15) showStr = showStr.slice(0, 15);
+    const padded = showStr.padStart(15, ' ');
+    const digitW = (dispW - 10) / 15;
+
+    for (let i = 0; i < 15; i++) {
+        drawLEDSegment(dispX + 5 + i * digitW, dispY + 4, digitW, dispH - 8, padded[i], 0.85);
+    }
+
+    // Mode indicator
+    ctx.fillStyle = degMode ? 'rgba(255,60,40,0.7)' : 'rgba(60,60,80,0.3)';
+    ctx.font = `8px monospace`;
+    ctx.textAlign = 'right';
+    ctx.fillText(degMode ? 'DEG' : 'RAD', dispX + dispW - 4, dispY + dispH - 3);
+
+    // Draw keys
+    for (const k of layout.keys) {
+        const isFlash = keyFlash === k.fn && (now - keyFlashTime) < 120;
+
+        // Key colors based on HP-35 layout
+        let bgColor, textColor;
+        switch(k.color) {
+            case 'blue':
+                bgColor = isFlash ? '#3060a0' : '#1a3a6a';
+                textColor = '#a0c8ff';
+                break;
+            case 'orange':
+                bgColor = isFlash ? '#a06830' : '#7a4820';
+                textColor = '#ffcc88';
+                break;
+            case 'white':
+                bgColor = isFlash ? '#888888' : '#606068';
+                textColor = '#ffffff';
+                break;
+            default:
+                bgColor = isFlash ? '#444448' : '#2a2a30';
+                textColor = '#ccccdd';
+        }
+
+        ctx.fillStyle = bgColor;
+        ctx.beginPath();
+        ctx.roundRect(k.x, k.y, k.w, k.h, 4);
+        ctx.fill();
+
+        // Key top bevel
+        const kGrad = ctx.createLinearGradient(k.x, k.y, k.x, k.y + k.h);
+        kGrad.addColorStop(0, 'rgba(255,255,255,0.08)');
+        kGrad.addColorStop(0.5, 'rgba(255,255,255,0)');
+        kGrad.addColorStop(1, 'rgba(0,0,0,0.15)');
+        ctx.fillStyle = kGrad;
+        ctx.beginPath();
+        ctx.roundRect(k.x, k.y, k.w, k.h, 4);
+        ctx.fill();
+
+        ctx.fillStyle = textColor;
+        ctx.font = `bold ${Math.max(9, k.h * 0.38)}px 'Courier New', monospace`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(k.label, k.x + k.w / 2, k.y + k.h / 2);
+    }
+
+    requestAnimationFrame(animate);
+}
+
+function resetAll() {
+    stack = [0, 0, 0, 0];
+    displayStr = '0';
+    newInput = true;
+    lastX = 0;
+    mem = 0;
+    degMode = false;
+    updateStackDisplay();
+}
+
+window.reset = resetAll;
+requestAnimationFrame(animate);
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

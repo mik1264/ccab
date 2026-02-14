@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strasbourg Astronomical Clock (1843) - Scientific Instruments</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #12100e;
+            overflow: hidden;
+            font-family: 'Georgia', serif;
+            color: #d4a857;
+        }
+        canvas { display: block; }
+        #controls {
+            position: fixed;
+            top: 60px;
+            right: 20px;
+            background: rgba(30, 22, 15, 0.92);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(212, 168, 87, 0.3);
+            border-radius: 12px;
+            padding: 14px 18px;
+            z-index: 100;
+            font-size: 13px;
+            min-width: 180px;
+        }
+        #controls label {
+            display: block;
+            margin: 6px 0 2px;
+            color: #c4a060;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        #controls input[type="range"] {
+            width: 100%;
+            accent-color: #d4a857;
+        }
+        #controls .val { color: #d4a857; font-weight: bold; float: right; }
+        #time-display {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(30, 22, 15, 0.92);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(212, 168, 87, 0.3);
+            border-radius: 12px;
+            padding: 10px 24px;
+            font-size: 16px;
+            color: #d4a857;
+            z-index: 100;
+            text-align: center;
+            font-variant-numeric: tabular-nums;
+        }
+        #info-panel {
+            position: fixed;
+            bottom: 70px;
+            right: 20px;
+            background: rgba(30, 22, 15, 0.9);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(212, 168, 87, 0.3);
+            border-radius: 12px;
+            padding: 16px 20px;
+            max-width: 300px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #c4a060;
+            z-index: 100;
+        }
+        #info-panel h3 {
+            color: #d4a857;
+            margin-bottom: 8px;
+            font-size: 15px;
+            border-bottom: 1px solid rgba(212, 168, 87, 0.3);
+            padding-bottom: 6px;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" style="position:fixed;top:10px;left:10px;z-index:1000;background:rgba(255,255,255,0.8);padding:6px 14px;border-radius:20px;text-decoration:none;color:#606C38;font-weight:600;backdrop-filter:blur(10px)">&larr; Back</a>
+
+    <canvas id="canvas"></canvas>
+
+    <div id="controls">
+        <label>Time Speed <span class="val" id="speed-val">60x</span></label>
+        <input type="range" id="speed" min="0" max="3600" value="60" step="1">
+    </div>
+
+    <div id="time-display">Loading...</div>
+
+    <div id="info-panel">
+        <h3>Strasbourg Clock</h3>
+        <p>The third Strasbourg astronomical clock (1843), designed by Jean-Baptiste Schwilgu&eacute;, displays civil time, solar time, moon phases, eclipses, equation of time, zodiac position, and features automata including an apostle procession and a crowing rooster at noon.</p>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const speedSlider = document.getElementById('speed');
+        const speedVal = document.getElementById('speed-val');
+        const timeDisplay = document.getElementById('time-display');
+
+        speedSlider.addEventListener('input', () => {
+            const v = parseInt(speedSlider.value);
+            speedVal.textContent = v + 'x';
+        });
+
+        // Simulation time starts from now
+        let simTime = Date.now();
+        let paused = false;
+
+        const zodiacSymbols = ['\u2648', '\u2649', '\u264A', '\u264B', '\u264C', '\u264D', '\u264E', '\u264F', '\u2650', '\u2651', '\u2652', '\u2653'];
+        const zodiacNames = ['Aries', 'Taurus', 'Gemini', 'Cancer', 'Leo', 'Virgo', 'Libra', 'Scorpio', 'Sagittarius', 'Capricorn', 'Aquarius', 'Pisces'];
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+        // Equation of time approximation (minutes)
+        function equationOfTime(dayOfYear) {
+            const b = (360 / 365) * (dayOfYear - 81) * Math.PI / 180;
+            return 9.87 * Math.sin(2 * b) - 7.53 * Math.cos(b) - 1.5 * Math.sin(b);
+        }
+
+        // Moon phase (0-1, 0=new, 0.5=full)
+        function moonPhase(timestamp) {
+            const knownNew = new Date(2000, 0, 6, 18, 14).getTime();
+            const synodicMonth = 29.53058867 * 24 * 60 * 60 * 1000;
+            return ((timestamp - knownNew) % synodicMonth + synodicMonth) % synodicMonth / synodicMonth;
+        }
+
+        // Sun ecliptic longitude (approximate)
+        function sunLongitude(dayOfYear) {
+            return ((dayOfYear - 80) / 365.25 * 360 + 360) % 360;
+        }
+
+        function drawClockFace(cx, cy, r) {
+            // Outer bezel
+            const bezelGrad = ctx.createRadialGradient(cx, cy, r * 0.95, cx, cy, r);
+            bezelGrad.addColorStop(0, 'rgba(180, 140, 60, 0.4)');
+            bezelGrad.addColorStop(0.5, 'rgba(140, 100, 40, 0.5)');
+            bezelGrad.addColorStop(1, 'rgba(100, 70, 30, 0.3)');
+            ctx.fillStyle = bezelGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Face
+            const faceGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 0.93);
+            faceGrad.addColorStop(0, 'rgba(35, 28, 18, 1)');
+            faceGrad.addColorStop(0.7, 'rgba(25, 20, 14, 1)');
+            faceGrad.addColorStop(1, 'rgba(40, 30, 18, 1)');
+            ctx.fillStyle = faceGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r * 0.93, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Inner ring borders
+            [0.93, 0.82, 0.65, 0.45].forEach(ratio => {
+                ctx.strokeStyle = 'rgba(180, 140, 60, 0.3)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r * ratio, 0, Math.PI * 2);
+                ctx.stroke();
+            });
+        }
+
+        function drawHourMarkers(cx, cy, r) {
+            // Roman numerals
+            const romans = ['XII', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI'];
+            for (let i = 0; i < 12; i++) {
+                const angle = (i / 12) * Math.PI * 2 - Math.PI / 2;
+                const tr = r * 0.88;
+
+                // Tick mark
+                ctx.strokeStyle = 'rgba(212, 168, 87, 0.7)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(angle) * r * 0.82, cy + Math.sin(angle) * r * 0.82);
+                ctx.lineTo(cx + Math.cos(angle) * r * 0.93, cy + Math.sin(angle) * r * 0.93);
+                ctx.stroke();
+
+                // Numeral
+                ctx.fillStyle = '#d4a857';
+                ctx.font = `${r * 0.065}px Georgia`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(romans[i], cx + Math.cos(angle) * tr, cy + Math.sin(angle) * tr);
+            }
+
+            // Minute ticks
+            for (let i = 0; i < 60; i++) {
+                if (i % 5 === 0) continue;
+                const angle = (i / 60) * Math.PI * 2 - Math.PI / 2;
+                ctx.strokeStyle = 'rgba(180, 140, 60, 0.35)';
+                ctx.lineWidth = 0.8;
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(angle) * r * 0.91, cy + Math.sin(angle) * r * 0.91);
+                ctx.lineTo(cx + Math.cos(angle) * r * 0.93, cy + Math.sin(angle) * r * 0.93);
+                ctx.stroke();
+            }
+        }
+
+        function drawZodiacRing(cx, cy, r, sunLong) {
+            for (let i = 0; i < 12; i++) {
+                const startAngle = (i * 30 - 90) * Math.PI / 180;
+                const endAngle = ((i + 1) * 30 - 90) * Math.PI / 180;
+                const midAngle = (startAngle + endAngle) / 2;
+
+                // Segment fill (highlight current zodiac)
+                const zodiacIdx = Math.floor(sunLong / 30);
+                if (i === zodiacIdx) {
+                    ctx.fillStyle = 'rgba(212, 168, 87, 0.12)';
+                    ctx.beginPath();
+                    ctx.moveTo(cx, cy);
+                    ctx.arc(cx, cy, r * 0.65, startAngle, endAngle);
+                    ctx.fill();
+                }
+
+                // Divider lines
+                ctx.strokeStyle = 'rgba(140, 110, 50, 0.3)';
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(startAngle) * r * 0.45, cy + Math.sin(startAngle) * r * 0.45);
+                ctx.lineTo(cx + Math.cos(startAngle) * r * 0.65, cy + Math.sin(startAngle) * r * 0.65);
+                ctx.stroke();
+
+                // Symbol
+                ctx.fillStyle = i === zodiacIdx ? '#d4a857' : 'rgba(180, 140, 60, 0.5)';
+                ctx.font = `${r * 0.06}px serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(zodiacSymbols[i], cx + Math.cos(midAngle) * r * 0.55, cy + Math.sin(midAngle) * r * 0.55);
+            }
+        }
+
+        function drawMoonPhase(cx, cy, r, phase) {
+            // Moon disc
+            ctx.fillStyle = 'rgba(30, 25, 18, 1)';
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(180, 140, 60, 0.4)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Illuminated part
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.clip();
+
+            const illumination = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+            const isWaxing = phase < 0.5;
+
+            ctx.fillStyle = '#e8d8a0';
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, -Math.PI / 2, Math.PI / 2, !isWaxing);
+            const bulge = (illumination * 2 - 1) * r;
+            ctx.ellipse(cx, cy, Math.abs(bulge), r, 0, Math.PI / 2, -Math.PI / 2, bulge > 0 ? isWaxing : !isWaxing);
+            ctx.fill();
+            ctx.restore();
+
+            // Label
+            ctx.fillStyle = 'rgba(212, 168, 87, 0.6)';
+            ctx.font = `${r * 0.3}px Georgia`;
+            ctx.textAlign = 'center';
+            ctx.fillText(phase < 0.25 ? 'Waxing' : phase < 0.5 ? 'Gibbous' : phase < 0.75 ? 'Waning' : 'Crescent', cx, cy + r + 14);
+        }
+
+        function drawHand(cx, cy, length, angle, width, color, hasOrnament) {
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(angle);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.lineCap = 'round';
+
+            // Main shaft
+            ctx.beginPath();
+            ctx.moveTo(0, length * 0.15);
+            ctx.lineTo(0, -length);
+            ctx.stroke();
+
+            if (hasOrnament) {
+                // Decorative circle near tip
+                ctx.beginPath();
+                ctx.arc(0, -length * 0.75, width * 2, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // Counterweight
+            ctx.beginPath();
+            ctx.arc(0, length * 0.1, width * 1.5, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        function drawAutomata(cx, cy, r, hours, minutes) {
+            // Apostle procession near the top
+            const isNoon = hours === 12 && minutes < 5;
+            const procY = cy - r * 0.35;
+            const procX = cx;
+
+            // Platform
+            ctx.fillStyle = 'rgba(140, 100, 40, 0.3)';
+            ctx.fillRect(procX - r * 0.3, procY - 2, r * 0.6, 4);
+
+            // Apostle figures (small colored circles)
+            for (let i = 0; i < 6; i++) {
+                const offset = isNoon ? (Date.now() % 4000) / 4000 * r * 0.5 : 0;
+                const fx = procX - r * 0.25 + (i / 5) * r * 0.5 + (isNoon ? Math.sin(offset + i) * 5 : 0);
+                const fy = procY - 8;
+                const colors = ['#c06040', '#5588bb', '#8a8a5b', '#d4a050', '#a060a0', '#60a0a0'];
+                ctx.fillStyle = isNoon ? colors[i] : 'rgba(100, 80, 50, 0.3)';
+                ctx.beginPath();
+                ctx.arc(fx, fy, 4, 0, Math.PI * 2);
+                ctx.fill();
+                // Head
+                ctx.fillStyle = isNoon ? '#e8d0a0' : 'rgba(100, 80, 50, 0.2)';
+                ctx.beginPath();
+                ctx.arc(fx, fy - 6, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Rooster
+            const roosterX = cx + r * 0.32;
+            const roosterY = procY - 5;
+            ctx.fillStyle = isNoon ? '#c06040' : 'rgba(100, 80, 50, 0.3)';
+            ctx.beginPath();
+            ctx.ellipse(roosterX, roosterY, 6, 4, 0, 0, Math.PI * 2);
+            ctx.fill();
+            // Comb
+            ctx.fillStyle = isNoon ? '#e04030' : 'rgba(80, 40, 30, 0.3)';
+            ctx.beginPath();
+            ctx.arc(roosterX + 3, roosterY - 4, 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (isNoon) {
+                ctx.fillStyle = 'rgba(212, 168, 87, 0.8)';
+                ctx.font = '10px Georgia';
+                ctx.textAlign = 'center';
+                ctx.fillText('Cock-a-doodle-doo!', cx, procY - 22);
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const speed = parseInt(speedSlider.value);
+            if (!paused) simTime += speed * (1000 / 60);
+
+            const d = new Date(simTime);
+            const hours = d.getHours();
+            const minutes = d.getMinutes();
+            const seconds = d.getSeconds();
+            const ms = d.getMilliseconds();
+
+            const dayOfYear = Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000);
+            const eot = equationOfTime(dayOfYear);
+            const phase = moonPhase(simTime);
+            const sunLong = sunLongitude(dayOfYear);
+
+            ctx.fillStyle = '#12100e';
+            ctx.fillRect(0, 0, W, H);
+
+            const cx = W / 2;
+            const cy = H / 2;
+            const r = Math.min(W, H) * 0.42;
+
+            // Main clock face
+            drawClockFace(cx, cy, r);
+            drawHourMarkers(cx, cy, r);
+            drawZodiacRing(cx, cy, r, sunLong);
+
+            // Automata
+            drawAutomata(cx, cy, r, hours % 12 === 0 ? 12 : hours % 12, minutes);
+
+            // Sun position marker on zodiac ring
+            const sunAngle = (sunLong - 90) * Math.PI / 180;
+            ctx.fillStyle = '#ffd040';
+            ctx.beginPath();
+            ctx.arc(cx + Math.cos(sunAngle) * r * 0.55, cy + Math.sin(sunAngle) * r * 0.55, 5, 0, Math.PI * 2);
+            ctx.fill();
+            // Sun rays
+            for (let i = 0; i < 8; i++) {
+                const ra = sunAngle + (i / 8) * Math.PI * 2;
+                ctx.strokeStyle = 'rgba(255, 208, 64, 0.4)';
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(sunAngle) * r * 0.55 + Math.cos(ra) * 6, cy + Math.sin(sunAngle) * r * 0.55 + Math.sin(ra) * 6);
+                ctx.lineTo(cx + Math.cos(sunAngle) * r * 0.55 + Math.cos(ra) * 10, cy + Math.sin(sunAngle) * r * 0.55 + Math.sin(ra) * 10);
+                ctx.stroke();
+            }
+
+            // Moon position marker (approximate)
+            const moonLong = (sunLong + phase * 360) % 360;
+            const moonAngle = (moonLong - 90) * Math.PI / 180;
+            ctx.fillStyle = '#bbb8a0';
+            ctx.beginPath();
+            ctx.arc(cx + Math.cos(moonAngle) * r * 0.5, cy + Math.sin(moonAngle) * r * 0.5, 4, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Moon phase display (small, in center area)
+            drawMoonPhase(cx, cy - r * 0.18, r * 0.08, phase);
+
+            // Equation of time display
+            ctx.fillStyle = 'rgba(212, 168, 87, 0.5)';
+            ctx.font = `${r * 0.035}px Georgia`;
+            ctx.textAlign = 'center';
+            ctx.fillText(`EoT: ${eot > 0 ? '+' : ''}${eot.toFixed(1)}m`, cx, cy + r * 0.15);
+
+            // Calendar display
+            ctx.fillStyle = 'rgba(212, 168, 87, 0.6)';
+            ctx.font = `${r * 0.04}px Georgia`;
+            ctx.fillText(`${dayNames[d.getDay()]} ${d.getDate()} ${monthNames[d.getMonth()]} ${d.getFullYear()}`, cx, cy + r * 0.25);
+
+            // Clock hands
+            const hourAngle = ((hours % 12) + minutes / 60 + seconds / 3600) / 12 * Math.PI * 2 - Math.PI / 2;
+            const minAngle = (minutes + seconds / 60) / 60 * Math.PI * 2 - Math.PI / 2;
+            const secAngle = (seconds + ms / 1000) / 60 * Math.PI * 2 - Math.PI / 2;
+
+            // Solar time hand
+            const solarMinutes = minutes + eot;
+            const solarAngle = ((hours % 12) + solarMinutes / 60) / 12 * Math.PI * 2 - Math.PI / 2;
+            drawHand(cx, cy, r * 0.45, solarAngle, 1, 'rgba(255, 200, 50, 0.35)', false);
+
+            // Hour hand (thick, brass)
+            drawHand(cx, cy, r * 0.5, hourAngle, 4, '#d4a857', true);
+            // Minute hand
+            drawHand(cx, cy, r * 0.7, minAngle, 2.5, '#c4a060', true);
+            // Second hand (thin, red-copper)
+            drawHand(cx, cy, r * 0.75, secAngle, 1, '#c06040', false);
+
+            // Center hub
+            const hubGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 8);
+            hubGrad.addColorStop(0, '#e8c870');
+            hubGrad.addColorStop(1, '#8a6a30');
+            ctx.fillStyle = hubGrad;
+            ctx.beginPath();
+            ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Time display
+            const h12 = hours % 12 || 12;
+            const ampm = hours < 12 ? 'AM' : 'PM';
+            const solarH = Math.floor(((hours * 60 + solarMinutes) / 60 + 24) % 24);
+            const solarM = Math.floor(((solarMinutes % 60) + 60) % 60);
+            timeDisplay.textContent = `${String(h12).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')} ${ampm}  |  Solar: ${String(solarH % 12 || 12).padStart(2, '0')}:${String(solarM).padStart(2, '0')}  |  Moon: ${(phase * 100).toFixed(0)}%  |  ${zodiacSymbols[Math.floor(sunLong / 30)]} ${zodiacNames[Math.floor(sunLong / 30)]}`;
+        }
+
+        window.reset = function() {
+            simTime = Date.now();
+            speedSlider.value = 60;
+            speedVal.textContent = '60x';
+            paused = false;
+        };
+
+        animate();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>
