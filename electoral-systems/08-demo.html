@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Banzhaf Power Index Calculator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        canvas { display: block; }
+        .controls { position: fixed; top: 10px; right: 10px; width: 300px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 14px; border-radius: 12px; z-index: 100; max-height: 95vh; overflow-y: auto; }
+        h1 { font-size: 1.1rem; color: #DDA15E; margin-bottom: 4px; }
+        .sub { font-size: 0.78rem; color: #8A9A5B; margin-bottom: 12px; }
+        .voter { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; padding: 6px 8px; background: rgba(255,255,255,0.05); border-radius: 6px; }
+        .voter input { width: 60px; padding: 4px; background: rgba(255,255,255,0.1); border: 1px solid rgba(138,154,91,0.3); color: #FEFAE0; border-radius: 4px; text-align: center; font-size: 0.85rem; }
+        .voter .name { flex: 1; font-size: 0.85rem; }
+        .voter .power { font-size: 0.85rem; font-weight: 600; color: #DDA15E; width: 50px; text-align: right; }
+        .quota-ctrl { margin-bottom: 12px; }
+        .quota-ctrl label { font-size: 0.85rem; color: #DDA15E; display: block; margin-bottom: 4px; }
+        input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+        select { width: 100%; padding: 6px; background: rgba(255,255,255,0.1); border: 1px solid rgba(138,154,91,0.3); color: #FEFAE0; border-radius: 6px; font-size: 0.85rem; margin-bottom: 8px; }
+        button { padding: 6px 14px; background: #606C38; color: #FEFAE0; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; margin-right: 4px; margin-top: 4px; }
+        button:hover { background: #8A9A5B; }
+        .info { font-size: 0.72rem; color: #606C38; line-height: 1.4; margin-top: 10px; padding: 8px; background: rgba(96,108,56,0.15); border-radius: 6px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <h1>Banzhaf Power Index</h1>
+        <p class="sub">Who really has the power in weighted voting?</p>
+        <div>
+            <label style="font-size:0.85rem;color:#DDA15E;">Preset:</label>
+            <select id="preset">
+                <option value="custom">Custom</option>
+                <option value="un">UN Security Council (simplified)</option>
+                <option value="eu">EU Council (simplified)</option>
+                <option value="company">Corporate Board</option>
+            </select>
+        </div>
+        <div class="quota-ctrl">
+            <label>Quota (votes to pass): <span id="qVal">51</span></label>
+            <input type="range" id="quota" min="1" max="100" value="51">
+        </div>
+        <div id="voterList"></div>
+        <button id="addBtn">+ Add Voter</button>
+        <button id="calcBtn">Calculate</button>
+        <div class="info">
+            <strong>Banzhaf Power Index:</strong> Counts how often each voter is "critical" -- meaning their vote changes the outcome. A voter with 1% of the votes might have 0% power (a dummy voter), or a voter with 49% might have equal power to one with 51%. Power depends on the quota and the combination of weights.
+        </div>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const colors = ['#e63946','#457b9d','#2a9d8f','#e9c46a','#f4a261','#a8dadc','#264653','#ff6b6b','#6a994e','#bc4749'];
+
+        let voters = [
+            { name: 'A', weight: 4 },
+            { name: 'B', weight: 3 },
+            { name: 'C', weight: 2 },
+            { name: 'D', weight: 1 }
+        ];
+        let quota = 6;
+        let powerIndices = [];
+        let criticalCounts = [];
+        let winningCoalitions = [];
+        let animT = 0;
+
+        function buildUI() {
+            const list = document.getElementById('voterList');
+            list.innerHTML = '';
+            voters.forEach((v, i) => {
+                const div = document.createElement('div');
+                div.className = 'voter';
+                div.innerHTML = `
+                    <span class="name" style="color:${colors[i % colors.length]}">${v.name}</span>
+                    <input type="number" value="${v.weight}" min="0" max="100" data-i="${i}">
+                    <span class="power" id="pow${i}">--</span>
+                `;
+                div.querySelector('input').addEventListener('change', e => {
+                    voters[i].weight = Math.max(0, +e.target.value);
+                    updateQuotaMax();
+                });
+                list.appendChild(div);
+            });
+            updateQuotaMax();
+        }
+
+        function updateQuotaMax() {
+            const total = voters.reduce((s, v) => s + v.weight, 0);
+            document.getElementById('quota').max = total;
+            if (quota > total) {
+                quota = Math.ceil(total / 2);
+                document.getElementById('quota').value = quota;
+                document.getElementById('qVal').textContent = quota;
+            }
+        }
+
+        document.getElementById('quota').addEventListener('input', e => {
+            quota = +e.target.value;
+            document.getElementById('qVal').textContent = quota;
+        });
+
+        document.getElementById('addBtn').addEventListener('click', () => {
+            if (voters.length < 10) {
+                voters.push({ name: String.fromCharCode(65 + voters.length), weight: 1 });
+                buildUI();
+            }
+        });
+
+        document.getElementById('preset').addEventListener('change', e => {
+            const presets = {
+                un: { voters: [{name:'P1(Veto)',weight:7},{name:'P2(Veto)',weight:7},{name:'P3(Veto)',weight:7},{name:'P4(Veto)',weight:7},{name:'P5(Veto)',weight:7},{name:'NP1',weight:1},{name:'NP2',weight:1},{name:'NP3',weight:1},{name:'NP4',weight:1},{name:'NP5',weight:1}], quota: 39 },
+                eu: { voters: [{name:'Germany',weight:29},{name:'France',weight:29},{name:'Italy',weight:29},{name:'Spain',weight:27},{name:'Poland',weight:13},{name:'Netherlands',weight:13},{name:'Belgium',weight:12},{name:'Others',weight:10}], quota: 91 },
+                company: { voters: [{name:'CEO',weight:30},{name:'CFO',weight:20},{name:'Board A',weight:15},{name:'Board B',weight:15},{name:'Board C',weight:10},{name:'Board D',weight:10}], quota: 51 }
+            };
+            if (presets[e.target.value]) {
+                voters = presets[e.target.value].voters;
+                quota = presets[e.target.value].quota;
+                document.getElementById('quota').value = quota;
+                document.getElementById('qVal').textContent = quota;
+                buildUI();
+                calculate();
+            }
+        });
+
+        document.getElementById('calcBtn').addEventListener('click', calculate);
+
+        function calculate() {
+            const n = voters.length;
+            criticalCounts = voters.map(() => 0);
+            winningCoalitions = [];
+
+            // Enumerate all coalitions (2^n)
+            const total = 1 << n;
+            for (let mask = 0; mask < total; mask++) {
+                let sum = 0;
+                for (let i = 0; i < n; i++) {
+                    if (mask & (1 << i)) sum += voters[i].weight;
+                }
+                if (sum >= quota) {
+                    const members = [];
+                    const critical = [];
+                    for (let i = 0; i < n; i++) {
+                        if (mask & (1 << i)) {
+                            members.push(i);
+                            if (sum - voters[i].weight < quota) {
+                                criticalCounts[i]++;
+                                critical.push(i);
+                            }
+                        }
+                    }
+                    winningCoalitions.push({ members, critical, sum });
+                }
+            }
+
+            const totalCritical = criticalCounts.reduce((s, c) => s + c, 0);
+            powerIndices = criticalCounts.map(c => totalCritical > 0 ? c / totalCritical : 0);
+
+            // Update UI
+            voters.forEach((v, i) => {
+                const el = document.getElementById('pow' + i);
+                if (el) el.textContent = (powerIndices[i] * 100).toFixed(1) + '%';
+            });
+
+            animT = 0;
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        function draw() {
+            const w = window.innerWidth;
+            const h = window.innerHeight;
+            if (canvas.width !== w * devicePixelRatio) resize();
+
+            ctx.clearRect(0, 0, w, h);
+            const grad = ctx.createLinearGradient(0, 0, 0, h);
+            grad.addColorStop(0, '#1a1a2e');
+            grad.addColorStop(1, '#16213e');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, w, h);
+
+            const cw = w - 330;
+
+            if (powerIndices.length === 0) {
+                ctx.font = '16px "Segoe UI", system-ui, sans-serif';
+                ctx.fillStyle = '#8A9A5B';
+                ctx.textAlign = 'center';
+                ctx.fillText('Set weights and click "Calculate"', cw / 2, h / 2);
+                requestAnimationFrame(draw);
+                return;
+            }
+
+            // Weight vs Power comparison
+            const totalWeight = voters.reduce((s, v) => s + v.weight, 0);
+            const barArea = { x: 60, y: 60, w: cw - 100, h: h * 0.35 };
+
+            ctx.font = 'bold 16px "Segoe UI", system-ui, sans-serif';
+            ctx.fillStyle = '#DDA15E';
+            ctx.textAlign = 'center';
+            ctx.fillText('Weight Share vs Power Share', barArea.x + barArea.w / 2, 35);
+
+            const groupW = barArea.w / voters.length;
+            voters.forEach((v, i) => {
+                const gx = barArea.x + i * groupW;
+                const weightPct = (v.weight / totalWeight) * 100;
+                const powerPct = powerIndices[i] * 100;
+
+                // Weight bar
+                const wh = (weightPct / 60) * barArea.h * Math.min(1, animT * 2);
+                ctx.fillStyle = colors[i % colors.length];
+                ctx.globalAlpha = 0.4;
+                ctx.fillRect(gx + 8, barArea.y + barArea.h - wh, groupW * 0.35, wh);
+                ctx.globalAlpha = 1;
+
+                // Power bar
+                const ph = (powerPct / 60) * barArea.h * Math.min(1, animT * 2);
+                ctx.fillStyle = colors[i % colors.length];
+                ctx.fillRect(gx + groupW * 0.45, barArea.y + barArea.h - ph, groupW * 0.35, ph);
+
+                // Labels
+                ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+                ctx.fillStyle = '#FEFAE0';
+                ctx.textAlign = 'center';
+                if (wh > 12) ctx.fillText(weightPct.toFixed(1) + '%', gx + 8 + groupW * 0.175, barArea.y + barArea.h - wh - 4);
+                if (ph > 12) ctx.fillText(powerPct.toFixed(1) + '%', gx + groupW * 0.625, barArea.y + barArea.h - ph - 4);
+
+                ctx.fillStyle = colors[i % colors.length];
+                ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+                ctx.fillText(v.name, gx + groupW / 2, barArea.y + barArea.h + 16);
+
+                // Arrow showing discrepancy
+                if (animT > 1.5) {
+                    const diff = powerPct - weightPct;
+                    if (Math.abs(diff) > 0.5) {
+                        ctx.font = '9px "Segoe UI", system-ui, sans-serif';
+                        ctx.fillStyle = diff > 0 ? '#2a9d8f' : '#e63946';
+                        const sign = diff > 0 ? '+' : '';
+                        ctx.fillText(`${sign}${diff.toFixed(1)}`, gx + groupW / 2, barArea.y + barArea.h + 28);
+                    }
+                }
+            });
+
+            // Legend
+            ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.globalAlpha = 0.5;
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillRect(barArea.x, barArea.y - 20, 12, 10);
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fillText('Weight %', barArea.x + 16, barArea.y - 11);
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillRect(barArea.x + 90, barArea.y - 20, 12, 10);
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fillText('Banzhaf Power %', barArea.x + 106, barArea.y - 11);
+
+            // Pie chart of power
+            const pieR = Math.min(cw * 0.15, h * 0.15);
+            const pieCx = cw * 0.25;
+            const pieCy = barArea.y + barArea.h + 80 + pieR;
+
+            ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif';
+            ctx.fillStyle = '#DDA15E';
+            ctx.textAlign = 'center';
+            ctx.fillText('Power Distribution', pieCx, pieCy - pieR - 12);
+
+            let startA = -Math.PI / 2;
+            voters.forEach((v, i) => {
+                const angle = powerIndices[i] * Math.PI * 2 * Math.min(1, animT * 1.5);
+                ctx.beginPath();
+                ctx.moveTo(pieCx, pieCy);
+                ctx.arc(pieCx, pieCy, pieR, startA, startA + angle);
+                ctx.closePath();
+                ctx.fillStyle = colors[i % colors.length];
+                ctx.fill();
+                ctx.strokeStyle = '#1a1a2e';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                startA += angle;
+            });
+
+            // Winning coalitions display
+            const coalX = cw * 0.5;
+            const coalY = barArea.y + barArea.h + 60;
+            ctx.font = 'bold 13px "Segoe UI", system-ui, sans-serif';
+            ctx.fillStyle = '#DDA15E';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Winning Coalitions: ${winningCoalitions.length}`, coalX, coalY);
+
+            ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+            const maxShow = Math.min(winningCoalitions.length, Math.floor((h - coalY - 20) / 18));
+            winningCoalitions.slice(0, maxShow).forEach((wc, wi) => {
+                const cy = coalY + 16 + wi * 18;
+                const alpha = Math.min(1, animT * 3 - wi * 0.1);
+                if (alpha <= 0) return;
+                ctx.globalAlpha = Math.max(0, alpha);
+
+                let tx = coalX;
+                ctx.fillStyle = '#FEFAE0';
+                ctx.fillText('{', tx, cy);
+                tx += 8;
+                wc.members.forEach((m, mi) => {
+                    const isCritical = wc.critical.includes(m);
+                    ctx.fillStyle = isCritical ? '#DDA15E' : colors[m % colors.length];
+                    ctx.font = isCritical ? 'bold 10px "Segoe UI", system-ui, sans-serif' : '10px "Segoe UI", system-ui, sans-serif';
+                    ctx.fillText(voters[m].name, tx, cy);
+                    tx += ctx.measureText(voters[m].name).width + 6;
+                });
+                ctx.fillStyle = '#8A9A5B';
+                ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+                ctx.fillText(`} = ${wc.sum}`, tx, cy);
+
+                ctx.globalAlpha = 1;
+            });
+
+            if (winningCoalitions.length > maxShow) {
+                ctx.fillStyle = '#606C38';
+                ctx.fillText(`... and ${winningCoalitions.length - maxShow} more`, coalX, coalY + 16 + maxShow * 18);
+            }
+
+            ctx.font = '9px "Segoe UI", system-ui, sans-serif';
+            ctx.fillStyle = '#606C38';
+            ctx.fillText('Bold = critical voter (removing changes outcome)', coalX, coalY + 16 + (maxShow + 1) * 18);
+
+            animT += 0.015;
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            voters = [
+                { name: 'A', weight: 4 },
+                { name: 'B', weight: 3 },
+                { name: 'C', weight: 2 },
+                { name: 'D', weight: 1 }
+            ];
+            quota = 6;
+            powerIndices = [];
+            criticalCounts = [];
+            winningCoalitions = [];
+            animT = 0;
+            document.getElementById('quota').value = 6;
+            document.getElementById('qVal').textContent = '6';
+            document.getElementById('preset').value = 'custom';
+            buildUI();
+        };
+
+        buildUI();
+        calculate();
+        draw();
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tidal Harmonic Analysis</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; overflow: hidden; font-family: Georgia, serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(96,108,56,0.85); backdrop-filter: blur(10px);
+    padding: 15px 25px; border-radius: 12px; color: #FEFAE0;
+    display: flex; gap: 15px; align-items: center; z-index: 100; flex-wrap: wrap;
+    justify-content: center; font-size: 0.8rem;
+}
+#controls input[type="range"] { width: 80px; accent-color: #DDA15E; }
+#controls label { display: flex; align-items: center; gap: 5px; }
+.constituent-color { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+#info {
+    position: fixed; top: 60px; right: 20px;
+    background: rgba(96,108,56,0.85); backdrop-filter: blur(10px);
+    padding: 15px; border-radius: 12px; color: #FEFAE0;
+    font-size: 0.8rem; max-width: 240px; z-index: 100; line-height: 1.5;
+}
+.val { color: #DDA15E; font-weight: bold; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="info">
+    <div class="val">Harmonic Analysis</div>
+    <br>
+    <div>Real tides = sum of harmonic constituents, each from a gravitational source.</div>
+    <br>
+    <div><span class="val">M2</span>: Principal lunar (12.42h)</div>
+    <div><span class="val">S2</span>: Principal solar (12.00h)</div>
+    <div><span class="val">K1</span>: Lunisolar diurnal (23.93h)</div>
+    <div><span class="val">O1</span>: Lunar diurnal (25.82h)</div>
+    <br>
+    <div>Form ratio F = (K1+O1)/(M2+S2)</div>
+    <div>Current: <span class="val" id="formRatio">--</span></div>
+    <div>Type: <span class="val" id="tideType">--</span></div>
+</div>
+<div id="controls">
+    <label><span class="constituent-color" style="background:#e74c3c"></span>M2: <input type="range" id="m2" min="0" max="3" step="0.1" value="1.5"> <span id="m2v">1.5</span></label>
+    <label><span class="constituent-color" style="background:#f39c12"></span>S2: <input type="range" id="s2" min="0" max="2" step="0.1" value="0.6"> <span id="s2v">0.6</span></label>
+    <label><span class="constituent-color" style="background:#2ecc71"></span>K1: <input type="range" id="k1" min="0" max="2" step="0.1" value="0.4"> <span id="k1v">0.4</span></label>
+    <label><span class="constituent-color" style="background:#3498db"></span>O1: <input type="range" id="o1" min="0" max="2" step="0.1" value="0.3"> <span id="o1v">0.3</span></label>
+    <label>Speed: <input type="range" id="speed" min="0.1" max="5" step="0.1" value="1"></label>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+let time = 0;
+let animId;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const m2El = document.getElementById('m2');
+const s2El = document.getElementById('s2');
+const k1El = document.getElementById('k1');
+const o1El = document.getElementById('o1');
+const speedEl = document.getElementById('speed');
+const formRatioEl = document.getElementById('formRatio');
+const tideTypeEl = document.getElementById('tideType');
+
+// Periods in hours (converted to angular frequencies)
+const constituents = [
+    { name: 'M2', period: 12.42, color: '#e74c3c', el: m2El, valEl: document.getElementById('m2v') },
+    { name: 'S2', period: 12.00, color: '#f39c12', el: s2El, valEl: document.getElementById('s2v') },
+    { name: 'K1', period: 23.93, color: '#2ecc71', el: k1El, valEl: document.getElementById('k1v') },
+    { name: 'O1', period: 25.82, color: '#3498db', el: o1El, valEl: document.getElementById('o1v') },
+];
+
+constituents.forEach(c => {
+    c.omega = 2 * Math.PI / c.period;
+    c.el.oninput = () => c.valEl.textContent = parseFloat(c.el.value).toFixed(1);
+});
+
+function getAmplitude(c) {
+    return parseFloat(c.el.value);
+}
+
+function constituentHeight(c, t) {
+    return getAmplitude(c) * Math.cos(c.omega * t);
+}
+
+function totalHeight(t) {
+    return constituents.reduce((sum, c) => sum + constituentHeight(c, t), 0);
+}
+
+// History buffer for graph
+const historyLen = 500;
+const history = new Float64Array(historyLen);
+let histIdx = 0;
+
+function draw() {
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, W, H);
+
+    const speed = parseFloat(speedEl.value);
+    const graphLeft = 60;
+    const graphRight = W - 280;
+    const graphWidth = graphRight - graphLeft;
+
+    // Individual constituents area (top half)
+    const topY = H * 0.08;
+    const midY = H * 0.42;
+    const botY = H * 0.75;
+    const compHeight = (midY - topY) / 4;
+
+    // Draw individual constituent waves
+    constituents.forEach((c, idx) => {
+        const baseY = topY + idx * compHeight + compHeight / 2;
+        const amp = getAmplitude(c);
+        const maxAmp = 3;
+        const scale = (compHeight / 2 - 5) / maxAmp;
+
+        // Label
+        ctx.fillStyle = c.color;
+        ctx.font = 'bold 12px Georgia';
+        ctx.textAlign = 'right';
+        ctx.fillText(c.name, graphLeft - 10, baseY + 4);
+        ctx.font = '9px Georgia';
+        ctx.fillStyle = '#FEFAE0';
+        ctx.fillText(c.period.toFixed(2) + 'h', graphLeft - 10, baseY + 16);
+
+        // Baseline
+        ctx.beginPath();
+        ctx.moveTo(graphLeft, baseY);
+        ctx.lineTo(graphRight, baseY);
+        ctx.strokeStyle = 'rgba(254,250,224,0.1)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Wave
+        ctx.beginPath();
+        for (let x = 0; x < graphWidth; x++) {
+            const t = time - (graphWidth - x) * 0.08;
+            const h = constituentHeight(c, t);
+            const py = baseY - h * scale;
+            if (x === 0) ctx.moveTo(graphLeft + x, py);
+            else ctx.lineTo(graphLeft + x, py);
+        }
+        ctx.strokeStyle = c.color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Current value dot
+        const currH = constituentHeight(c, time);
+        ctx.beginPath();
+        ctx.arc(graphRight, baseY - currH * scale, 4, 0, Math.PI * 2);
+        ctx.fillStyle = c.color;
+        ctx.fill();
+    });
+
+    // Separator
+    ctx.beginPath();
+    ctx.moveTo(graphLeft, midY + 5);
+    ctx.lineTo(graphRight, midY + 5);
+    ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Combined tide (bottom half)
+    const combBaseY = (midY + botY) / 2 + 10;
+    const combScale = (botY - midY - 20) / 2 / 6;
+
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = 'bold 12px Georgia';
+    ctx.textAlign = 'right';
+    ctx.fillText('Total', graphLeft - 10, combBaseY + 4);
+
+    // Baseline
+    ctx.beginPath();
+    ctx.moveTo(graphLeft, combBaseY);
+    ctx.lineTo(graphRight, combBaseY);
+    ctx.strokeStyle = 'rgba(254,250,224,0.1)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Fill under combined curve
+    ctx.beginPath();
+    ctx.moveTo(graphLeft, combBaseY);
+    for (let x = 0; x < graphWidth; x++) {
+        const t = time - (graphWidth - x) * 0.08;
+        const h = totalHeight(t);
+        const py = combBaseY - h * combScale;
+        ctx.lineTo(graphLeft + x, py);
+    }
+    ctx.lineTo(graphRight, combBaseY);
+    ctx.closePath();
+    let fillG = ctx.createLinearGradient(0, combBaseY - 80, 0, combBaseY + 80);
+    fillG.addColorStop(0, 'rgba(41,137,216,0.3)');
+    fillG.addColorStop(0.5, 'rgba(41,137,216,0.05)');
+    fillG.addColorStop(1, 'rgba(41,137,216,0.3)');
+    ctx.fillStyle = fillG;
+    ctx.fill();
+
+    // Combined wave line
+    ctx.beginPath();
+    for (let x = 0; x < graphWidth; x++) {
+        const t = time - (graphWidth - x) * 0.08;
+        const h = totalHeight(t);
+        const py = combBaseY - h * combScale;
+        if (x === 0) ctx.moveTo(graphLeft + x, py);
+        else ctx.lineTo(graphLeft + x, py);
+    }
+    ctx.strokeStyle = '#FEFAE0';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    // Current value marker
+    const currTotal = totalHeight(time);
+    ctx.beginPath();
+    ctx.arc(graphRight, combBaseY - currTotal * combScale, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#FEFAE0';
+    ctx.fill();
+
+    // Height scale
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '10px Georgia';
+    ctx.textAlign = 'right';
+    for (let h = -4; h <= 4; h += 2) {
+        const py = combBaseY - h * combScale;
+        ctx.fillText(h + 'm', graphLeft - 5, py + 3);
+        ctx.beginPath();
+        ctx.moveTo(graphLeft, py);
+        ctx.lineTo(graphLeft + 5, py);
+        ctx.strokeStyle = 'rgba(254,250,224,0.2)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+
+    // Water level visualization (right side)
+    const wlX = graphRight + 30;
+    const wlW = 60;
+    const wlTop = midY + 20;
+    const wlBot = botY;
+    const wlMid = (wlTop + wlBot) / 2;
+
+    // Tide gauge
+    ctx.fillStyle = 'rgba(96,108,56,0.3)';
+    ctx.fillRect(wlX, wlTop, wlW, wlBot - wlTop);
+    ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(wlX, wlTop, wlW, wlBot - wlTop);
+
+    // Water level
+    const waterLevel = wlMid - currTotal * combScale;
+    ctx.fillStyle = 'rgba(41,137,216,0.6)';
+    ctx.fillRect(wlX, waterLevel, wlW, wlBot - waterLevel);
+
+    // Level marker
+    ctx.beginPath();
+    ctx.moveTo(wlX - 5, waterLevel);
+    ctx.lineTo(wlX + wlW + 5, waterLevel);
+    ctx.strokeStyle = '#DDA15E';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = 'bold 12px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText(currTotal.toFixed(1) + 'm', wlX + wlW / 2, waterLevel - 8);
+
+    // Form ratio calculation
+    const m2Amp = getAmplitude(constituents[0]);
+    const s2Amp = getAmplitude(constituents[1]);
+    const k1Amp = getAmplitude(constituents[2]);
+    const o1Amp = getAmplitude(constituents[3]);
+    const denom = m2Amp + s2Amp;
+    const F = denom > 0 ? (k1Amp + o1Amp) / denom : 0;
+    formRatioEl.textContent = F.toFixed(2);
+
+    let tideType;
+    if (F < 0.25) tideType = 'Semidiurnal';
+    else if (F < 1.5) tideType = 'Mixed (semidiurnal)';
+    else if (F < 3.0) tideType = 'Mixed (diurnal)';
+    else tideType = 'Diurnal';
+    tideTypeEl.textContent = tideType;
+
+    // Time axis
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '10px Georgia';
+    ctx.textAlign = 'center';
+    const hoursShown = graphWidth * 0.08;
+    for (let h = 0; h <= hoursShown; h += 6) {
+        const x = graphRight - (h / 0.08);
+        if (x >= graphLeft) {
+            ctx.fillText(h + 'h', x, botY + 15);
+            ctx.beginPath();
+            ctx.moveTo(x, botY);
+            ctx.lineTo(x, botY + 5);
+            ctx.strokeStyle = 'rgba(254,250,224,0.2)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    }
+
+    // Title
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '14px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText('Tidal Harmonic Decomposition', (graphLeft + graphRight) / 2, topY - 10);
+
+    // Plus signs between constituents
+    ctx.fillStyle = 'rgba(254,250,224,0.5)';
+    ctx.font = '16px Georgia';
+    ctx.textAlign = 'center';
+    for (let i = 0; i < 3; i++) {
+        const baseY = topY + i * compHeight + compHeight;
+        ctx.fillText('+', graphLeft - 25, baseY + 4);
+    }
+    // Equals sign before total
+    ctx.fillText('=', graphLeft - 25, combBaseY + 4);
+
+    time += 0.05 * speed;
+    animId = requestAnimationFrame(draw);
+}
+
+window.reset = function() {
+    time = 0;
+    m2El.value = 1.5; document.getElementById('m2v').textContent = '1.5';
+    s2El.value = 0.6; document.getElementById('s2v').textContent = '0.6';
+    k1El.value = 0.4; document.getElementById('k1v').textContent = '0.4';
+    o1El.value = 0.3; document.getElementById('o1v').textContent = '0.3';
+    speedEl.value = 1;
+};
+
+draw();
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

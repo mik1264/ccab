@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Just Intonation vs Equal Temperament - Musical Tuning Systems</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .info-panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(26,26,46,0.85);
+            backdrop-filter: blur(10px); border: 1px solid #8A9A5B; border-radius: 12px;
+            padding: 15px; max-width: 300px; z-index: 1000; font-size: 0.82rem; line-height: 1.4;
+        }
+        .info-panel h2 { color: #DDA15E; margin-bottom: 8px; font-size: 1rem; }
+        .info-panel p { color: #FEFAE0; opacity: 0.8; margin-bottom: 6px; }
+        .controls {
+            position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 8px; z-index: 1000; flex-wrap: wrap; justify-content: center;
+            max-width: 90vw;
+        }
+        .controls button {
+            background: rgba(96,108,56,0.7); border: 1px solid #8A9A5B; color: #FEFAE0;
+            padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.82rem;
+            transition: all 0.2s;
+        }
+        .controls button:hover { background: rgba(138,154,91,0.8); }
+        .controls button.active { background: #DDA15E; color: #1a1a2e; border-color: #DDA15E; }
+        .note-display {
+            position: fixed; bottom: 65px; left: 50%; transform: translateX(-50%);
+            color: #DDA15E; font-size: 0.95rem; z-index: 1000; text-align: center;
+            background: rgba(26,26,46,0.7); padding: 6px 16px; border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info-panel">
+        <h2>Just Intonation vs Equal Temperament</h2>
+        <p>Just intonation uses pure ratios (5:4 major third, 3:2 fifth). Equal temperament divides the octave into 12 equal semitones.</p>
+        <p>Listen for <strong>beating</strong> in equal temperament intervals -- the slight wavering as frequencies clash.</p>
+        <p>Click any interval to hear both tunings side by side.</p>
+    </div>
+    <div class="note-display" id="noteDisplay">Click an interval to compare</div>
+    <div class="controls">
+        <button id="btnJust" class="active">Just Intonation</button>
+        <button id="btnEqual">Equal Temperament</button>
+        <button id="btnBoth">Both (Beating)</button>
+        <button id="btnChord">Major Triad</button>
+        <button id="btnStop">Stop</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const noteDisplay = document.getElementById('noteDisplay');
+        let W, H;
+        let audioCtx = null;
+        let activeOscs = [];
+        let animTime = 0;
+        let running = true;
+        let hoveredInterval = -1;
+        let playingInterval = -1;
+        let mode = 'just'; // 'just', 'equal', 'both'
+        let beatPhase = 0;
+
+        const baseFreq = 261.63; // C4
+
+        const intervals = [
+            { name: 'Unison', justRatio: 1/1, semitones: 0 },
+            { name: 'Minor 2nd', justRatio: 16/15, semitones: 1 },
+            { name: 'Major 2nd', justRatio: 9/8, semitones: 2 },
+            { name: 'Minor 3rd', justRatio: 6/5, semitones: 3 },
+            { name: 'Major 3rd', justRatio: 5/4, semitones: 4 },
+            { name: 'Perfect 4th', justRatio: 4/3, semitones: 5 },
+            { name: 'Tritone', justRatio: 45/32, semitones: 6 },
+            { name: 'Perfect 5th', justRatio: 3/2, semitones: 7 },
+            { name: 'Minor 6th', justRatio: 8/5, semitones: 8 },
+            { name: 'Major 6th', justRatio: 5/3, semitones: 9 },
+            { name: 'Minor 7th', justRatio: 9/5, semitones: 10 },
+            { name: 'Major 7th', justRatio: 15/8, semitones: 11 },
+            { name: 'Octave', justRatio: 2/1, semitones: 12 }
+        ];
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        function stopAll() {
+            activeOscs.forEach(o => { try { o.gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1); o.osc.stop(audioCtx.currentTime + 0.15); } catch(e){} });
+            activeOscs = [];
+            playingInterval = -1;
+        }
+
+        function playTone(freq, vol) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = freq;
+            gain.gain.value = 0;
+            gain.gain.linearRampToValueAtTime(vol || 0.2, audioCtx.currentTime + 0.03);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            activeOscs.push({ osc, gain });
+        }
+
+        function playInterval(idx) {
+            initAudio();
+            stopAll();
+            const iv = intervals[idx];
+            const justFreq = baseFreq * iv.justRatio;
+            const equalFreq = baseFreq * Math.pow(2, iv.semitones / 12);
+            const diff = Math.abs(justFreq - equalFreq);
+            const cents = 1200 * Math.log2(equalFreq / justFreq);
+
+            // Always play the root
+            playTone(baseFreq, 0.15);
+
+            if (mode === 'just') {
+                playTone(justFreq, 0.2);
+                noteDisplay.textContent = `${iv.name} (Just): ${iv.justRatio.toFixed(4)} = ${justFreq.toFixed(2)} Hz`;
+            } else if (mode === 'equal') {
+                playTone(equalFreq, 0.2);
+                noteDisplay.textContent = `${iv.name} (Equal): 2^(${iv.semitones}/12) = ${equalFreq.toFixed(2)} Hz`;
+            } else {
+                playTone(justFreq, 0.15);
+                playTone(equalFreq, 0.15);
+                noteDisplay.textContent = `${iv.name}: Just ${justFreq.toFixed(2)} Hz vs Equal ${equalFreq.toFixed(2)} Hz | Beating: ${diff.toFixed(2)} Hz (${Math.abs(cents).toFixed(1)} cents)`;
+            }
+            playingInterval = idx;
+        }
+
+        function playMajorTriad() {
+            initAudio();
+            stopAll();
+            if (mode === 'just') {
+                playTone(baseFreq, 0.15);
+                playTone(baseFreq * 5/4, 0.15);
+                playTone(baseFreq * 3/2, 0.15);
+                noteDisplay.textContent = 'Just Major Triad: 4:5:6 -- pure, beatless';
+            } else if (mode === 'equal') {
+                playTone(baseFreq, 0.15);
+                playTone(baseFreq * Math.pow(2, 4/12), 0.15);
+                playTone(baseFreq * Math.pow(2, 7/12), 0.15);
+                noteDisplay.textContent = 'Equal Tempered Major Triad -- subtle beating';
+            } else {
+                playTone(baseFreq, 0.1);
+                playTone(baseFreq * 5/4, 0.1);
+                playTone(baseFreq * 3/2, 0.1);
+                playTone(baseFreq * Math.pow(2, 4/12), 0.1);
+                playTone(baseFreq * Math.pow(2, 7/12), 0.1);
+                noteDisplay.textContent = 'Both triads together -- hear the beating!';
+            }
+            playingInterval = -2;
+        }
+
+        function setMode(m) {
+            mode = m;
+            document.getElementById('btnJust').classList.toggle('active', m === 'just');
+            document.getElementById('btnEqual').classList.toggle('active', m === 'equal');
+            document.getElementById('btnBoth').classList.toggle('active', m === 'both');
+        }
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const marginTop = 60;
+            const marginBottom = 110;
+            const marginX = Math.min(W * 0.12, 120);
+            const barH = (H - marginTop - marginBottom) / intervals.length;
+            const barW = W - marginX * 2 - 200;
+
+            // Title
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = 'bold 18px "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('JUST INTONATION vs EQUAL TEMPERAMENT', W / 2, 35);
+
+            for (let i = 0; i < intervals.length; i++) {
+                const iv = intervals[i];
+                const y = marginTop + i * barH;
+                const justFreq = baseFreq * iv.justRatio;
+                const equalFreq = baseFreq * Math.pow(2, iv.semitones / 12);
+                const cents = 1200 * Math.log2(equalFreq / justFreq);
+                const isHovered = hoveredInterval === i;
+                const isPlaying = playingInterval === i;
+
+                // Background
+                ctx.fillStyle = isHovered ? 'rgba(138,154,91,0.12)' : 'rgba(255,255,255,0.02)';
+                ctx.fillRect(marginX, y, barW + 200, barH - 2);
+
+                // Interval name
+                ctx.fillStyle = isPlaying ? '#DDA15E' : '#FEFAE0';
+                ctx.font = `${isPlaying ? 'bold ' : ''}13px 'Segoe UI', sans-serif`;
+                ctx.textAlign = 'right';
+                ctx.fillText(iv.name, marginX - 10, y + barH * 0.6);
+
+                // Just intonation bar (green)
+                const justCents = 1200 * Math.log2(iv.justRatio);
+                const justW = (justCents / 1200) * barW;
+                ctx.fillStyle = 'rgba(138,154,91,0.6)';
+                ctx.fillRect(marginX, y + 4, justW, barH * 0.35);
+
+                // Equal temperament bar (orange)
+                const equalCents = iv.semitones * 100;
+                const equalW = (equalCents / 1200) * barW;
+                ctx.fillStyle = 'rgba(221,161,94,0.6)';
+                ctx.fillRect(marginX, y + barH * 0.45, equalW, barH * 0.35);
+
+                // Difference indicator
+                const diff = Math.abs(cents);
+                if (diff > 0.01) {
+                    const pulseBright = isPlaying ? (Math.sin(animTime * 8) * 0.3 + 0.7) : 0.7;
+                    ctx.fillStyle = `rgba(188,108,37,${pulseBright})`;
+                    ctx.font = '11px "Segoe UI", sans-serif';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(`${cents > 0 ? '+' : ''}${cents.toFixed(1)}c`, marginX + barW + 10, y + barH * 0.45);
+
+                    // Beat rate indicator
+                    const beatRate = Math.abs(justFreq - equalFreq);
+                    if (beatRate > 0.01) {
+                        ctx.fillStyle = 'rgba(254,250,224,0.4)';
+                        ctx.fillText(`${beatRate.toFixed(1)} Hz beat`, marginX + barW + 10, y + barH * 0.75);
+                    }
+                }
+
+                // Ratio label
+                ctx.fillStyle = 'rgba(138,154,91,0.7)';
+                ctx.font = '10px "Segoe UI", sans-serif';
+                ctx.textAlign = 'left';
+                const ratioStr = iv.justRatio === 1 ? '1:1' : `${Math.round(iv.justRatio * (iv.justRatio < 2 ? 8 : 4))}:${Math.round(1 * (iv.justRatio < 2 ? 8 : 4))}`;
+                ctx.fillText(fractionStr(iv.justRatio), marginX + justW + 5, y + barH * 0.32);
+            }
+
+            // Legend
+            ctx.fillStyle = 'rgba(138,154,91,0.8)';
+            ctx.fillRect(marginX, H - marginBottom - 30, 12, 12);
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '12px "Segoe UI", sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Just Intonation (pure ratios)', marginX + 18, H - marginBottom - 20);
+
+            ctx.fillStyle = 'rgba(221,161,94,0.8)';
+            ctx.fillRect(marginX + 250, H - marginBottom - 30, 12, 12);
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fillText('Equal Temperament (12-TET)', marginX + 268, H - marginBottom - 20);
+
+            // Beat visualization
+            if (playingInterval >= 0 && mode === 'both') {
+                const iv = intervals[playingInterval];
+                const justFreq = baseFreq * iv.justRatio;
+                const equalFreq = baseFreq * Math.pow(2, iv.semitones / 12);
+                const beatRate = Math.abs(justFreq - equalFreq);
+                if (beatRate > 0.01) {
+                    beatPhase += beatRate * 0.016 * Math.PI * 2;
+                    const beatAmp = Math.cos(beatPhase) * 0.5 + 0.5;
+                    ctx.beginPath();
+                    ctx.arc(W / 2, H - marginBottom - 50, 15, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(221,161,94,${beatAmp * 0.8 + 0.2})`;
+                    ctx.fill();
+                }
+            }
+        }
+
+        function fractionStr(ratio) {
+            const fractions = {
+                1: '1/1', [16/15]: '16/15', [9/8]: '9/8', [6/5]: '6/5', [5/4]: '5/4',
+                [4/3]: '4/3', [45/32]: '45/32', [3/2]: '3/2', [8/5]: '8/5', [5/3]: '5/3',
+                [9/5]: '9/5', [15/8]: '15/8', 2: '2/1'
+            };
+            for (const [key, val] of Object.entries(fractions)) {
+                if (Math.abs(parseFloat(key) - ratio) < 0.0001) return val;
+            }
+            return ratio.toFixed(4);
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            const marginTop = 60;
+            const marginBottom = 110;
+            const barH = (H - marginTop - marginBottom) / intervals.length;
+            const idx = Math.floor((e.clientY - marginTop) / barH);
+            hoveredInterval = (idx >= 0 && idx < intervals.length) ? idx : -1;
+            canvas.style.cursor = hoveredInterval >= 0 ? 'pointer' : 'default';
+        });
+
+        canvas.addEventListener('click', () => {
+            if (hoveredInterval >= 0) playInterval(hoveredInterval);
+        });
+
+        document.getElementById('btnJust').addEventListener('click', () => setMode('just'));
+        document.getElementById('btnEqual').addEventListener('click', () => setMode('equal'));
+        document.getElementById('btnBoth').addEventListener('click', () => setMode('both'));
+        document.getElementById('btnChord').addEventListener('click', playMajorTriad);
+        document.getElementById('btnStop').addEventListener('click', () => { stopAll(); noteDisplay.textContent = 'Click an interval to compare'; });
+
+        function animate() {
+            animTime += 0.016;
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+        animate();
+
+        window.reset = function() {
+            stopAll();
+            hoveredInterval = -1;
+            playingInterval = -1;
+            mode = 'just';
+            beatPhase = 0;
+            animTime = 0;
+            setMode('just');
+            noteDisplay.textContent = 'Click an interval to compare';
+        };
+    })();
+    </script>
+</body>
+</html>

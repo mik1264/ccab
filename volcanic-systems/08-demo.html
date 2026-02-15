@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tephra Fallout Dispersal</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; overflow: hidden; font-family: Georgia, serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(96,108,56,0.85); backdrop-filter: blur(10px);
+    padding: 15px 25px; border-radius: 12px; color: #FEFAE0;
+    display: flex; gap: 20px; align-items: center; z-index: 100; flex-wrap: wrap;
+    justify-content: center;
+}
+#controls label { font-size: 0.85rem; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+#controls input[type=range] { width: 110px; accent-color: #DDA15E; }
+#controls button { background: #DDA15E; color: #1a1a2e; border: none; padding: 8px 16px;
+    border-radius: 8px; cursor: pointer; font-family: Georgia; font-size: 0.85rem; }
+#info {
+    position: fixed; top: 60px; right: 20px; background: rgba(96,108,56,0.85);
+    backdrop-filter: blur(10px); padding: 15px; border-radius: 12px;
+    color: #FEFAE0; font-size: 0.8rem; max-width: 260px; z-index: 100; line-height: 1.5;
+}
+#info h3 { color: #DDA15E; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="info">
+    <h3>Tephra Dispersal</h3>
+    <p>Tephra (volcanic fragments) is ejected into the atmosphere and carried by wind. Larger particles fall near the vent; fine ash can travel thousands of km.</p>
+    <p style="margin-top:6px;font-size:0.75rem;">This is a top-down view showing isopach contours of deposit thickness.</p>
+</div>
+<div id="controls">
+    <label>Eruption Intensity
+        <input type="range" id="intensity" min="10" max="100" value="60">
+    </label>
+    <label>Wind Speed (m/s)
+        <input type="range" id="windSpeed" min="0" max="50" value="15">
+    </label>
+    <label>Wind Direction
+        <input type="range" id="windDir" min="0" max="360" value="90">
+    </label>
+    <button id="eruptBtn">Erupt</button>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+let time = 0;
+let paused = false;
+let tephraParticles = [];
+let depositGrid = [];
+const GRID_SIZE = 4;
+let gridW, gridH;
+let erupting = false;
+let eruptionTime = 0;
+
+function initGrid() {
+    gridW = Math.ceil(W / GRID_SIZE);
+    gridH = Math.ceil(H / GRID_SIZE);
+    depositGrid = new Float32Array(gridW * gridH);
+}
+initGrid();
+window.addEventListener('resize', () => { resize(); initGrid(); });
+
+const ventX = () => W * 0.3;
+const ventY = () => H * 0.5;
+
+class TephraParticle {
+    constructor(intensity, windSpeed, windDir) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 20 + Math.random() * 80 * intensity;
+        this.x = ventX();
+        this.y = ventY();
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
+        this.altitude = 5000 + Math.random() * 20000 * intensity; // meters
+        this.size = 0.5 + Math.random() * 4 * (1 - intensity * 0.3); // larger particles = less intensity dependent
+        this.fallRate = 0.3 + this.size * 2; // bigger = falls faster
+        this.windSpeed = windSpeed;
+        this.windDir = windDir;
+        this.life = 1;
+        this.deposited = false;
+    }
+    update(dt) {
+        if (this.deposited) return;
+
+        const windRad = this.windDir * Math.PI / 180;
+        const windEffect = this.windSpeed * (this.altitude / 20000); // more wind at altitude
+
+        this.vx += Math.cos(windRad) * windEffect * dt;
+        this.vy += Math.sin(windRad) * windEffect * dt;
+
+        // Turbulent diffusion
+        this.vx += (Math.random() - 0.5) * 20 * dt;
+        this.vy += (Math.random() - 0.5) * 20 * dt;
+
+        // Drag
+        this.vx *= 0.995;
+        this.vy *= 0.995;
+
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+
+        // Settling
+        this.altitude -= this.fallRate * 100 * dt;
+
+        if (this.altitude <= 0) {
+            this.deposited = true;
+            // Add to deposit grid
+            const gx = Math.floor(this.x / GRID_SIZE);
+            const gy = Math.floor(this.y / GRID_SIZE);
+            if (gx >= 0 && gx < gridW && gy >= 0 && gy < gridH) {
+                depositGrid[gy * gridW + gx] += this.size * 0.5;
+            }
+        }
+
+        if (this.x < -100 || this.x > W + 100 || this.y < -100 || this.y > H + 100) {
+            this.life = 0;
+        }
+    }
+}
+
+function triggerEruption() {
+    erupting = true;
+    eruptionTime = 0;
+}
+
+document.getElementById('eruptBtn').addEventListener('click', triggerEruption);
+
+function drawDeposit() {
+    // Draw deposit as heatmap
+    const imageData = ctx.getImageData(0, 0, W, H);
+    const data = imageData.data;
+
+    for (let gy = 0; gy < gridH; gy++) {
+        for (let gx = 0; gx < gridW; gx++) {
+            const val = depositGrid[gy * gridW + gx];
+            if (val < 0.1) continue;
+
+            const t = Math.min(1, val / 20);
+            let r, g, b, a;
+
+            if (t > 0.7) {
+                r = 180; g = 80; b = 30; a = Math.floor(t * 180);
+            } else if (t > 0.3) {
+                r = 140; g = 120; b = 80; a = Math.floor(t * 150);
+            } else {
+                r = 120; g = 110; b = 100; a = Math.floor(t * 120);
+            }
+
+            for (let py = gy * GRID_SIZE; py < Math.min((gy + 1) * GRID_SIZE, H); py++) {
+                for (let px = gx * GRID_SIZE; px < Math.min((gx + 1) * GRID_SIZE, W); px++) {
+                    const idx = (py * W + px) * 4;
+                    const srcA = a / 255;
+                    data[idx] = Math.min(255, data[idx] + r * srcA);
+                    data[idx + 1] = Math.min(255, data[idx + 1] + g * srcA);
+                    data[idx + 2] = Math.min(255, data[idx + 2] + b * srcA);
+                }
+            }
+        }
+    }
+    ctx.putImageData(imageData, 0, 0);
+}
+
+function drawIsopachs() {
+    // Draw contour lines for deposit thickness
+    const thresholds = [2, 5, 10, 15];
+    const colors = ['rgba(221,161,94,0.3)', 'rgba(221,161,94,0.4)', 'rgba(221,161,94,0.5)', 'rgba(221,161,94,0.6)'];
+
+    for (let t = 0; t < thresholds.length; t++) {
+        ctx.strokeStyle = colors[t];
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+
+        // Simple contour: find boundary cells
+        for (let gy = 1; gy < gridH - 1; gy += 2) {
+            for (let gx = 1; gx < gridW - 1; gx += 2) {
+                const val = depositGrid[gy * gridW + gx];
+                if (Math.abs(val - thresholds[t]) < 2) {
+                    ctx.beginPath();
+                    ctx.arc(gx * GRID_SIZE, gy * GRID_SIZE, 2, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+            }
+        }
+        ctx.setLineDash([]);
+    }
+}
+
+function drawVent() {
+    const vx = ventX();
+    const vy = ventY();
+
+    // Vent marker
+    ctx.beginPath();
+    ctx.arc(vx, vy, 8, 0, Math.PI * 2);
+    const vGrad = ctx.createRadialGradient(vx, vy, 0, vx, vy, 8);
+    vGrad.addColorStop(0, 'rgba(255,150,50,0.9)');
+    vGrad.addColorStop(1, 'rgba(255,50,20,0.3)');
+    ctx.fillStyle = vGrad;
+    ctx.fill();
+
+    // Triangle marker
+    ctx.beginPath();
+    ctx.moveTo(vx, vy - 12);
+    ctx.lineTo(vx - 8, vy + 4);
+    ctx.lineTo(vx + 8, vy + 4);
+    ctx.closePath();
+    ctx.fillStyle = '#DDA15E';
+    ctx.fill();
+
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '12px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText('Vent', vx, vy + 25);
+
+    // Wind arrow
+    const windDir = parseInt(document.getElementById('windDir').value);
+    const windSpeed = parseInt(document.getElementById('windSpeed').value);
+    const windRad = windDir * Math.PI / 180;
+    const arrowLen = 30 + windSpeed;
+
+    const ax = vx + Math.cos(windRad) * 50;
+    const ay = vy + Math.sin(windRad) * 50;
+    const bx = ax + Math.cos(windRad) * arrowLen;
+    const by = ay + Math.sin(windRad) * arrowLen;
+
+    ctx.strokeStyle = '#8A9A5B';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.stroke();
+
+    // Arrowhead
+    const headLen = 10;
+    ctx.beginPath();
+    ctx.moveTo(bx, by);
+    ctx.lineTo(bx - Math.cos(windRad - 0.4) * headLen, by - Math.sin(windRad - 0.4) * headLen);
+    ctx.moveTo(bx, by);
+    ctx.lineTo(bx - Math.cos(windRad + 0.4) * headLen, by - Math.sin(windRad + 0.4) * headLen);
+    ctx.stroke();
+
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = '10px Georgia';
+    ctx.fillText(`Wind: ${windSpeed} m/s`, bx + 15, by);
+
+    // Scale bar
+    ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W - 120, H - 80);
+    ctx.lineTo(W - 20, H - 80);
+    ctx.stroke();
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = '10px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText('~50 km', W - 70, H - 65);
+}
+
+let lastTime = 0;
+function animate(ts) {
+    const dt = Math.min((ts - lastTime) / 1000, 0.05);
+    lastTime = ts;
+
+    if (!paused) {
+        time += dt;
+
+        if (erupting) {
+            eruptionTime += dt;
+            const intensity = document.getElementById('intensity').value / 100;
+            const windSpeed = parseInt(document.getElementById('windSpeed').value);
+            const windDir = parseInt(document.getElementById('windDir').value);
+
+            // Emit tephra
+            const numNew = Math.floor(intensity * 30);
+            for (let i = 0; i < numNew; i++) {
+                tephraParticles.push(new TephraParticle(intensity, windSpeed, windDir));
+            }
+
+            if (eruptionTime > 5) erupting = false;
+        }
+
+        for (let p of tephraParticles) p.update(dt);
+        tephraParticles = tephraParticles.filter(p => p.life > 0 && !p.deposited);
+        if (tephraParticles.length > 5000) tephraParticles.splice(0, tephraParticles.length - 5000);
+    }
+
+    // Draw
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+
+    // Grid background
+    ctx.strokeStyle = 'rgba(96,108,56,0.1)';
+    ctx.lineWidth = 0.5;
+    for (let x = 0; x < W; x += 50) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0); ctx.lineTo(x, H);
+        ctx.stroke();
+    }
+    for (let y = 0; y < H; y += 50) {
+        ctx.beginPath();
+        ctx.moveTo(0, y); ctx.lineTo(W, y);
+        ctx.stroke();
+    }
+
+    // Draw deposit heatmap
+    drawDeposit();
+    drawIsopachs();
+
+    // Draw airborne particles
+    for (let p of tephraParticles) {
+        const altFactor = p.altitude / 25000;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * (0.5 + altFactor), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(200,180,150,${0.3 + altFactor * 0.4})`;
+        ctx.fill();
+    }
+
+    drawVent();
+
+    // Title
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '14px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText('Tephra Fallout Pattern (Top-Down View)', W / 2, 30);
+
+    requestAnimationFrame(animate);
+}
+
+window.reset = function() {
+    tephraParticles = [];
+    initGrid();
+    erupting = false;
+    eruptionTime = 0;
+    time = 0;
+};
+
+requestAnimationFrame(animate);
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

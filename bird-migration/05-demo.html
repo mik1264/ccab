@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wind Drift Compensation | Bird Migration</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #10151d; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #info {
+            position: fixed; top: 10px; right: 10px; background: rgba(16,21,29,0.92);
+            backdrop-filter: blur(10px); padding: 14px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 270px;
+            border: 1px solid rgba(138,154,91,0.3); line-height: 1.6;
+        }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(16,21,29,0.92); backdrop-filter: blur(10px);
+            padding: 14px 24px; border-radius: 14px; display: flex; gap: 16px;
+            align-items: center; z-index: 100; color: #FEFAE0; font-size: 0.82rem;
+            border: 1px solid rgba(138,154,91,0.3); flex-wrap: wrap; justify-content: center;
+        }
+        #controls label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+        #controls input[type=range] { width: 80px; accent-color: #8A9A5B; }
+        #compass {
+            position: fixed; bottom: 100px; right: 20px; width: 100px; height: 100px;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <canvas id="compass" width="100" height="100"></canvas>
+    <div id="info">
+        <strong style="color:#DDA15E;">Wind Drift Compensation</strong><br>
+        Birds adjust heading into the wind to maintain their desired track. Below 300m, compensation is <span style="color:#8A9A5B;">near-complete</span>. Above 600m, birds <span style="color:#DDA15E;">drift freely</span>.<br>
+        <div id="driftInfo" style="margin-top:8px;font-size:0.75rem;"></div>
+    </div>
+    <div id="controls">
+        <label>Wind Speed <input type="range" id="windSpeed" min="0" max="30" value="12"><span id="wsVal">12</span> m/s</label>
+        <label>Wind Dir <input type="range" id="windDir" min="0" max="360" value="270"><span id="wdVal">270</span>&deg;</label>
+        <label>Altitude <input type="range" id="altitude" min="50" max="1500" value="200"><span id="altVal">200</span>m</label>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const compassCanvas = document.getElementById('compass');
+        const cctx = compassCanvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const wsSlider = document.getElementById('windSpeed');
+        const wdSlider = document.getElementById('windDir');
+        const altSlider = document.getElementById('altitude');
+        wsSlider.oninput = () => document.getElementById('wsVal').textContent = wsSlider.value;
+        wdSlider.oninput = () => document.getElementById('wdVal').textContent = wdSlider.value;
+        altSlider.oninput = () => document.getElementById('altVal').textContent = altSlider.value;
+
+        let time = 0;
+        let bird = { x: 0, y: 0, heading: 0, track: 0 };
+        let trail = [];
+        let windParticles = [];
+        let groundFeatures = [];
+
+        // Generate ground features (for visual flow reference)
+        function initGround() {
+            groundFeatures = [];
+            for (let i = 0; i < 60; i++) {
+                groundFeatures.push({
+                    x: Math.random() * W * 2 - W * 0.5,
+                    y: Math.random() * H * 2 - H * 0.5,
+                    size: 3 + Math.random() * 8,
+                    type: Math.random() > 0.5 ? 'tree' : 'field'
+                });
+            }
+        }
+
+        function initWind() {
+            windParticles = [];
+            for (let i = 0; i < 120; i++) {
+                windParticles.push({
+                    x: Math.random() * W,
+                    y: Math.random() * H,
+                    speed: 0.5 + Math.random() * 1.5,
+                    life: Math.random()
+                });
+            }
+        }
+
+        function resetBird() {
+            bird.x = W * 0.2;
+            bird.y = H * 0.7;
+            bird.heading = -Math.PI / 4; // NE intended direction
+            bird.track = bird.heading;
+            trail = [];
+        }
+
+        initGround();
+        initWind();
+        resetBird();
+
+        function getCompensation(altitude) {
+            // Below 300m: full compensation; 300-600: partial; above 600: drift
+            if (altitude < 300) return 1.0;
+            if (altitude < 600) return 1.0 - (altitude - 300) / 300;
+            return 0;
+        }
+
+        function drawWindParticles() {
+            const windAngle = parseInt(wdSlider.value) * Math.PI / 180;
+            const windSpd = parseInt(wsSlider.value);
+            const alpha = Math.min(0.5, windSpd / 40);
+
+            windParticles.forEach(p => {
+                p.x += Math.cos(windAngle) * p.speed * windSpd * 0.15;
+                p.y += Math.sin(windAngle) * p.speed * windSpd * 0.15;
+                p.life -= 0.005;
+
+                if (p.life <= 0 || p.x < -20 || p.x > W + 20 || p.y < -20 || p.y > H + 20) {
+                    // Respawn from upwind edge
+                    p.x = Math.random() * W;
+                    p.y = Math.random() * H;
+                    p.life = 1;
+                }
+
+                const len = windSpd * 0.8;
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(p.x + Math.cos(windAngle) * len, p.y + Math.sin(windAngle) * len);
+                ctx.strokeStyle = `rgba(138,154,91,${alpha * p.life * 0.4})`;
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            });
+        }
+
+        function drawGroundFeatures() {
+            const altitude = parseInt(altSlider.value);
+            const scale = Math.max(0.2, 1 - altitude / 2000);
+            const alpha = Math.max(0.1, scale);
+
+            groundFeatures.forEach(f => {
+                const sx = (f.x - bird.x) * scale + W / 2;
+                const sy = (f.y - bird.y) * scale + H / 2;
+                if (sx < -50 || sx > W + 50 || sy < -50 || sy > H + 50) return;
+
+                if (f.type === 'tree') {
+                    ctx.beginPath();
+                    ctx.arc(sx, sy, f.size * scale, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(96,108,56,${alpha * 0.3})`;
+                    ctx.fill();
+                } else {
+                    ctx.fillStyle = `rgba(138,154,91,${alpha * 0.15})`;
+                    ctx.fillRect(sx - f.size * scale, sy - f.size * scale * 0.5, f.size * scale * 2, f.size * scale);
+                }
+            });
+        }
+
+        function drawBird(x, y, heading) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(heading + Math.PI / 2);
+
+            const wf = Math.sin(time * 6) * 6;
+            ctx.beginPath();
+            ctx.moveTo(0, -12);
+            ctx.lineTo(-4, 0);
+            ctx.lineTo(-20, wf);
+            ctx.moveTo(0, -12);
+            ctx.lineTo(4, 0);
+            ctx.lineTo(20, wf);
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2.5;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.ellipse(0, -4, 4, 10, 0, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(0, -14, 3, 0, Math.PI * 2);
+            ctx.fillStyle = '#606C38';
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        function drawCompass() {
+            const cx = 50, cy = 50, r = 40;
+            cctx.clearRect(0, 0, 100, 100);
+
+            cctx.beginPath();
+            cctx.arc(cx, cy, r, 0, Math.PI * 2);
+            cctx.fillStyle = 'rgba(16,21,29,0.9)';
+            cctx.fill();
+            cctx.strokeStyle = 'rgba(138,154,91,0.5)';
+            cctx.lineWidth = 1.5;
+            cctx.stroke();
+
+            // Cardinal directions
+            cctx.font = '10px Segoe UI';
+            cctx.fillStyle = '#8A9A5B';
+            cctx.textAlign = 'center';
+            cctx.textBaseline = 'middle';
+            cctx.fillText('N', cx, cy - r + 10);
+            cctx.fillText('S', cx, cy + r - 10);
+            cctx.fillText('E', cx + r - 10, cy);
+            cctx.fillText('W', cx - r + 10, cy);
+
+            // Wind direction arrow
+            const windAngle = parseInt(wdSlider.value) * Math.PI / 180 - Math.PI / 2;
+            cctx.beginPath();
+            cctx.moveTo(cx + Math.cos(windAngle) * (r - 18), cy + Math.sin(windAngle) * (r - 18));
+            cctx.lineTo(cx + Math.cos(windAngle) * (r - 5), cy + Math.sin(windAngle) * (r - 5));
+            cctx.strokeStyle = 'rgba(138,154,91,0.8)';
+            cctx.lineWidth = 2;
+            cctx.stroke();
+            cctx.fillStyle = '#8A9A5B';
+            cctx.font = '8px Segoe UI';
+            cctx.fillText('wind', cx + Math.cos(windAngle) * (r - 12), cy + Math.sin(windAngle) * (r - 12) + 10);
+
+            // Bird heading arrow
+            const headAngle = bird.heading - Math.PI / 2;
+            cctx.beginPath();
+            cctx.moveTo(cx, cy);
+            cctx.lineTo(cx + Math.cos(headAngle) * 20, cy + Math.sin(headAngle) * 20);
+            cctx.strokeStyle = '#DDA15E';
+            cctx.lineWidth = 2;
+            cctx.stroke();
+
+            // Track arrow
+            const trackAngle = bird.track - Math.PI / 2;
+            cctx.setLineDash([3, 3]);
+            cctx.beginPath();
+            cctx.moveTo(cx, cy);
+            cctx.lineTo(cx + Math.cos(trackAngle) * 25, cy + Math.sin(trackAngle) * 25);
+            cctx.strokeStyle = '#FEFAE0';
+            cctx.lineWidth = 1.5;
+            cctx.stroke();
+            cctx.setLineDash([]);
+        }
+
+        function animate() {
+            ctx.fillStyle = 'rgba(16,21,29,0.3)';
+            ctx.fillRect(0, 0, W, H);
+
+            if (Math.floor(time * 60) % 120 === 0) {
+                ctx.fillStyle = '#10151d';
+                ctx.fillRect(0, 0, W, H);
+            }
+
+            const windAngle = parseInt(wdSlider.value) * Math.PI / 180;
+            const windSpd = parseInt(wsSlider.value);
+            const altitude = parseInt(altSlider.value);
+            const compensation = getCompensation(altitude);
+
+            drawGroundFeatures();
+            drawWindParticles();
+
+            // Bird physics
+            const desiredHeading = -Math.PI / 4; // NE
+            const airspeed = 12; // m/s
+
+            // With compensation, bird adjusts heading into wind
+            const windVx = Math.cos(windAngle) * windSpd;
+            const windVy = Math.sin(windAngle) * windSpd;
+
+            // Compensation: bird rotates heading toward wind to counteract drift
+            const crossWindAngle = windAngle - desiredHeading;
+            const crossWindComponent = windSpd * Math.sin(crossWindAngle);
+            const correctionAngle = compensation * Math.asin(Math.min(1, Math.max(-1, crossWindComponent / airspeed)));
+
+            bird.heading = desiredHeading - correctionAngle;
+
+            // Actual track (heading + wind)
+            const vx = Math.cos(bird.heading) * airspeed + windVx * (1 - compensation * 0.7);
+            const vy = Math.sin(bird.heading) * airspeed + windVy * (1 - compensation * 0.7);
+            bird.track = Math.atan2(vy, vx);
+
+            const speed = Math.sqrt(vx * vx + vy * vy);
+            bird.x += vx * 0.1;
+            bird.y += vy * 0.1;
+
+            // Wrap
+            if (bird.x > W * 1.2 || bird.x < -W * 0.2 || bird.y > H * 1.2 || bird.y < -H * 0.2) {
+                resetBird();
+            }
+
+            trail.push({ x: bird.x, y: bird.y });
+            if (trail.length > 200) trail.shift();
+
+            // Draw intended path (straight NE line)
+            ctx.setLineDash([4, 8]);
+            ctx.beginPath();
+            ctx.moveTo(W * 0.2, H * 0.7);
+            ctx.lineTo(W * 0.2 + Math.cos(desiredHeading) * W, H * 0.7 + Math.sin(desiredHeading) * W);
+            ctx.strokeStyle = 'rgba(254,250,224,0.2)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Draw trail
+            for (let i = 1; i < trail.length; i++) {
+                const alpha = i / trail.length * 0.6;
+                ctx.beginPath();
+                ctx.moveTo(trail[i-1].x, trail[i-1].y);
+                ctx.lineTo(trail[i].x, trail[i].y);
+                ctx.strokeStyle = `rgba(221,161,94,${alpha})`;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+
+            drawBird(bird.x, bird.y, bird.heading);
+
+            // Drift angle info
+            const driftAngle = Math.abs(bird.track - desiredHeading) * 180 / Math.PI;
+            const driftInfo = document.getElementById('driftInfo');
+            const compPct = Math.round(compensation * 100);
+            driftInfo.innerHTML =
+                `Altitude: <strong>${altitude}m</strong><br>` +
+                `Compensation: <strong style="color:${compensation > 0.7 ? '#8A9A5B' : compensation > 0.3 ? '#DDA15E' : '#BC6C25'}">${compPct}%</strong><br>` +
+                `Drift angle: <strong>${driftAngle.toFixed(1)}&deg;</strong><br>` +
+                `Ground speed: <strong>${speed.toFixed(1)} m/s</strong>`;
+
+            drawCompass();
+
+            time += 0.016;
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+
+        window.reset = function() {
+            time = 0;
+            resetBird();
+            initGround();
+            initWind();
+            ctx.clearRect(0, 0, W, H);
+        };
+    })();
+    </script>
+</body>
+</html>

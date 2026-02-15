@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Epicycle Drawing Machine - Fourier Art</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30, 30, 50, 0.85); backdrop-filter: blur(10px);
+            color: #FEFAE0; padding: 12px 24px; border-radius: 12px;
+            font-size: 0.9rem; text-align: center; z-index: 100;
+            border: 1px solid rgba(138, 154, 91, 0.3);
+        }
+        #controls {
+            position: fixed; top: 10px; right: 10px; z-index: 100;
+            display: flex; gap: 8px; flex-direction: column; align-items: flex-end;
+        }
+        .btn {
+            background: rgba(30, 30, 50, 0.85); backdrop-filter: blur(10px);
+            color: #DDA15E; border: 1px solid rgba(221, 161, 94, 0.4);
+            padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 0.85rem;
+        }
+        .btn:hover { background: rgba(221, 161, 94, 0.2); }
+        .slider-group {
+            background: rgba(30, 30, 50, 0.85); backdrop-filter: blur(10px);
+            padding: 8px 14px; border-radius: 8px; color: #FEFAE0; font-size: 0.8rem;
+            border: 1px solid rgba(138, 154, 91, 0.2);
+        }
+        .slider-group input { width: 120px; accent-color: #8A9A5B; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <div class="slider-group">
+            <label>Circles: <span id="circleCount">50</span></label><br>
+            <input type="range" id="numCircles" min="1" max="200" value="50">
+        </div>
+        <div class="slider-group">
+            <label>Speed: <span id="speedVal">1.0</span>x</label><br>
+            <input type="range" id="speed" min="1" max="50" value="10">
+        </div>
+        <button class="btn" id="clearBtn">Clear Drawing</button>
+    </div>
+    <div id="info">Draw a path with your mouse or finger, then watch epicycles trace it back</div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // State
+        let userPath = [];
+        let drawing = false;
+        let fourierCoeffs = [];
+        let tracePoints = [];
+        let time = 0;
+        let phase = 'draw'; // 'draw' or 'replay'
+        let numCircles = 50;
+        let speedMult = 1.0;
+
+        // DFT
+        function dft(x) {
+            const N = x.length;
+            const X = [];
+            for (let k = 0; k < N; k++) {
+                let re = 0, im = 0;
+                for (let n = 0; n < N; n++) {
+                    const phi = (2 * Math.PI * k * n) / N;
+                    re += x[n].re * Math.cos(phi) + x[n].im * Math.sin(phi);
+                    im += x[n].im * Math.cos(phi) - x[n].re * Math.sin(phi);
+                }
+                re /= N;
+                im /= N;
+                X.push({
+                    re, im,
+                    freq: k,
+                    amp: Math.sqrt(re * re + im * im),
+                    phase: Math.atan2(im, re)
+                });
+            }
+            return X;
+        }
+
+        function epicycles(x, y, rotation, fourier, count) {
+            for (let i = 0; i < Math.min(count, fourier.length); i++) {
+                const prevX = x;
+                const prevY = y;
+                const freq = fourier[i].freq;
+                const radius = fourier[i].amp;
+                const ph = fourier[i].phase;
+
+                x += radius * Math.cos(freq * time + ph + rotation);
+                y += radius * Math.sin(freq * time + ph + rotation);
+
+                // Draw circle
+                ctx.beginPath();
+                ctx.arc(prevX, prevY, radius, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(138, 154, 91, 0.25)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Draw radius line
+                ctx.beginPath();
+                ctx.moveTo(prevX, prevY);
+                ctx.lineTo(x, y);
+                ctx.strokeStyle = 'rgba(221, 161, 94, 0.5)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+            return { x, y };
+        }
+
+        // Mouse/Touch
+        function getPos(e) {
+            const r = canvas.getBoundingClientRect();
+            const t = e.touches ? e.touches[0] : e;
+            return { re: t.clientX - r.left, im: t.clientY - r.top };
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (phase === 'replay') {
+                phase = 'draw';
+                userPath = [];
+                tracePoints = [];
+                fourierCoeffs = [];
+                time = 0;
+            }
+            drawing = true;
+            userPath = [getPos(e)];
+            document.getElementById('info').textContent = 'Drawing...';
+        });
+        canvas.addEventListener('mousemove', (e) => {
+            if (drawing) userPath.push(getPos(e));
+        });
+        canvas.addEventListener('mouseup', startReplay);
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (phase === 'replay') {
+                phase = 'draw';
+                userPath = [];
+                tracePoints = [];
+                fourierCoeffs = [];
+                time = 0;
+            }
+            drawing = true;
+            userPath = [getPos(e)];
+        }, { passive: false });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (drawing) userPath.push(getPos(e));
+        }, { passive: false });
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            startReplay();
+        });
+
+        function startReplay() {
+            if (!drawing) return;
+            drawing = false;
+            if (userPath.length < 4) return;
+
+            // Subsample for performance
+            const maxPoints = 300;
+            let sampled = userPath;
+            if (userPath.length > maxPoints) {
+                sampled = [];
+                const step = userPath.length / maxPoints;
+                for (let i = 0; i < maxPoints; i++) {
+                    sampled.push(userPath[Math.floor(i * step)]);
+                }
+            }
+
+            fourierCoeffs = dft(sampled);
+            fourierCoeffs.sort((a, b) => b.amp - a.amp);
+            tracePoints = [];
+            time = 0;
+            phase = 'replay';
+            document.getElementById('info').textContent =
+                `Tracing with ${Math.min(numCircles, fourierCoeffs.length)} epicycles (${sampled.length} sample points)`;
+        }
+
+        // Controls
+        document.getElementById('numCircles').addEventListener('input', (e) => {
+            numCircles = parseInt(e.target.value);
+            document.getElementById('circleCount').textContent = numCircles;
+            tracePoints = [];
+            time = 0;
+        });
+        document.getElementById('speed').addEventListener('input', (e) => {
+            speedMult = e.target.value / 10;
+            document.getElementById('speedVal').textContent = speedMult.toFixed(1);
+        });
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            phase = 'draw';
+            userPath = [];
+            tracePoints = [];
+            fourierCoeffs = [];
+            time = 0;
+            document.getElementById('info').textContent = 'Draw a path with your mouse or finger, then watch epicycles trace it back';
+        });
+
+        function animate() {
+            ctx.fillStyle = 'rgba(26, 26, 46, 0.15)';
+            ctx.fillRect(0, 0, W, H);
+
+            if (phase === 'draw' && drawing && userPath.length > 1) {
+                ctx.beginPath();
+                ctx.moveTo(userPath[0].re, userPath[0].im);
+                for (let i = 1; i < userPath.length; i++) {
+                    ctx.lineTo(userPath[i].re, userPath[i].im);
+                }
+                ctx.strokeStyle = '#FEFAE0';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+
+            if (phase === 'replay' && fourierCoeffs.length > 0) {
+                const count = Math.min(numCircles, fourierCoeffs.length);
+                const v = epicycles(0, 0, 0, fourierCoeffs, count);
+
+                // Offset to center the drawing
+                const offsetX = W / 2 - (fourierCoeffs[0] ? fourierCoeffs[0].re : 0);
+                const offsetY = H / 2 - (fourierCoeffs[0] ? fourierCoeffs[0].im : 0);
+
+                // Actually redraw with offset
+                ctx.fillStyle = 'rgba(26, 26, 46, 0.15)';
+                ctx.fillRect(0, 0, W, H);
+
+                ctx.save();
+                // No translate, epicycles already at data coords
+
+                const result = epicycles(0, 0, 0, fourierCoeffs, count);
+
+                tracePoints.unshift({ x: result.x, y: result.y });
+                if (tracePoints.length > fourierCoeffs.length + 50) {
+                    tracePoints.pop();
+                }
+
+                // Draw trace
+                if (tracePoints.length > 1) {
+                    ctx.beginPath();
+                    ctx.moveTo(tracePoints[0].x, tracePoints[0].y);
+                    for (let i = 1; i < tracePoints.length; i++) {
+                        ctx.lineTo(tracePoints[i].x, tracePoints[i].y);
+                    }
+                    const grad = ctx.createLinearGradient(
+                        tracePoints[0].x, tracePoints[0].y,
+                        tracePoints[tracePoints.length - 1].x, tracePoints[tracePoints.length - 1].y
+                    );
+                    grad.addColorStop(0, '#DDA15E');
+                    grad.addColorStop(0.5, '#FEFAE0');
+                    grad.addColorStop(1, '#8A9A5B');
+                    ctx.strokeStyle = grad;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+
+                // Dot at tip
+                ctx.beginPath();
+                ctx.arc(result.x, result.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = '#DDA15E';
+                ctx.fill();
+
+                ctx.restore();
+
+                const dt = (2 * Math.PI) / fourierCoeffs.length;
+                time += dt * speedMult;
+
+                if (time >= 2 * Math.PI) {
+                    time = 0;
+                    tracePoints = [];
+                }
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+
+        window.reset = function() {
+            phase = 'draw';
+            userPath = [];
+            tracePoints = [];
+            fourierCoeffs = [];
+            time = 0;
+            ctx.clearRect(0, 0, W, H);
+            document.getElementById('info').textContent = 'Draw a path with your mouse or finger, then watch epicycles trace it back';
+        };
+    })();
+    </script>
+</body>
+</html>

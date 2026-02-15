@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Harrison's Marine Chronometer - Historical Timekeeping</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Georgia', serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 15px 25px;
+            border-radius: 15px; color: #FEFAE0; display: flex; gap: 20px; align-items: center;
+            font-size: 0.85rem; z-index: 100; flex-wrap: wrap; justify-content: center;
+        }
+        .controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .controls input[type="range"] { width: 100px; accent-color: #DDA15E; }
+        .controls .value { color: #DDA15E; font-weight: bold; }
+        .controls select {
+            background: #333; color: #FEFAE0; border: 1px solid #606C38; padding: 4px 8px;
+            border-radius: 5px; font-family: inherit;
+        }
+        .info {
+            position: fixed; top: 10px; right: 10px; color: #FEFAE0; font-size: 0.8rem;
+            background: rgba(0,0,0,0.5); padding: 10px 15px; border-radius: 10px;
+            backdrop-filter: blur(10px); z-index: 100; text-align: right; line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="info" id="info"></div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Temperature
+            <input type="range" id="temp" min="-10" max="40" value="20" step="1">
+            <span class="value" id="tempVal">20&deg;C</span>
+        </label>
+        <label>Compensation
+            <select id="compensation">
+                <option value="none">None</option>
+                <option value="bimetallic" selected>Bimetallic Strip</option>
+            </select>
+        </label>
+        <label>Sea State
+            <input type="range" id="seaState" min="0" max="10" value="3" step="1">
+            <span class="value" id="seaVal">3</span>
+        </label>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const tempSlider = document.getElementById('temp');
+        const compSelect = document.getElementById('compensation');
+        const seaSlider = document.getElementById('seaState');
+        const tempVal = document.getElementById('tempVal');
+        const seaVal = document.getElementById('seaVal');
+        const infoEl = document.getElementById('info');
+
+        let W, H;
+        let balanceAngle = 0;
+        let balanceVelocity = 0;
+        let elapsedSeconds = 0;
+        let driftSeconds = 0;
+        let time = 0;
+        let lastTime = 0;
+        let wavePhase = 0;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        function drawCase(cx, cy, R) {
+            // Outer case (mahogany box)
+            const caseR = R + 30;
+            ctx.beginPath();
+            ctx.arc(cx, cy, caseR, 0, Math.PI * 2);
+            const caseGrad = ctx.createRadialGradient(cx, cy, R, cx, cy, caseR);
+            caseGrad.addColorStop(0, '#5C3A1E');
+            caseGrad.addColorStop(1, '#3A2210');
+            ctx.fillStyle = caseGrad;
+            ctx.fill();
+            ctx.strokeStyle = '#8A6B3E';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // Inner bezel
+            ctx.beginPath();
+            ctx.arc(cx, cy, R + 5, 0, Math.PI * 2);
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        function drawClockFace(cx, cy, R) {
+            // White/cream dial
+            ctx.beginPath();
+            ctx.arc(cx, cy, R, 0, Math.PI * 2);
+            const dialGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+            dialGrad.addColorStop(0, '#FEFAE0');
+            dialGrad.addColorStop(1, '#F0E8D0');
+            ctx.fillStyle = dialGrad;
+            ctx.fill();
+
+            // Hour markers
+            for (let i = 0; i < 12; i++) {
+                const a = (i / 12) * Math.PI * 2 - Math.PI / 2;
+                const inner = R * 0.82;
+                const outer = R * 0.92;
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner);
+                ctx.lineTo(cx + Math.cos(a) * outer, cy + Math.sin(a) * outer);
+                ctx.strokeStyle = '#333';
+                ctx.lineWidth = i % 3 === 0 ? 3 : 1.5;
+                ctx.stroke();
+
+                // Roman numerals at quarters
+                if (i % 3 === 0) {
+                    const labels = ['XII', 'III', 'VI', 'IX'];
+                    const labelR = R * 0.72;
+                    ctx.fillStyle = '#333';
+                    ctx.font = 'bold 14px Georgia';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(labels[i / 3], cx + Math.cos(a) * labelR, cy + Math.sin(a) * labelR);
+                }
+            }
+
+            // Minute markers
+            for (let i = 0; i < 60; i++) {
+                if (i % 5 === 0) continue;
+                const a = (i / 60) * Math.PI * 2 - Math.PI / 2;
+                const inner = R * 0.88;
+                const outer = R * 0.92;
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner);
+                ctx.lineTo(cx + Math.cos(a) * outer, cy + Math.sin(a) * outer);
+                ctx.strokeStyle = '#666';
+                ctx.lineWidth = 0.5;
+                ctx.stroke();
+            }
+
+            // Seconds subdial
+            const subR = R * 0.2;
+            const subY = cy + R * 0.4;
+            ctx.beginPath();
+            ctx.arc(cx, subY, subR, 0, Math.PI * 2);
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Seconds hand
+            const secAngle = (elapsedSeconds % 60) / 60 * Math.PI * 2 - Math.PI / 2;
+            ctx.beginPath();
+            ctx.moveTo(cx, subY);
+            ctx.lineTo(cx + Math.cos(secAngle) * subR * 0.85, subY + Math.sin(secAngle) * subR * 0.85);
+            ctx.strokeStyle = '#BC6C25';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Hour hand
+            const hourAngle = (elapsedSeconds / 43200) * Math.PI * 2 - Math.PI / 2;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + Math.cos(hourAngle) * R * 0.5, cy + Math.sin(hourAngle) * R * 0.5);
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 4;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+
+            // Minute hand
+            const minAngle = (elapsedSeconds / 3600) * Math.PI * 2 - Math.PI / 2;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + Math.cos(minAngle) * R * 0.7, cy + Math.sin(minAngle) * R * 0.7);
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2.5;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+
+            // Center pip
+            ctx.beginPath();
+            ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+            ctx.fillStyle = '#333';
+            ctx.fill();
+
+            // "H4" label
+            ctx.fillStyle = '#606C38';
+            ctx.font = 'italic 11px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Harrison H4', cx, cy - R * 0.25);
+        }
+
+        function drawBimetallicStrip(cx, cy, R, temp) {
+            // Show the bimetallic compensation curb
+            const stripX = cx + R + 50;
+            const stripY = cy - 60;
+            const stripW = 80;
+            const stripH = 15;
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '11px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Bimetallic Compensation Curb', stripX, stripY - 30);
+
+            // Temperature-dependent bend
+            const refTemp = 20;
+            const bend = (temp - refTemp) * 0.8; // bend in pixels
+
+            // Brass layer (top)
+            ctx.beginPath();
+            ctx.moveTo(stripX - stripW / 2, stripY);
+            ctx.quadraticCurveTo(stripX, stripY - bend, stripX + stripW / 2, stripY);
+            ctx.lineTo(stripX + stripW / 2, stripY + stripH / 2);
+            ctx.quadraticCurveTo(stripX, stripY + stripH / 2 - bend, stripX - stripW / 2, stripY + stripH / 2);
+            ctx.closePath();
+            ctx.fillStyle = '#D4A843';
+            ctx.fill();
+            ctx.strokeStyle = '#B8860B';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Steel layer (bottom)
+            ctx.beginPath();
+            ctx.moveTo(stripX - stripW / 2, stripY + stripH / 2);
+            ctx.quadraticCurveTo(stripX, stripY + stripH / 2 - bend, stripX + stripW / 2, stripY + stripH / 2);
+            ctx.lineTo(stripX + stripW / 2, stripY + stripH);
+            ctx.quadraticCurveTo(stripX, stripY + stripH - bend * 0.7, stripX - stripW / 2, stripY + stripH);
+            ctx.closePath();
+            ctx.fillStyle = '#808080';
+            ctx.fill();
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Labels
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = '9px Georgia';
+            ctx.textAlign = 'left';
+            ctx.fillText('Brass (expands more)', stripX + stripW / 2 + 5, stripY + 6);
+            ctx.fillText('Steel (expands less)', stripX + stripW / 2 + 5, stripY + stripH + 3);
+
+            // Curb pins
+            const pinX = stripX + stripW / 2 - 5;
+            const pinY = stripY + stripH - bend * 0.5;
+            ctx.beginPath();
+            ctx.arc(pinX, pinY, 3, 0, Math.PI * 2);
+            ctx.fillStyle = '#BC6C25';
+            ctx.fill();
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '9px Georgia';
+            ctx.fillText('Curb pins', pinX + 8, pinY + 3);
+
+            // Balance spring length indicator
+            ctx.fillStyle = 'rgba(138, 154, 91, 0.5)';
+            ctx.font = '10px Georgia';
+            ctx.textAlign = 'center';
+            const compensation = compSelect.value;
+            if (compensation === 'bimetallic') {
+                ctx.fillText('Spring shortened by ' + Math.abs(bend * 0.1).toFixed(2) + '%', stripX, stripY + stripH + 25);
+                ctx.fillText('Compensating for ' + (temp - refTemp).toFixed(0) + '\u00B0C change', stripX, stripY + stripH + 40);
+            }
+        }
+
+        function drawWaves(sea) {
+            if (sea === 0) return;
+            const amplitude = sea * 3;
+            ctx.strokeStyle = 'rgba(60, 120, 180, 0.15)';
+            ctx.lineWidth = 1;
+            for (let row = 0; row < 3; row++) {
+                ctx.beginPath();
+                const baseY = H - 40 + row * 15;
+                for (let x = 0; x < W; x += 2) {
+                    const y = baseY + Math.sin(x * 0.02 + wavePhase + row * 0.5) * amplitude;
+                    if (x === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+        }
+
+        function draw(timestamp) {
+            const dt = lastTime ? Math.min((timestamp - lastTime) / 1000, 0.05) : 0.016;
+            lastTime = timestamp;
+            time += dt;
+
+            const temp = parseFloat(tempSlider.value);
+            const sea = parseFloat(seaSlider.value);
+            const compensation = compSelect.value;
+
+            tempVal.textContent = temp + '\u00B0C';
+            seaVal.textContent = sea;
+
+            // Temperature effect on rate
+            const refTemp = 20;
+            const tempError = (temp - refTemp) * 0.0001; // seconds drift per second per degree
+            let rateError = tempError;
+
+            // Bimetallic compensation
+            if (compensation === 'bimetallic') {
+                rateError *= 0.05; // 95% compensation
+            }
+
+            // Sea state adds slight random perturbation
+            const seaError = sea * 0.00001 * Math.sin(time * 2.3);
+
+            // Advance time
+            const effectiveRate = 1 + rateError + seaError;
+            elapsedSeconds += dt * effectiveRate * 60; // speed up for demo
+            driftSeconds += (rateError + seaError) * dt * 60;
+
+            // Balance wheel oscillation
+            const springFreq = 5; // Hz
+            balanceAngle = Math.sin(time * springFreq * Math.PI * 2) * 0.5;
+
+            // Wave phase
+            wavePhase += dt * sea * 0.5;
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            // Sea rocking effect
+            const rockAngle = sea > 0 ? Math.sin(time * 0.8) * sea * 0.003 : 0;
+            ctx.save();
+            ctx.translate(W / 2, H / 2);
+            ctx.rotate(rockAngle);
+            ctx.translate(-W / 2, -H / 2);
+
+            const cx = W * 0.4;
+            const cy = H / 2;
+            const R = Math.min(W, H) * 0.22;
+
+            // Chronometer
+            drawCase(cx, cy, R);
+            drawClockFace(cx, cy, R);
+
+            ctx.restore();
+
+            // Bimetallic strip diagram (not rocked)
+            drawBimetallicStrip(cx, cy, R, temp);
+
+            // Waves
+            drawWaves(sea);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'italic 14px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Harrison\'s H4 Marine Chronometer (1761)', W / 2, 30);
+
+            // Longitude calculation
+            const timeDiff = driftSeconds;
+            const longitudeError = (timeDiff / 3600) * 15; // 15 degrees per hour
+
+            // Info
+            infoEl.innerHTML =
+                'Temperature: ' + temp + '\u00B0C<br>' +
+                'Compensation: ' + (compensation === 'bimetallic' ? 'Active' : 'None') + '<br>' +
+                'Clock drift: ' + driftSeconds.toFixed(3) + 's<br>' +
+                'Longitude error: ' + longitudeError.toFixed(4) + '\u00B0<br>' +
+                'Sea state: ' + sea + '/10<br>' +
+                (compensation === 'bimetallic' ? 'Bimetallic curb compensates spring' : 'No compensation - drift increases!');
+
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            balanceAngle = 0;
+            balanceVelocity = 0;
+            elapsedSeconds = 0;
+            driftSeconds = 0;
+            time = 0;
+            tempSlider.value = 20;
+            seaSlider.value = 3;
+            compSelect.value = 'bimetallic';
+        };
+
+        requestAnimationFrame(draw);
+    })();
+    </script>
+</body>
+</html>

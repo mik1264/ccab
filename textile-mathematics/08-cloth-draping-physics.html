@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cloth Draping Physics - Textile Mathematics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; }
+a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+
+.controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center;
+    background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 12px 20px;
+    border-radius: 16px; border: 1px solid rgba(138,154,91,0.3); z-index: 100;
+}
+.controls label { font-size: 0.85rem; color: #8A9A5B; }
+.controls select, .controls button, .controls input[type=range] {
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(138,154,91,0.4);
+    color: #FEFAE0; padding: 4px 10px; border-radius: 8px; font-size: 0.85rem; cursor: pointer;
+}
+.controls button:hover { background: rgba(138,154,91,0.3); }
+.controls input[type=range] { width: 80px; }
+
+.info-panel {
+    position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7);
+    backdrop-filter: blur(10px); padding: 14px 18px; border-radius: 14px;
+    border: 1px solid rgba(138,154,91,0.3); max-width: 260px; z-index: 100;
+}
+.info-panel h2 { font-size: 1rem; color: #DDA15E; margin-bottom: 6px; }
+.info-panel p { font-size: 0.8rem; line-height: 1.5; opacity: 0.8; }
+</style>
+</head>
+<body>
+<a href="index.html">&larr; Back</a>
+
+<div class="info-panel">
+    <h2>Cloth Draping Physics</h2>
+    <p>A spring-mass particle system simulates fabric draping under gravity. Each node connects to neighbors via structural, shear, and bend springs. Drag pinned points or click to add obstacles.</p>
+</div>
+
+<div class="controls">
+    <label>Gravity: <input type="range" id="gravity" min="0" max="20" value="8"></label>
+    <label>Stiffness: <input type="range" id="stiffness" min="1" max="20" value="10"></label>
+    <label>Damping: <input type="range" id="damping" min="1" max="10" value="5"></label>
+    <label>Wind: <input type="range" id="wind" min="0" max="15" value="0"></label>
+    <button id="dropBtn">Drop</button>
+    <button id="resetBtn">Reset</button>
+</div>
+
+<canvas id="canvas"></canvas>
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+const COLS = 40;
+const ROWS = 30;
+const REST = 12;
+
+let gravity = 0.08;
+let stiffness = 0.5;
+let damping = 0.97;
+let windStrength = 0;
+
+let particles = [];
+let springs = [];
+let obstacles = [];
+let dragging = null;
+let mousePos = { x: 0, y: 0 };
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    initCloth();
+}
+
+function initCloth() {
+    particles = [];
+    springs = [];
+
+    const startX = (canvas.width - (COLS - 1) * REST) / 2;
+    const startY = 80;
+
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            const x = startX + c * REST;
+            const y = startY + r * REST;
+            particles.push({
+                x, y, px: x, py: y,
+                pinned: r === 0 && (c % 8 === 0 || c === COLS - 1),
+                mass: 1
+            });
+        }
+    }
+
+    // Structural springs (horizontal + vertical)
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            const i = r * COLS + c;
+            if (c < COLS - 1) springs.push({ a: i, b: i + 1, rest: REST });
+            if (r < ROWS - 1) springs.push({ a: i, b: i + COLS, rest: REST });
+        }
+    }
+
+    // Shear springs (diagonals)
+    for (let r = 0; r < ROWS - 1; r++) {
+        for (let c = 0; c < COLS - 1; c++) {
+            const i = r * COLS + c;
+            springs.push({ a: i, b: i + COLS + 1, rest: REST * Math.SQRT2 });
+            springs.push({ a: i + 1, b: i + COLS, rest: REST * Math.SQRT2 });
+        }
+    }
+
+    // Bend springs (skip one)
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS - 2; c++) {
+            const i = r * COLS + c;
+            springs.push({ a: i, b: i + 2, rest: REST * 2 });
+        }
+    }
+    for (let r = 0; r < ROWS - 2; r++) {
+        for (let c = 0; c < COLS; c++) {
+            const i = r * COLS + c;
+            springs.push({ a: i, b: i + COLS * 2, rest: REST * 2 });
+        }
+    }
+}
+
+function simulate() {
+    const g = gravity;
+    const windT = Date.now() * 0.001;
+
+    // Verlet integration
+    for (const p of particles) {
+        if (p.pinned) continue;
+        const vx = (p.x - p.px) * damping;
+        const vy = (p.y - p.py) * damping;
+
+        // Wind force
+        const wind = windStrength * (Math.sin(windT * 2 + p.y * 0.01) * 0.5 + 0.5);
+
+        p.px = p.x;
+        p.py = p.y;
+        p.x += vx + wind * 0.1;
+        p.y += vy + g;
+    }
+
+    // Satisfy spring constraints (multiple iterations)
+    const iterations = 5;
+    for (let iter = 0; iter < iterations; iter++) {
+        for (const s of springs) {
+            const a = particles[s.a];
+            const b = particles[s.b];
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 0.001) continue;
+            const diff = (dist - s.rest) / dist * stiffness * 0.5;
+            const ox = dx * diff;
+            const oy = dy * diff;
+            if (!a.pinned) { a.x += ox; a.y += oy; }
+            if (!b.pinned) { b.x -= ox; b.y -= oy; }
+        }
+
+        // Obstacle collisions
+        for (const p of particles) {
+            if (p.pinned) continue;
+            for (const obs of obstacles) {
+                const dx = p.x - obs.x;
+                const dy = p.y - obs.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < obs.r) {
+                    const nx = dx / dist;
+                    const ny = dy / dist;
+                    p.x = obs.x + nx * obs.r;
+                    p.y = obs.y + ny * obs.r;
+                }
+            }
+
+            // Floor
+            if (p.y > canvas.height - 50) {
+                p.y = canvas.height - 50;
+            }
+        }
+    }
+}
+
+function draw() {
+    const w = canvas.width, h = canvas.height;
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, w, h);
+
+    simulate();
+
+    // Draw obstacles
+    for (const obs of obstacles) {
+        ctx.beginPath();
+        ctx.arc(obs.x, obs.y, obs.r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(188,108,37,0.3)';
+        ctx.fill();
+        ctx.strokeStyle = '#BC6C25';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+    }
+
+    // Draw cloth as filled triangles with shading
+    for (let r = 0; r < ROWS - 1; r++) {
+        for (let c = 0; c < COLS - 1; c++) {
+            const i = r * COLS + c;
+            const p0 = particles[i];
+            const p1 = particles[i + 1];
+            const p2 = particles[i + COLS];
+            const p3 = particles[i + COLS + 1];
+
+            // Calculate normal for shading (simplified)
+            const dx1 = p1.x - p0.x, dy1 = p1.y - p0.y;
+            const dx2 = p2.x - p0.x, dy2 = p2.y - p0.y;
+            const cross = dx1 * dy2 - dy1 * dx2;
+            const shade = Math.max(0.3, Math.min(1, Math.abs(cross) / (REST * REST) * 0.8));
+
+            // Color based on position for warp/weft effect
+            const isWarp = (r + c) % 2 === 0;
+            const baseR = isWarp ? 96 : 138;
+            const baseG = isWarp ? 108 : 154;
+            const baseB = isWarp ? 56 : 91;
+
+            ctx.fillStyle = `rgba(${Math.floor(baseR * shade)},${Math.floor(baseG * shade)},${Math.floor(baseB * shade)},0.9)`;
+
+            // Triangle 1
+            ctx.beginPath();
+            ctx.moveTo(p0.x, p0.y);
+            ctx.lineTo(p1.x, p1.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.closePath();
+            ctx.fill();
+
+            // Triangle 2
+            ctx.beginPath();
+            ctx.moveTo(p1.x, p1.y);
+            ctx.lineTo(p3.x, p3.y);
+            ctx.lineTo(p2.x, p2.y);
+            ctx.closePath();
+            ctx.fill();
+        }
+    }
+
+    // Draw grid lines for woven texture
+    ctx.strokeStyle = 'rgba(254,250,224,0.08)';
+    ctx.lineWidth = 0.5;
+    for (let r = 0; r < ROWS; r++) {
+        ctx.beginPath();
+        for (let c = 0; c < COLS; c++) {
+            const p = particles[r * COLS + c];
+            if (c === 0) ctx.moveTo(p.x, p.y);
+            else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+    }
+    for (let c = 0; c < COLS; c++) {
+        ctx.beginPath();
+        for (let r = 0; r < ROWS; r++) {
+            const p = particles[r * COLS + c];
+            if (r === 0) ctx.moveTo(p.x, p.y);
+            else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+    }
+
+    // Draw pinned points
+    for (const p of particles) {
+        if (p.pinned) {
+            ctx.fillStyle = '#DDA15E';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Floor line
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, h - 50);
+    ctx.lineTo(w, h - 50);
+    ctx.stroke();
+
+    requestAnimationFrame(draw);
+}
+
+// Interaction
+canvas.addEventListener('mousedown', (e) => {
+    const mx = e.clientX, my = e.clientY;
+    // Check if clicking a pinned particle
+    for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        if (p.pinned && Math.hypot(p.x - mx, p.y - my) < 15) {
+            dragging = i;
+            return;
+        }
+    }
+    // Otherwise add obstacle
+    obstacles.push({ x: mx, y: my, r: 30 + Math.random() * 20 });
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    mousePos.x = e.clientX;
+    mousePos.y = e.clientY;
+    if (dragging !== null) {
+        const p = particles[dragging];
+        p.x = e.clientX;
+        p.y = e.clientY;
+        p.px = e.clientX;
+        p.py = e.clientY;
+    }
+});
+
+canvas.addEventListener('mouseup', () => { dragging = null; });
+
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        if (p.pinned && Math.hypot(p.x - t.clientX, p.y - t.clientY) < 25) {
+            dragging = i;
+            return;
+        }
+    }
+    obstacles.push({ x: t.clientX, y: t.clientY, r: 30 + Math.random() * 20 });
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (dragging !== null) {
+        const t = e.touches[0];
+        const p = particles[dragging];
+        p.x = t.clientX;
+        p.y = t.clientY;
+        p.px = t.clientX;
+        p.py = t.clientY;
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => { dragging = null; });
+
+document.getElementById('gravity').addEventListener('input', (e) => { gravity = parseInt(e.target.value) / 100; });
+document.getElementById('stiffness').addEventListener('input', (e) => { stiffness = parseInt(e.target.value) / 20; });
+document.getElementById('damping').addEventListener('input', (e) => { damping = 0.9 + parseInt(e.target.value) / 100; });
+document.getElementById('wind').addEventListener('input', (e) => { windStrength = parseInt(e.target.value); });
+
+document.getElementById('dropBtn').addEventListener('click', () => {
+    for (const p of particles) {
+        if (p.pinned) { p.pinned = false; }
+    }
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+    obstacles = [];
+    initCloth();
+});
+
+window.reset = function() {
+    gravity = 0.08;
+    stiffness = 0.5;
+    damping = 0.97;
+    windStrength = 0;
+    obstacles = [];
+    document.getElementById('gravity').value = 8;
+    document.getElementById('stiffness').value = 10;
+    document.getElementById('damping').value = 5;
+    document.getElementById('wind').value = 0;
+    initCloth();
+};
+
+resize();
+window.addEventListener('resize', () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    initCloth();
+});
+draw();
+</script>
+</body>
+</html>

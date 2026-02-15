@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Throw Angle Optimizer - Paper Airplane Physics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px; border-radius: 12px; width: 250px;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 8px; font-size: 0.95rem; }
+        .control-group { margin-bottom: 8px; }
+        .control-group label { display: block; color: #8A9A5B; font-size: 0.8rem; margin-bottom: 2px; }
+        .control-group input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+        .val { color: #DDA15E; font-size: 0.8rem; float: right; }
+        button {
+            width: 100%; padding: 8px; border: none; border-radius: 8px;
+            background: linear-gradient(135deg, #606C38, #8A9A5B); color: #FEFAE0;
+            font-size: 0.85rem; cursor: pointer; font-weight: bold; margin-top: 5px;
+        }
+        #results {
+            position: fixed; bottom: 10px; left: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 12px 16px; border-radius: 12px; font-size: 0.85rem;
+            border: 1px solid rgba(138,154,91,0.3); max-width: 350px;
+        }
+        .best { color: #4CAF50; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Throw Angle Optimizer</h3>
+        <div class="control-group">
+            <label>Throw Speed: <span class="val" id="speedVal">12</span> m/s</label>
+            <input type="range" id="speed" min="5" max="25" value="12" step="0.5">
+        </div>
+        <div class="control-group">
+            <label>Design Type:</label>
+            <select id="design" style="width:100%; padding:4px; border-radius:6px; background:#2a2a4e; color:#FEFAE0; border:1px solid #8A9A5B;">
+                <option value="dart">Dart (fast, low drag)</option>
+                <option value="glider">Glider (slow, high lift)</option>
+                <option value="hybrid" selected>Hybrid (balanced)</option>
+            </select>
+        </div>
+        <button id="sweepBtn">Sweep All Angles</button>
+        <button id="singleBtn" style="margin-top:5px; background: linear-gradient(135deg, #BC6C25, #DDA15E);">Click Canvas to Throw</button>
+    </div>
+    <div id="results">
+        <p style="color:#8A9A5B; font-size:0.75rem; margin-bottom:4px;">Results appear after sweep or individual throws</p>
+        <p>Best Distance: <span class="best" id="bestDist">--</span></p>
+        <p>Best Angle: <span class="best" id="bestAngle">--</span></p>
+        <p>Best Hang Time: <span class="best" id="bestTime">--</span></p>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let time = 0;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const designs = {
+            dart: { mass: 0.005, wingArea: 0.015, AR: 3, cd0: 0.015, clSlope: 4.5, stallAngle: 18, color: '#f44336' },
+            glider: { mass: 0.004, wingArea: 0.06, AR: 7, cd0: 0.025, clSlope: 6.0, stallAngle: 12, color: '#4CAF50' },
+            hybrid: { mass: 0.0045, wingArea: 0.035, AR: 5, cd0: 0.02, clSlope: 5.2, stallAngle: 14, color: '#DDA15E' }
+        };
+
+        let flights = [];
+        let sweeping = false;
+        let sweepAngle = -10;
+        let sweepResults = [];
+        let bestResult = null;
+        let throwMode = false;
+        let aimAngle = 30;
+
+        const groundFrac = 0.82;
+        const launchX = 80;
+
+        function getDesign() { return designs[document.getElementById('design').value]; }
+        function getSpeed() { return parseFloat(document.getElementById('speed').value); }
+
+        function simulateFullFlight(angleDeg, speed, design) {
+            const angleRad = angleDeg * Math.PI / 180;
+            let x = 0, y = 0;
+            let vx = speed * Math.cos(angleRad);
+            let vy = -speed * Math.sin(angleRad);
+            let theta = -angleRad;
+            const dt = 0.002;
+            let t = 0;
+            const trail = [];
+            const rho = 1.225;
+            const g = 9.81;
+
+            while (t < 15 && y <= 0.01) {
+                // Allow initial rise
+                if (t > 0.1 && y >= 0) break;
+                const V = Math.sqrt(vx * vx + vy * vy);
+                if (V < 0.5 && t > 0.5) break;
+
+                const flightAngle = Math.atan2(-vy, vx);
+                const aoa = theta - flightAngle;
+                const aoaDeg = Math.abs(aoa * 180 / Math.PI);
+
+                let CL;
+                if (aoaDeg < design.stallAngle) {
+                    CL = design.clSlope * aoa;
+                } else {
+                    const clMax = design.clSlope * (design.stallAngle * Math.PI / 180);
+                    CL = clMax * Math.sign(aoa) * Math.max(0, 1 - (aoaDeg - design.stallAngle) / 25);
+                }
+                const cdi = (CL * CL) / (Math.PI * design.AR * 0.7);
+                const CD = design.cd0 + cdi;
+
+                const q = 0.5 * rho * V * V;
+                const L = q * design.wingArea * CL;
+                const D = q * design.wingArea * CD;
+
+                const ax = (-L * Math.sin(flightAngle) - D * (vx / V)) / design.mass;
+                const ay = g + (-L * Math.cos(flightAngle) - D * (vy / V)) / design.mass;
+
+                vx += ax * dt;
+                vy += ay * dt;
+                x += vx * dt;
+                y += vy * dt;
+
+                const targetTheta = -Math.atan2(-vy, Math.max(vx, 0.1));
+                theta += (targetTheta - theta) * 3 * dt;
+
+                t += dt;
+                if (Math.floor(t * 200) % 2 === 0) {
+                    trail.push({ x, y });
+                }
+            }
+
+            return { distance: x, hangTime: t, trail, angle: angleDeg, maxHeight: Math.min(...trail.map(p => p.y)) };
+        }
+
+        function worldToScreen(wx, wy) {
+            const groundY = H * groundFrac;
+            const scaleX = (W - 120) / 50; // 50 meters across
+            const scaleY = (groundY - 60) / 15; // 15 meters high
+            return {
+                x: launchX + wx * scaleX,
+                y: groundY + wy * scaleY
+            };
+        }
+
+        function drawGround() {
+            const gy = H * groundFrac;
+            const grad = ctx.createLinearGradient(0, gy, 0, H);
+            grad.addColorStop(0, '#2a3a1e');
+            grad.addColorStop(1, '#1a2a10');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, gy, W, H - gy);
+
+            // Distance markers
+            ctx.fillStyle = 'rgba(254,250,224,0.4)';
+            ctx.font = '10px Segoe UI, sans-serif';
+            ctx.textAlign = 'center';
+            for (let d = 5; d <= 50; d += 5) {
+                const sx = worldToScreen(d, 0);
+                ctx.fillText(d + 'm', sx.x, gy + 15);
+                ctx.beginPath();
+                ctx.moveTo(sx.x, gy);
+                ctx.lineTo(sx.x, gy + 5);
+                ctx.strokeStyle = 'rgba(254,250,224,0.2)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+            ctx.textAlign = 'left';
+        }
+
+        function drawTrail(trail, color, alpha) {
+            if (trail.length < 2) return;
+            ctx.beginPath();
+            const p0 = worldToScreen(trail[0].x, trail[0].y);
+            ctx.moveTo(p0.x, p0.y);
+            for (let i = 1; i < trail.length; i++) {
+                const p = worldToScreen(trail[i].x, trail[i].y);
+                ctx.lineTo(p.x, p.y);
+            }
+            ctx.strokeStyle = color + (alpha || '88');
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        function drawAngleChart() {
+            if (sweepResults.length < 3) return;
+
+            const chartX = W - 320;
+            const chartY = 60;
+            const chartW = 280;
+            const chartH = 160;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.beginPath();
+            ctx.roundRect(chartX, chartY, chartW, chartH, 10);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '11px Segoe UI, sans-serif';
+            ctx.fillText('Distance vs Throw Angle', chartX + 10, chartY + 18);
+
+            const padX = 35, padY = 28;
+            const cw = chartW - padX - 10;
+            const ch = chartH - padY - 25;
+
+            const maxDist = Math.max(...sweepResults.map(r => r.distance));
+
+            // Axes
+            ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+            ctx.beginPath();
+            ctx.moveTo(chartX + padX, chartY + padY);
+            ctx.lineTo(chartX + padX, chartY + padY + ch);
+            ctx.lineTo(chartX + padX + cw, chartY + padY + ch);
+            ctx.stroke();
+
+            // Plot
+            const design = getDesign();
+            ctx.beginPath();
+            ctx.strokeStyle = design.color;
+            ctx.lineWidth = 2;
+            for (let i = 0; i < sweepResults.length; i++) {
+                const r = sweepResults[i];
+                const px = chartX + padX + ((r.angle + 10) / 70) * cw;
+                const py = chartY + padY + ch - (r.distance / maxDist) * ch;
+                if (i === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // Best marker
+            if (bestResult) {
+                const bx = chartX + padX + ((bestResult.angle + 10) / 70) * cw;
+                const by = chartY + padY + ch - (bestResult.distance / maxDist) * ch;
+                ctx.beginPath();
+                ctx.arc(bx, by, 5, 0, Math.PI * 2);
+                ctx.fillStyle = '#DDA15E';
+                ctx.fill();
+                ctx.fillStyle = '#DDA15E';
+                ctx.font = '9px Segoe UI, sans-serif';
+                ctx.fillText(bestResult.angle + '\u00b0', bx + 8, by - 5);
+            }
+
+            // Tick marks
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '9px Segoe UI, sans-serif';
+            ctx.textAlign = 'center';
+            for (let a = 0; a <= 60; a += 15) {
+                const px = chartX + padX + ((a + 10) / 70) * cw;
+                ctx.fillText(a + '\u00b0', px, chartY + padY + ch + 12);
+            }
+            ctx.textAlign = 'left';
+        }
+
+        // Aim line on canvas click
+        canvas.addEventListener('mousemove', function(e) {
+            if (!throwMode) return;
+            const launchPos = worldToScreen(0, 0);
+            const dx = e.clientX - launchPos.x;
+            const dy = e.clientY - launchPos.y;
+            aimAngle = -Math.atan2(dy, dx) * 180 / Math.PI;
+            aimAngle = Math.max(-10, Math.min(60, aimAngle));
+        });
+
+        canvas.addEventListener('click', function(e) {
+            if (e.clientX > W - 270 && e.clientY < 300) return; // avoid controls
+            throwMode = true;
+
+            const speed = getSpeed();
+            const design = getDesign();
+            const result = simulateFullFlight(aimAngle, speed, design);
+
+            flights.push({
+                trail: result.trail,
+                color: design.color,
+                angle: aimAngle,
+                distance: result.distance,
+                hangTime: result.hangTime
+            });
+
+            // Keep last 15 flights
+            if (flights.length > 15) flights.shift();
+
+            // Update best
+            if (!bestResult || result.distance > bestResult.distance) {
+                bestResult = { angle: Math.round(aimAngle), distance: result.distance, hangTime: result.hangTime };
+                document.getElementById('bestDist').textContent = result.distance.toFixed(1) + ' m';
+                document.getElementById('bestAngle').textContent = Math.round(aimAngle) + '\u00b0';
+                document.getElementById('bestTime').textContent = result.hangTime.toFixed(2) + ' s';
+            }
+        });
+
+        // Sweep button
+        document.getElementById('sweepBtn').addEventListener('click', function() {
+            flights = [];
+            sweepResults = [];
+            bestResult = null;
+            sweeping = true;
+            sweepAngle = -10;
+        });
+
+        document.getElementById('singleBtn').addEventListener('click', function() {
+            throwMode = true;
+        });
+
+        // Update labels
+        document.getElementById('speed').addEventListener('input', function() {
+            document.getElementById('speedVal').textContent = this.value;
+        });
+
+        function animate() {
+            time += 0.016;
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            drawGround();
+
+            // Sweep animation
+            if (sweeping) {
+                const speed = getSpeed();
+                const design = getDesign();
+
+                for (let i = 0; i < 3 && sweepAngle <= 60; i++) {
+                    const result = simulateFullFlight(sweepAngle, speed, design);
+                    sweepResults.push(result);
+                    flights.push({
+                        trail: result.trail,
+                        color: design.color,
+                        angle: sweepAngle,
+                        distance: result.distance,
+                        hangTime: result.hangTime
+                    });
+
+                    if (!bestResult || result.distance > bestResult.distance) {
+                        bestResult = { angle: sweepAngle, distance: result.distance, hangTime: result.hangTime };
+                    }
+                    sweepAngle += 2;
+                }
+
+                if (sweepAngle > 60) {
+                    sweeping = false;
+                    document.getElementById('bestDist').textContent = bestResult.distance.toFixed(1) + ' m';
+                    document.getElementById('bestAngle').textContent = bestResult.angle + '\u00b0';
+                    document.getElementById('bestTime').textContent = bestResult.hangTime.toFixed(2) + ' s';
+                }
+            }
+
+            // Draw all flight trails
+            for (const f of flights) {
+                const isBest = bestResult && Math.abs(f.angle - bestResult.angle) < 1;
+                drawTrail(f.trail, f.color, isBest ? 'ff' : '33');
+
+                // Landing marker
+                if (f.trail.length > 0) {
+                    const last = f.trail[f.trail.length - 1];
+                    const lp = worldToScreen(last.x, 0);
+                    ctx.beginPath();
+                    ctx.arc(lp.x, H * groundFrac, 3, 0, Math.PI * 2);
+                    ctx.fillStyle = isBest ? '#DDA15E' : f.color + '66';
+                    ctx.fill();
+                }
+            }
+
+            // Best trail highlight
+            if (bestResult && sweepResults.length > 0) {
+                const best = sweepResults.find(r => r.angle === bestResult.angle);
+                if (best) {
+                    drawTrail(best.trail, '#DDA15E', 'ff');
+                }
+            }
+
+            // Aim line when in throw mode
+            if (throwMode) {
+                const launchPos = worldToScreen(0, 0);
+                const aimRad = aimAngle * Math.PI / 180;
+                const lineLen = 80;
+                ctx.beginPath();
+                ctx.moveTo(launchPos.x, launchPos.y);
+                ctx.lineTo(launchPos.x + lineLen * Math.cos(-aimRad), launchPos.y + lineLen * Math.sin(-aimRad));
+                ctx.strokeStyle = '#DDA15E';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([5, 5]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                ctx.fillStyle = '#DDA15E';
+                ctx.font = '12px Segoe UI, sans-serif';
+                ctx.fillText(Math.round(aimAngle) + '\u00b0', launchPos.x + lineLen + 5, launchPos.y - 10);
+            }
+
+            // Launcher
+            const launchPos = worldToScreen(0, 0);
+            ctx.beginPath();
+            ctx.arc(launchPos.x, launchPos.y, 6, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+
+            drawAngleChart();
+
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            flights = [];
+            sweepResults = [];
+            bestResult = null;
+            sweeping = false;
+            throwMode = false;
+            document.getElementById('speed').value = 12;
+            document.getElementById('speedVal').textContent = '12';
+            document.getElementById('design').value = 'hybrid';
+            document.getElementById('bestDist').textContent = '--';
+            document.getElementById('bestAngle').textContent = '--';
+            document.getElementById('bestTime').textContent = '--';
+        };
+
+        animate();
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Organ Pipe Ranks - Wind Instrument Physics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; cursor: pointer; }
+a.back-link { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+a.back-link:hover { color: #DDA15E; }
+
+.controls {
+    position: fixed; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(26,26,46,0.92); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 16px; min-width: 220px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #DDA15E; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+.controls label { display: block; font-size: 12px; color: #8A9A5B; margin-top: 8px; }
+.controls select { width: 100%; background: #2a2a4e; color: #FEFAE0; border: 1px solid #606C38; border-radius: 6px; padding: 4px; margin: 4px 0; }
+.controls input[type=range] { width: 100%; margin: 4px 0; accent-color: #8A9A5B; }
+.controls .value { font-size: 11px; color: #8A9A5B; text-align: right; }
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 12px; border: none; border-radius: 8px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+.btn.active { background: #DDA15E; color: #1a1a2e; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Organ Pipe Ranks</h3>
+    <label>Stop (Rank Type)</label>
+    <select id="stop">
+        <option value="principal">Principal 8'</option>
+        <option value="flute">Flute 8'</option>
+        <option value="string">String 8'</option>
+        <option value="reed">Reed 8'</option>
+    </select>
+    <label>Wind Pressure: <span id="windVal" class="value">75 mmWG</span></label>
+    <input type="range" id="wind" min="30" max="150" value="75">
+    <label>Pipe Material</label>
+    <select id="material">
+        <option value="tin">Tin (bright)</option>
+        <option value="lead">Lead (mellow)</option>
+        <option value="wood">Wood (warm)</option>
+    </select>
+    <p style="font-size:11px; color:#8A9A5B; margin-top:10px;">Click pipes to play them. Click again to stop.</p>
+</div>
+
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+let stopType = 'principal';
+let windPressure = 75;
+let material = 'tin';
+let time = 0;
+let audioCtx = null;
+let activePipes = new Map();
+let animId;
+
+const notes = ['C4', 'D4', 'E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5', 'E5', 'F5', 'G5'];
+const freqs = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25, 587.33, 659.25, 698.46, 783.99];
+const pipeData = [];
+
+// Pipe visual data
+for (let i = 0; i < notes.length; i++) {
+    const lengthRatio = freqs[0] / freqs[i];
+    pipeData.push({
+        note: notes[i],
+        freq: freqs[i],
+        lengthRatio: lengthRatio,
+        active: false,
+        glow: 0
+    });
+}
+
+const stopEl = document.getElementById('stop');
+const windEl = document.getElementById('wind');
+const matEl = document.getElementById('material');
+
+stopEl.addEventListener('change', e => { stopType = e.target.value; stopAllPipes(); });
+windEl.addEventListener('input', e => { windPressure = +e.target.value; document.getElementById('windVal').textContent = windPressure + ' mmWG'; });
+matEl.addEventListener('change', e => { material = e.target.value; });
+
+function getTimbreHarmonics() {
+    const timbres = {
+        principal: { tin: [1, 0.5, 0.3, 0.2, 0.12, 0.08], lead: [1, 0.4, 0.2, 0.1, 0.05, 0.02], wood: [1, 0.35, 0.15, 0.08, 0.03, 0.01] },
+        flute: { tin: [1, 0.15, 0.05, 0.02, 0, 0], lead: [1, 0.1, 0.03, 0.01, 0, 0], wood: [1, 0.08, 0.02, 0, 0, 0] },
+        string: { tin: [1, 0.8, 0.6, 0.5, 0.4, 0.3], lead: [1, 0.7, 0.5, 0.4, 0.3, 0.2], wood: [1, 0.6, 0.4, 0.3, 0.2, 0.1] },
+        reed: { tin: [1, 0.9, 0.7, 0.5, 0.4, 0.35], lead: [1, 0.8, 0.6, 0.45, 0.35, 0.25], wood: [1, 0.7, 0.5, 0.35, 0.25, 0.15] }
+    };
+    return timbres[stopType][material];
+}
+
+function playPipe(index) {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+
+    if (activePipes.has(index)) {
+        stopPipe(index);
+        return;
+    }
+
+    const harmonics = getTimbreHarmonics();
+    const freq = freqs[index];
+    const gain = audioCtx.createGain();
+    gain.gain.setValueAtTime(0, audioCtx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.06 * windPressure / 75, audioCtx.currentTime + 0.08);
+    gain.connect(audioCtx.destination);
+
+    const oscs = [];
+    for (let h = 0; h < harmonics.length; h++) {
+        if (harmonics[h] < 0.01) continue;
+        const osc = audioCtx.createOscillator();
+        const hGain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq * (h + 1);
+        hGain.gain.value = harmonics[h] * 0.15;
+        osc.connect(hGain);
+        hGain.connect(gain);
+        osc.start();
+        oscs.push(osc);
+    }
+
+    activePipes.set(index, { oscs, gain });
+    pipeData[index].active = true;
+}
+
+function stopPipe(index) {
+    const pipe = activePipes.get(index);
+    if (pipe) {
+        pipe.gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1);
+        setTimeout(() => {
+            pipe.oscs.forEach(o => { try { o.stop(); } catch(e) {} });
+        }, 150);
+        activePipes.delete(index);
+    }
+    pipeData[index].active = false;
+}
+
+function stopAllPipes() {
+    for (let i = 0; i < pipeData.length; i++) stopPipe(i);
+}
+
+canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    const pipeAreaX = W * 0.08;
+    const pipeAreaW = W * 0.84;
+    const pipeSpacing = pipeAreaW / notes.length;
+    const pipeBottom = H * 0.85;
+
+    for (let i = 0; i < notes.length; i++) {
+        const px = pipeAreaX + i * pipeSpacing + pipeSpacing / 2;
+        const pipeW = pipeSpacing * 0.55;
+        const maxH = H * 0.6;
+        const pipeH = pipeData[i].lengthRatio * maxH;
+        const pipeTop = pipeBottom - pipeH;
+
+        if (mx > px - pipeW / 2 && mx < px + pipeW / 2 && my > pipeTop && my < pipeBottom) {
+            playPipe(i);
+            break;
+        }
+    }
+});
+
+function drawPipe(x, y, w, h, index) {
+    const pd = pipeData[index];
+    const isActive = pd.active;
+
+    // Glow animation
+    if (isActive) {
+        pd.glow = Math.min(1, pd.glow + 0.05);
+    } else {
+        pd.glow = Math.max(0, pd.glow - 0.03);
+    }
+
+    const top = y - h;
+
+    // Pipe glow
+    if (pd.glow > 0) {
+        const gradient = ctx.createLinearGradient(x - w, top, x + w, y);
+        gradient.addColorStop(0, `rgba(221,161,94,${pd.glow * 0.3})`);
+        gradient.addColorStop(1, `rgba(221,161,94,${pd.glow * 0.1})`);
+        ctx.fillStyle = gradient;
+        ctx.fillRect(x - w * 0.8, top - 5, w * 1.6, h + 10);
+    }
+
+    // Pipe body
+    const matColors = {
+        tin: { body: '#8a8a9a', highlight: '#b0b0c0' },
+        lead: { body: '#6a6a7a', highlight: '#8a8a9a' },
+        wood: { body: '#7a6040', highlight: '#9a7a55' }
+    };
+    const mc = matColors[material];
+
+    ctx.fillStyle = mc.body;
+    ctx.fillRect(x - w / 2, top, w, h);
+
+    // Highlight
+    ctx.fillStyle = mc.highlight;
+    ctx.fillRect(x - w / 2, top, w * 0.3, h);
+
+    // Mouth (for flue pipes)
+    if (stopType !== 'reed') {
+        const mouthH = h * 0.08;
+        const mouthY = y - mouthH - h * 0.05;
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(x - w / 2 + 2, mouthY, w - 4, mouthH);
+        ctx.strokeStyle = '#DDA15E';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x - w / 2 + 2, mouthY, w - 4, mouthH);
+    }
+
+    // Top cap (open or stopped)
+    ctx.fillStyle = mc.highlight;
+    if (stopType === 'flute') {
+        ctx.fillRect(x - w / 2 - 2, top - 4, w + 4, 4);
+    } else {
+        ctx.fillRect(x - w / 2 - 2, top, w + 4, 3);
+    }
+
+    // Air particles when active
+    if (isActive) {
+        const numP = 8;
+        for (let p = 0; p < numP; p++) {
+            const t = ((time * 0.003 + p / numP) % 1);
+            const py = y - t * h;
+            const px = x + Math.sin(t * Math.PI * 4 + time * 0.01) * w * 0.2;
+            ctx.fillStyle = `rgba(221,161,94,${(1 - t) * 0.5 * pd.glow})`;
+            ctx.beginPath();
+            ctx.arc(px, py, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Note label
+    ctx.fillStyle = isActive ? '#DDA15E' : '#8A9A5B';
+    ctx.font = `bold ${11}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText(pd.note, x, y + 18);
+    ctx.font = '9px system-ui';
+    ctx.fillText(pd.freq.toFixed(0) + ' Hz', x, y + 30);
+}
+
+function draw() {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+
+    const scale = Math.min(W, H) / 700;
+
+    // Title
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = `bold ${16 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    const stopNames = { principal: 'Principal 8\'', flute: 'Flute 8\'', string: 'String 8\'', reed: 'Reed 8\'' };
+    ctx.fillText(`Organ Pipe Rank: ${stopNames[stopType]} (${material})`, W / 2, 30 * scale);
+
+    // Draw pipes
+    const pipeAreaX = W * 0.08;
+    const pipeAreaW = W * 0.84;
+    const pipeSpacing = pipeAreaW / notes.length;
+    const pipeBottom = H * 0.85;
+    const maxH = H * 0.6;
+
+    for (let i = 0; i < notes.length; i++) {
+        const px = pipeAreaX + i * pipeSpacing + pipeSpacing / 2;
+        const pipeW = pipeSpacing * 0.55;
+        const pipeH = pipeData[i].lengthRatio * maxH;
+        drawPipe(px, pipeBottom, pipeW, pipeH, i);
+    }
+
+    // Wind chest
+    ctx.fillStyle = 'rgba(96,108,56,0.2)';
+    ctx.strokeStyle = '#606C38';
+    ctx.lineWidth = 2;
+    ctx.fillRect(pipeAreaX - 10, pipeBottom + 2, pipeAreaW + 20, 20);
+    ctx.strokeRect(pipeAreaX - 10, pipeBottom + 2, pipeAreaW + 20, 20);
+
+    ctx.fillStyle = '#606C38';
+    ctx.font = '10px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Wind Chest (Windlade)', pipeAreaX + pipeAreaW / 2, pipeBottom + 16);
+
+    // Timbre info
+    const harmonics = getTimbreHarmonics();
+    const infoX = W * 0.05;
+    const infoY = H * 0.92;
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = '11px system-ui';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Harmonic content: ${harmonics.map((h, i) => `${i + 1}:${(h * 100).toFixed(0)}%`).join('  ')}`, infoX, infoY);
+
+    // Physics note
+    ctx.fillStyle = 'rgba(138,154,91,0.5)';
+    ctx.font = '10px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Pipe length halves for each octave rise. Longer pipes = lower pitch. f = v/2L (open) or f = v/4L (stopped)', W / 2, H - 10);
+}
+
+function animate(ts) {
+    time = ts || 0;
+    draw();
+    animId = requestAnimationFrame(animate);
+}
+
+animate();
+
+window.reset = function() {
+    stopAllPipes();
+    stopType = 'principal';
+    windPressure = 75;
+    material = 'tin';
+    stopEl.value = 'principal';
+    windEl.value = 75;
+    matEl.value = 'tin';
+    document.getElementById('windVal').textContent = '75 mmWG';
+    pipeData.forEach(p => { p.active = false; p.glow = 0; });
+};
+</script>
+</body>
+</html>

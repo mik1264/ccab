@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Candle Clock - Historical Timekeeping</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0f0f1a; overflow: hidden; font-family: 'Georgia', serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 15px 25px;
+            border-radius: 15px; color: #FEFAE0; display: flex; gap: 20px; align-items: center;
+            font-size: 0.85rem; z-index: 100;
+        }
+        .controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .controls input[type="range"] { width: 100px; accent-color: #DDA15E; }
+        .controls .value { color: #DDA15E; font-weight: bold; }
+        .controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 8px 16px;
+            border-radius: 8px; cursor: pointer; font-family: inherit;
+        }
+        .controls button:hover { background: #8A9A5B; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Burn Rate
+            <input type="range" id="burnRate" min="0.5" max="3" value="1" step="0.1">
+            <span class="value" id="burnVal">1x</span>
+        </label>
+        <label>Wind
+            <input type="range" id="wind" min="-5" max="5" value="0" step="0.5">
+            <span class="value" id="windVal">0</span>
+        </label>
+        <button id="resetBtn">New Candle</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const burnSlider = document.getElementById('burnRate');
+        const windSlider = document.getElementById('wind');
+        const resetBtn = document.getElementById('resetBtn');
+        const burnVal = document.getElementById('burnVal');
+        const windVal = document.getElementById('windVal');
+
+        let W, H;
+        let candleHeight = 1.0; // 0 to 1
+        let flameParticles = [];
+        let waxDrops = [];
+        let smokeParticles = [];
+        let time = 0;
+        let lastTime = 0;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        function drawCandle(cx, baseY, maxH, candleW) {
+            const h = candleHeight * maxH;
+            const topY = baseY - h;
+
+            // Candle body
+            const candleGrad = ctx.createLinearGradient(cx - candleW / 2, topY, cx + candleW / 2, topY);
+            candleGrad.addColorStop(0, '#F5E6C8');
+            candleGrad.addColorStop(0.3, '#FEFAE0');
+            candleGrad.addColorStop(0.7, '#FEFAE0');
+            candleGrad.addColorStop(1, '#E8D5B0');
+            ctx.fillStyle = candleGrad;
+
+            ctx.beginPath();
+            ctx.rect(cx - candleW / 2, topY, candleW, h);
+            ctx.fill();
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Hour markings (Alfred's 6 candles, each 4 hours, 12 marks each)
+            const numMarks = 12;
+            ctx.strokeStyle = '#BC6C25';
+            ctx.fillStyle = '#BC6C25';
+            ctx.font = '10px Georgia';
+            ctx.textAlign = 'right';
+            for (let i = 1; i <= numMarks; i++) {
+                const markY = baseY - (i / numMarks) * maxH;
+                if (markY < topY) continue;
+                ctx.beginPath();
+                ctx.moveTo(cx - candleW / 2, markY);
+                ctx.lineTo(cx - candleW / 2 + candleW * 0.3, markY);
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                // Time label
+                const mins = i * 20; // 20 min per mark
+                const hrs = Math.floor(mins / 60);
+                const m = mins % 60;
+                ctx.fillText(hrs + ':' + (m < 10 ? '0' : '') + m, cx - candleW / 2 - 5, markY + 3);
+            }
+
+            // Wick
+            const wind = parseFloat(windSlider.value);
+            const wickLen = 12;
+            const wickBend = wind * 1.5;
+            ctx.beginPath();
+            ctx.moveTo(cx, topY);
+            ctx.quadraticCurveTo(cx + wickBend * 0.5, topY - wickLen / 2, cx + wickBend, topY - wickLen);
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Melted wax pool on top
+            ctx.beginPath();
+            ctx.ellipse(cx, topY, candleW / 2 - 2, 3, 0, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 240, 200, 0.5)';
+            ctx.fill();
+
+            return { wickX: cx + wickBend, wickY: topY - wickLen, topY: topY };
+        }
+
+        function drawFlame(fx, fy, wind) {
+            const windOff = wind * 3;
+            const flameH = 25 + Math.sin(time * 8) * 5;
+            const flameW = 8 + Math.sin(time * 12) * 2;
+
+            // Outer flame (orange)
+            ctx.beginPath();
+            ctx.moveTo(fx, fy);
+            ctx.quadraticCurveTo(fx - flameW + windOff * 0.5, fy - flameH * 0.5, fx + windOff, fy - flameH);
+            ctx.quadraticCurveTo(fx + flameW + windOff * 0.5, fy - flameH * 0.5, fx, fy);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+
+            // Inner flame (yellow)
+            ctx.beginPath();
+            ctx.moveTo(fx, fy);
+            ctx.quadraticCurveTo(fx - flameW * 0.5 + windOff * 0.3, fy - flameH * 0.35, fx + windOff * 0.6, fy - flameH * 0.7);
+            ctx.quadraticCurveTo(fx + flameW * 0.5 + windOff * 0.3, fy - flameH * 0.35, fx, fy);
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fill();
+
+            // Glow
+            const glowR = 60 + Math.sin(time * 6) * 10;
+            const glow = ctx.createRadialGradient(fx + windOff * 0.5, fy - flameH * 0.4, 0, fx + windOff * 0.5, fy - flameH * 0.4, glowR);
+            glow.addColorStop(0, 'rgba(255, 200, 100, 0.15)');
+            glow.addColorStop(1, 'transparent');
+            ctx.fillStyle = glow;
+            ctx.beginPath();
+            ctx.arc(fx + windOff * 0.5, fy - flameH * 0.4, glowR, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Room illumination
+            const roomGlow = ctx.createRadialGradient(fx, fy, 0, fx, fy, H * 0.6);
+            roomGlow.addColorStop(0, 'rgba(255, 180, 80, 0.06)');
+            roomGlow.addColorStop(1, 'transparent');
+            ctx.fillStyle = roomGlow;
+            ctx.fillRect(0, 0, W, H);
+
+            // Flame particles
+            for (let i = 0; i < 2; i++) {
+                flameParticles.push({
+                    x: fx + (Math.random() - 0.5) * 6,
+                    y: fy - Math.random() * 10,
+                    vx: windOff * 0.05 + (Math.random() - 0.5) * 0.5,
+                    vy: -(1 + Math.random() * 2),
+                    life: 1,
+                    size: 1 + Math.random() * 2
+                });
+            }
+
+            // Smoke from flame tip
+            if (Math.random() < 0.3) {
+                smokeParticles.push({
+                    x: fx + windOff,
+                    y: fy - flameH,
+                    vx: windOff * 0.08 + (Math.random() - 0.5),
+                    vy: -(0.5 + Math.random()),
+                    life: 1,
+                    size: 2 + Math.random() * 3
+                });
+            }
+        }
+
+        function drawParticles(dt) {
+            // Flame particles
+            for (let i = flameParticles.length - 1; i >= 0; i--) {
+                const p = flameParticles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= dt * 3;
+                if (p.life <= 0) { flameParticles.splice(i, 1); continue; }
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(255, 200, 100, ${p.life * 0.5})`;
+                ctx.fill();
+            }
+
+            // Smoke
+            for (let i = smokeParticles.length - 1; i >= 0; i--) {
+                const p = smokeParticles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.size += dt * 2;
+                p.life -= dt * 0.8;
+                if (p.life <= 0) { smokeParticles.splice(i, 1); continue; }
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(150, 150, 150, ${p.life * 0.15})`;
+                ctx.fill();
+            }
+
+            // Wax drops
+            for (let i = waxDrops.length - 1; i >= 0; i--) {
+                const d = waxDrops[i];
+                d.y += d.vy;
+                d.vy += 0.05;
+                d.life -= dt * 0.5;
+                if (d.life <= 0) { waxDrops.splice(i, 1); continue; }
+                ctx.beginPath();
+                ctx.ellipse(d.x, d.y, 2, 3, 0, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(255, 240, 200, ${d.life * 0.6})`;
+                ctx.fill();
+            }
+        }
+
+        function drawHolder(cx, baseY) {
+            // Candlestick holder
+            ctx.fillStyle = '#8A6B3E';
+            ctx.strokeStyle = '#6B4F2E';
+            ctx.lineWidth = 2;
+
+            // Base plate
+            ctx.beginPath();
+            ctx.ellipse(cx, baseY + 5, 50, 8, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+
+            // Stem
+            ctx.fillRect(cx - 8, baseY - 20, 16, 25);
+            ctx.strokeRect(cx - 8, baseY - 20, 16, 25);
+
+            // Cup
+            ctx.beginPath();
+            ctx.moveTo(cx - 20, baseY - 20);
+            ctx.lineTo(cx - 15, baseY - 30);
+            ctx.lineTo(cx + 15, baseY - 30);
+            ctx.lineTo(cx + 20, baseY - 20);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
+
+        function drawCaseFrame(cx, baseY, maxH) {
+            // Horn-panel lantern case (medieval protection)
+            const caseW = 80;
+            const caseH = maxH + 60;
+            const caseTop = baseY - maxH - 40;
+
+            ctx.strokeStyle = 'rgba(138, 107, 62, 0.4)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 4]);
+            ctx.strokeRect(cx - caseW / 2, caseTop, caseW, caseH);
+            ctx.setLineDash([]);
+
+            // "Horn panels" semi-transparent
+            ctx.fillStyle = 'rgba(255, 240, 200, 0.03)';
+            ctx.fillRect(cx - caseW / 2, caseTop, caseW, caseH);
+        }
+
+        function draw(timestamp) {
+            const dt = lastTime ? Math.min((timestamp - lastTime) / 1000, 0.05) : 0.016;
+            lastTime = timestamp;
+            time += dt;
+
+            const rate = parseFloat(burnSlider.value);
+            const wind = parseFloat(windSlider.value);
+            burnVal.textContent = rate + 'x';
+            windVal.textContent = wind.toFixed(1);
+
+            // Burn candle
+            if (candleHeight > 0) {
+                candleHeight = Math.max(0, candleHeight - rate * 0.0002);
+                // Wax drips
+                if (Math.random() < 0.01 * rate) {
+                    const cx = W / 2;
+                    const candleW = 30;
+                    waxDrops.push({
+                        x: cx + (Math.random() - 0.5) * candleW,
+                        y: H * 0.75 - candleHeight * H * 0.4,
+                        vy: 0.2,
+                        life: 1
+                    });
+                }
+            }
+
+            ctx.fillStyle = '#0f0f1a';
+            ctx.fillRect(0, 0, W, H);
+
+            const cx = W / 2;
+            const baseY = H * 0.75;
+            const maxH = H * 0.4;
+            const candleW = 30;
+
+            drawCaseFrame(cx, baseY - 30, maxH);
+            drawHolder(cx, baseY);
+            const candle = drawCandle(cx, baseY - 30, maxH, candleW);
+
+            if (candleHeight > 0.01) {
+                drawFlame(candle.wickX, candle.wickY, wind);
+            }
+            drawParticles(dt);
+
+            // Time display
+            const hoursElapsed = (1 - candleHeight) * 4; // 4 hours per candle
+            const hrs = Math.floor(hoursElapsed);
+            const mins = Math.floor((hoursElapsed - hrs) * 60);
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '14px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('King Alfred\'s Candle Clock', cx, 30);
+            ctx.font = '24px Georgia';
+            ctx.fillText(hrs + 'h ' + mins + 'm elapsed', cx, 60);
+            ctx.font = '12px Georgia';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText('Each candle = 4 hours, 12 markings = 20 min each', cx, 80);
+
+            if (candleHeight <= 0.01) {
+                ctx.fillStyle = '#DDA15E';
+                ctx.font = 'italic 18px Georgia';
+                ctx.fillText('The candle has burned down. Click "New Candle" to restart.', cx, H * 0.4);
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        resetBtn.addEventListener('click', () => {
+            candleHeight = 1.0;
+            flameParticles = [];
+            waxDrops = [];
+            smokeParticles = [];
+        });
+
+        window.reset = function() {
+            candleHeight = 1.0;
+            flameParticles = [];
+            waxDrops = [];
+            smokeParticles = [];
+            burnSlider.value = 1;
+            windSlider.value = 0;
+        };
+
+        requestAnimationFrame(draw);
+    })();
+    </script>
+</body>
+</html>

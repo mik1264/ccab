@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Magma Chamber Pressure Dynamics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; overflow: hidden; font-family: Georgia, serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(96,108,56,0.85); backdrop-filter: blur(10px);
+    padding: 15px 25px; border-radius: 12px; color: #FEFAE0;
+    display: flex; gap: 20px; align-items: center; z-index: 100; flex-wrap: wrap;
+    justify-content: center;
+}
+#controls label { font-size: 0.85rem; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+#controls input[type=range] { width: 120px; accent-color: #DDA15E; }
+#info {
+    position: fixed; top: 60px; right: 20px; background: rgba(96,108,56,0.85);
+    backdrop-filter: blur(10px); padding: 15px; border-radius: 12px;
+    color: #FEFAE0; font-size: 0.8rem; max-width: 260px; z-index: 100; line-height: 1.5;
+}
+#info h3 { color: #DDA15E; margin-bottom: 8px; }
+.meter { position: fixed; left: 20px; top: 80px; width: 30px; height: 300px;
+    background: rgba(0,0,0,0.4); border-radius: 15px; border: 2px solid #606C38;
+    overflow: hidden; z-index: 100; }
+.meter-fill { position: absolute; bottom: 0; width: 100%; transition: height 0.3s;
+    border-radius: 0 0 13px 13px; }
+.meter-label { position: fixed; left: 15px; top: 55px; color: #DDA15E;
+    font-size: 0.7rem; z-index: 100; font-family: Georgia, serif; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="c"></canvas>
+<div class="meter-label">Pressure</div>
+<div class="meter"><div class="meter-fill" id="pressureMeter"></div></div>
+<div id="info">
+    <h3>Magma Chamber Dynamics</h3>
+    <p>A magma chamber is an elastic reservoir beneath a volcano. As magma accumulates, pressure rises. When it exceeds the rock strength, magma forces through the conduit, triggering an eruption.</p>
+    <p style="margin-top:8px;font-size:0.75rem;color:#DDA15E;">Click to inject magma into the chamber.</p>
+</div>
+<div id="controls">
+    <label>Magma Inflow
+        <input type="range" id="inflow" min="0" max="100" value="30">
+    </label>
+    <label>Rock Elasticity
+        <input type="range" id="elasticity" min="10" max="100" value="50">
+    </label>
+    <label>Conduit Width
+        <input type="range" id="conduit" min="10" max="100" value="40">
+    </label>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const pressureMeter = document.getElementById('pressureMeter');
+
+let W, H;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Simulation state
+let chamberPressure = 0.3;
+let chamberVolume = 0.5;
+let eruptionActive = false;
+let eruptionIntensity = 0;
+let magmaParticles = [];
+let eruptionParticles = [];
+let conduitMagma = [];
+let time = 0;
+let paused = false;
+
+const CRITICAL_PRESSURE = 0.85;
+const MAX_PARTICLES = 200;
+
+class MagmaParticle {
+    constructor(x, y, vx, vy, temp) {
+        this.x = x; this.y = y;
+        this.vx = vx; this.vy = vy;
+        this.temp = temp || 0.8 + Math.random() * 0.2;
+        this.size = 3 + Math.random() * 4;
+        this.life = 1;
+    }
+    update(dt) {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.temp *= 0.9995;
+        this.life -= 0.001;
+    }
+}
+
+class EruptionParticle {
+    constructor(x, y, vx, vy) {
+        this.x = x; this.y = y;
+        this.vx = vx; this.vy = vy;
+        this.life = 1;
+        this.size = 2 + Math.random() * 6;
+        this.temp = 0.9 + Math.random() * 0.1;
+        this.gravity = 40 + Math.random() * 20;
+    }
+    update(dt) {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.vy += this.gravity * dt;
+        this.vx *= 0.998;
+        this.life -= 0.008;
+        this.temp *= 0.997;
+    }
+}
+
+function magmaColor(temp, alpha) {
+    if (temp > 0.8) {
+        const r = 255;
+        const g = Math.floor(80 + temp * 120);
+        const b = Math.floor(20 + temp * 30);
+        return `rgba(${r},${g},${b},${alpha})`;
+    } else if (temp > 0.5) {
+        const r = Math.floor(180 + temp * 75);
+        const g = Math.floor(40 + temp * 40);
+        const b = 20;
+        return `rgba(${r},${g},${b},${alpha})`;
+    } else {
+        const r = Math.floor(80 + temp * 100);
+        const g = Math.floor(20 + temp * 20);
+        const b = Math.floor(10 + temp * 10);
+        return `rgba(${r},${g},${b},${alpha})`;
+    }
+}
+
+function drawCrossSection() {
+    const cx = W * 0.5;
+    const groundY = H * 0.38;
+    const chamberCX = cx;
+    const chamberCY = H * 0.7;
+    const chamberRX = 120 + chamberVolume * 40;
+    const chamberRY = 70 + chamberVolume * 25;
+    const conduitW = 8 + (document.getElementById('conduit').value / 100) * 20;
+
+    // Sky gradient
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, groundY);
+    skyGrad.addColorStop(0, '#0a0a1a');
+    skyGrad.addColorStop(1, '#1a1a2e');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, groundY);
+
+    // Mountain / volcano shape
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(cx - 250, groundY);
+    ctx.lineTo(cx - 40, groundY - 140);
+    ctx.lineTo(cx - 15, groundY - 150);
+    ctx.lineTo(cx + 15, groundY - 150);
+    ctx.lineTo(cx + 40, groundY - 140);
+    ctx.lineTo(cx + 250, groundY);
+    ctx.lineTo(W, groundY);
+    ctx.lineTo(W, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+
+    const rockGrad = ctx.createLinearGradient(0, groundY - 150, 0, H);
+    rockGrad.addColorStop(0, '#3d3024');
+    rockGrad.addColorStop(0.2, '#4a3728');
+    rockGrad.addColorStop(0.5, '#5a4535');
+    rockGrad.addColorStop(1, '#2a1a10');
+    ctx.fillStyle = rockGrad;
+    ctx.fill();
+
+    // Rock texture lines
+    ctx.strokeStyle = 'rgba(100,80,60,0.15)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 20; i++) {
+        const ly = groundY + i * (H - groundY) / 20;
+        ctx.beginPath();
+        ctx.moveTo(0, ly + Math.sin(i * 3) * 5);
+        for (let x = 0; x < W; x += 30) {
+            ctx.lineTo(x, ly + Math.sin(x * 0.02 + i) * 5);
+        }
+        ctx.stroke();
+    }
+
+    // Magma chamber (ellipse)
+    const chamberGlow = chamberPressure;
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(chamberCX, chamberCY, chamberRX, chamberRY, 0, 0, Math.PI * 2);
+
+    // Glow effect
+    const glowGrad = ctx.createRadialGradient(chamberCX, chamberCY, 0, chamberCX, chamberCY, chamberRX);
+    glowGrad.addColorStop(0, magmaColor(0.9, 0.9));
+    glowGrad.addColorStop(0.6, magmaColor(0.7, 0.7));
+    glowGrad.addColorStop(1, magmaColor(0.4, 0.5));
+    ctx.fillStyle = glowGrad;
+    ctx.fill();
+
+    // Convection cells inside chamber
+    for (let i = 0; i < 6; i++) {
+        const angle = time * 0.3 + i * Math.PI / 3;
+        const px = chamberCX + Math.cos(angle) * chamberRX * 0.5;
+        const py = chamberCY + Math.sin(angle) * chamberRY * 0.4;
+        ctx.beginPath();
+        ctx.arc(px, py, 8 + chamberPressure * 10, 0, Math.PI * 2);
+        ctx.fillStyle = magmaColor(0.95, 0.3 + chamberPressure * 0.3);
+        ctx.fill();
+    }
+
+    // Pulsating border
+    ctx.strokeStyle = magmaColor(0.9, 0.4 + chamberPressure * 0.5);
+    ctx.lineWidth = 2 + chamberPressure * 3;
+    ctx.stroke();
+    ctx.restore();
+
+    // Conduit
+    ctx.fillStyle = magmaColor(0.8, 0.6 + chamberPressure * 0.3);
+    const conduitTop = groundY - 150;
+    const conduitBottom = chamberCY - chamberRY;
+    ctx.fillRect(cx - conduitW / 2, conduitTop, conduitW, conduitBottom - conduitTop);
+
+    // Rising magma in conduit
+    if (chamberPressure > 0.3) {
+        const magmaLevel = conduitBottom + (conduitBottom - conduitTop) * (1 - chamberPressure);
+        const condGrad = ctx.createLinearGradient(0, magmaLevel, 0, conduitBottom);
+        condGrad.addColorStop(0, magmaColor(0.95, 0.9));
+        condGrad.addColorStop(1, magmaColor(0.7, 0.7));
+        ctx.fillStyle = condGrad;
+        ctx.fillRect(cx - conduitW / 2 + 1, magmaLevel, conduitW - 2, conduitBottom - magmaLevel);
+    }
+
+    // Pressure indicator on chamber
+    if (chamberPressure > CRITICAL_PRESSURE) {
+        const flash = Math.sin(time * 8) * 0.5 + 0.5;
+        ctx.strokeStyle = `rgba(255,100,50,${flash * 0.8})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.ellipse(chamberCX, chamberCY, chamberRX + 5, chamberRY + 5, 0, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+
+    // Labels
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = '13px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText('Magma Chamber', chamberCX, chamberCY + chamberRY + 20);
+    ctx.fillText(`P = ${(chamberPressure * 100).toFixed(0)} MPa`, chamberCX, chamberCY + chamberRY + 38);
+    ctx.fillText('Conduit', cx + 35, (conduitTop + conduitBottom) / 2);
+
+    if (chamberPressure > CRITICAL_PRESSURE) {
+        ctx.fillStyle = '#ff6644';
+        ctx.font = 'bold 14px Georgia';
+        ctx.fillText('CRITICAL PRESSURE!', chamberCX, chamberCY - chamberRY - 15);
+    }
+
+    return { cx, groundY, conduitW };
+}
+
+function drawEruption(cx, groundY) {
+    if (!eruptionActive && eruptionIntensity <= 0) return;
+
+    // Eruption plume from vent
+    const ventX = cx;
+    const ventY = groundY - 150;
+
+    // Add eruption particles
+    if (eruptionActive) {
+        const conduitW = 8 + (document.getElementById('conduit').value / 100) * 20;
+        for (let i = 0; i < Math.floor(eruptionIntensity * 8); i++) {
+            eruptionParticles.push(new EruptionParticle(
+                ventX + (Math.random() - 0.5) * conduitW,
+                ventY,
+                (Math.random() - 0.5) * 80 * eruptionIntensity,
+                -200 * eruptionIntensity - Math.random() * 150,
+            ));
+        }
+    }
+
+    // Draw eruption particles
+    for (let p of eruptionParticles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+        ctx.fillStyle = magmaColor(p.temp, p.life * 0.8);
+        ctx.fill();
+
+        // Glow
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * p.life * 2, 0, Math.PI * 2);
+        ctx.fillStyle = magmaColor(p.temp, p.life * 0.15);
+        ctx.fill();
+    }
+}
+
+function drawMagmaParticles() {
+    for (let p of magmaParticles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fillStyle = magmaColor(p.temp, p.life * 0.6);
+        ctx.fill();
+    }
+}
+
+canvas.addEventListener('click', (e) => {
+    // Add magma on click
+    const chamberCX = W * 0.5;
+    const chamberCY = H * 0.7;
+    for (let i = 0; i < 10; i++) {
+        magmaParticles.push(new MagmaParticle(
+            chamberCX + (Math.random() - 0.5) * 100,
+            chamberCY + (Math.random() - 0.5) * 60,
+            (Math.random() - 0.5) * 20,
+            (Math.random() - 0.5) * 20,
+            0.95
+        ));
+    }
+    chamberPressure = Math.min(1, chamberPressure + 0.08);
+    chamberVolume = Math.min(1, chamberVolume + 0.03);
+});
+
+let lastTime = 0;
+function animate(ts) {
+    if (!paused) {
+        const dt = Math.min((ts - lastTime) / 1000, 0.05);
+        lastTime = ts;
+        time += dt;
+
+        const inflow = document.getElementById('inflow').value / 100;
+        const elasticity = document.getElementById('elasticity').value / 100;
+        const conduitWidth = document.getElementById('conduit').value / 100;
+
+        // Pressure dynamics
+        chamberPressure += inflow * 0.001 * dt * 60;
+        chamberPressure -= chamberPressure * elasticity * 0.0005 * dt * 60;
+
+        // Eruption trigger
+        if (chamberPressure >= CRITICAL_PRESSURE && !eruptionActive) {
+            eruptionActive = true;
+        }
+
+        if (eruptionActive) {
+            eruptionIntensity = Math.min(1, eruptionIntensity + dt * 2);
+            const outflow = eruptionIntensity * conduitWidth * 0.01 * dt * 60;
+            chamberPressure -= outflow;
+            chamberVolume -= outflow * 0.3;
+
+            if (chamberPressure < 0.2) {
+                eruptionActive = false;
+            }
+        } else {
+            eruptionIntensity = Math.max(0, eruptionIntensity - dt * 3);
+        }
+
+        chamberPressure = Math.max(0, Math.min(1, chamberPressure));
+        chamberVolume = Math.max(0.3, Math.min(1, chamberVolume));
+        chamberVolume += (chamberPressure * 0.7 + 0.3 - chamberVolume) * 0.02;
+
+        // Add convection particles
+        if (Math.random() < 0.1 + chamberPressure * 0.3) {
+            const chamberCX = W * 0.5;
+            const chamberCY = H * 0.7;
+            magmaParticles.push(new MagmaParticle(
+                chamberCX + (Math.random() - 0.5) * 180,
+                chamberCY + (Math.random() - 0.5) * 100,
+                (Math.random() - 0.5) * 15,
+                -5 - Math.random() * 15,
+                0.7 + Math.random() * 0.3
+            ));
+        }
+
+        // Update particles
+        for (let p of magmaParticles) p.update(dt);
+        for (let p of eruptionParticles) p.update(dt);
+        magmaParticles = magmaParticles.filter(p => p.life > 0);
+        eruptionParticles = eruptionParticles.filter(p => p.life > 0);
+        if (magmaParticles.length > MAX_PARTICLES) magmaParticles.splice(0, magmaParticles.length - MAX_PARTICLES);
+        if (eruptionParticles.length > 500) eruptionParticles.splice(0, eruptionParticles.length - 500);
+
+        // Pressure meter
+        const pColor = chamberPressure > CRITICAL_PRESSURE ? '#ff4422' : `rgb(${180 + chamberPressure * 75}, ${60 + (1 - chamberPressure) * 100}, 30)`;
+        pressureMeter.style.height = (chamberPressure * 100) + '%';
+        pressureMeter.style.background = pColor;
+    }
+    lastTime = ts;
+
+    ctx.clearRect(0, 0, W, H);
+    const { cx, groundY, conduitW: cw } = drawCrossSection();
+    drawMagmaParticles();
+    drawEruption(cx, groundY);
+
+    requestAnimationFrame(animate);
+}
+
+window.reset = function() {
+    chamberPressure = 0.3;
+    chamberVolume = 0.5;
+    eruptionActive = false;
+    eruptionIntensity = 0;
+    magmaParticles = [];
+    eruptionParticles = [];
+    time = 0;
+};
+
+requestAnimationFrame(animate);
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

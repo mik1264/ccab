@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tablebase Explorer: Depth to Mate - Chess Endgames</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+canvas { display: block; }
+#ui {
+    position: fixed; top: 10px; right: 10px; z-index: 100;
+    background: rgba(96,108,56,0.9); backdrop-filter: blur(10px);
+    padding: 15px; border-radius: 12px; max-width: 300px;
+    font-size: 0.85rem; line-height: 1.5;
+}
+#ui h3 { color: #DDA15E; margin-bottom: 8px; }
+.highlight { color: #DDA15E; font-weight: bold; }
+#status {
+    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+    background: rgba(96,108,56,0.9); backdrop-filter: blur(10px);
+    padding: 10px 20px; border-radius: 12px; font-size: 0.95rem;
+    z-index: 100; text-align: center; max-width: 90%;
+}
+#controls {
+    position: fixed; bottom: 10px; right: 10px; z-index: 100;
+    display: flex; gap: 8px; flex-wrap: wrap; max-width: 320px; justify-content: flex-end;
+}
+#controls button {
+    background: rgba(138,154,91,0.9); border: none; color: #FEFAE0;
+    padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.8rem;
+}
+#controls button:hover { background: rgba(221,161,94,0.9); }
+#dtm-display {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+    background: rgba(221,161,94,0.15); border: 1px solid rgba(221,161,94,0.4);
+    padding: 8px 20px; border-radius: 12px; font-size: 1.1rem; z-index: 100;
+    color: #DDA15E; font-weight: bold;
+}
+#heatmap-legend {
+    position: fixed; bottom: 50px; left: 10px; z-index: 100;
+    background: rgba(96,108,56,0.85); backdrop-filter: blur(10px);
+    padding: 10px 15px; border-radius: 12px; font-size: 0.78rem;
+}
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="ui">
+    <h3>Tablebase Explorer</h3>
+    <p>Endgame <span class="highlight">tablebases</span> solve every position perfectly.</p>
+    <p>This shows <span class="highlight">DTM</span> (Depth to Mate) - the minimum moves to checkmate with perfect play.</p>
+    <p>Drag the Black King to see how DTM changes. The heatmap shows difficulty across the board.</p>
+</div>
+<div id="dtm-display">DTM: --</div>
+<div id="status">Drag the Black King to explore DTM values</div>
+<div id="heatmap-legend">
+    <div style="color:#606C38;">Low DTM = Quick mate</div>
+    <div style="color:#DDA15E;">High DTM = Long fight</div>
+    <div style="color:#BC6C25;">MAX = Drawn position</div>
+</div>
+<div id="controls">
+    <button onclick="setEndgame('KQK')">K+Q vs K</button>
+    <button onclick="setEndgame('KRK')">K+R vs K</button>
+    <button onclick="setEndgame('KBBK')">K+BB vs K</button>
+    <button onclick="setEndgame('KBNK')">K+BN vs K</button>
+    <button onclick="toggleHeatmap()">Heatmap</button>
+    <button onclick="resetDemo()">Reset</button>
+</div>
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, sq, ox, oy;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    sq = Math.min(W, H) * 0.09;
+    ox = (W - 8 * sq) / 2;
+    oy = (H - 8 * sq) / 2;
+}
+resize();
+window.addEventListener('resize', resize);
+
+let pieces = {};
+let endgameType = 'KRK';
+let showHeatmap = true;
+let dragging = null;
+let dragOff = { x: 0, y: 0 };
+let heatmapData = [];
+let message = 'Drag the Black King to explore DTM values';
+
+// Approximate DTM calculations for simple endgames
+// These are heuristic approximations, not full tablebase values
+function computeDTM_KRK(wkf, wkr, bkf, bkr) {
+    // KR vs K: typically 15-20 moves from any position
+    // Harder when defending king is in the center
+    const bkCenter = Math.max(Math.abs(bkf - 3.5), Math.abs(bkr - 3.5));
+    const dist = Math.max(Math.abs(wkf - bkf), Math.abs(wkr - bkr));
+    // Edge distance matters most
+    const edgeDist = Math.min(bkf, 7 - bkf, bkr, 7 - bkr);
+    if (Math.abs(wkf - bkf) <= 1 && Math.abs(wkr - bkr) <= 1) return -1; // illegal: kings adjacent
+    return Math.max(4, Math.round(16 - bkCenter * 2 + edgeDist * 3 - dist * 0.5));
+}
+
+function computeDTM_KQK(wkf, wkr, bkf, bkr) {
+    // KQ vs K: typically 7-10 moves
+    const bkCenter = Math.max(Math.abs(bkf - 3.5), Math.abs(bkr - 3.5));
+    const dist = Math.max(Math.abs(wkf - bkf), Math.abs(wkr - bkr));
+    const edgeDist = Math.min(bkf, 7 - bkf, bkr, 7 - bkr);
+    if (Math.abs(wkf - bkf) <= 1 && Math.abs(wkr - bkr) <= 1) return -1;
+    return Math.max(3, Math.round(10 - bkCenter * 1.5 + edgeDist * 2 - dist * 0.3));
+}
+
+function computeDTM_KBBK(wkf, wkr, bkf, bkr) {
+    // KBB vs K: typically 18-20 moves
+    const bkCenter = Math.max(Math.abs(bkf - 3.5), Math.abs(bkr - 3.5));
+    const edgeDist = Math.min(bkf, 7 - bkf, bkr, 7 - bkr);
+    const cornerDist = Math.min(
+        Math.max(bkf, bkr), Math.max(7 - bkf, bkr),
+        Math.max(bkf, 7 - bkr), Math.max(7 - bkf, 7 - bkr)
+    );
+    if (Math.abs(wkf - bkf) <= 1 && Math.abs(wkr - bkr) <= 1) return -1;
+    return Math.max(8, Math.round(19 - bkCenter + edgeDist * 2 + cornerDist));
+}
+
+function computeDTM_KBNK(wkf, wkr, bkf, bkr) {
+    // KBN vs K: typically 30+ moves, must drive to correct corner
+    const bkCenter = Math.max(Math.abs(bkf - 3.5), Math.abs(bkr - 3.5));
+    const edgeDist = Math.min(bkf, 7 - bkf, bkr, 7 - bkr);
+    // Wrong corner is far from a1/h8, right corner is close
+    const rightCornerDist = Math.min(
+        Math.max(Math.abs(bkf), Math.abs(bkr)),
+        Math.max(Math.abs(7 - bkf), Math.abs(7 - bkr))
+    );
+    if (Math.abs(wkf - bkf) <= 1 && Math.abs(wkr - bkr) <= 1) return -1;
+    return Math.max(12, Math.round(33 - bkCenter * 0.5 + edgeDist * 1.5 + rightCornerDist * 2));
+}
+
+function getDTM(bkf, bkr) {
+    const wk = pieces.WK;
+    switch (endgameType) {
+        case 'KQK': return computeDTM_KQK(wk.f, wk.r, bkf, bkr);
+        case 'KRK': return computeDTM_KRK(wk.f, wk.r, bkf, bkr);
+        case 'KBBK': return computeDTM_KBBK(wk.f, wk.r, bkf, bkr);
+        case 'KBNK': return computeDTM_KBNK(wk.f, wk.r, bkf, bkr);
+    }
+    return 0;
+}
+
+function computeHeatmap() {
+    heatmapData = [];
+    for (let f = 0; f < 8; f++) {
+        heatmapData[f] = [];
+        for (let r = 0; r < 8; r++) {
+            heatmapData[f][r] = getDTM(f, r);
+        }
+    }
+}
+
+function setEndgame(type) {
+    endgameType = type;
+    initPieces();
+}
+
+function initPieces() {
+    switch (endgameType) {
+        case 'KQK':
+            pieces = { WK: {f:3,r:0}, WQ: {f:4,r:3}, BK: {f:4,r:6} };
+            break;
+        case 'KRK':
+            pieces = { WK: {f:3,r:0}, WR: {f:0,r:3}, BK: {f:4,r:6} };
+            break;
+        case 'KBBK':
+            pieces = { WK: {f:3,r:0}, WB1: {f:2,r:2}, WB2: {f:5,r:2}, BK: {f:4,r:6} };
+            break;
+        case 'KBNK':
+            pieces = { WK: {f:3,r:0}, WB: {f:2,r:2}, WN: {f:5,r:2}, BK: {f:4,r:6} };
+            break;
+    }
+    computeHeatmap();
+    updateDTM();
+}
+
+function updateDTM() {
+    const dtm = getDTM(pieces.BK.f, pieces.BK.r);
+    document.getElementById('dtm-display').textContent =
+        dtm < 0 ? 'DTM: Illegal' : `DTM: ~${dtm} moves`;
+}
+
+function toggleHeatmap() { showHeatmap = !showHeatmap; }
+function resetDemo() { initPieces(); }
+
+// Drag handling
+canvas.addEventListener('mousedown', (e) => {
+    const mx = e.clientX - ox, my = e.clientY - oy;
+    const f = Math.floor(mx / sq), r = 7 - Math.floor(my / sq);
+    if (pieces.BK && pieces.BK.f === f && pieces.BK.r === r) {
+        dragging = 'BK';
+    }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const mx = e.clientX - ox, my = e.clientY - oy;
+    const f = Math.floor(mx / sq), r = 7 - Math.floor(my / sq);
+    if (f >= 0 && f <= 7 && r >= 0 && r <= 7) {
+        // Check not adjacent to white king
+        if (Math.abs(f - pieces.WK.f) <= 1 && Math.abs(r - pieces.WK.r) <= 1) return;
+        // Check not on other pieces
+        for (const [k, p] of Object.entries(pieces)) {
+            if (k !== 'BK' && p.f === f && p.r === r) return;
+        }
+        pieces.BK.f = f;
+        pieces.BK.r = r;
+        updateDTM();
+    }
+});
+
+canvas.addEventListener('mouseup', () => { dragging = null; });
+
+// Touch support
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    const mx = t.clientX - ox, my = t.clientY - oy;
+    const f = Math.floor(mx / sq), r = 7 - Math.floor(my / sq);
+    if (pieces.BK && pieces.BK.f === f && pieces.BK.r === r) dragging = 'BK';
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (!dragging) return;
+    const t = e.touches[0];
+    const mx = t.clientX - ox, my = t.clientY - oy;
+    const f = Math.floor(mx / sq), r = 7 - Math.floor(my / sq);
+    if (f >= 0 && f <= 7 && r >= 0 && r <= 7) {
+        if (Math.abs(f - pieces.WK.f) <= 1 && Math.abs(r - pieces.WK.r) <= 1) return;
+        for (const [k, p] of Object.entries(pieces)) {
+            if (k !== 'BK' && p.f === f && p.r === r) return;
+        }
+        pieces.BK.f = f;
+        pieces.BK.r = r;
+        updateDTM();
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => { dragging = null; });
+
+function dtmColor(dtm) {
+    if (dtm < 0) return 'rgba(0,0,0,0)';
+    const maxDtm = endgameType === 'KBNK' ? 40 : endgameType === 'KBBK' ? 25 : endgameType === 'KRK' ? 20 : 12;
+    const t = Math.min(dtm / maxDtm, 1);
+    const r = Math.round(96 + t * 125);
+    const g = Math.round(108 - t * 40);
+    const b = Math.round(56 + t * 2);
+    return `rgba(${r},${g},${b},0.35)`;
+}
+
+function drawBoard() {
+    const light = '#FEFAE0', dark = '#8A9A5B';
+    for (let f = 0; f < 8; f++) {
+        for (let r = 0; r < 8; r++) {
+            const x = ox + f * sq, y = oy + (7 - r) * sq;
+            ctx.fillStyle = (f + r) % 2 === 0 ? dark : light;
+            ctx.fillRect(x, y, sq, sq);
+            // Heatmap overlay
+            if (showHeatmap && heatmapData[f]) {
+                ctx.fillStyle = dtmColor(heatmapData[f][r]);
+                ctx.fillRect(x, y, sq, sq);
+                // DTM number
+                if (heatmapData[f][r] >= 0) {
+                    ctx.fillStyle = 'rgba(254,250,224,0.5)';
+                    ctx.font = `${sq * 0.22}px sans-serif`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(heatmapData[f][r], x + sq / 2, y + sq * 0.8);
+                }
+            }
+        }
+    }
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = `${sq * 0.18}px sans-serif`;
+    ctx.textAlign = 'center';
+    for (let f = 0; f < 8; f++) ctx.fillText('abcdefgh'[f], ox + f * sq + sq / 2, oy + 8 * sq + sq * 0.25);
+    for (let r = 0; r < 8; r++) ctx.fillText(r + 1, ox - sq * 0.25, oy + (7 - r) * sq + sq / 2 + sq * 0.06);
+}
+
+function drawPiece(f, r, type) {
+    const x = ox + f * sq + sq / 2, y = oy + (7 - r) * sq + sq / 2;
+    const s = sq * 0.4;
+    const isWhite = type[0] === 'W';
+    ctx.save();
+    ctx.translate(x, y);
+    // Drag highlight
+    if (type === 'BK' && dragging) {
+        ctx.beginPath();
+        ctx.arc(0, 0, s * 0.85, 0, Math.PI * 2);
+        ctx.strokeStyle = '#DDA15E';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.arc(0, 0, s * 0.7, 0, Math.PI * 2);
+    ctx.fillStyle = isWhite ? '#FEFAE0' : '#2a2a3e';
+    ctx.fill();
+    ctx.strokeStyle = isWhite ? '#606C38' : '#DDA15E';
+    ctx.lineWidth = 2; ctx.stroke();
+    const symbols = {
+        WK: '\u2654', WQ: '\u2655', WR: '\u2656', WB: '\u2657', WB1: '\u2657', WB2: '\u2657', WN: '\u2658',
+        BK: '\u265A'
+    };
+    ctx.fillStyle = isWhite ? '#606C38' : '#DDA15E';
+    ctx.font = `bold ${s * 0.9}px serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(symbols[type] || '?', 0, 0);
+    ctx.restore();
+}
+
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#1a1a2e'; ctx.fillRect(0, 0, W, H);
+    computeHeatmap();
+    drawBoard();
+    for (const [key, pos] of Object.entries(pieces)) drawPiece(pos.f, pos.r, key);
+    document.getElementById('status').textContent = message;
+    requestAnimationFrame(draw);
+}
+
+initPieces();
+draw();
+
+window.reset = function() { resetDemo(); };
+</script>
+</body>
+</html>

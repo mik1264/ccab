@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Avalanche Statistics | Sandpile Dynamics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .container { display: flex; width: 100vw; height: 100vh; }
+        .sandpile-view { flex: 1; position: relative; }
+        .sandpile-view canvas { width: 100%; height: 100%; }
+        .stats-view {
+            width: 380px; background: rgba(0,0,0,0.8); backdrop-filter: blur(10px);
+            border-left: 1px solid rgba(138,154,91,0.3); padding: 20px;
+            overflow-y: auto; color: #FEFAE0;
+        }
+        .stats-view h2 { color: #8A9A5B; font-size: 1rem; margin-bottom: 12px; }
+        .stats-view h3 { color: #DDA15E; font-size: 0.9rem; margin: 15px 0 8px; }
+        .stats-view p { font-size: 0.8rem; color: #aaa; line-height: 1.4; margin-bottom: 8px; }
+        .chart-container { position: relative; width: 100%; height: 200px; margin: 10px 0; }
+        .chart-container canvas { width: 100%; height: 100%; border: 1px solid rgba(138,154,91,0.2); border-radius: 8px; }
+        .stat-row { display: flex; justify-content: space-between; margin: 4px 0; font-size: 0.8rem; }
+        .stat-label { color: #8A9A5B; }
+        .stat-val { color: #DDA15E; font-weight: bold; }
+        .power-law { color: #BC6C25; font-style: italic; font-size: 0.85rem; margin: 8px 0; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="container">
+        <div class="sandpile-view">
+            <canvas id="sandCanvas"></canvas>
+        </div>
+        <div class="stats-view">
+            <h2>Self-Organized Criticality</h2>
+            <p>Grains rain randomly. The system self-organizes to a critical state where avalanche sizes follow a power law: P(s) ~ s^(-&tau;) with &tau; &approx; 1.2</p>
+            <div class="stat-row"><span class="stat-label">Total grains:</span><span class="stat-val" id="totalGrains">0</span></div>
+            <div class="stat-row"><span class="stat-label">Total avalanches:</span><span class="stat-val" id="totalAval">0</span></div>
+            <div class="stat-row"><span class="stat-label">Largest avalanche:</span><span class="stat-val" id="maxAval">0</span></div>
+            <div class="stat-row"><span class="stat-label">Mean size:</span><span class="stat-val" id="meanAval">0</span></div>
+
+            <h3>Avalanche Size Distribution (log-log)</h3>
+            <p>Power-law: straight line on log-log plot</p>
+            <div class="chart-container"><canvas id="histCanvas"></canvas></div>
+            <p class="power-law" id="fitInfo">Collecting data...</p>
+
+            <h3>Avalanche Time Series</h3>
+            <div class="chart-container"><canvas id="timeCanvas"></canvas></div>
+
+            <h3>About</h3>
+            <p>The BTW sandpile reaches a critical state where adding a single grain can trigger avalanches of any size. This is self-organized criticality -- the system tunes itself to the critical point without any external parameter tuning.</p>
+        </div>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const sandCanvas = document.getElementById('sandCanvas');
+        const sCtx = sandCanvas.getContext('2d');
+        const histCanvas = document.getElementById('histCanvas');
+        const hCtx = histCanvas.getContext('2d');
+        const timeCanvas = document.getElementById('timeCanvas');
+        const tCtx = timeCanvas.getContext('2d');
+
+        const N = 100;
+        let grid = new Int32Array(N * N);
+        let cellSize;
+        const colors = ['#1a1a2e', '#2d3a1a', '#606C38', '#8A9A5B', '#DDA15E'];
+
+        let totalGrains = 0, totalAvalanches = 0, maxAvalanche = 0;
+        let avalancheSizes = [];
+        let recentSizes = [];
+        const maxRecent = 500;
+        let avalancheHist = {};
+
+        function resizeSand() {
+            const rect = sandCanvas.parentElement.getBoundingClientRect();
+            sandCanvas.width = rect.width;
+            sandCanvas.height = rect.height;
+            cellSize = Math.min(sandCanvas.width / N, sandCanvas.height / N);
+        }
+
+        function resizeCharts() {
+            const containers = document.querySelectorAll('.chart-container');
+            containers.forEach(c => {
+                const cv = c.querySelector('canvas');
+                cv.width = c.clientWidth;
+                cv.height = c.clientHeight;
+            });
+        }
+
+        function addGrainAndMeasure() {
+            const rx = Math.floor(Math.random() * N);
+            const ry = Math.floor(Math.random() * N);
+            grid[ry * N + rx]++;
+            totalGrains++;
+
+            let avalancheSize = 0;
+            let didTopple = true;
+            while (didTopple) {
+                didTopple = false;
+                for (let i = 0; i < grid.length; i++) {
+                    if (grid[i] >= 4) {
+                        const x = i % N;
+                        const y = Math.floor(i / N);
+                        grid[i] -= 4;
+                        if (x > 0) grid[i - 1]++;
+                        if (x < N - 1) grid[i + 1]++;
+                        if (y > 0) grid[i - N]++;
+                        if (y < N - 1) grid[i + N]++;
+                        avalancheSize++;
+                        didTopple = true;
+                    }
+                }
+            }
+
+            if (avalancheSize > 0) {
+                totalAvalanches++;
+                if (avalancheSize > maxAvalanche) maxAvalanche = avalancheSize;
+                avalancheSizes.push(avalancheSize);
+                recentSizes.push(avalancheSize);
+                if (recentSizes.length > maxRecent) recentSizes.shift();
+                const bucket = Math.max(1, avalancheSize);
+                avalancheHist[bucket] = (avalancheHist[bucket] || 0) + 1;
+            }
+        }
+
+        function drawSandpile() {
+            sCtx.fillStyle = '#1a1a2e';
+            sCtx.fillRect(0, 0, sandCanvas.width, sandCanvas.height);
+            const ox = (sandCanvas.width - N * cellSize) / 2;
+            const oy = (sandCanvas.height - N * cellSize) / 2;
+            for (let y = 0; y < N; y++) {
+                for (let x = 0; x < N; x++) {
+                    const v = grid[y * N + x];
+                    if (v > 0) {
+                        sCtx.fillStyle = colors[Math.min(v, colors.length - 1)];
+                        sCtx.fillRect(ox + x * cellSize, oy + y * cellSize, cellSize, cellSize);
+                    }
+                }
+            }
+        }
+
+        function drawHistogram() {
+            hCtx.fillStyle = '#0a0a18';
+            hCtx.fillRect(0, 0, histCanvas.width, histCanvas.height);
+
+            const entries = Object.entries(avalancheHist)
+                .map(([s, c]) => [parseInt(s), c])
+                .filter(([s, c]) => s > 0 && c > 0);
+            if (entries.length < 3) return;
+
+            const logEntries = entries.map(([s, c]) => [Math.log10(s), Math.log10(c)]);
+            const minX = Math.min(...logEntries.map(e => e[0]));
+            const maxX = Math.max(...logEntries.map(e => e[0]));
+            const minY = Math.min(...logEntries.map(e => e[1]));
+            const maxY = Math.max(...logEntries.map(e => e[1]));
+            const rangeX = maxX - minX || 1;
+            const rangeY = maxY - minY || 1;
+            const pad = 30;
+            const w = histCanvas.width - pad * 2;
+            const h = histCanvas.height - pad * 2;
+
+            // Axes
+            hCtx.strokeStyle = 'rgba(138,154,91,0.4)';
+            hCtx.beginPath();
+            hCtx.moveTo(pad, pad);
+            hCtx.lineTo(pad, pad + h);
+            hCtx.lineTo(pad + w, pad + h);
+            hCtx.stroke();
+
+            // Labels
+            hCtx.fillStyle = '#8A9A5B';
+            hCtx.font = '10px sans-serif';
+            hCtx.fillText('log(size)', pad + w / 2 - 20, pad + h + 18);
+            hCtx.save();
+            hCtx.translate(10, pad + h / 2);
+            hCtx.rotate(-Math.PI / 2);
+            hCtx.fillText('log(count)', -20, 0);
+            hCtx.restore();
+
+            // Points
+            hCtx.fillStyle = '#DDA15E';
+            logEntries.forEach(([lx, ly]) => {
+                const px = pad + ((lx - minX) / rangeX) * w;
+                const py = pad + h - ((ly - minY) / rangeY) * h;
+                hCtx.beginPath();
+                hCtx.arc(px, py, 3, 0, Math.PI * 2);
+                hCtx.fill();
+            });
+
+            // Power law fit line
+            if (logEntries.length > 5) {
+                const n = logEntries.length;
+                let sx = 0, sy = 0, sxx = 0, sxy = 0;
+                logEntries.forEach(([lx, ly]) => { sx += lx; sy += ly; sxx += lx * lx; sxy += lx * ly; });
+                const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+                const intercept = (sy - slope * sx) / n;
+                const x1 = minX, x2 = maxX;
+                const y1 = slope * x1 + intercept, y2 = slope * x2 + intercept;
+                const px1 = pad + ((x1 - minX) / rangeX) * w;
+                const py1 = pad + h - ((y1 - minY) / rangeY) * h;
+                const px2 = pad + ((x2 - minX) / rangeX) * w;
+                const py2 = pad + h - ((y2 - minY) / rangeY) * h;
+                hCtx.strokeStyle = '#BC6C25';
+                hCtx.lineWidth = 2;
+                hCtx.setLineDash([5, 3]);
+                hCtx.beginPath();
+                hCtx.moveTo(px1, py1);
+                hCtx.lineTo(px2, py2);
+                hCtx.stroke();
+                hCtx.setLineDash([]);
+                hCtx.lineWidth = 1;
+
+                document.getElementById('fitInfo').textContent =
+                    `Power law exponent: \u03C4 \u2248 ${(-slope).toFixed(2)} (expected ~1.2)`;
+            }
+        }
+
+        function drawTimeSeries() {
+            tCtx.fillStyle = '#0a0a18';
+            tCtx.fillRect(0, 0, timeCanvas.width, timeCanvas.height);
+            if (recentSizes.length < 2) return;
+
+            const pad = 20;
+            const w = timeCanvas.width - pad * 2;
+            const h = timeCanvas.height - pad * 2;
+            const maxVal = Math.max(...recentSizes, 1);
+
+            tCtx.strokeStyle = '#8A9A5B';
+            tCtx.lineWidth = 1;
+            tCtx.beginPath();
+            recentSizes.forEach((s, i) => {
+                const px = pad + (i / (recentSizes.length - 1)) * w;
+                const py = pad + h - (s / maxVal) * h;
+                if (i === 0) tCtx.moveTo(px, py);
+                else tCtx.lineTo(px, py);
+            });
+            tCtx.stroke();
+
+            // Highlight large avalanches
+            tCtx.fillStyle = '#DDA15E';
+            const threshold = maxVal * 0.5;
+            recentSizes.forEach((s, i) => {
+                if (s > threshold) {
+                    const px = pad + (i / (recentSizes.length - 1)) * w;
+                    const py = pad + h - (s / maxVal) * h;
+                    tCtx.beginPath();
+                    tCtx.arc(px, py, 3, 0, Math.PI * 2);
+                    tCtx.fill();
+                }
+            });
+        }
+
+        function updateStats() {
+            document.getElementById('totalGrains').textContent = totalGrains.toLocaleString();
+            document.getElementById('totalAval').textContent = totalAvalanches.toLocaleString();
+            document.getElementById('maxAval').textContent = maxAvalanche.toLocaleString();
+            if (avalancheSizes.length > 0) {
+                const mean = avalancheSizes.reduce((a, b) => a + b, 0) / avalancheSizes.length;
+                document.getElementById('meanAval').textContent = mean.toFixed(2);
+            }
+        }
+
+        let frameCount = 0;
+        function animate() {
+            // Add multiple grains per frame to speed up data collection
+            for (let i = 0; i < 5; i++) addGrainAndMeasure();
+            frameCount++;
+            if (frameCount % 5 === 0) {
+                drawSandpile();
+                updateStats();
+            }
+            if (frameCount % 30 === 0) {
+                drawHistogram();
+                drawTimeSeries();
+            }
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            grid.fill(0);
+            totalGrains = 0;
+            totalAvalanches = 0;
+            maxAvalanche = 0;
+            avalancheSizes = [];
+            recentSizes = [];
+            avalancheHist = {};
+            document.getElementById('fitInfo').textContent = 'Collecting data...';
+        };
+
+        function init() {
+            resizeSand();
+            resizeCharts();
+        }
+        window.addEventListener('resize', init);
+        init();
+        animate();
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stopover Ecology & Fuel Loading | Bird Migration</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0f1a0f; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #info {
+            position: fixed; top: 10px; right: 10px; background: rgba(15,26,15,0.92);
+            backdrop-filter: blur(10px); padding: 14px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 280px;
+            border: 1px solid rgba(138,154,91,0.3); line-height: 1.6;
+        }
+        #birdStats {
+            position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+            background: rgba(15,26,15,0.92); backdrop-filter: blur(10px);
+            padding: 10px 20px; border-radius: 12px; color: #FEFAE0; font-size: 0.82rem;
+            z-index: 100; border: 1px solid rgba(138,154,91,0.3); text-align: center;
+        }
+        .fuel-bar { display: inline-block; height: 12px; border-radius: 6px; vertical-align: middle; transition: width 0.3s; }
+        .fuel-bg { display: inline-block; width: 120px; height: 12px; background: rgba(255,255,255,0.15); border-radius: 6px; vertical-align: middle; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(15,26,15,0.92); backdrop-filter: blur(10px);
+            padding: 12px 20px; border-radius: 14px; display: flex; gap: 14px;
+            align-items: center; z-index: 100; color: #FEFAE0; font-size: 0.82rem;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        button.ctrl {
+            background: rgba(138,154,91,0.3); border: 1px solid rgba(138,154,91,0.5);
+            color: #FEFAE0; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.8rem;
+        }
+        button.ctrl:hover { background: rgba(138,154,91,0.5); }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="birdStats"></div>
+    <div id="info">
+        <strong style="color:#DDA15E;">Stopover Ecology</strong><br>
+        Migrants fuel flight with <span style="color:#8A9A5B;">lipids</span>. Birds stopping at rich sites gain 1-3% body mass per day. Barrier crossings (oceans, deserts) require heavy fuel loads.<br>
+        <div style="margin-top:6px;font-size:0.75rem;opacity:0.7;">
+            Watch the warbler migrate south, stopping at sites to refuel. Green = food-rich. Food depletes with competition.
+        </div>
+    </div>
+    <div id="controls">
+        <button class="ctrl" id="resetBtn">Reset Migration</button>
+        <button class="ctrl" id="speedBtn">2x Speed</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let time = 0;
+        let speedMult = 1;
+
+        document.getElementById('speedBtn').onclick = function() {
+            speedMult = speedMult === 1 ? 2 : speedMult === 2 ? 4 : 1;
+            this.textContent = speedMult + 'x Speed';
+        };
+
+        // Migration route: breeding ground (top) to wintering ground (bottom)
+        // With stopover sites along the way
+        const routeY = [0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 0.95]; // normalized y positions
+        const sites = [];
+        const barriers = [];
+
+        function initSites() {
+            sites.length = 0;
+            barriers.length = 0;
+
+            // Stopover sites
+            const siteData = [
+                { y: 0.05, quality: 0.9, name: 'Breeding Ground', type: 'breeding' },
+                { y: 0.18, quality: 0.7, name: 'Coastal Marsh', type: 'stopover' },
+                { y: 0.32, quality: 0.5, name: 'Farmland Edge', type: 'stopover' },
+                { y: 0.48, quality: 0.3, name: 'Desert Oasis', type: 'stopover' },
+                { y: 0.62, quality: 0.6, name: 'River Delta', type: 'stopover' },
+                { y: 0.78, quality: 0.8, name: 'Tropical Forest', type: 'stopover' },
+                { y: 0.93, quality: 0.9, name: 'Wintering Ground', type: 'wintering' }
+            ];
+
+            siteData.forEach(s => {
+                sites.push({
+                    x: W * (0.35 + Math.random() * 0.3),
+                    y: H * s.y,
+                    quality: s.quality,
+                    currentFood: s.quality,
+                    name: s.name,
+                    type: s.type,
+                    radius: 30 + s.quality * 25
+                });
+            });
+
+            // Barriers (desert, ocean)
+            barriers.push({ y1: H * 0.38, y2: H * 0.52, name: 'Sahara Desert', color: 'rgba(188,108,37,0.12)' });
+        }
+
+        class Migrant {
+            constructor() {
+                this.reset();
+            }
+
+            reset() {
+                this.x = sites[0] ? sites[0].x : W / 2;
+                this.y = sites[0] ? sites[0].y : H * 0.05;
+                this.fuel = 0.8; // 0-1
+                this.maxFuel = 1.0;
+                this.mass = 20; // grams (base lean mass)
+                this.fatMass = 8; // grams of fat
+                this.state = 'flying'; // flying, refueling, resting
+                this.targetSite = 1;
+                this.daysAtSite = 0;
+                this.totalDays = 0;
+                this.distanceTraveled = 0;
+                this.fuelHistory = [{ day: 0, fuel: this.fuel }];
+            }
+
+            update() {
+                const dt = 0.016 * speedMult;
+                this.totalDays += dt * 0.5;
+
+                if (this.state === 'flying') {
+                    if (this.targetSite >= sites.length) {
+                        this.state = 'arrived';
+                        return;
+                    }
+
+                    const target = sites[this.targetSite];
+                    const dx = target.x - this.x;
+                    const dy = target.y - this.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist < 15) {
+                        // Arrived at stopover
+                        this.state = 'refueling';
+                        this.daysAtSite = 0;
+                        return;
+                    }
+
+                    // Move toward target
+                    const speed = 3 * speedMult;
+                    this.x += (dx / dist) * speed;
+                    this.y += (dy / dist) * speed;
+                    this.distanceTraveled += speed;
+
+                    // Burn fuel (heavier birds burn more)
+                    const fuelBurn = 0.0008 * (1 + this.fatMass / 20) * speedMult;
+                    this.fuel = Math.max(0, this.fuel - fuelBurn);
+                    this.fatMass = Math.max(0, this.fatMass - fuelBurn * 10);
+
+                    if (this.fuel <= 0) {
+                        this.state = 'exhausted';
+                    }
+                } else if (this.state === 'refueling') {
+                    const site = sites[this.targetSite];
+                    this.daysAtSite += 0.016 * speedMult;
+
+                    // Fuel deposition rate depends on site quality and competition
+                    const fuelRate = 0.003 * site.currentFood * speedMult;
+                    this.fuel = Math.min(this.maxFuel, this.fuel + fuelRate);
+                    this.fatMass = Math.min(15, this.fatMass + fuelRate * 10);
+
+                    // Deplete food at site
+                    site.currentFood = Math.max(0.1, site.currentFood - 0.0001 * speedMult);
+
+                    // Decision to depart
+                    const nextSite = this.targetSite + 1 < sites.length ? sites[this.targetSite + 1] : null;
+                    const distToNext = nextSite ? Math.sqrt((nextSite.x - this.x) ** 2 + (nextSite.y - this.y) ** 2) : 0;
+                    const fuelNeeded = distToNext * 0.0008 * 1.3; // 30% safety margin
+
+                    // Check if crossing a barrier
+                    let crossingBarrier = false;
+                    barriers.forEach(b => {
+                        if (this.y < b.y1 && nextSite && nextSite.y > b.y2) crossingBarrier = true;
+                    });
+
+                    const threshold = crossingBarrier ? Math.min(0.9, fuelNeeded * 1.5) : Math.min(0.7, fuelNeeded * 1.2);
+
+                    if (this.fuel >= threshold || this.daysAtSite > 15) {
+                        this.fuelHistory.push({ day: this.totalDays, fuel: this.fuel });
+                        this.state = 'flying';
+                        this.targetSite++;
+                    }
+                }
+            }
+
+            draw() {
+                // Draw trail
+                ctx.beginPath();
+                ctx.setLineDash([3, 6]);
+                for (let i = 0; i < this.targetSite && i < sites.length - 1; i++) {
+                    const s1 = sites[i];
+                    const s2 = sites[Math.min(i + 1, sites.length - 1)];
+                    if (i === 0) ctx.moveTo(s1.x, s1.y);
+                    ctx.lineTo(s2.x, s2.y);
+                }
+                if (this.state === 'flying' && this.targetSite < sites.length) {
+                    ctx.lineTo(this.x, this.y);
+                }
+                ctx.strokeStyle = 'rgba(221,161,94,0.3)';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Bird
+                ctx.save();
+                ctx.translate(this.x, this.y);
+
+                if (this.state === 'exhausted') {
+                    ctx.globalAlpha = 0.4;
+                }
+
+                // Body size reflects fat stores
+                const bodyScale = 1 + this.fatMass / 30;
+                ctx.scale(bodyScale, bodyScale);
+
+                const wf = this.state === 'flying' ? Math.sin(time * 6) * 5 : 0;
+
+                ctx.beginPath();
+                ctx.moveTo(0, -2);
+                ctx.quadraticCurveTo(-8, wf - 2, -14, wf);
+                ctx.moveTo(0, -2);
+                ctx.quadraticCurveTo(8, wf - 2, 14, wf);
+                ctx.strokeStyle = '#DDA15E';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.ellipse(0, 0, 4, 7, 0, 0, Math.PI * 2);
+                // Color based on fuel: green = full, red = empty
+                const fuelR = Math.round(221 * (1 - this.fuel) + 138 * this.fuel);
+                const fuelG = Math.round(100 * (1 - this.fuel) + 180 * this.fuel);
+                const fuelB = Math.round(50 * (1 - this.fuel) + 91 * this.fuel);
+                ctx.fillStyle = `rgb(${fuelR},${fuelG},${fuelB})`;
+                ctx.fill();
+
+                ctx.restore();
+
+                // Refueling indicator
+                if (this.state === 'refueling') {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, 18, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([2, 2]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+
+                    ctx.font = '9px Segoe UI';
+                    ctx.fillStyle = '#8A9A5B';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('refueling', this.x, this.y + 26);
+                }
+            }
+        }
+
+        let bird = new Migrant();
+
+        function drawSites() {
+            sites.forEach((s, i) => {
+                // Food availability halo
+                const foodAlpha = s.currentFood * 0.3;
+                const grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.radius);
+                grad.addColorStop(0, `rgba(138,154,91,${foodAlpha})`);
+                grad.addColorStop(1, 'rgba(138,154,91,0)');
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+                ctx.fillStyle = grad;
+                ctx.fill();
+
+                // Site marker
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, 6, 0, Math.PI * 2);
+                const color = s.type === 'breeding' ? '#8A9A5B' : s.type === 'wintering' ? '#DDA15E' : '#606C38';
+                ctx.fillStyle = color;
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(254,250,224,0.5)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Label
+                ctx.font = '10px Segoe UI';
+                ctx.fillStyle = 'rgba(254,250,224,0.7)';
+                ctx.textAlign = 'center';
+                ctx.fillText(s.name, s.x, s.y - 14);
+
+                // Food bar
+                const barW = 40;
+                ctx.fillStyle = 'rgba(255,255,255,0.1)';
+                ctx.fillRect(s.x - barW / 2, s.y + 10, barW, 4);
+                ctx.fillStyle = `rgba(138,154,91,${0.4 + s.currentFood * 0.6})`;
+                ctx.fillRect(s.x - barW / 2, s.y + 10, barW * s.currentFood, 4);
+            });
+        }
+
+        function drawBarriers() {
+            barriers.forEach(b => {
+                ctx.fillStyle = b.color;
+                ctx.fillRect(0, b.y1, W, b.y2 - b.y1);
+
+                ctx.font = '11px Segoe UI';
+                ctx.fillStyle = 'rgba(188,108,37,0.4)';
+                ctx.textAlign = 'center';
+                ctx.fillText(b.name, W / 2, (b.y1 + b.y2) / 2);
+            });
+        }
+
+        function updateStats() {
+            const stats = document.getElementById('birdStats');
+            const fuelPct = Math.round(bird.fuel * 100);
+            const fuelColor = bird.fuel > 0.6 ? '#8A9A5B' : bird.fuel > 0.3 ? '#DDA15E' : '#BC6C25';
+            stats.innerHTML =
+                `<strong>Garden Warbler Migration</strong> | ` +
+                `State: <strong>${bird.state}</strong> | ` +
+                `Fat: <strong style="color:${fuelColor}">${bird.fatMass.toFixed(1)}g</strong> | ` +
+                `Fuel: <span class="fuel-bg"><span class="fuel-bar" style="width:${fuelPct}%;background:${fuelColor};"></span></span> ${fuelPct}% | ` +
+                `Day: ${Math.round(bird.totalDays)}`;
+        }
+
+        document.getElementById('resetBtn').onclick = () => {
+            bird.reset();
+            initSites();
+        };
+
+        initSites();
+
+        function animate() {
+            ctx.fillStyle = '#0f1a0f';
+            ctx.fillRect(0, 0, W, H);
+
+            // Subtle landscape gradient
+            const landGrad = ctx.createLinearGradient(0, 0, 0, H);
+            landGrad.addColorStop(0, 'rgba(96,108,56,0.05)');
+            landGrad.addColorStop(0.4, 'rgba(96,108,56,0.02)');
+            landGrad.addColorStop(0.5, 'rgba(188,108,37,0.03)');
+            landGrad.addColorStop(0.7, 'rgba(96,108,56,0.04)');
+            landGrad.addColorStop(1, 'rgba(96,108,56,0.06)');
+            ctx.fillStyle = landGrad;
+            ctx.fillRect(0, 0, W, H);
+
+            drawBarriers();
+            drawSites();
+
+            bird.update();
+            bird.draw();
+            updateStats();
+
+            // Draw fuel graph
+            if (bird.fuelHistory.length > 1) {
+                const gx = 20, gy = H - 150, gw = 160, gh = 80;
+                ctx.fillStyle = 'rgba(15,26,15,0.8)';
+                ctx.fillRect(gx, gy, gw, gh);
+                ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+                ctx.strokeRect(gx, gy, gw, gh);
+
+                ctx.font = '9px Segoe UI';
+                ctx.fillStyle = 'rgba(254,250,224,0.5)';
+                ctx.textAlign = 'left';
+                ctx.fillText('Fuel over time', gx + 4, gy + 12);
+
+                ctx.beginPath();
+                bird.fuelHistory.forEach((pt, i) => {
+                    const px = gx + (pt.day / Math.max(bird.totalDays, 1)) * gw;
+                    const py = gy + gh - pt.fuel * gh;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                });
+                // Current position
+                const curPx = gx + (bird.totalDays / Math.max(bird.totalDays, 1)) * gw;
+                const curPy = gy + gh - bird.fuel * gh;
+                ctx.lineTo(curPx, curPy);
+                ctx.strokeStyle = '#DDA15E';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            time += 0.016;
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+
+        window.reset = function() {
+            time = 0;
+            bird.reset();
+            initSites();
+        };
+    })();
+    </script>
+</body>
+</html>

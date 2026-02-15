@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Didgeridoo Drone Physics - Wind Instrument Physics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; }
+a.back-link { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+a.back-link:hover { color: #DDA15E; }
+
+.controls {
+    position: fixed; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(26,26,46,0.92); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 16px; min-width: 230px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #DDA15E; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+.controls label { display: block; font-size: 12px; color: #8A9A5B; margin-top: 8px; }
+.controls input[type=range] { width: 100%; margin: 4px 0; accent-color: #8A9A5B; }
+.controls .value { font-size: 11px; color: #8A9A5B; text-align: right; }
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 12px; border: none; border-radius: 8px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+.btn.active { background: #DDA15E; color: #1a1a2e; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Didgeridoo Drone</h3>
+    <label>Bore Length: <span id="lenVal" class="value">1.3 m</span></label>
+    <input type="range" id="boreLen" min="0.8" max="2.0" value="1.3" step="0.05">
+    <label>Lip Tension: <span id="lipVal" class="value">50%</span></label>
+    <input type="range" id="lipTension" min="10" max="90" value="50">
+    <label>Vocal Formant: <span id="formantVal" class="value">500 Hz</span></label>
+    <input type="range" id="formant" min="200" max="2000" value="500" step="10">
+    <label>Formant Width: <span id="fWidthVal" class="value">200 Hz</span></label>
+    <input type="range" id="formantWidth" min="50" max="500" value="200" step="10">
+    <div style="margin-top:10px;">
+        <button class="btn" id="playBtn">Play Drone</button>
+        <button class="btn" id="breathBtn">Circular Breathing</button>
+    </div>
+</div>
+
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+let boreLen = 1.3;
+let lipTension = 50;
+let formantFreq = 500;
+let formantWidth = 200;
+let isPlaying = false;
+let circularBreathing = false;
+let time = 0;
+let audioCtx = null;
+let droneNodes = null;
+let breathPhase = 0;
+let animId;
+
+const lenEl = document.getElementById('boreLen');
+const lipEl = document.getElementById('lipTension');
+const formantEl = document.getElementById('formant');
+const fWidthEl = document.getElementById('formantWidth');
+const playBtn = document.getElementById('playBtn');
+const breathBtn = document.getElementById('breathBtn');
+
+lenEl.addEventListener('input', e => { boreLen = +e.target.value; document.getElementById('lenVal').textContent = boreLen.toFixed(2) + ' m'; updateDrone(); });
+lipEl.addEventListener('input', e => { lipTension = +e.target.value; document.getElementById('lipVal').textContent = lipTension + '%'; updateDrone(); });
+formantEl.addEventListener('input', e => { formantFreq = +e.target.value; document.getElementById('formantVal').textContent = formantFreq + ' Hz'; updateDrone(); });
+fWidthEl.addEventListener('input', e => { formantWidth = +e.target.value; document.getElementById('fWidthVal').textContent = formantWidth + ' Hz'; updateDrone(); });
+
+playBtn.addEventListener('click', () => { if (isPlaying) stopDrone(); else startDrone(); });
+breathBtn.addEventListener('click', () => {
+    circularBreathing = !circularBreathing;
+    breathBtn.classList.toggle('active');
+});
+
+function getDroneFreq() {
+    return 343 / (2 * boreLen);
+}
+
+function startDrone() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    stopDrone();
+
+    const fundamental = getDroneFreq();
+    const master = audioCtx.createGain();
+    master.gain.value = 0.1;
+    master.connect(audioCtx.destination);
+
+    // Formant filter
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = formantFreq;
+    filter.Q.value = formantFreq / formantWidth;
+    filter.connect(master);
+
+    // Direct path (bypasses filter for fundamental)
+    const directGain = audioCtx.createGain();
+    directGain.gain.value = 0.5;
+    directGain.connect(master);
+
+    const oscs = [];
+    const gains = [];
+    // Didgeridoo has slightly stretched harmonics due to conical bore
+    for (let i = 0; i < 12; i++) {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        const stretchFactor = 1 + i * 0.005;
+        osc.type = 'sawtooth';
+        osc.frequency.value = fundamental * (i + 1) * stretchFactor;
+        const amp = 1.0 / (i + 1);
+        gain.gain.value = amp * 0.08;
+        osc.connect(gain);
+        if (i === 0) gain.connect(directGain);
+        else gain.connect(filter);
+        osc.start();
+        oscs.push(osc);
+        gains.push(gain);
+    }
+
+    droneNodes = { oscs, gains, master, filter, directGain };
+    isPlaying = true;
+    playBtn.textContent = 'Stop';
+    playBtn.classList.add('active');
+}
+
+function stopDrone() {
+    if (droneNodes) {
+        droneNodes.oscs.forEach(o => { try { o.stop(); } catch(e) {} });
+        droneNodes.master.disconnect();
+        droneNodes = null;
+    }
+    isPlaying = false;
+    playBtn.textContent = 'Play Drone';
+    playBtn.classList.remove('active');
+}
+
+function updateDrone() {
+    if (!isPlaying || !droneNodes) return;
+    const fundamental = getDroneFreq();
+    droneNodes.oscs.forEach((osc, i) => {
+        const stretchFactor = 1 + i * 0.005;
+        osc.frequency.setValueAtTime(fundamental * (i + 1) * stretchFactor, audioCtx.currentTime);
+    });
+    droneNodes.filter.frequency.setValueAtTime(formantFreq, audioCtx.currentTime);
+    droneNodes.filter.Q.setValueAtTime(formantFreq / formantWidth, audioCtx.currentTime);
+}
+
+function drawDidgeridoo(cx, cy, scale) {
+    // Bore shape (slightly conical with irregularities)
+    const length = boreLen * 200 * scale;
+    const startR = 15 * scale;
+    const endR = 45 * scale;
+
+    ctx.fillStyle = 'rgba(120,80,40,0.3)';
+    ctx.strokeStyle = '#7a5030';
+    ctx.lineWidth = 3;
+
+    // Top contour with irregularities
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - startR);
+    for (let i = 0; i <= 100; i++) {
+        const frac = i / 100;
+        const x = cx + frac * length;
+        const r = startR + (endR - startR) * frac;
+        const irregular = Math.sin(frac * 30) * 3 * scale + Math.sin(frac * 17) * 2 * scale;
+        ctx.lineTo(x, cy - r - irregular);
+    }
+    for (let i = 100; i >= 0; i--) {
+        const frac = i / 100;
+        const x = cx + frac * length;
+        const r = startR + (endR - startR) * frac;
+        const irregular = Math.sin(frac * 30 + 1) * 3 * scale + Math.sin(frac * 17 + 2) * 2 * scale;
+        ctx.lineTo(x, cy + r + irregular);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Bark texture
+    ctx.strokeStyle = 'rgba(90,55,25,0.3)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 20; i++) {
+        const frac = (i + 0.5) / 20;
+        const x = cx + frac * length;
+        const r = startR + (endR - startR) * frac;
+        ctx.beginPath();
+        ctx.moveTo(x, cy - r + 3);
+        ctx.lineTo(x + 5 * scale, cy + r - 3);
+        ctx.stroke();
+    }
+
+    // Standing wave inside
+    if (isPlaying) {
+        const freq = getDroneFreq();
+        const omega = freq * 2 * Math.PI;
+        ctx.strokeStyle = `rgba(221,161,94,${0.3 + Math.abs(Math.sin(time * 0.003)) * 0.4})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i <= 150; i++) {
+            const frac = i / 150;
+            const x = cx + frac * length;
+            const r = (startR + (endR - startR) * frac) * 0.6;
+            const spatial = Math.sin(Math.PI * frac);
+            const y = cy + spatial * r * Math.cos(omega * time * 0.001 * 0.02);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+
+    // Labels
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = `${10 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Mouthpiece', cx, cy + startR + 20 * scale);
+    ctx.fillText('Bell', cx + length, cy + endR + 20 * scale);
+    ctx.fillText(boreLen.toFixed(2) + ' m', cx + length / 2, cy + (startR + endR) / 2 + 25 * scale);
+}
+
+function drawBreathDiagram(x, y, scale) {
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = `bold ${12 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Circular Breathing Cycle', x + 80 * scale, y - 15 * scale);
+
+    const phases = [
+        { label: 'Inhale (nose)', angle: -Math.PI / 2, desc: 'Soft palate down' },
+        { label: 'Cheek push', angle: 0, desc: 'Cheeks compress air' },
+        { label: 'Exhale (mouth)', angle: Math.PI / 2, desc: 'Lung air to reed' },
+        { label: 'Store air', angle: Math.PI, desc: 'Fill cheeks again' }
+    ];
+
+    const r = 50 * scale;
+
+    // Circle
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x + 80 * scale, y + 50 * scale, r, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Current phase indicator
+    if (circularBreathing) {
+        breathPhase = (time * 0.002) % (Math.PI * 2);
+        ctx.fillStyle = 'rgba(221,161,94,0.3)';
+        ctx.beginPath();
+        ctx.moveTo(x + 80 * scale, y + 50 * scale);
+        ctx.arc(x + 80 * scale, y + 50 * scale, r + 5, breathPhase - 0.3, breathPhase + 0.3);
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    // Phase labels
+    phases.forEach(p => {
+        const px = x + 80 * scale + Math.cos(p.angle) * (r + 20 * scale);
+        const py = y + 50 * scale + Math.sin(p.angle) * (r + 20 * scale);
+        ctx.fillStyle = '#DDA15E';
+        ctx.font = `${9 * scale}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.fillText(p.label, px, py);
+        ctx.fillStyle = '#8A9A5B';
+        ctx.font = `${8 * scale}px system-ui`;
+        ctx.fillText(p.desc, px, py + 12 * scale);
+    });
+
+    // Arrows
+    ctx.strokeStyle = '#DDA15E';
+    ctx.lineWidth = 1.5;
+    for (let i = 0; i < 4; i++) {
+        const a1 = phases[i].angle + 0.3;
+        const a2 = phases[(i + 1) % 4].angle - 0.3;
+        const amid = (a1 + a2) / 2;
+        if (a2 < a1) continue;
+        const ax = x + 80 * scale + Math.cos(amid) * r;
+        const ay = y + 50 * scale + Math.sin(amid) * r;
+        ctx.beginPath();
+        ctx.arc(ax, ay, 4, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+}
+
+function drawSpectrum(x, y, w, h) {
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = 'bold 12px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Resonance Spectrum with Formant', x + w / 2, y - 8);
+
+    const fundamental = getDroneFreq();
+    const maxFreq = 2500;
+    const barCount = 15;
+
+    ctx.strokeStyle = 'rgba(138,154,91,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, y + h);
+    ctx.lineTo(x + w, y + h);
+    ctx.stroke();
+
+    // Draw formant curve
+    ctx.strokeStyle = 'rgba(221,161,94,0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i <= w; i++) {
+        const freq = (i / w) * maxFreq;
+        const formantResp = Math.exp(-Math.pow(freq - formantFreq, 2) / (2 * formantWidth * formantWidth));
+        const py = y + h - formantResp * h * 0.8;
+        if (i === 0) ctx.moveTo(x + i, py);
+        else ctx.lineTo(x + i, py);
+    }
+    ctx.stroke();
+
+    // Harmonic bars
+    for (let i = 0; i < barCount; i++) {
+        const stretchFactor = 1 + i * 0.005;
+        const freq = fundamental * (i + 1) * stretchFactor;
+        if (freq > maxFreq) break;
+        const bx = x + (freq / maxFreq) * w;
+        const baseAmp = 1 / (i + 1);
+        const formantBoost = Math.exp(-Math.pow(freq - formantFreq, 2) / (2 * formantWidth * formantWidth));
+        const totalAmp = baseAmp * (0.3 + 0.7 * formantBoost);
+        const barH = totalAmp * h * 0.75;
+
+        ctx.fillStyle = formantBoost > 0.3 ? '#DDA15E' : '#8A9A5B';
+        ctx.fillRect(bx - 3, y + h - barH, 6, barH);
+
+        if (i < 6) {
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '8px system-ui';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${freq.toFixed(0)}`, bx, y + h + 12);
+        }
+    }
+
+    // Formant label
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = '10px system-ui';
+    ctx.textAlign = 'center';
+    const fPx = x + (formantFreq / maxFreq) * w;
+    ctx.fillText(`Formant: ${formantFreq} Hz`, fPx, y - 20);
+    ctx.strokeStyle = 'rgba(221,161,94,0.5)';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(fPx, y);
+    ctx.lineTo(fPx, y + h);
+    ctx.stroke();
+    ctx.setLineDash([]);
+}
+
+function draw() {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+
+    const scale = Math.min(W, H) / 700;
+    const fundamental = getDroneFreq();
+
+    // Title
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = `bold ${16 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Didgeridoo Drone Physics', W / 2, 30 * scale);
+
+    // Draw didgeridoo
+    drawDidgeridoo(W * 0.08, H * 0.28, scale);
+
+    // Frequency info
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = `bold ${14 * scale}px system-ui`;
+    ctx.textAlign = 'left';
+    ctx.fillText(`Drone frequency: ${fundamental.toFixed(1)} Hz`, W * 0.08, H * 0.48);
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = `${12 * scale}px system-ui`;
+    ctx.fillText(`Typical didgeridoo: 50-80 Hz (slightly conical bore with irregular walls)`, W * 0.08, H * 0.48 + 20 * scale);
+    ctx.fillText(`Lip vibration creates harmonic series; vocal tract shapes the timbre`, W * 0.08, H * 0.48 + 40 * scale);
+
+    // Spectrum
+    drawSpectrum(W * 0.05, H * 0.6, W * 0.55, H * 0.3);
+
+    // Circular breathing diagram
+    drawBreathDiagram(W * 0.68, H * 0.55, scale);
+
+    // Air particles at mouthpiece when playing
+    if (isPlaying) {
+        const mouthX = W * 0.08;
+        const mouthY = H * 0.28;
+        for (let i = 0; i < 15; i++) {
+            const t = ((time * 0.004 + i / 15) % 1);
+            const px = mouthX + t * boreLen * 100 * scale;
+            const spread = 5 * scale + t * 20 * scale;
+            const py = mouthY + Math.sin(t * Math.PI * 6 + time * 0.01) * spread;
+            ctx.fillStyle = `rgba(138,154,91,${(1 - t) * 0.4})`;
+            ctx.beginPath();
+            ctx.arc(px, py, 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Bottom note
+    ctx.fillStyle = 'rgba(138,154,91,0.5)';
+    ctx.font = `${10 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('The didgeridoo\'s drone is shaped by lip buzz harmonics filtered through the bore\'s resonances and the player\'s vocal tract', W / 2, H - 12);
+}
+
+function animate(ts) {
+    time = ts || 0;
+    draw();
+    animId = requestAnimationFrame(animate);
+}
+
+animate();
+
+window.reset = function() {
+    boreLen = 1.3;
+    lipTension = 50;
+    formantFreq = 500;
+    formantWidth = 200;
+    circularBreathing = false;
+    lenEl.value = 1.3;
+    lipEl.value = 50;
+    formantEl.value = 500;
+    fWidthEl.value = 200;
+    document.getElementById('lenVal').textContent = '1.3 m';
+    document.getElementById('lipVal').textContent = '50%';
+    document.getElementById('formantVal').textContent = '500 Hz';
+    document.getElementById('fWidthVal').textContent = '200 Hz';
+    breathBtn.classList.remove('active');
+    stopDrone();
+};
+</script>
+</body>
+</html>

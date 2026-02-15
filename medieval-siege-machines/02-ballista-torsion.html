@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ballista Torsion Engine - Medieval Siege Machines</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px 25px; border-radius: 15px; display: flex; gap: 20px;
+            align-items: center; z-index: 100; flex-wrap: wrap; justify-content: center;
+        }
+        .control-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .control-group label { color: #DDA15E; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .control-group input[type="range"] { width: 100px; accent-color: #8A9A5B; }
+        .control-group .value { color: #FEFAE0; font-size: 0.8rem; font-weight: bold; }
+        button {
+            background: linear-gradient(135deg, #8A9A5B, #606C38); color: #FEFAE0;
+            border: none; padding: 10px 24px; border-radius: 10px; cursor: pointer;
+            font-size: 0.9rem; font-weight: bold; transition: all 0.2s;
+        }
+        button:hover { transform: scale(1.05); }
+        .info {
+            position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(10px); padding: 12px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 220px;
+        }
+        .info h3 { color: #DDA15E; margin-bottom: 6px; }
+        .info p { line-height: 1.4; opacity: 0.85; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h3>Ballista Torsion Engine</h3>
+        <p>Roman torsion artillery using twisted sinew bundles. Adjust torsion and bolt weight, then release. Bolts reach 80-120 m/s!</p>
+        <div id="stats"></div>
+    </div>
+    <div class="controls">
+        <div class="control-group">
+            <label>Torsion (turns)</label>
+            <input type="range" id="torsion" min="5" max="30" value="15" step="1">
+            <span class="value" id="torsionVal">15</span>
+        </div>
+        <div class="control-group">
+            <label>Bolt Mass (g)</label>
+            <input type="range" id="boltMass" min="15" max="500" value="100" step="5">
+            <span class="value" id="boltMassVal">100</span>
+        </div>
+        <div class="control-group">
+            <label>Elevation</label>
+            <input type="range" id="elevation" min="5" max="45" value="20" step="1">
+            <span class="value" id="elevationVal">20&deg;</span>
+        </div>
+        <button id="fireBtn">FIRE!</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const G = 9.81;
+        let state = 'ready';
+        let armAngle = 0;
+        let armVel = 0;
+        let bolt = null;
+        let trail = [];
+        let torsionBundles = [{ twist: 0 }, { twist: 0 }];
+        let maxRange = 0;
+        let boltSpeed = 0;
+
+        const els = {
+            torsion: document.getElementById('torsion'),
+            boltMass: document.getElementById('boltMass'),
+            elevation: document.getElementById('elevation')
+        };
+
+        function getP() {
+            return {
+                torsion: +els.torsion.value,
+                boltMass: +els.boltMass.value / 1000,
+                elevation: +els.elevation.value * Math.PI / 180
+            };
+        }
+
+        function updateLabels() {
+            document.getElementById('torsionVal').textContent = els.torsion.value;
+            document.getElementById('boltMassVal').textContent = els.boltMass.value;
+            document.getElementById('elevationVal').textContent = els.elevation.value + '\u00B0';
+        }
+        Object.values(els).forEach(e => e.addEventListener('input', updateLabels));
+
+        function fire() {
+            if (state !== 'ready') return;
+            const p = getP();
+            state = 'releasing';
+            armAngle = -Math.PI * 0.3;
+            armVel = 0;
+            torsionBundles.forEach(b => b.twist = p.torsion);
+            bolt = null;
+            trail = [];
+            maxRange = 0;
+        }
+
+        document.getElementById('fireBtn').addEventListener('click', fire);
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            state = 'ready'; armAngle = -Math.PI * 0.3; armVel = 0;
+            bolt = null; trail = []; maxRange = 0;
+            torsionBundles.forEach(b => b.twist = 0);
+            document.getElementById('stats').innerHTML = '';
+        });
+
+        window.reset = function() {
+            state = 'ready'; armAngle = -Math.PI * 0.3; armVel = 0;
+            bolt = null; trail = []; maxRange = 0;
+            torsionBundles.forEach(b => b.twist = 0);
+        };
+
+        armAngle = -Math.PI * 0.3;
+
+        function drawBallista(cx, groundY, p) {
+            const baseW = 120, baseH = 20;
+            // Wooden base/frame
+            ctx.fillStyle = '#6B5B3A';
+            ctx.fillRect(cx - baseW / 2, groundY - baseH, baseW, baseH);
+
+            // Wheels
+            ctx.strokeStyle = '#5A4A2A';
+            ctx.lineWidth = 3;
+            [-40, 40].forEach(dx => {
+                ctx.beginPath();
+                ctx.arc(cx + dx, groundY, 10, 0, Math.PI * 2);
+                ctx.stroke();
+                // Spokes
+                for (let a = 0; a < Math.PI * 2; a += Math.PI / 3) {
+                    ctx.beginPath();
+                    ctx.moveTo(cx + dx, groundY);
+                    ctx.lineTo(cx + dx + 8 * Math.cos(a), groundY + 8 * Math.sin(a));
+                    ctx.stroke();
+                }
+            });
+
+            // Torsion bundles
+            const bundleY = groundY - baseH - 15;
+            [-30, 30].forEach((dx, i) => {
+                const tw = torsionBundles[i].twist;
+                ctx.fillStyle = tw > 0 ? `rgb(${150 + tw * 3}, ${100 + tw}, ${60})` : '#A08050';
+                ctx.beginPath();
+                ctx.ellipse(cx + dx, bundleY, 8, 12, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#806040';
+                ctx.lineWidth = 1;
+                // Twist lines
+                for (let j = 0; j < Math.min(tw, 10); j++) {
+                    const y = bundleY - 10 + j * 2;
+                    ctx.beginPath();
+                    ctx.moveTo(cx + dx - 6, y);
+                    ctx.quadraticCurveTo(cx + dx, y + (j % 2 ? 3 : -3), cx + dx + 6, y);
+                    ctx.stroke();
+                }
+            });
+
+            // Arms from torsion bundles
+            const armLen = 50;
+            const leftArmAngle = -Math.PI * 0.5 + armAngle * 0.6;
+            const rightArmAngle = -Math.PI * 0.5 + armAngle * 0.6;
+
+            ctx.strokeStyle = '#8B7355';
+            ctx.lineWidth = 4;
+            [-30, 30].forEach(dx => {
+                const endX = cx + dx + armLen * Math.cos(leftArmAngle);
+                const endY = bundleY + armLen * Math.sin(leftArmAngle);
+                ctx.beginPath();
+                ctx.moveTo(cx + dx, bundleY);
+                ctx.lineTo(endX, endY);
+                ctx.stroke();
+            });
+
+            // Bowstring
+            const lEndX = cx - 30 + armLen * Math.cos(leftArmAngle);
+            const lEndY = bundleY + armLen * Math.sin(leftArmAngle);
+            const rEndX = cx + 30 + armLen * Math.cos(rightArmAngle);
+            const rEndY = bundleY + armLen * Math.sin(rightArmAngle);
+
+            ctx.strokeStyle = '#C0A070';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(lEndX, lEndY);
+            if (!bolt) {
+                ctx.lineTo((lEndX + rEndX) / 2, (lEndY + rEndY) / 2);
+            } else {
+                const pullBack = Math.max(0, -armAngle * 30);
+                ctx.lineTo((lEndX + rEndX) / 2 + pullBack, (lEndY + rEndY) / 2);
+            }
+            ctx.lineTo(rEndX, rEndY);
+            ctx.stroke();
+
+            // Slide rail
+            const railLen = 80;
+            const railAngle = p.elevation;
+            ctx.strokeStyle = '#7A6B4A';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(cx, bundleY);
+            ctx.lineTo(cx + railLen * Math.cos(-railAngle), bundleY + railLen * Math.sin(-railAngle));
+            ctx.stroke();
+
+            // Bolt in rail (if not fired)
+            if (state === 'ready') {
+                const boltLen = 30;
+                ctx.strokeStyle = '#888';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(cx, bundleY);
+                ctx.lineTo(cx + boltLen * Math.cos(-railAngle), bundleY + boltLen * Math.sin(-railAngle));
+                ctx.stroke();
+                // Bolt tip
+                const tipX = cx + boltLen * Math.cos(-railAngle);
+                const tipY = bundleY + boltLen * Math.sin(-railAngle);
+                ctx.fillStyle = '#aaa';
+                ctx.beginPath();
+                ctx.moveTo(tipX + 8 * Math.cos(-railAngle), tipY + 8 * Math.sin(-railAngle));
+                ctx.lineTo(tipX + 4 * Math.cos(-railAngle + 0.4), tipY + 4 * Math.sin(-railAngle + 0.4));
+                ctx.lineTo(tipX + 4 * Math.cos(-railAngle - 0.4), tipY + 4 * Math.sin(-railAngle - 0.4));
+                ctx.fill();
+            }
+
+            return { cx, bundleY, railAngle: p.elevation };
+        }
+
+        function drawTarget(x, groundY) {
+            // Wooden target
+            ctx.fillStyle = '#6B4B2A';
+            ctx.fillRect(x - 5, groundY - 60, 10, 60);
+            // Shield
+            ctx.fillStyle = '#8B6B4A';
+            ctx.beginPath();
+            ctx.arc(x, groundY - 45, 20, 0, Math.PI * 2);
+            ctx.fill();
+            // Rings
+            [15, 10, 5].forEach((r, i) => {
+                ctx.strokeStyle = i === 2 ? '#DDA15E' : '#5A3A1A';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(x, groundY - 45, r, 0, Math.PI * 2);
+                ctx.stroke();
+            });
+        }
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+
+            const p = getP();
+            const groundY = H * 0.75;
+            const cx = W * 0.2;
+
+            // Sky
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.7);
+            skyGrad.addColorStop(0, '#0a0a1e');
+            skyGrad.addColorStop(1, '#2a2a4e');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, W, H);
+
+            // Ground
+            const gGrad = ctx.createLinearGradient(0, groundY, 0, H);
+            gGrad.addColorStop(0, '#4a5a2a');
+            gGrad.addColorStop(1, '#2a3318');
+            ctx.fillStyle = gGrad;
+            ctx.fillRect(0, groundY, W, H - groundY);
+
+            // Distance markers
+            ctx.fillStyle = 'rgba(254,250,224,0.3)';
+            ctx.font = '11px sans-serif';
+            for (let d = 50; d <= 500; d += 50) {
+                const mx = cx + d * 1.2;
+                if (mx < W - 30) {
+                    ctx.fillText(d + 'm', mx, groundY + 15);
+                }
+            }
+
+            drawTarget(W * 0.75, groundY);
+
+            // Physics
+            if (state === 'releasing') {
+                const torsionForce = torsionBundles[0].twist * 50;
+                armVel += torsionForce * dt * 0.5;
+                armAngle += armVel * dt;
+                torsionBundles.forEach(b => b.twist = Math.max(0, b.twist - dt * p.torsion * 2));
+
+                if (armAngle >= 0) {
+                    const speed = armVel * 3;
+                    boltSpeed = speed;
+                    const bundleY = groundY - 20 - 15;
+                    bolt = {
+                        x: cx,
+                        y: bundleY,
+                        vx: speed * Math.cos(p.elevation),
+                        vy: -speed * Math.sin(p.elevation),
+                        angle: -p.elevation,
+                        startX: cx
+                    };
+                    state = 'flying';
+                }
+            }
+
+            if (state === 'flying' && bolt) {
+                bolt.vy += G * 0.15 * dt * 60;
+                bolt.x += bolt.vx * dt * 60;
+                bolt.y += bolt.vy * dt * 60;
+                bolt.angle = Math.atan2(bolt.vy, bolt.vx);
+
+                trail.push({ x: bolt.x, y: bolt.y });
+                if (trail.length > 300) trail.shift();
+
+                const dist = (bolt.x - bolt.startX) / 1.2;
+                if (dist > maxRange) maxRange = dist;
+
+                if (bolt.y >= groundY) {
+                    state = 'done';
+                }
+            }
+
+            // Trail
+            if (trail.length > 1) {
+                for (let i = 1; i < trail.length; i++) {
+                    const alpha = i / trail.length;
+                    ctx.strokeStyle = `rgba(200,180,140,${alpha * 0.6})`;
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.moveTo(trail[i - 1].x, trail[i - 1].y);
+                    ctx.lineTo(trail[i].x, trail[i].y);
+                    ctx.stroke();
+                }
+            }
+
+            // Flying bolt
+            if (state === 'flying' && bolt) {
+                ctx.save();
+                ctx.translate(bolt.x, bolt.y);
+                ctx.rotate(bolt.angle);
+                ctx.strokeStyle = '#ccc';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(-15, 0);
+                ctx.lineTo(15, 0);
+                ctx.stroke();
+                // Tip
+                ctx.fillStyle = '#aaa';
+                ctx.beginPath();
+                ctx.moveTo(20, 0);
+                ctx.lineTo(15, -3);
+                ctx.lineTo(15, 3);
+                ctx.fill();
+                // Fletching
+                ctx.strokeStyle = '#8A9A5B';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(-15, 0);
+                ctx.lineTo(-20, -5);
+                ctx.moveTo(-15, 0);
+                ctx.lineTo(-20, 5);
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            const bData = drawBallista(cx, groundY, p);
+
+            // Stats
+            const statsDiv = document.getElementById('stats');
+            let html = '';
+            if (maxRange > 0) {
+                html += `<div style="color:#8A9A5B;margin-top:6px">Range: ${maxRange.toFixed(0)} m</div>`;
+                html += `<div style="color:#8A9A5B">Speed: ${(boltSpeed * 5).toFixed(0)} m/s</div>`;
+            }
+            statsDiv.innerHTML = html;
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 16px sans-serif';
+            ctx.fillText('Ballista Torsion Engine', cx - 50, 40);
+
+            requestAnimationFrame(animate);
+        }
+
+        requestAnimationFrame(animate);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

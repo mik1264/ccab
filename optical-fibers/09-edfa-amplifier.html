@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EDFA Optical Amplifier - Optical Fibers</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: Georgia, serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,60,0.85); backdrop-filter: blur(10px);
+            padding: 16px 24px; border-radius: 14px; color: #FEFAE0;
+            display: flex; gap: 24px; align-items: center; z-index: 100; flex-wrap: wrap; justify-content: center;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        .controls label { font-size: 0.85rem; display: flex; flex-direction: column; gap: 4px; align-items: center; }
+        .controls input[type=range] { width: 110px; accent-color: #8A9A5B; }
+        .info {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 14px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 270px;
+            border: 1px solid rgba(138,154,91,0.3); line-height: 1.5;
+        }
+        .info h3 { color: #8A9A5B; margin-bottom: 6px; }
+        .val { color: #DDA15E; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h3>EDFA - Erbium-Doped Fiber Amplifier</h3>
+        <p>A <span class="val">980 nm pump laser</span> excites erbium ions in the doped fiber. Incoming signal photons (~1550 nm) stimulate emission of <span class="val">identical photons</span>, amplifying the signal.</p>
+        <p style="margin-top:6px;">Gain: <span class="val" id="gainDisp">20.0</span> dB</p>
+        <p>Pump power: <span class="val" id="pumpDisp">100</span> mW</p>
+        <p>Signal in: <span class="val" id="sigInDisp">-30</span> dBm</p>
+        <p>Signal out: <span class="val" id="sigOutDisp">-10</span> dBm</p>
+    </div>
+    <div class="controls">
+        <label>Pump Power (mW)
+            <input type="range" id="pump" min="10" max="500" step="5" value="100">
+            <span id="pumpVal">100</span>
+        </label>
+        <label>Fiber Length (m)
+            <input type="range" id="edfLen" min="2" max="30" step="1" value="12">
+            <span id="edfLenVal">12</span>
+        </label>
+        <label>Signal Power (dBm)
+            <input type="range" id="sigPower" min="-40" max="-10" step="1" value="-30">
+            <span id="sigPowerVal">-30</span>
+        </label>
+        <label>Speed
+            <input type="range" id="speed" min="0.5" max="4" step="0.25" value="1.5">
+            <span id="speedVal">1.5</span>x
+        </label>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    let pumpPower = 100, edfLength = 12, sigPower = -30, speed = 1.5;
+    let time = 0;
+
+    const pumpSlider = document.getElementById('pump');
+    const edfLenSlider = document.getElementById('edfLen');
+    const sigPowerSlider = document.getElementById('sigPower');
+    const speedSlider = document.getElementById('speed');
+
+    pumpSlider.addEventListener('input', () => { pumpPower = parseInt(pumpSlider.value); document.getElementById('pumpVal').textContent = pumpPower; });
+    edfLenSlider.addEventListener('input', () => { edfLength = parseInt(edfLenSlider.value); document.getElementById('edfLenVal').textContent = edfLength; });
+    sigPowerSlider.addEventListener('input', () => { sigPower = parseInt(sigPowerSlider.value); document.getElementById('sigPowerVal').textContent = sigPower; });
+    speedSlider.addEventListener('input', () => { speed = parseFloat(speedSlider.value); document.getElementById('speedVal').textContent = speed.toFixed(1); });
+
+    function getGain() {
+        // Simplified EDFA gain model
+        const pumpSat = 50; // mW saturation
+        const maxGain = 35; // dB
+        const optimalLength = 15; // m
+        const lengthFactor = 1 - Math.exp(-edfLength / optimalLength);
+        const pumpFactor = pumpPower / (pumpPower + pumpSat);
+        return maxGain * lengthFactor * pumpFactor;
+    }
+
+    // Erbium ions
+    const ions = [];
+    for (let i = 0; i < 40; i++) {
+        ions.push({
+            x: Math.random(),
+            y: (Math.random() - 0.5) * 0.8,
+            excited: false,
+            exciteTime: 0,
+            size: 2 + Math.random() * 2
+        });
+    }
+
+    // Photon particles
+    const photons = [];
+
+    function spawnPhoton(type, x, y, vx) {
+        photons.push({
+            x, y, vx,
+            type, // 'signal', 'pump', 'amplified', 'ase'
+            life: 1,
+            size: type === 'pump' ? 2.5 : 3
+        });
+    }
+
+    function draw() {
+        time += 0.016 * speed;
+        ctx.clearRect(0, 0, W, H);
+
+        const gain = getGain();
+        const sigOut = sigPower + gain;
+
+        document.getElementById('gainDisp').textContent = gain.toFixed(1);
+        document.getElementById('pumpDisp').textContent = pumpPower;
+        document.getElementById('sigInDisp').textContent = sigPower;
+        document.getElementById('sigOutDisp').textContent = sigOut.toFixed(1);
+
+        // Layout
+        const diagramY = H * 0.35;
+        const fiberH = H * 0.08;
+        const fiberX = W * 0.15;
+        const fiberEnd = W * 0.85;
+        const fiberLen = fiberEnd - fiberX;
+        const edfStart = W * 0.32;
+        const edfEnd = W * 0.68;
+        const edfW = edfEnd - edfStart;
+
+        // Title
+        ctx.font = '16px Georgia';
+        ctx.fillStyle = '#FEFAE0';
+        ctx.textAlign = 'center';
+        ctx.fillText('Erbium-Doped Fiber Amplifier (EDFA)', W / 2, 30);
+
+        // Input fiber
+        ctx.fillStyle = 'rgba(50, 70, 130, 0.3)';
+        ctx.fillRect(fiberX, diagramY - fiberH * 0.5, edfStart - fiberX, fiberH);
+        ctx.strokeStyle = 'rgba(96,108,56,0.4)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(fiberX, diagramY - fiberH * 0.5, edfStart - fiberX, fiberH);
+
+        // EDF (erbium-doped fiber) - glowing section
+        const edfGrad = ctx.createLinearGradient(edfStart, 0, edfEnd, 0);
+        edfGrad.addColorStop(0, 'rgba(80, 40, 120, 0.4)');
+        edfGrad.addColorStop(0.5, `rgba(120, 60, 180, ${0.3 + pumpPower / 1500})`);
+        edfGrad.addColorStop(1, 'rgba(80, 40, 120, 0.4)');
+        ctx.fillStyle = edfGrad;
+        ctx.fillRect(edfStart, diagramY - fiberH * 0.7, edfW, fiberH * 1.4);
+        ctx.strokeStyle = 'rgba(180, 100, 220, 0.5)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(edfStart, diagramY - fiberH * 0.7, edfW, fiberH * 1.4);
+
+        // EDF label
+        ctx.font = '12px Georgia';
+        ctx.fillStyle = 'rgba(200, 160, 255, 0.7)';
+        ctx.textAlign = 'center';
+        ctx.fillText(`Erbium-Doped Fiber (${edfLength} m)`, (edfStart + edfEnd) / 2, diagramY - fiberH * 0.7 - 8);
+
+        // Output fiber
+        ctx.fillStyle = 'rgba(50, 70, 130, 0.3)';
+        ctx.fillRect(edfEnd, diagramY - fiberH * 0.5, fiberEnd - edfEnd, fiberH);
+        ctx.strokeStyle = 'rgba(96,108,56,0.4)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(edfEnd, diagramY - fiberH * 0.5, fiberEnd - edfEnd, fiberH);
+
+        // Pump laser source (top)
+        const pumpX = (edfStart + edfEnd) / 2;
+        const pumpY = diagramY - fiberH * 2.5;
+        const pumpW = 80, pumpH = 35;
+
+        ctx.fillStyle = 'rgba(40, 100, 60, 0.5)';
+        ctx.strokeStyle = 'rgba(138,154,91,0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.roundRect(pumpX - pumpW / 2, pumpY - pumpH / 2, pumpW, pumpH, 6);
+        ctx.fill();
+        ctx.stroke();
+        ctx.font = '10px Georgia';
+        ctx.fillStyle = '#8A9A5B';
+        ctx.textAlign = 'center';
+        ctx.fillText('Pump Laser', pumpX, pumpY - 3);
+        ctx.fillText(`${pumpPower} mW @ 980 nm`, pumpX, pumpY + 10);
+
+        // Pump arrow
+        ctx.beginPath();
+        ctx.moveTo(pumpX, pumpY + pumpH / 2);
+        ctx.lineTo(pumpX, diagramY - fiberH * 0.7);
+        ctx.strokeStyle = '#2ecc71';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // WDM coupler
+        ctx.beginPath();
+        ctx.arc(pumpX, diagramY - fiberH * 0.7, 6, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(46, 204, 113, 0.5)';
+        ctx.fill();
+        ctx.strokeStyle = '#2ecc71';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.font = '9px Georgia';
+        ctx.fillText('WDM coupler', pumpX, diagramY - fiberH * 0.7 - 12);
+
+        // Draw erbium ions
+        const excitedFrac = pumpPower / (pumpPower + 50);
+        ions.forEach((ion, i) => {
+            const ix = edfStart + ion.x * edfW;
+            const iy = diagramY + ion.y * fiberH;
+
+            // Randomly excite based on pump
+            if (Math.random() < 0.01 * speed * excitedFrac && !ion.excited) {
+                ion.excited = true;
+                ion.exciteTime = time;
+            }
+            // De-excite after a while
+            if (ion.excited && time - ion.exciteTime > 0.5 + Math.random()) {
+                ion.excited = false;
+                // Stimulated emission - spawn amplified photon
+                if (Math.random() < 0.4) {
+                    spawnPhoton('amplified', ix, iy, 2);
+                }
+            }
+
+            ctx.beginPath();
+            ctx.arc(ix, iy, ion.size, 0, Math.PI * 2);
+            if (ion.excited) {
+                ctx.fillStyle = `rgba(255, 200, 50, ${0.6 + 0.4 * Math.sin(time * 8 + i)})`;
+                // Glow
+                const glow = ctx.createRadialGradient(ix, iy, 0, ix, iy, ion.size * 3);
+                glow.addColorStop(0, 'rgba(255, 200, 50, 0.3)');
+                glow.addColorStop(1, 'transparent');
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(ix, iy, ion.size * 3, 0, Math.PI * 2);
+                ctx.fillStyle = glow;
+            } else {
+                ctx.fillStyle = 'rgba(180, 100, 220, 0.4)';
+            }
+            ctx.fill();
+        });
+
+        // Spawn signal photons
+        if (Math.random() < 0.05 * speed * Math.pow(10, (sigPower + 30) / 20)) {
+            const sy = diagramY + (Math.random() - 0.5) * fiberH * 0.6;
+            spawnPhoton('signal', fiberX, sy, 3);
+        }
+
+        // Spawn pump photons
+        if (Math.random() < 0.03 * speed * pumpPower / 100) {
+            spawnPhoton('pump', pumpX, diagramY - fiberH * 0.7, (Math.random() - 0.5) * 2);
+        }
+
+        // Update and draw photons
+        for (let i = photons.length - 1; i >= 0; i--) {
+            const p = photons[i];
+            p.x += p.vx * speed;
+            p.life -= 0.003 * speed;
+
+            if (p.life <= 0 || p.x > fiberEnd + 20 || p.x < fiberX - 20) {
+                photons.splice(i, 1);
+                continue;
+            }
+
+            let color;
+            switch (p.type) {
+                case 'signal': color = '#e74c3c'; break;
+                case 'pump': color = '#2ecc71'; break;
+                case 'amplified': color = '#f39c12'; break;
+                case 'ase': color = '#9b59b6'; break;
+            }
+
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.globalAlpha = p.life;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            // Trail
+            ctx.beginPath();
+            ctx.moveTo(p.x, p.y);
+            ctx.lineTo(p.x - p.vx * 5, p.y);
+            ctx.strokeStyle = color + '40';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+
+        // Labels
+        ctx.font = '12px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#e74c3c';
+        ctx.fillText(`Signal In: ${sigPower} dBm`, fiberX + 40, diagramY + fiberH + 25);
+        ctx.fillStyle = '#f39c12';
+        ctx.fillText(`Signal Out: ${sigOut.toFixed(1)} dBm`, fiberEnd - 50, diagramY + fiberH + 25);
+
+        // Energy level diagram
+        const elvX = W * 0.08;
+        const elvY = H * 0.7;
+        const elvW = W * 0.25;
+        const elvH = H * 0.2;
+
+        ctx.font = '13px Georgia';
+        ctx.fillStyle = '#8A9A5B';
+        ctx.textAlign = 'left';
+        ctx.fillText('Er³⁺ Energy Levels', elvX, elvY - 10);
+
+        // Ground state
+        ctx.strokeStyle = 'rgba(254,250,224,0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(elvX, elvY + elvH);
+        ctx.lineTo(elvX + elvW * 0.6, elvY + elvH);
+        ctx.stroke();
+        ctx.font = '10px Georgia';
+        ctx.fillStyle = 'rgba(254,250,224,0.5)';
+        ctx.fillText('⁴I₁₅/₂ (ground)', elvX + elvW * 0.65, elvY + elvH + 4);
+
+        // Metastable state
+        ctx.beginPath();
+        ctx.moveTo(elvX, elvY + elvH * 0.4);
+        ctx.lineTo(elvX + elvW * 0.6, elvY + elvH * 0.4);
+        ctx.stroke();
+        ctx.fillText('⁴I₁₃/₂ (metastable)', elvX + elvW * 0.65, elvY + elvH * 0.4 + 4);
+
+        // Pump level
+        ctx.beginPath();
+        ctx.moveTo(elvX, elvY);
+        ctx.lineTo(elvX + elvW * 0.6, elvY);
+        ctx.stroke();
+        ctx.fillText('⁴I₁₁/₂ (pump)', elvX + elvW * 0.65, elvY + 4);
+
+        // Pump absorption arrow (green, up)
+        const arrowX = elvX + elvW * 0.15;
+        ctx.beginPath();
+        ctx.moveTo(arrowX, elvY + elvH);
+        ctx.lineTo(arrowX, elvY + 5);
+        ctx.strokeStyle = '#2ecc71';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(arrowX - 5, elvY + 12);
+        ctx.lineTo(arrowX, elvY + 2);
+        ctx.lineTo(arrowX + 5, elvY + 12);
+        ctx.fillStyle = '#2ecc71';
+        ctx.fill();
+        ctx.font = '9px Georgia';
+        ctx.fillStyle = '#2ecc71';
+        ctx.textAlign = 'center';
+        ctx.fillText('980 nm', arrowX, elvY + elvH * 0.5 - 5);
+        ctx.fillText('pump', arrowX, elvY + elvH * 0.5 + 7);
+
+        // Fast decay arrow (wavy, down)
+        const decayX = elvX + elvW * 0.35;
+        ctx.beginPath();
+        ctx.setLineDash([3, 3]);
+        ctx.moveTo(decayX, elvY + 5);
+        ctx.lineTo(decayX, elvY + elvH * 0.4 - 5);
+        ctx.strokeStyle = 'rgba(254,250,224,0.4)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = '8px Georgia';
+        ctx.fillStyle = 'rgba(254,250,224,0.4)';
+        ctx.textAlign = 'center';
+        ctx.fillText('fast decay', decayX, elvY + elvH * 0.2);
+
+        // Stimulated emission arrow (red/orange, down)
+        const emitX = elvX + elvW * 0.5;
+        ctx.beginPath();
+        ctx.moveTo(emitX, elvY + elvH * 0.4 + 5);
+        ctx.lineTo(emitX, elvY + elvH - 5);
+        ctx.strokeStyle = '#e74c3c';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(emitX - 5, elvY + elvH - 12);
+        ctx.lineTo(emitX, elvY + elvH - 2);
+        ctx.lineTo(emitX + 5, elvY + elvH - 12);
+        ctx.fillStyle = '#e74c3c';
+        ctx.fill();
+        ctx.font = '9px Georgia';
+        ctx.fillStyle = '#e74c3c';
+        ctx.fillText('1550 nm', emitX, elvY + elvH * 0.7 - 5);
+        ctx.fillText('stimulated', emitX, elvY + elvH * 0.7 + 7);
+        ctx.fillText('emission', emitX, elvY + elvH * 0.7 + 18);
+
+        // Gain spectrum
+        const gsX = W * 0.55;
+        const gsY = H * 0.7;
+        const gsW = W * 0.38;
+        const gsH = H * 0.2;
+
+        ctx.font = '13px Georgia';
+        ctx.fillStyle = '#8A9A5B';
+        ctx.textAlign = 'left';
+        ctx.fillText('EDFA Gain Spectrum', gsX, gsY - 10);
+
+        // Axes
+        ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(gsX, gsY + gsH);
+        ctx.lineTo(gsX + gsW, gsY + gsH);
+        ctx.moveTo(gsX, gsY);
+        ctx.lineTo(gsX, gsY + gsH);
+        ctx.stroke();
+
+        ctx.font = '10px Georgia';
+        ctx.fillStyle = 'rgba(254,250,224,0.4)';
+        ctx.textAlign = 'center';
+        ctx.fillText('Wavelength (nm)', gsX + gsW / 2, gsY + gsH + 18);
+
+        // Gain curve (simplified EDFA shape: peak around 1530-1560 nm)
+        ctx.beginPath();
+        const gsWlMin = 1500, gsWlMax = 1600;
+        for (let px = 0; px < gsW; px++) {
+            const wl = gsWlMin + (px / gsW) * (gsWlMax - gsWlMin);
+            const center = 1535;
+            const dw = wl - center;
+            let g = gain * Math.exp(-dw * dw / (2 * 400)) + gain * 0.5 * Math.exp(-(wl - 1555) * (wl - 1555) / (2 * 200));
+            g = Math.max(0, Math.min(gain * 1.1, g));
+            const y = gsY + gsH - (g / 40) * gsH;
+            if (px === 0) ctx.moveTo(gsX + px, y);
+            else ctx.lineTo(gsX + px, y);
+        }
+        ctx.strokeStyle = '#DDA15E';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Gain value on Y axis
+        ctx.textAlign = 'right';
+        ctx.fillStyle = 'rgba(254,250,224,0.3)';
+        for (let g = 0; g <= 40; g += 10) {
+            const y = gsY + gsH - (g / 40) * gsH;
+            ctx.fillText(g + ' dB', gsX - 5, y + 3);
+            ctx.beginPath();
+            ctx.moveTo(gsX, y);
+            ctx.lineTo(gsX + gsW, y);
+            ctx.strokeStyle = 'rgba(254,250,224,0.1)';
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+        }
+
+        // X ticks
+        for (let wl = 1510; wl <= 1590; wl += 20) {
+            const x = gsX + ((wl - gsWlMin) / (gsWlMax - gsWlMin)) * gsW;
+            ctx.textAlign = 'center';
+            ctx.fillText(wl.toString(), x, gsY + gsH + 12);
+        }
+
+        // Legend
+        ctx.font = '10px Georgia';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#e74c3c'; ctx.fillText('Signal photons (1550 nm)', W * 0.15, diagramY + fiberH + 45);
+        ctx.fillStyle = '#2ecc71'; ctx.fillText('Pump photons (980 nm)', W * 0.15, diagramY + fiberH + 60);
+        ctx.fillStyle = '#f39c12'; ctx.fillText('Amplified photons', W * 0.55, diagramY + fiberH + 45);
+        ctx.beginPath();
+        ctx.arc(W * 0.53, diagramY + fiberH + 56, 3, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,200,50,0.7)';
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,200,50,0.7)'; ctx.fillText('Excited Er³⁺ ions', W * 0.55, diagramY + fiberH + 60);
+
+        requestAnimationFrame(draw);
+    }
+
+    window.reset = function() {
+        pumpPower = 100; edfLength = 12; sigPower = -30; speed = 1.5; time = 0;
+        photons.length = 0;
+        pumpSlider.value = 100; edfLenSlider.value = 12; sigPowerSlider.value = -30; speedSlider.value = 1.5;
+        document.getElementById('pumpVal').textContent = '100';
+        document.getElementById('edfLenVal').textContent = '12';
+        document.getElementById('sigPowerVal').textContent = '-30';
+        document.getElementById('speedVal').textContent = '1.5';
+    };
+
+    draw();
+    </script>
+</body>
+</html>

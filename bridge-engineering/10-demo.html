@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bridge Design Challenge</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; cursor: crosshair; }
+        .panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(254,250,224,0.92);
+            backdrop-filter: blur(10px); border-radius: 12px; padding: 16px; z-index: 100;
+            color: #283618; min-width: 230px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        .panel h2 { font-size: 1rem; color: #606C38; margin-bottom: 8px; }
+        .panel p { font-size: 0.75rem; line-height: 1.3; margin-bottom: 5px; }
+        .stat { display: flex; justify-content: space-between; font-size: 0.78rem; padding: 3px 0; border-bottom: 1px solid rgba(96,108,56,0.2); }
+        .stat-label { color: #606C38; }
+        .stat-val { font-weight: bold; }
+        .btn {
+            background: #606C38; color: #FEFAE0; border: none; padding: 6px 12px;
+            border-radius: 6px; cursor: pointer; font-size: 0.78rem; margin: 3px 2px;
+            width: 100%;
+        }
+        .btn:hover { background: #8A9A5B; }
+        .btn.danger { background: #8b3a3a; }
+        .btn.danger:hover { background: #d94a4a; }
+        .score { font-size: 1.1rem; text-align: center; padding: 8px; margin-top: 8px;
+            border-radius: 8px; font-weight: bold; }
+        .info { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+            background: rgba(254,250,224,0.88); backdrop-filter: blur(10px); border-radius: 10px;
+            padding: 10px 18px; color: #283618; font-size: 0.8rem; z-index: 100; text-align: center;
+            max-width: 700px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="panel">
+        <h2>Bridge Design Challenge</h2>
+        <p><strong>Goal:</strong> Build a truss bridge that supports the load using minimum material.</p>
+        <p>Click to place nodes. Click two nodes to connect them with a member.</p>
+        <div class="stat"><span class="stat-label">Members:</span><span class="stat-val" id="memCount">0</span></div>
+        <div class="stat"><span class="stat-label">Nodes:</span><span class="stat-val" id="nodeCount">0</span></div>
+        <div class="stat"><span class="stat-label">Total Weight:</span><span class="stat-val" id="weight">0 kg</span></div>
+        <div class="stat"><span class="stat-label">Max Stress:</span><span class="stat-val" id="maxStressDisp">0 MPa</span></div>
+        <div class="stat"><span class="stat-label">Max Deflection:</span><span class="stat-val" id="maxDeflDisp">0 mm</span></div>
+        <button class="btn" id="testBtn">Test Bridge</button>
+        <button class="btn" id="clearBtn" class="danger">Clear All</button>
+        <button class="btn" id="templateBtn">Load Template</button>
+        <div class="score" id="scoreBox" style="background:rgba(138,154,91,0.15); color:#8A9A5B;">
+            Place nodes to begin
+        </div>
+    </div>
+    <div class="info">
+        <strong>Click</strong> to place nodes &mdash; <strong>Click two nodes</strong> to connect &mdash;
+        <strong>Test</strong> to apply load &mdash; Goal: lightest bridge that doesn't fail!
+    </div>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    resize();
+    window.addEventListener('resize', resize);
+
+    let nodes = [];
+    let members = [];
+    let selectedNode = -1;
+    let testing = false;
+    let testTime = 0;
+    let forces = [];
+    let deflections = [];
+    let failed = false;
+    let hoverNode = -1;
+
+    // Fixed support positions
+    const deckY = () => H * 0.6;
+    const leftSupport = () => ({ x: W * 0.15, y: deckY() });
+    const rightSupport = () => ({ x: W * 0.72, y: deckY() });
+
+    // Initialize with support nodes
+    function initSupports() {
+        const ls = leftSupport();
+        const rs = rightSupport();
+        nodes = [
+            { x: ls.x, y: ls.y, fixed: true, support: 'pin' },
+            { x: rs.x, y: rs.y, fixed: true, support: 'roller' }
+        ];
+    }
+    initSupports();
+
+    function findNode(mx, my) {
+        for (let i = 0; i < nodes.length; i++) {
+            const d = Math.sqrt((nodes[i].x - mx) ** 2 + (nodes[i].y - my) ** 2);
+            if (d < 18) return i;
+        }
+        return -1;
+    }
+
+    function memberExists(a, b) {
+        return members.some(m => (m[0] === a && m[1] === b) || (m[0] === b && m[1] === a));
+    }
+
+    canvas.addEventListener('mousemove', e => {
+        hoverNode = findNode(e.clientX, e.clientY);
+    });
+
+    canvas.addEventListener('click', e => {
+        if (testing) return;
+        const mx = e.clientX, my = e.clientY;
+        const found = findNode(mx, my);
+
+        if (found >= 0) {
+            if (selectedNode === -1) {
+                selectedNode = found;
+            } else if (found !== selectedNode) {
+                if (!memberExists(selectedNode, found)) {
+                    members.push([selectedNode, found]);
+                }
+                selectedNode = -1;
+            } else {
+                selectedNode = -1;
+            }
+        } else {
+            // Place new node (not too close to edge)
+            if (my < deckY() + 100 && my > H * 0.1) {
+                nodes.push({ x: mx, y: my, fixed: false });
+                if (selectedNode >= 0) {
+                    const newIdx = nodes.length - 1;
+                    if (!memberExists(selectedNode, newIdx)) {
+                        members.push([selectedNode, newIdx]);
+                    }
+                    selectedNode = -1;
+                }
+            }
+        }
+        updateStats();
+    });
+
+    canvas.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        if (testing) return;
+        const found = findNode(e.clientX, e.clientY);
+        if (found >= 0 && !nodes[found].fixed) {
+            // Remove node and connected members
+            members = members.filter(m => m[0] !== found && m[1] !== found);
+            // Re-index
+            members = members.map(m => [
+                m[0] > found ? m[0] - 1 : m[0],
+                m[1] > found ? m[1] - 1 : m[1]
+            ]);
+            nodes.splice(found, 1);
+            selectedNode = -1;
+            updateStats();
+        }
+    });
+
+    document.getElementById('testBtn').addEventListener('click', () => {
+        testing = !testing;
+        testTime = 0;
+        if (testing) {
+            simulateBridge();
+        } else {
+            forces = [];
+            deflections = [];
+            failed = false;
+        }
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+        testing = false; forces = []; deflections = []; failed = false;
+        selectedNode = -1;
+        members = [];
+        initSupports();
+        updateStats();
+    });
+
+    document.getElementById('templateBtn').addEventListener('click', () => {
+        testing = false; forces = []; deflections = []; failed = false;
+        selectedNode = -1;
+        const ls = leftSupport(), rs = rightSupport();
+        const span = rs.x - ls.x;
+        const h = span * 0.22;
+        const panels = 5;
+        const dx = span / panels;
+
+        nodes = [
+            { x: ls.x, y: ls.y, fixed: true, support: 'pin' },
+            { x: rs.x, y: rs.y, fixed: true, support: 'roller' }
+        ];
+        // Bottom chord
+        for (let i = 1; i < panels; i++) {
+            nodes.push({ x: ls.x + i * dx, y: ls.y, fixed: false });
+        }
+        // Top chord
+        for (let i = 0; i <= panels; i++) {
+            nodes.push({ x: ls.x + i * dx, y: ls.y - h, fixed: false });
+        }
+
+        members = [];
+        const botStart = 0;
+        const topStart = panels + 1;
+
+        // Bottom chord
+        const botNodes = [0, ...Array.from({ length: panels - 1 }, (_, i) => i + 2), 1];
+        for (let i = 0; i < botNodes.length - 1; i++) {
+            members.push([botNodes[i], botNodes[i + 1]]);
+        }
+        // Top chord
+        for (let i = 0; i < panels; i++) {
+            members.push([topStart + i, topStart + i + 1]);
+        }
+        // Verticals
+        for (let i = 0; i <= panels; i++) {
+            const botIdx = i === 0 ? 0 : (i === panels ? 1 : i + 1);
+            members.push([botIdx, topStart + i]);
+        }
+        // Diagonals
+        for (let i = 0; i < panels; i++) {
+            const botIdx = i === 0 ? 0 : i + 1;
+            members.push([botIdx, topStart + i + 1]);
+        }
+
+        updateStats();
+    });
+
+    function updateStats() {
+        document.getElementById('memCount').textContent = members.length;
+        document.getElementById('nodeCount').textContent = nodes.length;
+        let totalLen = 0;
+        members.forEach(m => {
+            const dx = nodes[m[1]].x - nodes[m[0]].x;
+            const dy = nodes[m[1]].y - nodes[m[0]].y;
+            totalLen += Math.sqrt(dx * dx + dy * dy);
+        });
+        document.getElementById('weight').textContent = (totalLen * 0.05).toFixed(1) + ' kg';
+    }
+
+    function simulateBridge() {
+        forces = new Array(members.length).fill(0);
+        deflections = new Array(nodes.length).fill(0);
+        failed = false;
+
+        const loadNode = -1;
+        // Apply load at middle bottom chord
+        const midX = (leftSupport().x + rightSupport().x) / 2;
+        let closestBot = -1, minDist = Infinity;
+        nodes.forEach((n, i) => {
+            if (Math.abs(n.y - deckY()) < 5) {
+                const d = Math.abs(n.x - midX);
+                if (d < minDist) { minDist = d; closestBot = i; }
+            }
+        });
+
+        // Simplified force analysis
+        const loadMag = 50000; // N
+        const nodeConnections = nodes.map(() => []);
+        members.forEach((m, mi) => {
+            nodeConnections[m[0]].push(mi);
+            nodeConnections[m[1]].push(mi);
+        });
+
+        // Estimate forces based on geometry
+        const maxForce = loadMag;
+        members.forEach((m, mi) => {
+            const [a, b] = m;
+            const dx = nodes[b].x - nodes[a].x;
+            const dy = nodes[b].y - nodes[a].y;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const angle = Math.atan2(dy, dx);
+
+            // Simple force estimation
+            const midMemberX = (nodes[a].x + nodes[b].x) / 2;
+            const nearCenter = 1 - Math.abs(midMemberX - midX) / ((rightSupport().x - leftSupport().x) / 2);
+            const influence = Math.max(0, nearCenter);
+
+            if (Math.abs(dy) < 5) {
+                // Horizontal - compression in top, tension in bottom
+                const isTop = nodes[a].y < deckY() - 20;
+                forces[mi] = isTop ? -loadMag * influence * 0.6 : loadMag * influence * 0.5;
+            } else if (Math.abs(dx) < 5) {
+                // Vertical
+                forces[mi] = loadMag * influence * 0.3;
+            } else {
+                // Diagonal
+                forces[mi] = -loadMag * influence * 0.4 * Math.cos(angle);
+            }
+        });
+
+        // Estimate deflections
+        const maxMemberForce = Math.max(...forces.map(Math.abs), 1);
+        nodes.forEach((n, i) => {
+            if (!n.fixed) {
+                const dist = Math.abs(n.x - midX) / ((rightSupport().x - leftSupport().x) / 2);
+                deflections[i] = (1 - dist * dist) * 5 * (closestBot >= 0 ? 1 : 0.5);
+            }
+        });
+
+        // Check failure
+        const failureForce = loadMag * 0.9;
+        failed = members.length < 3 || (closestBot < 0);
+
+        const maxStress = maxMemberForce / 100;
+        document.getElementById('maxStressDisp').textContent = (maxStress / 1000).toFixed(1) + ' MPa';
+        document.getElementById('maxDeflDisp').textContent = Math.max(...deflections).toFixed(1) + ' mm';
+
+        // Score
+        let totalLen = 0;
+        members.forEach(m => {
+            const dx = nodes[m[1]].x - nodes[m[0]].x;
+            const dy = nodes[m[1]].y - nodes[m[0]].y;
+            totalLen += Math.sqrt(dx * dx + dy * dy);
+        });
+        const weight = totalLen * 0.05;
+        const scoreBox = document.getElementById('scoreBox');
+
+        if (failed || members.length < 2) {
+            scoreBox.style.background = 'rgba(217,74,74,0.2)';
+            scoreBox.style.color = '#d94a4a';
+            scoreBox.textContent = 'FAILED - Bridge collapsed!';
+        } else {
+            const score = Math.max(0, Math.round(1000 - weight * 2));
+            scoreBox.style.background = score > 600 ? 'rgba(138,154,91,0.2)' : 'rgba(221,161,94,0.2)';
+            scoreBox.style.color = score > 600 ? '#8A9A5B' : '#DDA15E';
+            scoreBox.textContent = 'Score: ' + score + '/1000 (lighter = better)';
+        }
+    }
+
+    let time = 0;
+
+    function draw() {
+        time += 0.016;
+        if (testing) testTime += 0.016;
+
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, W, H);
+
+        // Grid
+        ctx.strokeStyle = 'rgba(138,154,91,0.05)';
+        ctx.lineWidth = 1;
+        for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+        for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+        // Ground/deck line
+        const dy = deckY();
+        ctx.fillStyle = 'rgba(96,108,56,0.15)';
+        ctx.fillRect(0, dy + 5, W, H - dy - 5);
+        ctx.strokeStyle = 'rgba(96,108,56,0.3)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, dy + 5);
+        ctx.lineTo(W, dy + 5);
+        ctx.stroke();
+
+        // Gap to span
+        const ls = leftSupport(), rs = rightSupport();
+        ctx.fillStyle = 'rgba(30,40,80,0.5)';
+        ctx.fillRect(ls.x, dy + 5, rs.x - ls.x, 50);
+
+        // Draw members
+        const maxForce = Math.max(...forces.map(Math.abs), 1);
+        members.forEach((m, mi) => {
+            const a = nodes[m[0]], b = nodes[m[1]];
+            let ax = a.x, ay = a.y, bx = b.x, by = b.y;
+
+            if (testing && deflections.length > 0) {
+                const anim = Math.min(testTime * 2, 1);
+                ay += (deflections[m[0]] || 0) * anim;
+                by += (deflections[m[1]] || 0) * anim;
+            }
+
+            const f = forces[mi] || 0;
+            const intensity = testing ? Math.abs(f) / maxForce : 0;
+
+            let color;
+            if (!testing) {
+                color = 'rgba(138,154,91,0.7)';
+            } else if (failed) {
+                color = 'rgba(217,74,74,0.5)';
+            } else if (f > 0) {
+                color = `rgba(74,144,217,${0.4 + intensity * 0.6})`;
+            } else if (f < 0) {
+                color = `rgba(217,74,74,${0.4 + intensity * 0.6})`;
+            } else {
+                color = 'rgba(136,136,136,0.5)';
+            }
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2 + intensity * 5;
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx, by);
+            ctx.stroke();
+        });
+
+        // Draw nodes
+        nodes.forEach((node, i) => {
+            let ny = node.y;
+            if (testing && deflections[i]) {
+                ny += deflections[i] * Math.min(testTime * 2, 1);
+            }
+
+            ctx.beginPath();
+            ctx.arc(node.x, ny, 8, 0, Math.PI * 2);
+
+            if (i === selectedNode) {
+                ctx.fillStyle = '#DDA15E';
+                ctx.shadowColor = 'rgba(221,161,94,0.5)';
+                ctx.shadowBlur = 10;
+            } else if (i === hoverNode) {
+                ctx.fillStyle = '#FEFAE0';
+            } else if (node.fixed) {
+                ctx.fillStyle = '#8A9A5B';
+            } else {
+                ctx.fillStyle = 'rgba(254,250,224,0.7)';
+            }
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.strokeStyle = '#606C38';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Support symbols
+            if (node.support === 'pin') {
+                ctx.beginPath();
+                ctx.moveTo(node.x - 12, node.y + 18);
+                ctx.lineTo(node.x + 12, node.y + 18);
+                ctx.lineTo(node.x, node.y + 5);
+                ctx.closePath();
+                ctx.fillStyle = '#8A9A5B';
+                ctx.fill();
+            } else if (node.support === 'roller') {
+                ctx.beginPath();
+                ctx.moveTo(node.x - 12, node.y + 18);
+                ctx.lineTo(node.x + 12, node.y + 18);
+                ctx.lineTo(node.x, node.y + 5);
+                ctx.closePath();
+                ctx.fillStyle = '#8A9A5B';
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(node.x - 6, node.y + 22, 3, 0, Math.PI * 2);
+                ctx.arc(node.x + 6, node.y + 22, 3, 0, Math.PI * 2);
+                ctx.strokeStyle = '#8A9A5B';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+        });
+
+        // Selection line
+        if (selectedNode >= 0) {
+            ctx.strokeStyle = 'rgba(221,161,94,0.3)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            // TODO: draw to mouse, not currently tracked
+            ctx.setLineDash([]);
+        }
+
+        // Test load arrow
+        if (testing) {
+            const midX = (ls.x + rs.x) / 2;
+            const pulse = 0.7 + 0.3 * Math.sin(time * 3);
+            ctx.strokeStyle = `rgba(221,161,94,${pulse})`;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(midX, dy - 100);
+            ctx.lineTo(midX, dy - 15);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(midX - 10, dy - 30);
+            ctx.lineTo(midX, dy - 15);
+            ctx.lineTo(midX + 10, dy - 30);
+            ctx.stroke();
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = 'bold 13px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('50 kN', midX, dy - 108);
+
+            // Legend
+            if (!failed) {
+                ctx.fillStyle = 'rgba(74,144,217,0.8)';
+                ctx.font = '11px "Segoe UI"';
+                ctx.textAlign = 'left';
+                ctx.fillText('Blue = Tension', W * 0.1, H * 0.08);
+                ctx.fillStyle = 'rgba(217,74,74,0.8)';
+                ctx.fillText('Red = Compression', W * 0.1, H * 0.08 + 16);
+            }
+        }
+
+        // Failure animation
+        if (testing && failed) {
+            const shake = Math.sin(testTime * 30) * 3 * Math.max(0, 1 - testTime);
+            ctx.save();
+            ctx.translate(shake, 0);
+            ctx.fillStyle = `rgba(217,74,74,${0.3 + 0.2 * Math.sin(time * 5)})`;
+            ctx.font = 'bold 36px "Segoe UI"';
+            ctx.textAlign = 'center';
+            ctx.fillText('STRUCTURAL FAILURE', W / 2, H * 0.35);
+            ctx.restore();
+        }
+
+        // Title
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = 'bold 18px "Segoe UI"';
+        ctx.textAlign = 'center';
+        ctx.fillText('Bridge Design Challenge', W / 2, 30);
+
+        ctx.fillStyle = 'rgba(254,250,224,0.4)';
+        ctx.font = '11px "Segoe UI"';
+        ctx.fillText('Right-click a node to delete it', W / 2, 50);
+
+        requestAnimationFrame(draw);
+    }
+
+    window.reset = function() {
+        testing = false; testTime = 0; forces = []; deflections = []; failed = false;
+        selectedNode = -1; members = [];
+        initSupports();
+        updateStats();
+        document.getElementById('scoreBox').style.background = 'rgba(138,154,91,0.15)';
+        document.getElementById('scoreBox').style.color = '#8A9A5B';
+        document.getElementById('scoreBox').textContent = 'Place nodes to begin';
+        document.getElementById('maxStressDisp').textContent = '0 MPa';
+        document.getElementById('maxDeflDisp').textContent = '0 mm';
+    };
+
+    draw();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

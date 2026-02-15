@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raku Thermal Shock - Crack Propagation Simulator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a1a; color: #FEFAE0; font-family: Georgia, serif; overflow: hidden; }
+        canvas { display: block; }
+        a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 12px; align-items: center; z-index: 100;
+            background: rgba(30,30,30,0.85); backdrop-filter: blur(10px);
+            padding: 12px 20px; border-radius: 12px; border: 1px solid #8A9A5B33;
+        }
+        .controls label { font-size: 0.8rem; }
+        .controls input[type="range"] { width: 100px; accent-color: #DDA15E; }
+        .controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 8px 14px;
+            border-radius: 6px; cursor: pointer; font-size: 0.8rem;
+        }
+        .controls button:hover { background: #8A9A5B; }
+        .info {
+            position: fixed; top: 10px; right: 10px;
+            background: rgba(30,30,30,0.85); backdrop-filter: blur(10px);
+            padding: 10px 14px; border-radius: 8px; font-size: 0.8rem; color: #8A9A5B; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <div class="info" id="info">
+        Surface: <span id="surfTemp">--</span>°C<br>
+        Core: <span id="coreTemp">--</span>°C<br>
+        Gradient: <span id="gradDisp">--</span>°C<br>
+        Cracks: <span id="crackCount">0</span>
+    </div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Pull Temp</label>
+        <input type="range" id="pullTempSlider" min="600" max="1000" value="900">
+        <label>Cooling Rate</label>
+        <input type="range" id="coolRateSlider" min="1" max="10" value="5">
+        <label>Wall Thickness</label>
+        <input type="range" id="thicknessSlider" min="3" max="15" value="8">
+        <button id="pullBtn">Pull from Kiln</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let W, H;
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Thermal model: concentric rings with temperature
+        const NUM_RINGS = 20;
+        let rings = [];
+        let cracks = [];
+        let pulled = false;
+        let ambientTemp = 25;
+        let time = 0;
+        let animId;
+
+        function initState() {
+            const pullTemp = parseFloat(document.getElementById('pullTempSlider').value);
+            rings = [];
+            for (let i = 0; i < NUM_RINGS; i++) {
+                rings.push({ temp: pullTemp });
+            }
+            cracks = [];
+            pulled = false;
+            time = 0;
+            document.getElementById('pullBtn').textContent = 'Pull from Kiln';
+        }
+        initState();
+
+        document.getElementById('pullBtn').addEventListener('click', () => {
+            if (!pulled) {
+                const pullTemp = parseFloat(document.getElementById('pullTempSlider').value);
+                rings.forEach(r => r.temp = pullTemp);
+                pulled = true;
+                time = 0;
+                document.getElementById('pullBtn').textContent = 'Cooling...';
+            }
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', initState);
+
+        function thermalDiffusivity() {
+            return 0.8; // mm^2/s, typical for ceramic
+        }
+
+        function updateThermal() {
+            if (!pulled) return;
+
+            const coolRate = parseFloat(document.getElementById('coolRateSlider').value);
+            const thickness = parseFloat(document.getElementById('thicknessSlider').value);
+            const dt = 0.05 * coolRate;
+            const diffusivity = thermalDiffusivity();
+            const dr = thickness / NUM_RINGS;
+
+            // Surface cooling (Newton's law of cooling)
+            const surfaceCoolRate = 0.02 * coolRate;
+            rings[0].temp += (ambientTemp - rings[0].temp) * surfaceCoolRate;
+
+            // Internal heat conduction
+            const newTemps = rings.map(r => r.temp);
+            for (let i = 1; i < NUM_RINGS - 1; i++) {
+                const laplacian = (rings[i - 1].temp - 2 * rings[i].temp + rings[i + 1].temp) / (dr * dr);
+                newTemps[i] = rings[i].temp + diffusivity * laplacian * dt;
+            }
+            // Core boundary
+            newTemps[NUM_RINGS - 1] = rings[NUM_RINGS - 1].temp + diffusivity * (rings[NUM_RINGS - 2].temp - rings[NUM_RINGS - 1].temp) / (dr * dr) * dt;
+
+            rings.forEach((r, i) => r.temp = newTemps[i]);
+
+            // Check for crack formation based on thermal gradient
+            const surfaceTemp = rings[0].temp;
+            const coreTemp = rings[NUM_RINGS - 1].temp;
+            const gradient = coreTemp - surfaceTemp;
+
+            // Thermal shock threshold (typical ceramic ~150-200C differential)
+            const crackThreshold = 120 + thickness * 5;
+            if (gradient > crackThreshold && Math.random() < 0.02 * coolRate) {
+                generateCrack();
+            }
+
+            time += 0.016;
+        }
+
+        function generateCrack() {
+            const cx = W / 2, cy = H * 0.45;
+            const angle = Math.random() * Math.PI * 2;
+            const startR = Math.min(W, H) * 0.15;
+            const sx = cx + Math.cos(angle) * startR * (0.5 + Math.random() * 0.5);
+            const sy = cy + Math.sin(angle) * startR * 0.6 * (0.5 + Math.random() * 0.5);
+
+            const crack = {
+                points: [{ x: sx, y: sy }],
+                growing: true,
+                direction: angle + (Math.random() - 0.5) * 1.5,
+                speed: 1 + Math.random() * 2,
+                maxLength: 30 + Math.random() * 100,
+                length: 0,
+                branches: []
+            };
+            cracks.push(crack);
+        }
+
+        function updateCracks() {
+            cracks.forEach(crack => {
+                if (!crack.growing) return;
+
+                const last = crack.points[crack.points.length - 1];
+                crack.direction += (Math.random() - 0.5) * 0.4;
+                const nx = last.x + Math.cos(crack.direction) * crack.speed;
+                const ny = last.y + Math.sin(crack.direction) * crack.speed;
+                crack.points.push({ x: nx, y: ny });
+                crack.length += crack.speed;
+
+                if (crack.length >= crack.maxLength) {
+                    crack.growing = false;
+                }
+
+                // Branch chance
+                if (crack.length > 15 && Math.random() < 0.03) {
+                    const branchDir = crack.direction + (Math.random() > 0.5 ? 1 : -1) * (0.5 + Math.random() * 0.8);
+                    const branch = {
+                        points: [{ x: nx, y: ny }],
+                        growing: true,
+                        direction: branchDir,
+                        speed: crack.speed * 0.7,
+                        maxLength: crack.maxLength * 0.4,
+                        length: 0,
+                        branches: []
+                    };
+                    crack.branches.push(branch);
+                    cracks.push(branch);
+                }
+            });
+        }
+
+        function tempToColor(temp) {
+            if (temp < 200) return `rgb(60,50,45)`;
+            if (temp < 500) {
+                const t = (temp - 200) / 300;
+                return `rgb(${60 + t * 80},${50 + t * 20},${45})`;
+            }
+            if (temp < 800) {
+                const t = (temp - 500) / 300;
+                return `rgb(${140 + t * 80},${70 + t * 30},${45 - t * 20})`;
+            }
+            const t = Math.min(1, (temp - 800) / 300);
+            return `rgb(${220 + t * 35},${100 + t * 80},${25 + t * 50})`;
+        }
+
+        function drawVessel(cx, cy) {
+            const r = Math.min(W, H) * 0.18;
+            const thickness = parseFloat(document.getElementById('thicknessSlider').value);
+            const ringWidth = r / NUM_RINGS;
+
+            // Draw concentric temperature rings
+            for (let i = NUM_RINGS - 1; i >= 0; i--) {
+                const ringR = r - i * ringWidth;
+                ctx.beginPath();
+                ctx.ellipse(cx, cy, ringR, ringR * 0.6, 0, 0, Math.PI * 2);
+                ctx.fillStyle = tempToColor(rings[i].temp);
+                ctx.fill();
+            }
+
+            // Vessel outline
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, r, r * 0.6, 0, 0, Math.PI * 2);
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Draw cracks
+            ctx.strokeStyle = '#111';
+            ctx.lineWidth = 1.5;
+            cracks.forEach(crack => {
+                if (crack.points.length < 2) return;
+                ctx.beginPath();
+                ctx.moveTo(crack.points[0].x, crack.points[0].y);
+                crack.points.forEach(p => ctx.lineTo(p.x, p.y));
+                ctx.stroke();
+
+                // Crack edge highlight
+                ctx.strokeStyle = 'rgba(200,180,150,0.3)';
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                crack.points.forEach((p, i) => {
+                    if (i === 0) ctx.moveTo(p.x + 1, p.y + 1);
+                    else ctx.lineTo(p.x + 1, p.y + 1);
+                });
+                ctx.stroke();
+                ctx.strokeStyle = '#111';
+                ctx.lineWidth = 1.5;
+            });
+        }
+
+        function drawTempProfile(x, y, w, h) {
+            ctx.fillStyle = 'rgba(30,30,30,0.7)';
+            ctx.fillRect(x, y, w, h);
+
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '12px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Temperature Profile (Surface to Core)', x + w / 2, y + 16);
+
+            const maxTemp = parseFloat(document.getElementById('pullTempSlider').value) + 100;
+            const plotX = x + 30;
+            const plotW = w - 50;
+            const plotY = y + 30;
+            const plotH = h - 50;
+
+            // Grid
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 0.5;
+            for (let t = 200; t < maxTemp; t += 200) {
+                const ty = plotY + plotH - (t / maxTemp) * plotH;
+                ctx.beginPath();
+                ctx.moveTo(plotX, ty);
+                ctx.lineTo(plotX + plotW, ty);
+                ctx.stroke();
+                ctx.fillStyle = '#666';
+                ctx.font = '9px Georgia';
+                ctx.textAlign = 'right';
+                ctx.fillText(`${t}°`, plotX - 4, ty + 3);
+            }
+
+            // Temperature curve across rings
+            ctx.beginPath();
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            rings.forEach((r, i) => {
+                const px = plotX + (i / (NUM_RINGS - 1)) * plotW;
+                const py = plotY + plotH - (r.temp / maxTemp) * plotH;
+                if (i === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            });
+            ctx.stroke();
+
+            // Labels
+            ctx.fillStyle = '#888';
+            ctx.font = '9px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Surface', plotX, plotY + plotH + 14);
+            ctx.fillText('Core', plotX + plotW, plotY + plotH + 14);
+
+            // Crack threshold line
+            const threshold = 120 + parseFloat(document.getElementById('thicknessSlider').value) * 5;
+            ctx.strokeStyle = 'rgba(180,50,50,0.5)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            const threshY = plotY + plotH - (threshold / maxTemp) * plotH;
+            ctx.beginPath();
+            ctx.moveTo(plotX, threshY);
+            ctx.lineTo(plotX + plotW, threshY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#a44';
+            ctx.fillText('Crack threshold', plotX + plotW / 2, threshY - 4);
+        }
+
+        function drawSmoke(cx, cy) {
+            if (!pulled || rings[0].temp < 100) return;
+            const intensity = Math.min(1, (rings[0].temp - 100) / 500);
+            ctx.globalAlpha = intensity * 0.15;
+            for (let i = 0; i < 15; i++) {
+                const sx = cx + (Math.random() - 0.5) * 100;
+                const sy = cy - 80 - Math.random() * 120 - time * 20 % 200;
+                const sr = 10 + Math.random() * 30;
+                ctx.beginPath();
+                ctx.arc(sx, sy % H, sr, 0, Math.PI * 2);
+                ctx.fillStyle = '#888';
+                ctx.fill();
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        function animate() {
+            animId = requestAnimationFrame(animate);
+            updateThermal();
+            updateCracks();
+
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, W, H);
+
+            const cx = W / 2;
+            const cy = H * 0.42;
+
+            // Title
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '24px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Raku Thermal Shock', cx, 40);
+            ctx.font = '14px Georgia';
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fillText('Pull red-hot pottery from the kiln and watch thermal stress create cracks', cx, 62);
+
+            drawSmoke(cx, cy);
+            drawVessel(cx, cy);
+
+            // Temperature profile chart
+            drawTempProfile(W * 0.05, H * 0.68, W * 0.9, H * 0.22);
+
+            // Update info
+            const surfTemp = rings.length > 0 ? Math.round(rings[0].temp) : '--';
+            const coreTemp = rings.length > 0 ? Math.round(rings[NUM_RINGS - 1].temp) : '--';
+            const gradient = rings.length > 0 ? Math.round(rings[NUM_RINGS - 1].temp - rings[0].temp) : '--';
+            document.getElementById('surfTemp').textContent = surfTemp;
+            document.getElementById('coreTemp').textContent = coreTemp;
+            document.getElementById('gradDisp').textContent = gradient;
+            document.getElementById('crackCount').textContent = cracks.length;
+        }
+
+        animate();
+
+        window.reset = function() {
+            initState();
+        };
+    </script>
+</body>
+</html>

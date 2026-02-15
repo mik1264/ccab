@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Joint Torque Explorer - Biomechanics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; }
+        a[href="index.html"] { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,60,0.85); backdrop-filter: blur(10px);
+            border-radius: 16px; padding: 16px 24px; display: flex; gap: 20px;
+            align-items: center; color: #FEFAE0; font-size: 0.85rem; z-index: 100;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        #controls input[type="range"] { width: 100px; accent-color: #8A9A5B; }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <label>Gait Phase<input type="range" id="phase" min="0" max="1" step="0.01" value="0.3"><span id="phase-val">30%</span></label>
+        <label>Body Mass (kg)<input type="range" id="mass" min="40" max="120" step="5" value="70"><span id="mass-val">70</span></label>
+        <label>Show Forces<input type="range" id="showForces" min="0" max="1" step="1" value="1"><span id="force-val">ON</span></label>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let gaitPhase = 0.3, bodyMass = 70, showForces = true;
+
+        document.getElementById('phase').oninput = e => { gaitPhase = +e.target.value; document.getElementById('phase-val').textContent = Math.round(gaitPhase * 100) + '%'; };
+        document.getElementById('mass').oninput = e => { bodyMass = +e.target.value; document.getElementById('mass-val').textContent = bodyMass; };
+        document.getElementById('showForces').oninput = e => { showForces = +e.target.value === 1; document.getElementById('force-val').textContent = showForces ? 'ON' : 'OFF'; };
+
+        // Joint torque data (normalized to body weight * height)
+        // Based on typical walking gait data
+        function getJointTorques(phase) {
+            const t = phase;
+            // Hip torque (Nm/kg) - extension in early stance, flexion in late stance
+            const hipTorque = Math.sin(t * Math.PI * 2.5) * 0.8;
+            // Knee torque - flexion moment in early stance, extension in mid
+            const kneeTorque = -Math.sin(t * Math.PI * 1.5 + 0.5) * 0.5 +
+                              Math.sin(t * Math.PI * 3) * 0.3;
+            // Ankle torque - plantarflexion moment building through stance
+            const ankleTorque = t < 0.5 ? Math.pow(t * 2, 1.5) * 1.5 : 0;
+
+            return { hipTorque, kneeTorque, ankleTorque };
+        }
+
+        function getLegGeometry(phase) {
+            // Simplified joint angles through gait
+            const hipAngle = Math.sin(phase * Math.PI * 2) * 0.3;
+            const kneeAngle = Math.abs(Math.sin(phase * Math.PI * 2)) * 0.4 + 0.05;
+            const ankleAngle = Math.sin(phase * Math.PI * 2 - 0.5) * 0.15;
+            return { hipAngle, kneeAngle, ankleAngle };
+        }
+
+        function drawTorqueArc(cx, cy, radius, torque, maxTorque, label) {
+            if (Math.abs(torque) < 0.01) return;
+
+            const magnitude = Math.abs(torque) / maxTorque;
+            const arcLen = magnitude * Math.PI * 0.8;
+            const direction = torque > 0 ? 1 : -1;
+            const startAngle = -Math.PI / 2;
+            const endAngle = startAngle + direction * arcLen;
+
+            // Torque arc
+            ctx.strokeStyle = torque > 0 ? '#8A9A5B' : '#DDA15E';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, startAngle, endAngle, direction < 0);
+            ctx.stroke();
+
+            // Arrow head
+            const ax = cx + Math.cos(endAngle) * radius;
+            const ay = cy + Math.sin(endAngle) * radius;
+            const arrowAngle = endAngle + (direction > 0 ? Math.PI / 2 : -Math.PI / 2);
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(ax + Math.cos(arrowAngle - 0.5) * 8, ay + Math.sin(arrowAngle - 0.5) * 8);
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(ax + Math.cos(arrowAngle + 0.5) * 8, ay + Math.sin(arrowAngle + 0.5) * 8);
+            ctx.stroke();
+
+            // Label
+            ctx.fillStyle = torque > 0 ? '#8A9A5B' : '#DDA15E';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.textAlign = 'center';
+            const labelAngle = (startAngle + endAngle) / 2;
+            ctx.fillText(label, cx + Math.cos(labelAngle) * (radius + 18),
+                        cy + Math.sin(labelAngle) * (radius + 18));
+            ctx.font = '10px sans-serif';
+            ctx.fillText((torque * bodyMass).toFixed(1) + ' Nm', cx + Math.cos(labelAngle) * (radius + 32),
+                        cy + Math.sin(labelAngle) * (radius + 32));
+        }
+
+        function drawForceArrow(x1, y1, x2, y2, color, label) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+
+            // Arrow head
+            const angle = Math.atan2(y2 - y1, x2 - x1);
+            ctx.beginPath();
+            ctx.moveTo(x2, y2);
+            ctx.lineTo(x2 - 10 * Math.cos(angle - 0.4), y2 - 10 * Math.sin(angle - 0.4));
+            ctx.moveTo(x2, y2);
+            ctx.lineTo(x2 - 10 * Math.cos(angle + 0.4), y2 - 10 * Math.sin(angle + 0.4));
+            ctx.stroke();
+
+            ctx.fillStyle = color;
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(label, (x1 + x2) / 2 + 15, (y1 + y2) / 2);
+        }
+
+        function drawTorqueGraph(x, y, w, h) {
+            ctx.fillStyle = 'rgba(20,20,50,0.7)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Joint Torques Through Gait Cycle', x + w / 2, y + 15);
+
+            const gx = x + 45, gy = y + 25, gw = w - 60, gh = h - 50;
+
+            // Axes
+            ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(gx, gy + gh / 2);
+            ctx.lineTo(gx + gw, gy + gh / 2);
+            ctx.moveTo(gx, gy);
+            ctx.lineTo(gx, gy + gh);
+            ctx.stroke();
+
+            ctx.fillStyle = 'rgba(254,250,224,0.4)';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText('Ext', gx - 5, gy + 5);
+            ctx.fillText('Flex', gx - 5, gy + gh);
+            ctx.fillText('0', gx - 5, gy + gh / 2 + 3);
+            ctx.textAlign = 'center';
+            ctx.fillText('0%', gx, gy + gh + 12);
+            ctx.fillText('50%', gx + gw / 2, gy + gh + 12);
+            ctx.fillText('100%', gx + gw, gy + gh + 12);
+
+            const colors = ['#8A9A5B', '#DDA15E', '#BC6C25'];
+            const labels = ['Hip', 'Knee', 'Ankle'];
+
+            for (let j = 0; j < 3; j++) {
+                ctx.strokeStyle = colors[j];
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                for (let i = 0; i <= 100; i++) {
+                    const t = i / 100;
+                    const torques = getJointTorques(t);
+                    const val = j === 0 ? torques.hipTorque :
+                               j === 1 ? torques.kneeTorque : torques.ankleTorque;
+                    const px = gx + t * gw;
+                    const py = gy + gh / 2 - val * gh * 0.3;
+                    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+
+                // Legend
+                ctx.fillStyle = colors[j];
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText(labels[j], gx + gw + 5, gy + 10 + j * 14);
+            }
+
+            // Current phase marker
+            ctx.strokeStyle = 'rgba(254,250,224,0.5)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(gx + gaitPhase * gw, gy);
+            ctx.lineTo(gx + gaitPhase * gw, gy + gh);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function animate() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const { hipAngle, kneeAngle, ankleAngle } = getLegGeometry(gaitPhase);
+            const torques = getJointTorques(gaitPhase);
+            const scale = Math.min(W, H) * 0.003;
+
+            // Free body diagram position
+            const fbdX = W * 0.35;
+            const fbdY = H * 0.2;
+
+            const thighLen = 90 * scale;
+            const shinLen = 85 * scale;
+            const footLen = 30 * scale;
+
+            // Hip position
+            const hipX = fbdX;
+            const hipY = fbdY;
+
+            // Knee position
+            const kneeX = hipX + Math.sin(hipAngle) * thighLen;
+            const kneeY = hipY + Math.cos(hipAngle) * thighLen;
+
+            // Ankle position
+            const totalKneeAngle = hipAngle + kneeAngle;
+            const ankleX = kneeX + Math.sin(totalKneeAngle) * shinLen;
+            const ankleY = kneeY + Math.cos(totalKneeAngle) * shinLen;
+
+            // Foot
+            const footX = ankleX + footLen;
+            const footY = ankleY;
+
+            // Draw torso
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 4 * scale;
+            ctx.beginPath();
+            ctx.moveTo(hipX, hipY);
+            ctx.lineTo(hipX, hipY - thighLen * 0.7);
+            ctx.stroke();
+
+            // Head
+            ctx.fillStyle = '#FEFAE0';
+            ctx.beginPath();
+            ctx.arc(hipX, hipY - thighLen * 0.7 - 15 * scale, 12 * scale, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Thigh
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 4 * scale;
+            ctx.beginPath();
+            ctx.moveTo(hipX, hipY);
+            ctx.lineTo(kneeX, kneeY);
+            ctx.stroke();
+
+            // Shank
+            ctx.beginPath();
+            ctx.moveTo(kneeX, kneeY);
+            ctx.lineTo(ankleX, ankleY);
+            ctx.stroke();
+
+            // Foot
+            ctx.lineWidth = 3 * scale;
+            ctx.beginPath();
+            ctx.moveTo(ankleX, ankleY);
+            ctx.lineTo(footX, footY);
+            ctx.lineTo(footX, footY + 5 * scale);
+            ctx.stroke();
+
+            // Joint dots
+            const joints = [
+                { x: hipX, y: hipY, label: 'Hip', torque: torques.hipTorque },
+                { x: kneeX, y: kneeY, label: 'Knee', torque: torques.kneeTorque },
+                { x: ankleX, y: ankleY, label: 'Ankle', torque: torques.ankleTorque }
+            ];
+
+            joints.forEach((j, i) => {
+                ctx.fillStyle = ['#8A9A5B', '#DDA15E', '#BC6C25'][i];
+                ctx.beginPath();
+                ctx.arc(j.x, j.y, 7 * scale, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = '#FEFAE0';
+                ctx.font = `bold ${11 * scale}px sans-serif`;
+                ctx.textAlign = 'right';
+                ctx.fillText(j.label, j.x - 12 * scale, j.y + 4);
+
+                // Torque arcs
+                drawTorqueArc(j.x, j.y, 25 * scale, j.torque, 1.5, j.label);
+            });
+
+            // Forces
+            if (showForces && gaitPhase < 0.62) {
+                // Ground reaction force
+                const grf = bodyMass * 9.81 * (1 + 0.3 * Math.sin(gaitPhase / 0.62 * Math.PI));
+                const grfLen = grf / 10;
+                drawForceArrow(footX, footY, footX, footY - grfLen,
+                    'rgba(138,154,91,0.8)', `GRF: ${grf.toFixed(0)}N`);
+
+                // Weight
+                drawForceArrow(hipX, hipY - thighLen * 0.3, hipX, hipY - thighLen * 0.3 + bodyMass * 9.81 / 15,
+                    'rgba(221,161,94,0.8)', `W: ${(bodyMass * 9.81).toFixed(0)}N`);
+            }
+
+            // Segment labels
+            ctx.fillStyle = 'rgba(254,250,224,0.4)';
+            ctx.font = `${9 * scale}px sans-serif`;
+            ctx.textAlign = 'left';
+            ctx.fillText('Thigh', (hipX + kneeX) / 2 + 10, (hipY + kneeY) / 2);
+            ctx.fillText('Shank', (kneeX + ankleX) / 2 + 10, (kneeY + ankleY) / 2);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Free Body Diagram - Lower Extremity', fbdX, fbdY - thighLen - 30);
+
+            // Phase indicator
+            const phaseName = gaitPhase < 0.62 ? 'Stance Phase' : 'Swing Phase';
+            ctx.fillStyle = gaitPhase < 0.62 ? '#8A9A5B' : '#DDA15E';
+            ctx.font = 'bold 12px sans-serif';
+            ctx.fillText(`${phaseName} (${Math.round(gaitPhase * 100)}%)`, fbdX, ankleY + 50);
+
+            // Torque data panel
+            const panelX = W * 0.6, panelY = H * 0.1, panelW = Math.min(300, W * 0.35), panelH = 130;
+            ctx.fillStyle = 'rgba(20,20,50,0.7)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(panelX, panelY, panelW, panelH, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 12px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Joint Moments', panelX + 15, panelY + 20);
+
+            const moments = [
+                { name: 'Hip', val: torques.hipTorque * bodyMass, color: '#8A9A5B', type: torques.hipTorque > 0 ? 'Extension' : 'Flexion' },
+                { name: 'Knee', val: torques.kneeTorque * bodyMass, color: '#DDA15E', type: torques.kneeTorque > 0 ? 'Extension' : 'Flexion' },
+                { name: 'Ankle', val: torques.ankleTorque * bodyMass, color: '#BC6C25', type: torques.ankleTorque > 0 ? 'Plantarflexion' : 'Dorsiflexion' }
+            ];
+
+            moments.forEach((m, i) => {
+                const my = panelY + 40 + i * 28;
+                ctx.fillStyle = m.color;
+                ctx.font = 'bold 11px sans-serif';
+                ctx.fillText(`${m.name}:`, panelX + 15, my);
+                ctx.fillStyle = '#FEFAE0';
+                ctx.font = '11px sans-serif';
+                ctx.fillText(`${m.val.toFixed(1)} Nm (${m.type})`, panelX + 65, my);
+
+                // Bar
+                const barW = Math.abs(m.val) / 80 * (panelW - 30);
+                ctx.fillStyle = m.color + '40';
+                ctx.fillRect(panelX + 15, my + 4, panelW - 30, 8);
+                ctx.fillStyle = m.color;
+                ctx.fillRect(panelX + 15, my + 4, Math.min(barW, panelW - 30), 8);
+            });
+
+            // Torque graph
+            drawTorqueGraph(W * 0.6, H * 0.45, Math.min(300, W * 0.35), 200);
+
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            gaitPhase = 0.3; bodyMass = 70; showForces = true;
+            document.getElementById('phase').value = 0.3;
+            document.getElementById('mass').value = 70;
+            document.getElementById('showForces').value = 1;
+            document.getElementById('phase-val').textContent = '30%';
+            document.getElementById('mass-val').textContent = '70';
+            document.getElementById('force-val').textContent = 'ON';
+        };
+
+        requestAnimationFrame(animate);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

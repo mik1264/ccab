@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crevasse Formation - Glacier Dynamics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 15px; border-radius: 12px; z-index: 1000;
+            min-width: 220px; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 10px; font-size: 0.95rem; }
+        .ctrl-row { margin-bottom: 8px; }
+        .ctrl-row label { display: block; font-size: 0.8rem; color: #8A9A5B; margin-bottom: 2px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #8A9A5B; }
+        .ctrl-row .val { float: right; color: #DDA15E; font-size: 0.8rem; }
+        .ctrl-row input[type=checkbox] { accent-color: #8A9A5B; }
+        #info {
+            position: fixed; bottom: 10px; left: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 12px; border-radius: 12px; z-index: 1000;
+            max-width: 380px; font-size: 0.8rem; line-height: 1.4; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #info h4 { color: #DDA15E; margin-bottom: 4px; }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Crevasse Formation</h3>
+        <div class="ctrl-row">
+            <label>Extending Strain Rate <span class="val" id="strainVal">0.01</span> /yr</label>
+            <input type="range" id="strainSlider" min="0.001" max="0.05" step="0.001" value="0.01">
+        </div>
+        <div class="ctrl-row">
+            <label>Ice Thickness (m) <span class="val" id="thickVal">200</span></label>
+            <input type="range" id="thickSlider" min="50" max="500" step="10" value="200">
+        </div>
+        <div class="ctrl-row">
+            <label>Ice Temperature (&deg;C) <span class="val" id="tempVal">-10</span></label>
+            <input type="range" id="tempSlider" min="-30" max="0" step="1" value="-10">
+        </div>
+        <div class="ctrl-row">
+            <label><input type="checkbox" id="waterCheck"> Water-filled crevasses</label>
+        </div>
+        <div class="ctrl-row">
+            <label>Water Level <span class="val" id="waterVal">50</span>%</label>
+            <input type="range" id="waterSlider" min="0" max="100" step="5" value="50" disabled>
+        </div>
+    </div>
+    <div id="info">
+        <h4>Nye Crevasse Depth Model</h4>
+        <p>Surface crevasses open where tensile stress exceeds ice strength (~100-300 kPa). Dry crevasses close at depth as overburden pressure forces them shut. Water-filled crevasses can penetrate much deeper via hydrofracture&mdash;water pressure counteracts ice overburden, potentially reaching the glacier bed.</p>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const strainSlider = document.getElementById('strainSlider');
+        const thickSlider = document.getElementById('thickSlider');
+        const tempSlider = document.getElementById('tempSlider');
+        const waterCheck = document.getElementById('waterCheck');
+        const waterSlider = document.getElementById('waterSlider');
+
+        waterCheck.addEventListener('change', () => {
+            waterSlider.disabled = !waterCheck.checked;
+        });
+
+        const NUM_CREVASSES = 12;
+        let crevasses = [];
+        let time = 0;
+
+        function initCrevasses() {
+            crevasses = [];
+            for (let i = 0; i < NUM_CREVASSES; i++) {
+                crevasses.push({
+                    x: 0.1 + 0.8 * (i / (NUM_CREVASSES - 1)),
+                    wobble: (Math.random() - 0.5) * 0.02,
+                    phase: Math.random() * Math.PI * 2
+                });
+            }
+        }
+        initCrevasses();
+
+        function computeCrevasseDepth(strainRate, thickness, temp, waterFilled, waterLevel) {
+            const rho_ice = 917;
+            const rho_water = 1000;
+            const g = 9.81;
+            const n = 3;
+
+            // Rate factor A (simplified Arrhenius)
+            const T_K = temp + 273.15;
+            const Q = temp > -10 ? 139000 : 60000;
+            const R = 8.314;
+            const A0 = temp > -10 ? 1.734e3 : 3.615e-13;
+            const A = A0 * Math.exp(-Q / (R * T_K));
+
+            // Tensile stress from extending flow: sigma_xx = (strainRate / A)^(1/n)
+            const tensileStress = Math.pow(strainRate / (A * 3.154e7), 1 / n);
+
+            // Nye model: crevasse penetrates until tensile stress = lithostatic stress
+            // d_dry = tensileStress / (rho_ice * g)
+            let dDry = tensileStress / (rho_ice * g);
+            dDry = Math.min(dDry, thickness);
+
+            // Water-filled: d_water = tensileStress / ((rho_ice - rho_water * waterLevel) * g)
+            let dWet = dDry;
+            if (waterFilled && waterLevel > 0) {
+                const effectiveDensity = rho_ice - rho_water * (waterLevel / 100);
+                if (effectiveDensity <= 0) {
+                    dWet = thickness; // Full penetration!
+                } else {
+                    dWet = tensileStress / (effectiveDensity * g);
+                    dWet = Math.min(dWet, thickness);
+                }
+            }
+
+            return { dDry, dWet, tensileStress };
+        }
+
+        function draw() {
+            time += 0.016;
+
+            const strainRate = parseFloat(strainSlider.value);
+            const thickness = parseFloat(thickSlider.value);
+            const temp = parseFloat(tempSlider.value);
+            const waterFilled = waterCheck.checked;
+            const waterLevel = parseFloat(waterSlider.value);
+
+            document.getElementById('strainVal').textContent = strainRate.toFixed(3);
+            document.getElementById('thickVal').textContent = thickness;
+            document.getElementById('tempVal').textContent = temp;
+            document.getElementById('waterVal').textContent = waterLevel;
+
+            const { dDry, dWet, tensileStress } = computeCrevasseDepth(
+                strainRate, thickness, temp, waterFilled, waterLevel
+            );
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const margin = { left: 80, right: 80, top: 70, bottom: 80 };
+            const gW = W - margin.left - margin.right;
+            const gH = H - margin.top - margin.bottom;
+            const iceTop = margin.top;
+            const iceBottom = margin.top + gH;
+
+            // Sky
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, iceTop);
+            skyGrad.addColorStop(0, '#0a0a1e');
+            skyGrad.addColorStop(1, '#1a2540');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, W, iceTop + 5);
+
+            // Ice block
+            const iceGrad = ctx.createLinearGradient(0, iceTop, 0, iceBottom);
+            iceGrad.addColorStop(0, 'rgba(190,215,245,0.95)');
+            iceGrad.addColorStop(0.3, 'rgba(150,190,235,0.9)');
+            iceGrad.addColorStop(0.7, 'rgba(110,160,215,0.85)');
+            iceGrad.addColorStop(1, 'rgba(70,120,180,0.8)');
+            ctx.fillStyle = iceGrad;
+            ctx.fillRect(margin.left, iceTop, gW, gH);
+
+            // Ice layers
+            for (let i = 1; i < 15; i++) {
+                const y = iceTop + (gH / 15) * i;
+                ctx.strokeStyle = `rgba(200,220,240,${0.08 + (i % 3 === 0 ? 0.05 : 0)})`;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(margin.left, y);
+                ctx.lineTo(margin.left + gW, y);
+                ctx.stroke();
+            }
+
+            // Bedrock
+            ctx.fillStyle = '#3d3025';
+            ctx.fillRect(margin.left - 5, iceBottom, gW + 10, H - iceBottom);
+
+            // Stress arrows at surface (extending flow)
+            const arrowY = iceTop - 15;
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 5; i++) {
+                const cx = margin.left + gW * (0.2 + 0.15 * i);
+                const len = 15 + strainRate * 800;
+                // Left arrow
+                ctx.beginPath();
+                ctx.moveTo(cx - 5, arrowY);
+                ctx.lineTo(cx - 5 - len, arrowY);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(cx - 5 - len, arrowY);
+                ctx.lineTo(cx - 5 - len + 6, arrowY - 4);
+                ctx.lineTo(cx - 5 - len + 6, arrowY + 4);
+                ctx.closePath();
+                ctx.fillStyle = '#DDA15E';
+                ctx.fill();
+                // Right arrow
+                ctx.beginPath();
+                ctx.moveTo(cx + 5, arrowY);
+                ctx.lineTo(cx + 5 + len, arrowY);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(cx + 5 + len, arrowY);
+                ctx.lineTo(cx + 5 + len - 6, arrowY - 4);
+                ctx.lineTo(cx + 5 + len - 6, arrowY + 4);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            // Draw crevasses
+            const depth = waterFilled ? dWet : dDry;
+            const depthFrac = Math.min(depth / thickness, 1);
+
+            for (const c of crevasses) {
+                const cx = margin.left + c.x * gW;
+                const cDepthPx = depthFrac * gH;
+                const wobbleAmt = Math.sin(time * 0.5 + c.phase) * 3;
+
+                // Crevasse shape
+                ctx.beginPath();
+                ctx.moveTo(cx - 4 + wobbleAmt, iceTop);
+                ctx.lineTo(cx - 1 + wobbleAmt * 0.5, iceTop + cDepthPx * 0.5);
+                ctx.lineTo(cx + wobbleAmt * 0.2, iceTop + cDepthPx);
+                ctx.lineTo(cx + 1 + wobbleAmt * 0.5, iceTop + cDepthPx * 0.5);
+                ctx.lineTo(cx + 4 + wobbleAmt, iceTop);
+                ctx.closePath();
+
+                const crevGrad = ctx.createLinearGradient(0, iceTop, 0, iceTop + cDepthPx);
+                crevGrad.addColorStop(0, 'rgba(20,30,60,0.9)');
+                crevGrad.addColorStop(0.5, 'rgba(10,15,40,0.95)');
+                crevGrad.addColorStop(1, 'rgba(5,5,20,1)');
+                ctx.fillStyle = crevGrad;
+                ctx.fill();
+
+                // Water fill in crevasse
+                if (waterFilled && waterLevel > 0) {
+                    const waterDepth = cDepthPx * (waterLevel / 100);
+                    const waterTop = iceTop + cDepthPx - waterDepth;
+                    const waterBottom = iceTop + cDepthPx;
+                    const wFrac = (waterTop - iceTop) / cDepthPx;
+
+                    ctx.beginPath();
+                    const leftAtWaterTop = cx - 4 * (1 - wFrac) + wobbleAmt * (1 - wFrac);
+                    const rightAtWaterTop = cx + 4 * (1 - wFrac) + wobbleAmt * (1 - wFrac);
+                    ctx.moveTo(leftAtWaterTop, waterTop);
+                    ctx.lineTo(cx + wobbleAmt * 0.2, waterBottom);
+                    ctx.lineTo(rightAtWaterTop, waterTop);
+                    ctx.closePath();
+                    ctx.fillStyle = 'rgba(30,100,200,0.7)';
+                    ctx.fill();
+                }
+
+                // Crevasse edge highlight
+                ctx.strokeStyle = 'rgba(150,180,220,0.4)';
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(cx - 4 + wobbleAmt, iceTop);
+                ctx.lineTo(cx + wobbleAmt * 0.2, iceTop + cDepthPx);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(cx + 4 + wobbleAmt, iceTop);
+                ctx.lineTo(cx + wobbleAmt * 0.2, iceTop + cDepthPx);
+                ctx.stroke();
+            }
+
+            // Depth scale on right
+            const scaleX = margin.left + gW + 15;
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(scaleX, iceTop);
+            ctx.lineTo(scaleX, iceBottom);
+            ctx.stroke();
+
+            // Tick marks
+            for (let d = 0; d <= thickness; d += 50) {
+                const y = iceTop + (d / thickness) * gH;
+                ctx.beginPath();
+                ctx.moveTo(scaleX - 3, y);
+                ctx.lineTo(scaleX + 3, y);
+                ctx.stroke();
+                ctx.fillStyle = '#8A9A5B';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText(d + 'm', scaleX + 6, y + 3);
+            }
+
+            // Crevasse depth marker
+            const depthY = iceTop + depthFrac * gH;
+            ctx.fillStyle = waterFilled ? '#3498db' : '#e74c3c';
+            ctx.beginPath();
+            ctx.moveTo(scaleX - 8, depthY);
+            ctx.lineTo(scaleX, depthY - 5);
+            ctx.lineTo(scaleX, depthY + 5);
+            ctx.closePath();
+            ctx.fill();
+            ctx.fillStyle = waterFilled ? '#3498db' : '#e74c3c';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText((depth).toFixed(1) + 'm', margin.left - 10, depthY + 4);
+
+            // Depth percentage label
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(
+                'Depth: ' + depth.toFixed(1) + 'm (' + (depthFrac * 100).toFixed(0) + '% of thickness)',
+                W / 2, iceBottom + 25
+            );
+
+            // Stress info
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '11px sans-serif';
+            ctx.fillText('Tensile Stress: ' + (tensileStress / 1000).toFixed(0) + ' kPa', W / 2, iceBottom + 45);
+
+            if (depthFrac >= 0.99) {
+                ctx.fillStyle = '#e74c3c';
+                ctx.font = 'bold 14px sans-serif';
+                ctx.fillText('FULL PENETRATION - Glacier fractures to bed!', W / 2, iceBottom + 65);
+            }
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Crevasse Formation & Hydrofracture', W / 2, 30);
+            ctx.font = '12px sans-serif';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText('Nye zero-stress model with water pressure', W / 2, 48);
+
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            strainSlider.value = 0.01;
+            thickSlider.value = 200;
+            tempSlider.value = -10;
+            waterCheck.checked = false;
+            waterSlider.value = 50;
+            waterSlider.disabled = true;
+            initCrevasses();
+            time = 0;
+        };
+
+        draw();
+    })();
+    </script>
+</body>
+</html>

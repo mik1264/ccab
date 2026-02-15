@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Great Circle vs Rhumb Line</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; cursor: crosshair; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(254,250,224,0.12); backdrop-filter: blur(10px);
+            color: #FEFAE0; padding: 12px 24px; border-radius: 12px;
+            font-size: 0.85rem; text-align: center; pointer-events: none; z-index: 100;
+            max-width: 600px;
+        }
+        .legend {
+            position: fixed; top: 10px; right: 10px; z-index: 100;
+            background: rgba(254,250,224,0.1); backdrop-filter: blur(10px);
+            padding: 12px 16px; border-radius: 10px; color: #FEFAE0; font-size: 0.8rem;
+        }
+        .legend div { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+        .legend .swatch { width: 20px; height: 3px; border-radius: 2px; }
+        .stats {
+            position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%);
+            background: rgba(254,250,224,0.1); backdrop-filter: blur(10px);
+            color: #FEFAE0; padding: 8px 16px; border-radius: 8px;
+            font-size: 0.8rem; text-align: center; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="legend">
+        <div><span class="swatch" style="background:#DDA15E;"></span> Great Circle (shortest)</div>
+        <div><span class="swatch" style="background:#8A9A5B;"></span> Rhumb Line (constant bearing)</div>
+    </div>
+    <div id="stats" class="stats" style="display:none;"></div>
+    <div class="info">Click two points on the Mercator map to compare Great Circle (shortest path) vs Rhumb Line (constant compass bearing).</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const statsEl = document.getElementById('stats');
+        let W, H;
+        let points = []; // [{lon, lat}]
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        function mercX(lon) { return W / 2 + (lon / 180) * (W * 0.4); }
+        function mercY(lat) {
+            const r = Math.max(-85, Math.min(85, lat)) * Math.PI / 180;
+            return H / 2 - Math.log(Math.tan(Math.PI / 4 + r / 2)) * (W * 0.4) / Math.PI;
+        }
+        function invMercX(x) { return ((x - W / 2) / (W * 0.4)) * 180; }
+        function invMercY(y) {
+            const mercN = -(y - H / 2) * Math.PI / (W * 0.4);
+            return (2 * Math.atan(Math.exp(mercN)) - Math.PI / 2) * 180 / Math.PI;
+        }
+
+        function toRad(d) { return d * Math.PI / 180; }
+        function toDeg(r) { return r * 180 / Math.PI; }
+
+        // Great circle intermediate points
+        function greatCirclePoints(lon1, lat1, lon2, lat2, n) {
+            const pts = [];
+            const p1 = toRad(lat1), l1 = toRad(lon1);
+            const p2 = toRad(lat2), l2 = toRad(lon2);
+            const d = Math.acos(Math.sin(p1) * Math.sin(p2) + Math.cos(p1) * Math.cos(p2) * Math.cos(l2 - l1));
+            if (d < 1e-10) return [{ lon: lon1, lat: lat1 }];
+            for (let i = 0; i <= n; i++) {
+                const f = i / n;
+                const A = Math.sin((1 - f) * d) / Math.sin(d);
+                const B = Math.sin(f * d) / Math.sin(d);
+                const x = A * Math.cos(p1) * Math.cos(l1) + B * Math.cos(p2) * Math.cos(l2);
+                const y = A * Math.cos(p1) * Math.sin(l1) + B * Math.cos(p2) * Math.sin(l2);
+                const z = A * Math.sin(p1) + B * Math.sin(p2);
+                const lat = toDeg(Math.atan2(z, Math.sqrt(x * x + y * y)));
+                const lon = toDeg(Math.atan2(y, x));
+                pts.push({ lon, lat });
+            }
+            return pts;
+        }
+
+        // Great circle distance (km)
+        function gcDist(lon1, lat1, lon2, lat2) {
+            const R = 6371;
+            const p1 = toRad(lat1), p2 = toRad(lat2);
+            const dp = toRad(lat2 - lat1), dl = toRad(lon2 - lon1);
+            const a = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+
+        // Rhumb line intermediate points
+        function rhumbPoints(lon1, lat1, lon2, lat2, n) {
+            const pts = [];
+            for (let i = 0; i <= n; i++) {
+                const f = i / n;
+                pts.push({ lon: lon1 + f * (lon2 - lon1), lat: lat1 + f * (lat2 - lat1) });
+            }
+            return pts;
+        }
+
+        // Rhumb distance (km)
+        function rhumbDist(lon1, lat1, lon2, lat2) {
+            const R = 6371;
+            const p1 = toRad(lat1), p2 = toRad(lat2);
+            const dp = p2 - p1;
+            const dl = toRad(lon2 - lon1);
+            const dpsi = Math.log(Math.tan(Math.PI / 4 + p2 / 2) / Math.tan(Math.PI / 4 + p1 / 2));
+            const q = Math.abs(dpsi) > 1e-12 ? dp / dpsi : Math.cos(p1);
+            const d = Math.sqrt(dp * dp + q * q * dl * dl) * R;
+            return d;
+        }
+
+        function drawGrid() {
+            ctx.strokeStyle = 'rgba(254,250,224,0.08)';
+            ctx.lineWidth = 0.5;
+            for (let lon = -180; lon <= 180; lon += 30) {
+                ctx.beginPath(); ctx.moveTo(mercX(lon), mercY(85)); ctx.lineTo(mercX(lon), mercY(-85)); ctx.stroke();
+            }
+            for (let lat = -60; lat <= 60; lat += 30) {
+                ctx.beginPath(); ctx.moveTo(mercX(-180), mercY(lat)); ctx.lineTo(mercX(180), mercY(lat)); ctx.stroke();
+            }
+        }
+
+        function drawLand() {
+            const continents = [
+                [[-130,50],[-125,55],[-120,60],[-140,65],[-165,65],[-150,60],[-125,50],[-115,32],[-105,25],[-97,26],[-90,30],[-82,25],[-80,30],[-75,35],[-70,42],[-60,47],[-65,60],[-80,65],[-130,70],[-145,65],[-130,50]],
+                [[-80,10],[-60,5],[-35,-5],[-38,-15],[-57,-38],[-75,-48],[-72,-35],[-77,-2],[-80,10]],
+                [[-15,12],[-10,25],[0,35],[25,30],[42,2],[28,-33],[10,-5],[-10,7],[-15,12]],
+                [[28,41],[55,25],[80,10],[100,15],[120,25],[140,40],[145,45],[110,45],[75,35],[55,45],[60,65],[120,70],[170,65]],
+                [[115,-10],[145,-15],[148,-35],[125,-30],[115,-10]]
+            ];
+            ctx.fillStyle = 'rgba(138,154,91,0.15)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+            ctx.lineWidth = 1;
+            for (const c of continents) {
+                ctx.beginPath();
+                for (let i = 0; i < c.length; i++) {
+                    const x = mercX(c[i][0]), y = mercY(c[i][1]);
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.closePath(); ctx.fill(); ctx.stroke();
+            }
+        }
+
+        function drawRoutes() {
+            if (points.length < 2) return;
+            const [p1, p2] = points;
+
+            // Great circle
+            const gcPts = greatCirclePoints(p1.lon, p1.lat, p2.lon, p2.lat, 100);
+            ctx.beginPath();
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 3;
+            let prev = null;
+            for (const pt of gcPts) {
+                const x = mercX(pt.lon), y = mercY(pt.lat);
+                if (prev && Math.abs(x - prev.x) > W * 0.3) { ctx.moveTo(x, y); }
+                else if (!prev) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+                prev = { x, y };
+            }
+            ctx.stroke();
+
+            // Rhumb line (straight on Mercator)
+            const rhPts = rhumbPoints(p1.lon, p1.lat, p2.lon, p2.lat, 100);
+            ctx.beginPath();
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 3;
+            ctx.setLineDash([8, 4]);
+            for (let i = 0; i < rhPts.length; i++) {
+                const x = mercX(rhPts[i].lon), y = mercY(rhPts[i].lat);
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Stats
+            const gc = gcDist(p1.lon, p1.lat, p2.lon, p2.lat);
+            const rh = rhumbDist(p1.lon, p1.lat, p2.lon, p2.lat);
+            const diff = ((rh - gc) / gc * 100).toFixed(1);
+            statsEl.style.display = 'block';
+            statsEl.innerHTML = `Great Circle: <b style="color:#DDA15E">${Math.round(gc)} km</b> | Rhumb Line: <b style="color:#8A9A5B">${Math.round(rh)} km</b> | Rhumb is <b>${diff}%</b> longer`;
+        }
+
+        function drawPoints() {
+            for (let i = 0; i < points.length; i++) {
+                const x = mercX(points[i].lon), y = mercY(points[i].lat);
+                ctx.beginPath();
+                ctx.arc(x, y, 6, 0, Math.PI * 2);
+                ctx.fillStyle = '#FEFAE0';
+                ctx.fill();
+                ctx.strokeStyle = '#1a1a2e';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.fillStyle = '#FEFAE0';
+                ctx.font = '12px "Segoe UI", sans-serif';
+                const latStr = Math.abs(points[i].lat).toFixed(1) + (points[i].lat >= 0 ? 'N' : 'S');
+                const lonStr = Math.abs(points[i].lon).toFixed(1) + (points[i].lon >= 0 ? 'E' : 'W');
+                ctx.fillText(`${latStr}, ${lonStr}`, x + 10, y - 10);
+            }
+        }
+
+        canvas.addEventListener('click', e => {
+            const lon = invMercX(e.clientX);
+            const lat = invMercY(e.clientY);
+            if (lat < -85 || lat > 85) return;
+            if (points.length >= 2) points = [];
+            points.push({ lon, lat });
+        });
+
+        // Preset routes
+        const presets = [
+            { name: 'NYC-London', p1: { lon: -74, lat: 40.7 }, p2: { lon: 0, lat: 51.5 } },
+            { name: 'Sydney-Santiago', p1: { lon: 151, lat: -33.9 }, p2: { lon: -70.7, lat: -33.4 } }
+        ];
+        if (points.length === 0) {
+            points = [presets[0].p1, presets[0].p2];
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+            drawGrid();
+            drawLand();
+            drawRoutes();
+            drawPoints();
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            points = [presets[0].p1, presets[0].p2];
+            statsEl.style.display = 'none';
+        };
+
+        draw();
+    })();
+    </script>
+</body>
+</html>

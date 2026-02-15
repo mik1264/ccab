@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reynolds Number Wind Tunnel - Paper Airplane Physics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px; border-radius: 12px; width: 260px;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 8px; font-size: 0.95rem; }
+        .control-group { margin-bottom: 10px; }
+        .control-group label { display: block; color: #8A9A5B; font-size: 0.8rem; margin-bottom: 2px; }
+        .control-group input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+        .val { color: #DDA15E; font-size: 0.8rem; float: right; }
+        #info {
+            position: fixed; bottom: 10px; left: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 12px 16px; border-radius: 12px; font-size: 0.82rem;
+            border: 1px solid rgba(138,154,91,0.3); max-width: 400px; line-height: 1.5;
+        }
+        .re-badge {
+            display: inline-block; padding: 3px 10px; border-radius: 8px; font-weight: bold;
+            font-size: 0.9rem; margin: 4px 0;
+        }
+        .laminar { background: rgba(76,175,80,0.2); color: #4CAF50; border: 1px solid rgba(76,175,80,0.3); }
+        .transitional { background: rgba(255,193,7,0.2); color: #FFC107; border: 1px solid rgba(255,193,7,0.3); }
+        .turbulent { background: rgba(244,67,54,0.2); color: #f44336; border: 1px solid rgba(244,67,54,0.3); }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Reynolds Number Wind Tunnel</h3>
+        <div class="control-group">
+            <label>Airspeed: <span class="val" id="speedVal">5</span> m/s</label>
+            <input type="range" id="speed" min="1" max="20" value="5" step="0.5">
+        </div>
+        <div class="control-group">
+            <label>Chord Length: <span class="val" id="chordVal">10</span> cm</label>
+            <input type="range" id="chord" min="3" max="25" value="10" step="1">
+        </div>
+        <div class="control-group">
+            <label>Angle of Attack: <span class="val" id="aoaVal">5</span>&deg;</label>
+            <input type="range" id="aoa" min="-5" max="20" value="5" step="1">
+        </div>
+    </div>
+    <div id="info">
+        <div>Reynolds Number: <span class="re-badge" id="reBadge">30,000</span></div>
+        <p id="flowDesc" style="margin-top:6px; color:#8A9A5B;">
+            Paper airplanes fly in the Re 20,000-100,000 range -- fully laminar to transitional flow.
+            This is why flat-plate wings work surprisingly well: they avoid the laminar separation bubble
+            that plagues traditional airfoils at low Re.
+        </p>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let time = 0;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        function getSpeed() { return parseFloat(document.getElementById('speed').value); }
+        function getChord() { return parseFloat(document.getElementById('chord').value) / 100; } // meters
+        function getAoA() { return parseFloat(document.getElementById('aoa').value); }
+
+        // Particles for flow visualization
+        const NUM_PARTICLES = 600;
+        let particles = [];
+
+        function initParticles() {
+            particles = [];
+            for (let i = 0; i < NUM_PARTICLES; i++) {
+                particles.push({
+                    x: Math.random() * W,
+                    y: Math.random() * H,
+                    size: 1 + Math.random() * 2,
+                    baseSpeed: 0.5 + Math.random()
+                });
+            }
+        }
+        initParticles();
+
+        // Airfoil position
+        function getAirfoilCenter() {
+            return { x: W * 0.35, y: H * 0.45 };
+        }
+
+        function getChordPixels() {
+            return Math.min(W, H) * 0.18;
+        }
+
+        function calcReynolds(speed, chord) {
+            const nu = 1.516e-5; // kinematic viscosity of air at 20C
+            return speed * chord / nu;
+        }
+
+        function getFlowRegime(Re) {
+            if (Re < 50000) return { name: 'Laminar', color: '#4CAF50', className: 'laminar' };
+            if (Re < 200000) return { name: 'Transitional', color: '#FFC107', className: 'transitional' };
+            return { name: 'Turbulent', color: '#f44336', className: 'turbulent' };
+        }
+
+        // Move and draw particles with flow physics
+        function updateParticles(speed, aoaDeg, Re) {
+            const center = getAirfoilCenter();
+            const chordPx = getChordPixels();
+            const aoaRad = aoaDeg * Math.PI / 180;
+            const regime = getFlowRegime(Re);
+            const turbulence = Re > 50000 ? Math.min(1, (Re - 50000) / 200000) : 0;
+
+            for (const p of particles) {
+                // Base flow velocity
+                let vx = speed * 8 * p.baseSpeed;
+                let vy = 0;
+
+                // Position relative to airfoil
+                const dx = p.x - center.x;
+                const dy = p.y - center.y;
+
+                // Rotate to airfoil frame
+                const rx = dx * Math.cos(aoaRad) + dy * Math.sin(aoaRad);
+                const ry = -dx * Math.sin(aoaRad) + dy * Math.cos(aoaRad);
+
+                const dist = Math.sqrt(rx * rx + ry * ry);
+                const normDist = dist / chordPx;
+
+                if (normDist < 2.5) {
+                    const influence = Math.max(0, 1 - normDist / 2.5);
+
+                    // Upwash/downwash
+                    if (rx < chordPx * 0.5 && rx > -chordPx * 0.6) {
+                        // Near the airfoil
+                        if (ry < 0) {
+                            // Upper surface: speed up, deflect
+                            vx *= (1 + influence * 0.5);
+                            vy -= influence * speed * 3 * aoaRad;
+                        } else {
+                            // Lower surface: slow down slightly
+                            vx *= (1 - influence * 0.2);
+                            vy += influence * speed * 1.5 * aoaRad;
+                        }
+
+                        // Deflect around leading edge
+                        if (rx < -chordPx * 0.3 && Math.abs(ry) < chordPx * 0.3) {
+                            vy += (ry > 0 ? 1 : -1) * influence * speed * 4;
+                        }
+                    }
+
+                    // Wake region behind airfoil
+                    if (rx > chordPx * 0.3) {
+                        const wakeInfluence = influence * 0.5;
+                        // Turbulent wake
+                        vy += Math.sin(time * 10 + p.x * 0.1) * wakeInfluence * speed * turbulence * 3;
+                        vx *= (1 - wakeInfluence * 0.3);
+
+                        // Boundary layer separation at high AoA
+                        if (aoaDeg > 10 && ry < 0) {
+                            vy += wakeInfluence * speed * (aoaDeg - 10) * 0.3;
+                            vx -= wakeInfluence * speed * 0.5;
+                        }
+                    }
+                }
+
+                // Add turbulence based on Reynolds number
+                if (turbulence > 0) {
+                    vx += (Math.random() - 0.5) * turbulence * speed * 2;
+                    vy += (Math.random() - 0.5) * turbulence * speed * 2;
+                }
+
+                p.x += vx * 0.016;
+                p.y += vy * 0.016;
+
+                // Wrap around
+                if (p.x > W + 20) { p.x = -20; p.y = Math.random() * H; }
+                if (p.x < -20) { p.x = W + 20; p.y = Math.random() * H; }
+                if (p.y > H + 20) p.y = -20;
+                if (p.y < -20) p.y = H + 20;
+
+                // Color based on local speed
+                const localSpeed = Math.sqrt(vx * vx + vy * vy);
+                const speedRatio = localSpeed / (speed * 12);
+
+                let r, g, b;
+                if (speedRatio < 0.8) {
+                    // Slow: blue
+                    r = 50; g = 100; b = 200;
+                } else if (speedRatio < 1.2) {
+                    // Normal: cyan/green
+                    r = 50; g = 200; b = 150;
+                } else {
+                    // Fast: yellow/red
+                    const t = Math.min(1, (speedRatio - 1.2) / 0.8);
+                    r = 200 + t * 55; g = 200 - t * 150; b = 50;
+                }
+
+                const alpha = 0.3 + influence * 0.5;
+                ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // Draw the flat plate airfoil (paper airplane cross section)
+        function drawAirfoil(aoaDeg) {
+            const center = getAirfoilCenter();
+            const chordPx = getChordPixels();
+            const aoaRad = aoaDeg * Math.PI / 180;
+
+            ctx.save();
+            ctx.translate(center.x, center.y);
+            ctx.rotate(-aoaRad);
+
+            // Paper airplane is essentially a flat plate with slight fold
+            ctx.beginPath();
+            ctx.moveTo(-chordPx / 2, -2);
+            ctx.lineTo(chordPx / 2, -1);
+            ctx.lineTo(chordPx / 2, 1);
+            ctx.lineTo(-chordPx / 2, 2);
+            ctx.closePath();
+
+            const grad = ctx.createLinearGradient(0, -3, 0, 3);
+            grad.addColorStop(0, '#8A9A5B');
+            grad.addColorStop(1, '#606C38');
+            ctx.fillStyle = grad;
+            ctx.fill();
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Leading edge marker
+            ctx.beginPath();
+            ctx.arc(-chordPx / 2, 0, 3, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+
+            ctx.restore();
+
+            // Labels
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '10px Segoe UI, sans-serif';
+            const leX = center.x - (chordPx / 2) * Math.cos(aoaRad);
+            const leY = center.y + (chordPx / 2) * Math.sin(aoaRad);
+            ctx.fillText('Leading Edge', leX - 50, leY + 25);
+        }
+
+        // Draw boundary layer visualization
+        function drawBoundaryLayer(aoaDeg, Re) {
+            const center = getAirfoilCenter();
+            const chordPx = getChordPixels();
+            const aoaRad = aoaDeg * Math.PI / 180;
+            const regime = getFlowRegime(Re);
+
+            ctx.save();
+            ctx.translate(center.x, center.y);
+            ctx.rotate(-aoaRad);
+
+            // Boundary layer thickness grows along chord
+            ctx.beginPath();
+            const steps = 50;
+            for (let i = 0; i <= steps; i++) {
+                const t = i / steps;
+                const x = (t - 0.5) * chordPx;
+
+                // Boundary layer thickness: laminar ~ x^0.5, turbulent ~ x^0.8
+                let blThickness;
+                if (Re < 50000) {
+                    blThickness = 5.0 * Math.sqrt(t * chordPx) / Math.sqrt(Re / 1000) * 3;
+                } else {
+                    const transPoint = 50000 / Re; // fraction where transition occurs
+                    if (t < transPoint) {
+                        blThickness = 5.0 * Math.sqrt(t * chordPx) / Math.sqrt(Re / 1000) * 3;
+                    } else {
+                        blThickness = 5.0 * Math.pow(t * chordPx, 0.8) / Math.pow(Re / 1000, 0.6) * 3;
+                    }
+                }
+
+                blThickness = Math.min(blThickness, 40);
+
+                if (i === 0) ctx.moveTo(x, -3 - blThickness);
+                else ctx.lineTo(x, -3 - blThickness);
+            }
+
+            // Back along surface
+            ctx.lineTo(chordPx / 2, -2);
+            ctx.lineTo(-chordPx / 2, -2);
+            ctx.closePath();
+
+            ctx.fillStyle = regime.color + '15';
+            ctx.fill();
+            ctx.strokeStyle = regime.color + '44';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Separation bubble at high AoA
+            if (aoaDeg > 8 && Re < 100000) {
+                const sepStart = 0.3 + (1 - aoaDeg / 20) * 0.3;
+                const sepEnd = Math.min(0.9, sepStart + 0.3);
+                ctx.beginPath();
+                for (let i = 0; i <= 20; i++) {
+                    const t = sepStart + (i / 20) * (sepEnd - sepStart);
+                    const x = (t - 0.5) * chordPx;
+                    const bubbleH = Math.sin((i / 20) * Math.PI) * (aoaDeg - 8) * 2;
+                    if (i === 0) ctx.moveTo(x, -3);
+                    ctx.lineTo(x, -3 - bubbleH);
+                }
+                ctx.lineTo((sepEnd - 0.5) * chordPx, -3);
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(244,67,54,0.15)';
+                ctx.fill();
+                ctx.strokeStyle = '#f44336';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Label
+                ctx.fillStyle = '#f44336';
+                ctx.font = '9px Segoe UI, sans-serif';
+                ctx.fillText('Separation Bubble', ((sepStart + sepEnd) / 2 - 0.5) * chordPx - 30, -3 - (aoaDeg - 8) * 2 - 5);
+            }
+
+            // Transition point marker
+            if (Re > 40000) {
+                const transX = Math.min(0.8, 50000 / Re) - 0.5;
+                ctx.beginPath();
+                ctx.moveTo(transX * chordPx, -2);
+                ctx.lineTo(transX * chordPx, -25);
+                ctx.strokeStyle = '#FFC107';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([2, 2]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = '#FFC107';
+                ctx.font = '9px Segoe UI, sans-serif';
+                ctx.fillText('Transition', transX * chordPx - 15, -28);
+            }
+
+            ctx.restore();
+        }
+
+        // Draw pressure distribution
+        function drawPressure(aoaDeg) {
+            const center = getAirfoilCenter();
+            const chordPx = getChordPixels();
+            const aoaRad = aoaDeg * Math.PI / 180;
+
+            ctx.save();
+            ctx.translate(center.x, center.y);
+            ctx.rotate(-aoaRad);
+
+            // Pressure arrows (upper surface: low pressure, lower: high)
+            const numArrows = 12;
+            for (let i = 1; i < numArrows; i++) {
+                const t = i / numArrows;
+                const x = (t - 0.5) * chordPx;
+
+                // Upper surface (suction)
+                const suctionMag = aoaDeg * (1 - t) * Math.sqrt(t) * 1.5;
+                if (suctionMag > 1) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, -3);
+                    ctx.lineTo(x, -3 - suctionMag);
+                    ctx.strokeStyle = 'rgba(100,181,246,0.4)';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                    // Arrowhead pointing away
+                    ctx.beginPath();
+                    ctx.moveTo(x - 3, -3 - suctionMag + 4);
+                    ctx.lineTo(x, -3 - suctionMag);
+                    ctx.lineTo(x + 3, -3 - suctionMag + 4);
+                    ctx.stroke();
+                }
+
+                // Lower surface (pressure)
+                const pressureMag = aoaDeg * t * 0.8;
+                if (pressureMag > 1) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, 3);
+                    ctx.lineTo(x, 3 + pressureMag);
+                    ctx.strokeStyle = 'rgba(244,67,54,0.3)';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(x - 3, 3 + pressureMag - 4);
+                    ctx.lineTo(x, 3 + pressureMag);
+                    ctx.lineTo(x + 3, 3 + pressureMag - 4);
+                    ctx.stroke();
+                }
+            }
+
+            ctx.restore();
+        }
+
+        // Speed legend
+        function drawLegend() {
+            const lx = 15, ly = H * 0.52;
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.beginPath();
+            ctx.roundRect(lx, ly, 120, 80, 8);
+            ctx.fill();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '10px Segoe UI, sans-serif';
+            ctx.fillText('Flow Speed', lx + 10, ly + 16);
+
+            const colors = [
+                { label: 'Slow', color: 'rgb(50,100,200)' },
+                { label: 'Normal', color: 'rgb(50,200,150)' },
+                { label: 'Fast', color: 'rgb(255,150,50)' }
+            ];
+
+            colors.forEach((c, i) => {
+                ctx.fillStyle = c.color;
+                ctx.fillRect(lx + 10, ly + 26 + i * 18, 12, 12);
+                ctx.fillStyle = '#FEFAE0';
+                ctx.fillText(c.label, lx + 28, ly + 36 + i * 18);
+            });
+        }
+
+        // Update labels
+        ['speed', 'chord', 'aoa'].forEach(id => {
+            document.getElementById(id).addEventListener('input', function() {
+                document.getElementById(id + 'Val').textContent = this.value;
+            });
+        });
+
+        function animate() {
+            time += 0.016;
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const speed = getSpeed();
+            const chord = getChord();
+            const aoaDeg = getAoA();
+            const Re = calcReynolds(speed, chord);
+            const regime = getFlowRegime(Re);
+
+            // Update Reynolds display
+            const reBadge = document.getElementById('reBadge');
+            reBadge.textContent = 'Re = ' + Math.round(Re).toLocaleString();
+            reBadge.className = 're-badge ' + regime.className;
+
+            // Flow description
+            const desc = document.getElementById('flowDesc');
+            if (Re < 30000) {
+                desc.textContent = 'Very low Reynolds number: fully laminar flow. Skin friction is minimal but the boundary layer separates easily. Paper airplanes in gentle throws operate here.';
+            } else if (Re < 70000) {
+                desc.textContent = 'Typical paper airplane Reynolds number. Flow is mostly laminar with possible transition near the trailing edge. Flat plate wings perform well because they avoid laminar separation bubbles.';
+            } else if (Re < 150000) {
+                desc.textContent = 'Upper range for paper airplanes (fast throw, large wing). Transition from laminar to turbulent occurs partway along the chord. A turbulent boundary layer resists separation better.';
+            } else {
+                desc.textContent = 'Beyond typical paper airplane flight. At this Re, conventional airfoils start to outperform flat plates. Turbulent boundary layer dominates, increasing skin friction but reducing separation.';
+            }
+
+            // Draw particles
+            updateParticles(speed, aoaDeg, Re);
+
+            // Draw airfoil and annotations
+            drawBoundaryLayer(aoaDeg, Re);
+            drawAirfoil(aoaDeg);
+            drawPressure(aoaDeg);
+
+            drawLegend();
+
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            document.getElementById('speed').value = 5;
+            document.getElementById('chord').value = 10;
+            document.getElementById('aoa').value = 5;
+            document.getElementById('speedVal').textContent = '5';
+            document.getElementById('chordVal').textContent = '10';
+            document.getElementById('aoaVal').textContent = '5';
+            initParticles();
+        };
+
+        animate();
+    })();
+    </script>
+</body>
+</html>

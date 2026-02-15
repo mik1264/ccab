@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dead-End Filling &amp; Tr&eacute;maux - Maze Generation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; }
+a.back-link {
+    position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none;
+    z-index: 1000; font-size: 1.2rem;
+}
+a.back-link:hover { color: #DDA15E; }
+.controls {
+    position: fixed; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(20,20,40,0.85); backdrop-filter: blur(10px);
+    border-radius: 12px; padding: 16px; min-width: 220px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #8A9A5B; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+.controls label { display: block; font-size: 12px; color: #FEFAE0; margin-top: 6px; opacity: 0.8; }
+.controls input[type=range] { width: 100%; margin: 4px 0; accent-color: #8A9A5B; }
+.controls select {
+    width: 100%; margin: 4px 0; padding: 4px 8px; border-radius: 6px;
+    background: #2a2a4e; color: #FEFAE0; border: 1px solid rgba(138,154,91,0.3); font-size: 12px;
+}
+.btn {
+    display: inline-block; margin: 3px 2px; padding: 6px 12px; border: none; border-radius: 6px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+.btn-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+.info {
+    position: fixed; bottom: 10px; left: 10px; z-index: 1000;
+    background: rgba(20,20,40,0.85); backdrop-filter: blur(10px);
+    border-radius: 12px; padding: 12px 16px; max-width: 320px;
+    border: 1px solid rgba(138,154,91,0.3); font-size: 12px; line-height: 1.5;
+}
+.info h4 { color: #DDA15E; margin-bottom: 4px; }
+.info p { color: #FEFAE0; opacity: 0.8; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Maze Solving</h3>
+    <label>Algorithm:</label>
+    <select id="algoSelect">
+        <option value="deadend">Dead-End Filling</option>
+        <option value="tremaux">Tr&eacute;maux's Algorithm</option>
+    </select>
+    <label>Grid Size: <span id="sizeVal">20</span></label>
+    <input type="range" id="sizeSlider" min="8" max="40" value="20">
+    <label>Solve Speed: <span id="speedVal">5</span> steps/frame</label>
+    <input type="range" id="speedSlider" min="1" max="30" value="5">
+    <div class="btn-row">
+        <button class="btn" id="btnNew">New Maze</button>
+        <button class="btn" id="btnSolve">Solve</button>
+    </div>
+</div>
+
+<div class="info">
+    <h4>Dead-End Filling &amp; Tr&eacute;maux</h4>
+    <p><b>Dead-End Filling:</b> Repeatedly fills in dead-end corridors until only the solution path remains. Requires a global view of the maze.</p>
+    <p style="margin-top:4px"><b>Tr&eacute;maux:</b> A walker marks passages as they go. Never enter a passage marked twice. The walker finds the exit without seeing the whole maze.</p>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let cols, rows, cellSize, grid, solving, solveAlgo;
+let filled, deadEndQueue;
+let walker, walkerMarks, walkerPath, walkerDone;
+let stepsPerFrame;
+const startPos = { r: 0, c: 0 };
+let endPos = { r: 0, c: 0 };
+
+const DIRS = [
+    { dr: -1, dc: 0, wall: 0, opp: 2 },
+    { dr: 0, dc: 1, wall: 1, opp: 3 },
+    { dr: 1, dc: 0, wall: 2, opp: 0 },
+    { dr: 0, dc: -1, wall: 3, opp: 1 }
+];
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+
+function idx(r, c) {
+    if (r < 0 || c < 0 || r >= rows || c >= cols) return -1;
+    return r * cols + c;
+}
+
+function getPassages(i) {
+    const cell = grid[i];
+    const passages = [];
+    for (const d of DIRS) {
+        if (!cell.walls[d.wall]) {
+            const ni = idx(cell.r + d.dr, cell.c + d.dc);
+            if (ni >= 0) passages.push({ ni, d });
+        }
+    }
+    return passages;
+}
+
+function generateMaze() {
+    const size = parseInt(document.getElementById('sizeSlider').value);
+    cellSize = Math.floor(Math.min(canvas.width, canvas.height) / (size + 2));
+    cols = Math.floor((canvas.width - cellSize) / cellSize);
+    rows = Math.floor((canvas.height - cellSize) / cellSize);
+    grid = [];
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            grid.push({ r, c, walls: [true, true, true, true], visited: false });
+        }
+    }
+    // DFS generation
+    const stack = [];
+    grid[0].visited = true;
+    stack.push(grid[0]);
+    while (stack.length > 0) {
+        const current = stack[stack.length - 1];
+        const neighbors = [];
+        for (const d of DIRS) {
+            const ni = idx(current.r + d.dr, current.c + d.dc);
+            if (ni >= 0 && !grid[ni].visited) neighbors.push({ cell: grid[ni], d });
+        }
+        if (neighbors.length > 0) {
+            const chosen = neighbors[Math.floor(Math.random() * neighbors.length)];
+            current.walls[chosen.d.wall] = false;
+            chosen.cell.walls[chosen.d.opp] = false;
+            chosen.cell.visited = true;
+            stack.push(chosen.cell);
+        } else {
+            stack.pop();
+        }
+    }
+    endPos = { r: rows - 1, c: cols - 1 };
+    solving = false;
+    filled = new Set();
+    deadEndQueue = [];
+    walker = null;
+    walkerMarks = null;
+    walkerPath = [];
+    walkerDone = false;
+}
+
+function initDeadEndFill() {
+    filled = new Set();
+    deadEndQueue = [];
+    for (let i = 0; i < grid.length; i++) {
+        if (i === idx(startPos.r, startPos.c) || i === idx(endPos.r, endPos.c)) continue;
+        const passages = getPassages(i).filter(p => !filled.has(p.ni));
+        if (passages.length <= 1) deadEndQueue.push(i);
+    }
+    solving = true;
+    solveAlgo = 'deadend';
+}
+
+function stepDeadEndFill() {
+    if (deadEndQueue.length === 0) { solving = false; return false; }
+    const nextQueue = [];
+    for (const di of deadEndQueue) {
+        if (filled.has(di)) continue;
+        if (di === idx(startPos.r, startPos.c) || di === idx(endPos.r, endPos.c)) continue;
+        const passages = getPassages(di).filter(p => !filled.has(p.ni));
+        if (passages.length <= 1) {
+            filled.add(di);
+            // Check if neighbors became dead ends
+            for (const p of passages) {
+                if (p.ni === idx(startPos.r, startPos.c) || p.ni === idx(endPos.r, endPos.c)) continue;
+                if (!filled.has(p.ni)) {
+                    const np = getPassages(p.ni).filter(pp => !filled.has(pp.ni));
+                    if (np.length <= 1) nextQueue.push(p.ni);
+                }
+            }
+        }
+    }
+    deadEndQueue = nextQueue;
+    return deadEndQueue.length > 0;
+}
+
+function initTremaux() {
+    walkerMarks = new Map(); // key: "from-to", value: mark count
+    walker = { pos: idx(startPos.r, startPos.c), prevPos: -1 };
+    walkerPath = [walker.pos];
+    walkerDone = false;
+    solving = true;
+    solveAlgo = 'tremaux';
+}
+
+function markKey(a, b) { return a < b ? `${a}-${b}` : `${b}-${a}`; }
+
+function getMarkCount(a, b) {
+    return walkerMarks.get(markKey(a, b)) || 0;
+}
+
+function addMark(a, b) {
+    const key = markKey(a, b);
+    walkerMarks.set(key, (walkerMarks.get(key) || 0) + 1);
+}
+
+function stepTremaux() {
+    if (walkerDone) { solving = false; return false; }
+    const pos = walker.pos;
+    if (pos === idx(endPos.r, endPos.c)) {
+        walkerDone = true;
+        solving = false;
+        return false;
+    }
+
+    const passages = getPassages(pos);
+    if (passages.length === 0) { walkerDone = true; solving = false; return false; }
+
+    // Tremaux rules
+    let next = -1;
+    if (passages.length === 1) {
+        // Dead end: go back
+        next = passages[0].ni;
+    } else {
+        // Junction
+        const unmarked = passages.filter(p => getMarkCount(pos, p.ni) === 0);
+        const onceMark = passages.filter(p => getMarkCount(pos, p.ni) === 1);
+
+        if (walker.prevPos >= 0 && getMarkCount(walker.prevPos, pos) === 1 && unmarked.length > 0) {
+            // Came from a once-marked passage, prefer unmarked
+            next = unmarked[Math.floor(Math.random() * unmarked.length)].ni;
+        } else if (unmarked.length > 0) {
+            next = unmarked[Math.floor(Math.random() * unmarked.length)].ni;
+        } else if (onceMark.length > 0) {
+            // Prefer the passage we came from if it's once-marked
+            const cameFrom = onceMark.find(p => p.ni === walker.prevPos);
+            next = cameFrom ? cameFrom.ni : onceMark[Math.floor(Math.random() * onceMark.length)].ni;
+        } else {
+            // All passages marked twice, stuck
+            walkerDone = true;
+            solving = false;
+            return false;
+        }
+    }
+
+    addMark(pos, next);
+    walker.prevPos = pos;
+    walker.pos = next;
+    walkerPath.push(next);
+    return true;
+}
+
+function drawCell(i, color) {
+    const cell = grid[i];
+    const x = cell.c * cellSize + cellSize / 2;
+    const y = cell.r * cellSize + cellSize / 2;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, cellSize, cellSize);
+}
+
+function draw() {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let i = 0; i < grid.length; i++) {
+        if (filled.has(i)) {
+            drawCell(i, '#1e1e2e');
+        } else {
+            drawCell(i, '#2a2a4e');
+        }
+    }
+
+    // Tremaux marks
+    if (walkerMarks) {
+        for (const [key, count] of walkerMarks) {
+            const [a, b] = key.split('-').map(Number);
+            const alpha = count >= 2 ? 0.6 : 0.3;
+            drawCell(a, `rgba(138,154,91,${alpha})`);
+            drawCell(b, `rgba(138,154,91,${alpha})`);
+        }
+        if (walker) {
+            drawCell(walker.pos, '#DDA15E');
+        }
+    }
+
+    // Start and end
+    drawCell(idx(startPos.r, startPos.c), '#606C38');
+    drawCell(idx(endPos.r, endPos.c), '#DDA15E');
+
+    // Walls
+    ctx.strokeStyle = '#8A9A5B';
+    ctx.lineWidth = 1.5;
+    for (const cell of grid) {
+        const x = cell.c * cellSize + cellSize / 2;
+        const y = cell.r * cellSize + cellSize / 2;
+        ctx.beginPath();
+        if (cell.walls[0]) { ctx.moveTo(x, y); ctx.lineTo(x + cellSize, y); }
+        if (cell.walls[1]) { ctx.moveTo(x + cellSize, y); ctx.lineTo(x + cellSize, y + cellSize); }
+        if (cell.walls[2]) { ctx.moveTo(x, y + cellSize); ctx.lineTo(x + cellSize, y + cellSize); }
+        if (cell.walls[3]) { ctx.moveTo(x, y); ctx.lineTo(x, y + cellSize); }
+        ctx.stroke();
+    }
+}
+
+function animate() {
+    if (solving) {
+        stepsPerFrame = parseInt(document.getElementById('speedSlider').value);
+        for (let i = 0; i < stepsPerFrame; i++) {
+            if (solveAlgo === 'deadend') { if (!stepDeadEndFill()) break; }
+            else { if (!stepTremaux()) break; }
+        }
+    }
+    draw();
+    requestAnimationFrame(animate);
+}
+
+function solve() {
+    const algo = document.getElementById('algoSelect').value;
+    generateMaze();
+    if (algo === 'deadend') initDeadEndFill();
+    else initTremaux();
+}
+
+window.reset = function() {
+    generateMaze();
+};
+
+document.getElementById('btnNew').addEventListener('click', () => generateMaze());
+document.getElementById('btnSolve').addEventListener('click', solve);
+document.getElementById('sizeSlider').addEventListener('input', e => {
+    document.getElementById('sizeVal').textContent = e.target.value;
+});
+document.getElementById('speedSlider').addEventListener('input', e => {
+    document.getElementById('speedVal').textContent = e.target.value;
+});
+
+let resizeTimeout;
+window.addEventListener('resize', () => {
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(() => { resize(); generateMaze(); }, 200);
+});
+
+resize();
+generateMaze();
+animate();
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

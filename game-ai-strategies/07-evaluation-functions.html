@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Evaluation Functions - Game AI Strategies</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        #ui { position: fixed; top: 10px; right: 10px; z-index: 100; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+        .btn { background: rgba(138,154,91,0.3); border: 1px solid #8A9A5B; color: #FEFAE0; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; backdrop-filter: blur(10px); }
+        .btn:hover { background: rgba(138,154,91,0.5); }
+        .btn.active { background: rgba(221,161,94,0.4); border-color: #DDA15E; }
+        .status { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.6); backdrop-filter: blur(10px); padding: 10px 24px; border-radius: 12px; font-size: 0.9rem; border: 1px solid rgba(138,154,91,0.3); text-align: center; z-index: 100; max-width: 700px; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div id="ui">
+        <button class="btn" onclick="resetBoard()">Randomize Board</button>
+        <button class="btn" id="btnMaterial" onclick="setEvalFn('material')">Material Only</button>
+        <button class="btn" id="btnPosition" onclick="setEvalFn('position')">Positional</button>
+        <button class="btn" id="btnMobility" onclick="setEvalFn('mobility')">Mobility</button>
+        <button class="btn" id="btnCombined" onclick="setEvalFn('combined')">Combined</button>
+    </div>
+    <div class="status" id="status">Click pieces to move them. Watch how different evaluation functions score the same position differently.</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Simplified chess-like board (8x8) with pieces
+    // Pieces: P=pawn, N=knight, B=bishop, R=rook, Q=queen, K=king
+    // Positive = white, negative = black
+    const PIECES = { P: 1, N: 2, B: 3, R: 4, Q: 5, K: 6 };
+    const PIECE_VALUES = { 1: 100, 2: 320, 3: 330, 4: 500, 5: 900, 6: 20000 };
+    const PIECE_NAMES = { 1: 'P', 2: 'N', 3: 'B', 4: 'R', 5: 'Q', 6: 'K' };
+    const PIECE_SYMBOLS = { 1: '\u2659', 2: '\u2658', 3: '\u2657', 4: '\u2656', 5: '\u2655', 6: '\u2654',
+                           '-1': '\u265F', '-2': '\u265E', '-3': '\u265D', '-4': '\u265C', '-5': '\u265B', '-6': '\u265A' };
+
+    // Position tables (simplified)
+    const PAWN_TABLE = [
+        0,  0,  0,  0,  0,  0,  0,  0,
+        50, 50, 50, 50, 50, 50, 50, 50,
+        10, 10, 20, 30, 30, 20, 10, 10,
+        5,  5, 10, 25, 25, 10,  5,  5,
+        0,  0,  0, 20, 20,  0,  0,  0,
+        5, -5,-10,  0,  0,-10, -5,  5,
+        5, 10, 10,-20,-20, 10, 10,  5,
+        0,  0,  0,  0,  0,  0,  0,  0
+    ];
+    const KNIGHT_TABLE = [
+        -50,-40,-30,-30,-30,-30,-40,-50,
+        -40,-20,  0,  0,  0,  0,-20,-40,
+        -30,  0, 10, 15, 15, 10,  0,-30,
+        -30,  5, 15, 20, 20, 15,  5,-30,
+        -30,  0, 15, 20, 20, 15,  0,-30,
+        -30,  5, 10, 15, 15, 10,  5,-30,
+        -40,-20,  0,  5,  5,  0,-20,-40,
+        -50,-40,-30,-30,-30,-30,-40,-50
+    ];
+
+    let board = [];
+    let currentEval = 'combined';
+    let selectedSquare = -1;
+    let hoverSquare = -1;
+    let evalScores = {};
+    let dragPiece = null;
+
+    function initBoard() {
+        board = Array(64).fill(0);
+        // Place some pieces for an interesting midgame
+        const setups = [
+            // White pieces
+            [0, 4, 6], [1, 3, 5], [2, 2, 4], [3, 1, 2], [4, 5, 2],
+            [5, 0, 1], [6, 2, 1], [7, 4, 1], [8, 6, 1],
+            // Black pieces
+            [9, 3, -6], [10, 4, -5], [11, 1, -4], [12, 6, -3], [13, 5, -2],
+            [14, 1, -1], [15, 3, -1], [16, 5, -1], [17, 7, -1]
+        ];
+        for (const [_, pos, piece] of setups) {
+            const r = Math.floor(Math.random() * 8);
+            const c = pos;
+            board[r * 8 + c] = piece;
+        }
+        // Ensure kings exist
+        board[7 * 8 + 4] = 6; // White king
+        board[0 * 8 + 4] = -6; // Black king
+    }
+
+    function randomizeBoard() {
+        board = Array(64).fill(0);
+        // Place kings
+        board[7 * 8 + 4] = 6;
+        board[0 * 8 + 4] = -6;
+        // Random white pieces
+        const whitePieces = [1,1,1,1,2,3,4,5];
+        for (const p of whitePieces) {
+            let pos;
+            do { pos = Math.floor(Math.random() * 48) + 8; } while (board[pos] !== 0);
+            board[pos] = p;
+        }
+        // Random black pieces
+        const blackPieces = [-1,-1,-1,-1,-2,-3,-4,-5];
+        for (const p of blackPieces) {
+            let pos;
+            do { pos = Math.floor(Math.random() * 48) + 8; } while (board[pos] !== 0);
+            board[pos] = p;
+        }
+        recalculate();
+    }
+
+    // Evaluation functions
+    function evalMaterial(b) {
+        let score = 0;
+        for (let i = 0; i < 64; i++) {
+            const p = b[i];
+            if (p > 0) score += PIECE_VALUES[p];
+            else if (p < 0) score -= PIECE_VALUES[-p];
+        }
+        return score;
+    }
+
+    function evalPosition(b) {
+        let score = 0;
+        for (let i = 0; i < 64; i++) {
+            const p = b[i];
+            if (p === 0) continue;
+            const absP = Math.abs(p);
+            let posBonus = 0;
+            if (absP === 1) posBonus = PAWN_TABLE[p > 0 ? i : 63 - i];
+            else if (absP === 2) posBonus = KNIGHT_TABLE[p > 0 ? i : 63 - i];
+            else {
+                // Center bonus for other pieces
+                const r = Math.floor(i / 8), c = i % 8;
+                posBonus = Math.max(0, 3.5 - Math.abs(r - 3.5)) * 5 + Math.max(0, 3.5 - Math.abs(c - 3.5)) * 5;
+            }
+            score += p > 0 ? posBonus : -posBonus;
+        }
+        return score;
+    }
+
+    function evalMobility(b) {
+        // Count possible moves (simplified: count empty adjacent squares)
+        let whiteMobility = 0, blackMobility = 0;
+        const dirs = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+        for (let i = 0; i < 64; i++) {
+            const p = b[i];
+            if (p === 0) continue;
+            const r = Math.floor(i / 8), c = i % 8;
+            let moves = 0;
+            for (const [dr, dc] of dirs) {
+                const nr = r + dr, nc = c + dc;
+                if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+                    const target = b[nr * 8 + nc];
+                    if (target === 0 || (p > 0 && target < 0) || (p < 0 && target > 0)) moves++;
+                }
+            }
+            // Knights get extra moves
+            if (Math.abs(p) === 2) {
+                const knightMoves = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+                for (const [dr, dc] of knightMoves) {
+                    const nr = r + dr, nc = c + dc;
+                    if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) moves++;
+                }
+            }
+            if (p > 0) whiteMobility += moves;
+            else blackMobility += moves;
+        }
+        return (whiteMobility - blackMobility) * 10;
+    }
+
+    function evalCombined(b) {
+        return evalMaterial(b) + evalPosition(b) * 0.5 + evalMobility(b) * 0.3;
+    }
+
+    function recalculate() {
+        evalScores = {
+            material: evalMaterial(board),
+            position: evalPosition(board),
+            mobility: evalMobility(board),
+            combined: evalCombined(board)
+        };
+    }
+
+    function setEvalFn(fn) {
+        currentEval = fn;
+        document.querySelectorAll('#ui .btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('btn' + fn.charAt(0).toUpperCase() + fn.slice(1)).classList.add('active');
+    }
+
+    function resetBoard() { randomizeBoard(); }
+
+    // Interaction
+    canvas.addEventListener('mousemove', function(e) {
+        const cellSize = Math.min(W * 0.06, H * 0.09, 60);
+        const boardX = W * 0.3 - cellSize * 4;
+        const boardY = H * 0.5 - cellSize * 4;
+        const col = Math.floor((e.clientX - boardX) / cellSize);
+        const row = Math.floor((e.clientY - boardY) / cellSize);
+        hoverSquare = (row >= 0 && row < 8 && col >= 0 && col < 8) ? row * 8 + col : -1;
+    });
+
+    canvas.addEventListener('click', function(e) {
+        if (hoverSquare < 0) return;
+        if (selectedSquare >= 0) {
+            // Move piece
+            if (hoverSquare !== selectedSquare) {
+                board[hoverSquare] = board[selectedSquare];
+                board[selectedSquare] = 0;
+                recalculate();
+            }
+            selectedSquare = -1;
+        } else if (board[hoverSquare] !== 0) {
+            selectedSquare = hoverSquare;
+        }
+    });
+
+    function draw() {
+        ctx.clearRect(0, 0, W, H);
+        const grad = ctx.createLinearGradient(0, 0, W, H);
+        grad.addColorStop(0, '#1a1a2e');
+        grad.addColorStop(1, '#16213e');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = 'bold 1.3rem "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Evaluation Functions', W * 0.3, 30);
+
+        const cellSize = Math.min(W * 0.06, H * 0.09, 60);
+        const boardX = W * 0.3 - cellSize * 4;
+        const boardY = H * 0.5 - cellSize * 4;
+
+        // Draw board
+        for (let r = 0; r < 8; r++) {
+            for (let c = 0; c < 8; c++) {
+                const x = boardX + c * cellSize;
+                const y = boardY + r * cellSize;
+                const isLight = (r + c) % 2 === 0;
+                const idx = r * 8 + c;
+
+                ctx.fillStyle = idx === selectedSquare ? 'rgba(221,161,94,0.5)' :
+                    idx === hoverSquare ? 'rgba(138,154,91,0.3)' :
+                    isLight ? 'rgba(254,250,224,0.15)' : 'rgba(96,108,56,0.2)';
+                ctx.fillRect(x, y, cellSize, cellSize);
+
+                // Piece
+                const piece = board[idx];
+                if (piece !== 0) {
+                    const symbol = PIECE_SYMBOLS[piece.toString()];
+                    ctx.font = (cellSize * 0.7) + 'px serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillStyle = piece > 0 ? '#FEFAE0' : '#333';
+                    ctx.fillText(symbol, x + cellSize / 2, y + cellSize / 2);
+                }
+            }
+        }
+
+        // Board border
+        ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(boardX, boardY, cellSize * 8, cellSize * 8);
+
+        // Evaluation display
+        const evalX = W * 0.68;
+        const evalY = 60;
+        const evalNames = ['material', 'position', 'mobility', 'combined'];
+        const evalLabels = ['Material', 'Positional', 'Mobility', 'Combined'];
+        const evalColors = ['#DDA15E', '#8A9A5B', '#3498db', '#FEFAE0'];
+        const evalDescs = [
+            'Piece values: P=100, N=320, B=330, R=500, Q=900',
+            'Piece-square tables: center control, pawn structure',
+            'Number of available moves for each side',
+            'Material + 0.5*Position + 0.3*Mobility'
+        ];
+
+        ctx.textAlign = 'left';
+        for (let i = 0; i < 4; i++) {
+            const y = evalY + i * 100;
+            const isActive = currentEval === evalNames[i];
+            const score = evalScores[evalNames[i]] || 0;
+
+            // Background
+            ctx.fillStyle = isActive ? 'rgba(138,154,91,0.15)' : 'rgba(0,0,0,0.2)';
+            ctx.beginPath();
+            ctx.roundRect(evalX - 10, y - 5, W * 0.28, 85, 8);
+            ctx.fill();
+            if (isActive) {
+                ctx.strokeStyle = evalColors[i];
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = evalColors[i];
+            ctx.font = 'bold 0.9rem "Segoe UI", system-ui, sans-serif';
+            ctx.fillText(evalLabels[i], evalX, y + 14);
+
+            ctx.fillStyle = '#888';
+            ctx.font = '0.65rem "Segoe UI", system-ui, sans-serif';
+            ctx.fillText(evalDescs[i], evalX, y + 32);
+
+            // Score bar
+            const barY = y + 44;
+            const barW = W * 0.24;
+            const barH = 20;
+            const center = evalX + barW / 2;
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(evalX, barY, barW, barH);
+
+            const maxScore = evalNames[i] === 'combined' ? 2000 : 1000;
+            const normalizedScore = Math.max(-1, Math.min(1, score / maxScore));
+            const fillW = Math.abs(normalizedScore) * barW / 2;
+            ctx.fillStyle = score >= 0 ? '#8A9A5B' : '#e74c3c';
+            if (score >= 0) ctx.fillRect(center, barY, fillW, barH);
+            else ctx.fillRect(center - fillW, barY, fillW, barH);
+
+            // Center line
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(center, barY);
+            ctx.lineTo(center, barY + barH);
+            ctx.stroke();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 0.7rem "Segoe UI", system-ui, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(score >= 0 ? '+' + Math.round(score) : Math.round(score), center, barY + barH / 2);
+            ctx.textAlign = 'left';
+
+            // White/Black labels
+            ctx.fillStyle = '#666';
+            ctx.font = '0.55rem "Segoe UI", system-ui, sans-serif';
+            ctx.fillText('Black', evalX, barY + barH + 12);
+            ctx.textAlign = 'right';
+            ctx.fillText('White', evalX + barW, barY + barH + 12);
+            ctx.textAlign = 'left';
+        }
+
+        // Instructions
+        ctx.fillStyle = '#666';
+        ctx.font = '0.7rem "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Click a piece, then click destination to move it', W * 0.3, boardY + cellSize * 8 + 24);
+
+        requestAnimationFrame(draw);
+    }
+
+    window.reset = function() { randomizeBoard(); };
+    initBoard();
+    recalculate();
+    setEvalFn('combined');
+    draw();
+    </script>
+</body>
+</html>

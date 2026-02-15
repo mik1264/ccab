@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Adaptive Transport - Mycelium Networks</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+canvas { display: block; }
+
+.controls {
+    position: fixed; top: 16px; right: 16px; z-index: 100;
+    background: rgba(10,14,26,0.88); backdrop-filter: blur(10px);
+    border-radius: 12px; padding: 16px; min-width: 210px;
+    border: 1px solid rgba(138,154,91,0.25);
+}
+.controls h3 { font-size: 13px; color: #8A9A5B; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+.controls label { display: block; font-size: 12px; color: #9a9a7a; margin-top: 8px; }
+.controls input[type=range] { width: 100%; margin: 4px 0; accent-color: #8A9A5B; }
+.controls .value { font-size: 11px; color: #606C38; text-align: right; }
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 14px; border: none; border-radius: 6px;
+    background: rgba(96,108,56,0.3); color: #8A9A5B; font-size: 12px; cursor: pointer;
+    transition: background 0.2s; border: 1px solid rgba(138,154,91,0.2);
+}
+.btn:hover { background: rgba(96,108,56,0.5); }
+.btn-row { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 4px; }
+
+.info {
+    position: fixed; bottom: 16px; left: 16px; z-index: 100;
+    background: rgba(10,14,26,0.88); backdrop-filter: blur(10px);
+    border-radius: 12px; padding: 14px 18px; max-width: 380px;
+    border: 1px solid rgba(138,154,91,0.25); font-size: 12px; color: #9a9a7a; line-height: 1.6;
+}
+.info h4 { color: #8A9A5B; margin-bottom: 6px; }
+.info em { color: #DDA15E; font-style: normal; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Adaptive Transport</h3>
+    <label>Flow Feedback</label>
+    <input type="range" id="feedback" min="0.5" max="3" step="0.1" value="1.5">
+    <div class="value" id="feedbackVal">1.5</div>
+    <label>Tube Decay</label>
+    <input type="range" id="decay" min="0.001" max="0.05" step="0.001" value="0.01">
+    <div class="value" id="decayVal">0.010</div>
+    <label>Viscosity</label>
+    <input type="range" id="viscosity" min="0.1" max="2" step="0.1" value="0.5">
+    <div class="value" id="viscVal">0.5</div>
+    <div class="btn-row">
+        <button class="btn" onclick="window.reset()">Reset</button>
+        <button class="btn" onclick="addObstacle()">Add Obstacle</button>
+        <button class="btn" onclick="clearObstacles()">Clear Obstacles</button>
+    </div>
+    <p style="font-size:11px;color:#606C38;margin-top:8px;">Click to add/move food sources. Right-click to add obstacle.</p>
+</div>
+
+<div class="info">
+    <h4>Physarum Adaptive Transport</h4>
+    <p>Based on Tero et al.'s model: the plasmodium is an array of tubes. Flow through each tube follows <em>Poiseuille's law</em> (Q = D/L * dp). Tubes carrying more flow thicken (positive feedback); unused tubes decay. This simple mechanism produces near-optimal transport networks, routing around obstacles. The model has been applied to road network design and circuit layout.</p>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Graph: nodes connected by tubes
+let gNodes = [];
+let tubes = [];
+let foodNodes = [];
+let obstacles = [];
+let flowParticles = [];
+
+function dist(a, b) {
+    return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+}
+
+function intersectsObstacle(x1, y1, x2, y2) {
+    for (const o of obstacles) {
+        // Check if line segment intersects circle
+        const dx = x2 - x1, dy = y2 - y1;
+        const fx = x1 - o.x, fy = y1 - o.y;
+        const a = dx * dx + dy * dy;
+        const b = 2 * (fx * dx + fy * dy);
+        const c = fx * fx + fy * fy - o.r * o.r;
+        let disc = b * b - 4 * a * c;
+        if (disc >= 0) {
+            disc = Math.sqrt(disc);
+            const t1 = (-b - disc) / (2 * a);
+            const t2 = (-b + disc) / (2 * a);
+            if ((t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1) || (t1 < 0 && t2 > 1)) return true;
+        }
+    }
+    return false;
+}
+
+function initGraph() {
+    gNodes = [];
+    tubes = [];
+    flowParticles = [];
+
+    const spacing = 40;
+    const cols = Math.floor((W - 100) / spacing);
+    const rows = Math.floor((H - 100) / spacing);
+    const offsetX = (W - cols * spacing) / 2;
+    const offsetY = (H - rows * spacing) / 2;
+
+    // Create grid of nodes
+    for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+            const x = offsetX + c * spacing;
+            const y = offsetY + r * spacing;
+            // Skip if inside obstacle
+            let blocked = false;
+            for (const o of obstacles) {
+                if ((x - o.x) ** 2 + (y - o.y) ** 2 < o.r * o.r) { blocked = true; break; }
+            }
+            if (!blocked) {
+                gNodes.push({ x, y, pressure: 0, isFood: false, idx: gNodes.length });
+            }
+        }
+    }
+
+    // Connect nearby nodes with tubes
+    for (let i = 0; i < gNodes.length; i++) {
+        for (let j = i + 1; j < gNodes.length; j++) {
+            const d = dist(gNodes[i], gNodes[j]);
+            if (d < spacing * 1.5) {
+                if (!intersectsObstacle(gNodes[i].x, gNodes[i].y, gNodes[j].x, gNodes[j].y)) {
+                    tubes.push({
+                        a: i, b: j,
+                        conductivity: 0.5 + Math.random() * 0.5, // initial tube diameter
+                        length: d,
+                        flow: 0
+                    });
+                }
+            }
+        }
+    }
+
+    // Assign food nodes
+    for (const fn of foodNodes) {
+        let closest = 0, minD = Infinity;
+        for (let i = 0; i < gNodes.length; i++) {
+            const d = dist(gNodes[i], fn);
+            if (d < minD) { minD = d; closest = i; }
+        }
+        gNodes[closest].isFood = true;
+        gNodes[closest].pressure = fn.pressure;
+    }
+}
+
+function defaultFood() {
+    foodNodes = [];
+    const cx = W / 2, cy = H / 2;
+    const r = Math.min(W, H) * 0.3;
+    // Two food sources on opposite sides
+    foodNodes.push({ x: cx - r, y: cy, pressure: 1.0 });
+    foodNodes.push({ x: cx + r, y: cy, pressure: -1.0 });
+    // Add some intermediate
+    foodNodes.push({ x: cx, y: cy - r * 0.7, pressure: 0.5 });
+    foodNodes.push({ x: cx, y: cy + r * 0.7, pressure: -0.5 });
+}
+
+function addObstacle() {
+    obstacles.push({
+        x: W * 0.3 + Math.random() * W * 0.4,
+        y: H * 0.3 + Math.random() * H * 0.4,
+        r: 30 + Math.random() * 40
+    });
+    initGraph();
+}
+
+function clearObstacles() {
+    obstacles = [];
+    initGraph();
+}
+
+canvas.addEventListener('click', (e) => {
+    if (e.target !== canvas) return;
+    // Find nearest food or add new one
+    let nearestFoodIdx = -1;
+    let minD = 30;
+    for (let i = 0; i < foodNodes.length; i++) {
+        const d = dist(foodNodes[i], { x: e.clientX, y: e.clientY });
+        if (d < minD) { minD = d; nearestFoodIdx = i; }
+    }
+    if (nearestFoodIdx >= 0) {
+        // Move existing food
+        foodNodes[nearestFoodIdx].x = e.clientX;
+        foodNodes[nearestFoodIdx].y = e.clientY;
+    } else {
+        foodNodes.push({
+            x: e.clientX, y: e.clientY,
+            pressure: foodNodes.length % 2 === 0 ? 0.8 : -0.8
+        });
+    }
+    initGraph();
+});
+
+canvas.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    obstacles.push({ x: e.clientX, y: e.clientY, r: 30 + Math.random() * 20 });
+    initGraph();
+});
+
+function solvePressure() {
+    // Simplified pressure solve: iterative relaxation
+    const viscosity = parseFloat(document.getElementById('viscosity').value);
+
+    for (let iter = 0; iter < 10; iter++) {
+        for (let i = 0; i < gNodes.length; i++) {
+            if (gNodes[i].isFood) continue;
+
+            let sumFlow = 0;
+            let sumConductivity = 0;
+            for (const t of tubes) {
+                let other = -1;
+                if (t.a === i) other = t.b;
+                else if (t.b === i) other = t.a;
+                if (other < 0) continue;
+                const c = t.conductivity / (t.length * viscosity);
+                sumFlow += c * gNodes[other].pressure;
+                sumConductivity += c;
+            }
+            if (sumConductivity > 0) {
+                gNodes[i].pressure = sumFlow / sumConductivity;
+            }
+        }
+    }
+
+    // Compute flow in each tube
+    for (const t of tubes) {
+        const dp = gNodes[t.a].pressure - gNodes[t.b].pressure;
+        t.flow = (t.conductivity / (t.length * viscosity)) * dp;
+    }
+}
+
+function adaptTubes() {
+    const feedback = parseFloat(document.getElementById('feedback').value);
+    const decay = parseFloat(document.getElementById('decay').value);
+
+    document.getElementById('feedbackVal').textContent = feedback.toFixed(1);
+    document.getElementById('decayVal').textContent = decay.toFixed(3);
+    document.getElementById('viscVal').textContent = parseFloat(document.getElementById('viscosity').value).toFixed(1);
+
+    for (const t of tubes) {
+        const absFlow = Math.abs(t.flow);
+        // Positive feedback: tubes with more flow grow
+        const growth = absFlow ** feedback;
+        t.conductivity += growth * 0.05;
+        // Decay
+        t.conductivity -= decay;
+        t.conductivity = Math.max(0.01, Math.min(5, t.conductivity));
+    }
+
+    // Prune very thin tubes (< threshold)
+    tubes = tubes.filter(t => t.conductivity > 0.02);
+
+    // Spawn flow particles along high-flow tubes
+    for (const t of tubes) {
+        if (Math.abs(t.flow) > 0.05 && Math.random() < Math.abs(t.flow) * 0.3) {
+            const from = t.flow > 0 ? gNodes[t.a] : gNodes[t.b];
+            const to = t.flow > 0 ? gNodes[t.b] : gNodes[t.a];
+            flowParticles.push({
+                x: from.x, y: from.y,
+                toX: to.x, toY: to.y,
+                t: 0, speed: 0.02 + Math.abs(t.flow) * 0.03
+            });
+        }
+    }
+
+    flowParticles = flowParticles.filter(p => {
+        p.t += p.speed;
+        return p.t < 1;
+    });
+    if (flowParticles.length > 500) flowParticles = flowParticles.slice(-400);
+}
+
+function draw() {
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0, 0, W, H);
+
+    // Obstacles
+    for (const o of obstacles) {
+        ctx.fillStyle = 'rgba(60,50,40,0.6)';
+        ctx.beginPath();
+        ctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(80,70,50,0.4)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+
+    // Tubes
+    for (const t of tubes) {
+        const alpha = Math.min(0.9, 0.05 + t.conductivity * 0.3);
+        const width = Math.max(0.3, t.conductivity * 2);
+        const flow = Math.abs(t.flow);
+
+        // Color based on flow intensity
+        const hue = 75; // sage
+        const sat = 30 + Math.min(50, flow * 200);
+        const light = 25 + Math.min(40, t.conductivity * 15);
+
+        ctx.strokeStyle = `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        ctx.moveTo(gNodes[t.a].x, gNodes[t.a].y);
+        ctx.lineTo(gNodes[t.b].x, gNodes[t.b].y);
+        ctx.stroke();
+    }
+
+    // Flow particles
+    for (const p of flowParticles) {
+        const x = p.x + (p.toX - p.x) * p.t;
+        const y = p.y + (p.toY - p.y) * p.t;
+        const alpha = Math.sin(p.t * Math.PI) * 0.8;
+        ctx.fillStyle = `rgba(221,161,94,${alpha})`;
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Food nodes
+    for (const fn of foodNodes) {
+        const color = fn.pressure > 0 ? 'rgba(138,154,91,0.9)' : 'rgba(221,161,94,0.9)';
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(fn.x, fn.y, 8, 0, Math.PI * 2);
+        ctx.fill();
+
+        const glow = ctx.createRadialGradient(fn.x, fn.y, 0, fn.x, fn.y, 25);
+        glow.addColorStop(0, fn.pressure > 0 ? 'rgba(138,154,91,0.2)' : 'rgba(221,161,94,0.2)');
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(fn.x, fn.y, 25, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = 'rgba(254,250,224,0.7)';
+        ctx.font = '10px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(fn.pressure > 0 ? 'Source' : 'Sink', fn.x, fn.y + 20);
+    }
+
+    // Legend
+    ctx.fillStyle = 'rgba(138,154,91,0.4)';
+    ctx.font = '11px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Tube thickness = conductivity | Flow particles show transport direction', W / 2, H - 20);
+}
+
+let animId;
+function animate() {
+    solvePressure();
+    adaptTubes();
+    draw();
+    animId = requestAnimationFrame(animate);
+}
+
+window.reset = function() {
+    cancelAnimationFrame(animId);
+    if (foodNodes.length === 0) defaultFood();
+    initGraph();
+    animate();
+};
+
+defaultFood();
+window.reset();
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

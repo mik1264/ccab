@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Train Dispatcher - Railway Operations</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,50,0.9); backdrop-filter: blur(10px);
+            padding: 12px 20px; border-radius: 12px; display: flex; gap: 14px;
+            align-items: center; z-index: 100; border: 1px solid rgba(138,154,91,0.3);
+            flex-wrap: wrap; justify-content: center;
+        }
+        #controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 6px 14px;
+            border-radius: 8px; cursor: pointer; font-size: 0.85rem;
+        }
+        #controls button:hover { background: #8A9A5B; }
+        #controls button.danger { background: #c0392b; }
+        #controls label { color: #FEFAE0; font-size: 0.85rem; }
+        #controls input[type=range] { width: 90px; accent-color: #8A9A5B; }
+        #dispatch {
+            position: fixed; top: 10px; right: 10px; background: rgba(15,15,30,0.95);
+            backdrop-filter: blur(10px); padding: 14px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; min-width: 240px;
+            max-height: 300px; overflow-y: auto;
+            border: 2px solid rgba(138,154,91,0.4);
+        }
+        #dispatch h3 { color: #DDA15E; margin-bottom: 8px; }
+        .train-entry { padding: 4px 0; border-bottom: 1px solid rgba(138,154,91,0.1); }
+        .train-entry .name { font-weight: bold; }
+        .on-time { color: #2ecc71; }
+        .delayed { color: #f1c40f; }
+        .late { color: #e74c3c; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div id="dispatch">
+        <h3>Dispatch Board</h3>
+        <div id="trainList"></div>
+    </div>
+    <div id="controls">
+        <button id="addDelay" class="danger">Inject Delay</button>
+        <button id="addTrain">Add Train</button>
+        <label>Sim Speed: <span id="simSpeedVal">2</span>x
+            <input type="range" id="simSpeedCtrl" min="1" max="10" value="2">
+        </label>
+        <button id="resetBtn">Reset</button>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let paused = false;
+        let simSpeed = 2;
+        let simTime = 0; // minutes
+
+        const COLORS = {
+            sage: '#8A9A5B', moss: '#606C38', earth: '#DDA15E', cream: '#FEFAE0',
+            red: '#e74c3c', yellow: '#f1c40f', green: '#2ecc71', blue: '#3498db'
+        };
+
+        // Network: simple corridor with 6 stations, double track with 2 passing loops
+        const stations = [
+            { name: 'Alpha', km: 0 },
+            { name: 'Bravo', km: 20 },
+            { name: 'Charlie', km: 45, siding: true },
+            { name: 'Delta', km: 65 },
+            { name: 'Echo', km: 85, siding: true },
+            { name: 'Foxtrot', km: 110 }
+        ];
+
+        const LINE_KM = 110;
+        let trains = [];
+        let trainIdCounter = 0;
+        let alerts = [];
+
+        const trainDefs = [
+            { type: 'express', speed: 140, color: COLORS.red, stops: [0, 5] },
+            { type: 'intercity', speed: 110, color: COLORS.earth, stops: [0, 2, 4, 5] },
+            { type: 'local', speed: 80, color: COLORS.sage, stops: [0, 1, 2, 3, 4, 5] },
+            { type: 'freight', speed: 60, color: '#7f8c8d', stops: [] }
+        ];
+
+        function createTrain(direction, typeIdx) {
+            if (typeIdx === undefined) typeIdx = Math.floor(Math.random() * trainDefs.length);
+            const def = trainDefs[typeIdx];
+            const id = ++trainIdCounter;
+            const scheduledDepart = simTime + Math.random() * 5;
+
+            return {
+                id,
+                name: def.type.charAt(0).toUpperCase() + id,
+                type: def.type,
+                speed: def.speed,
+                color: def.color,
+                direction, // 1 = east, -1 = west
+                km: direction === 1 ? 0 : LINE_KM,
+                scheduledKm: direction === 1 ? 0 : LINE_KM,
+                delay: 0,
+                state: 'running', // running, stopped, waiting
+                dwellTimer: 0,
+                stops: direction === 1 ? [...def.stops] : [...def.stops].reverse(),
+                nextStopIdx: 0,
+                departed: scheduledDepart,
+                waitingFor: null
+            };
+        }
+
+        function init() {
+            trains = [];
+            trainIdCounter = 0;
+            simTime = 0;
+            alerts = [];
+
+            // Create initial schedule
+            for (let i = 0; i < 3; i++) {
+                trains.push(createTrain(1, i));
+            }
+            for (let i = 0; i < 2; i++) {
+                trains.push(createTrain(-1, i));
+            }
+        }
+
+        function findConflict(train) {
+            for (let other of trains) {
+                if (other.id === train.id) continue;
+                if (other.direction === train.direction) continue;
+                // Opposing direction - check if on same track section
+                const dist = Math.abs(other.km - train.km);
+                if (dist < 5) {
+                    return other;
+                }
+            }
+            return null;
+        }
+
+        function getNearestSiding(km) {
+            let minDist = Infinity;
+            let nearest = null;
+            for (let s of stations) {
+                if (s.siding) {
+                    const d = Math.abs(s.km - km);
+                    if (d < minDist) { minDist = d; nearest = s; }
+                }
+            }
+            return nearest;
+        }
+
+        function update(dt) {
+            const dtMin = dt * simSpeed;
+            simTime += dtMin;
+
+            // Spawn new trains periodically
+            if (Math.random() < 0.002 * simSpeed) {
+                const dir = Math.random() < 0.5 ? 1 : -1;
+                trains.push(createTrain(dir));
+            }
+
+            for (let t of trains) {
+                if (t.state === 'stopped') {
+                    t.dwellTimer -= dtMin;
+                    if (t.dwellTimer <= 0) {
+                        t.state = 'running';
+                        t.nextStopIdx++;
+                    }
+                    continue;
+                }
+
+                if (t.state === 'waiting') {
+                    // Check if conflict resolved
+                    const conflict = findConflict(t);
+                    if (!conflict || Math.abs(conflict.km - t.km) > 8) {
+                        t.state = 'running';
+                        t.waitingFor = null;
+                    }
+                    continue;
+                }
+
+                // Move train
+                const speedKmPerMin = t.speed / 60;
+                t.km += t.direction * speedKmPerMin * dtMin;
+
+                // Check for station stops
+                if (t.nextStopIdx < t.stops.length) {
+                    const stopStation = stations[t.stops[t.nextStopIdx]];
+                    if (stopStation && Math.abs(t.km - stopStation.km) < 1) {
+                        t.state = 'stopped';
+                        t.dwellTimer = 1 + Math.random() * 2;
+                        t.km = stopStation.km;
+                    }
+                }
+
+                // Check for conflicts (opposing trains)
+                const conflict = findConflict(t);
+                if (conflict) {
+                    // Lower priority train yields
+                    const tPriority = trainDefs.findIndex(d => d.type === t.type);
+                    const cPriority = trainDefs.findIndex(d => d.type === conflict.type);
+                    if (tPriority >= cPriority) {
+                        // This train yields - find nearest siding
+                        const siding = getNearestSiding(t.km);
+                        if (siding) {
+                            t.state = 'waiting';
+                            t.waitingFor = conflict.name;
+                            t.delay += 2;
+                            addAlert(t.name + ' waiting for ' + conflict.name + ' at ' + siding.name);
+                        }
+                    }
+                }
+
+                // Update scheduled position for delay calculation
+                t.scheduledKm += t.direction * speedKmPerMin * dtMin;
+                const scheduleDiff = Math.abs(t.km - t.scheduledKm);
+                t.delay = scheduleDiff / speedKmPerMin; // delay in minutes
+
+                // Remove completed trains
+                if ((t.direction === 1 && t.km >= LINE_KM) || (t.direction === -1 && t.km <= 0)) {
+                    t.state = 'completed';
+                }
+            }
+
+            trains = trains.filter(t => t.state !== 'completed');
+            updateDispatchBoard();
+        }
+
+        function addAlert(msg) {
+            alerts.unshift({ msg, time: simTime });
+            if (alerts.length > 8) alerts.pop();
+        }
+
+        function updateDispatchBoard() {
+            const list = document.getElementById('trainList');
+            list.innerHTML = trains.map(t => {
+                const delayClass = t.delay < 1 ? 'on-time' : t.delay < 3 ? 'delayed' : 'late';
+                const delayText = t.delay < 0.5 ? 'On time' : '+' + t.delay.toFixed(1) + 'min';
+                const dirArrow = t.direction === 1 ? '\u2192' : '\u2190';
+                const stateText = t.state === 'waiting' ? ' [WAIT]' : t.state === 'stopped' ? ' [STOP]' : '';
+                return '<div class="train-entry">' +
+                    '<span class="name" style="color:' + t.color + '">' + t.name + '</span> ' +
+                    dirArrow + ' ' + t.type +
+                    ' <span class="' + delayClass + '">' + delayText + '</span>' +
+                    '<span style="color:#888">' + stateText + '</span>' +
+                    '<br><small style="color:#666">km ' + t.km.toFixed(1) + ' | ' + t.speed + ' km/h</small>' +
+                    '</div>';
+            }).join('');
+        }
+
+        function drawNetwork() {
+            const trackY1 = H * 0.4;
+            const trackY2 = H * 0.5;
+            const startX = W * 0.08;
+            const endX = W * 0.88;
+            const trackLen = endX - startX;
+
+            function kmToX(km) { return startX + (km / LINE_KM) * trackLen; }
+
+            // Track bed
+            ctx.fillStyle = '#2a2a44';
+            ctx.fillRect(startX - 10, trackY1 - 3, trackLen + 20, trackY2 - trackY1 + 6);
+
+            // Rails
+            for (let y of [trackY1, trackY2]) {
+                ctx.strokeStyle = '#555577';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(startX, y);
+                ctx.lineTo(endX, y);
+                ctx.stroke();
+            }
+
+            // Track labels
+            ctx.fillStyle = COLORS.cream + '40';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText('Eastbound \u2192', startX - 5, trackY1 + 4);
+            ctx.fillText('\u2190 Westbound', startX - 5, trackY2 + 4);
+
+            // Stations
+            for (let s of stations) {
+                const x = kmToX(s.km);
+
+                // Station marker
+                ctx.fillStyle = s.siding ? COLORS.earth : COLORS.cream + '80';
+                ctx.fillRect(x - 2, trackY1 - 20, 4, trackY2 - trackY1 + 40);
+
+                // Siding track
+                if (s.siding) {
+                    ctx.strokeStyle = COLORS.earth + '60';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(x - 30, trackY1);
+                    ctx.quadraticCurveTo(x - 15, trackY1 - 18, x, trackY1 - 18);
+                    ctx.quadraticCurveTo(x + 15, trackY1 - 18, x + 30, trackY1);
+                    ctx.stroke();
+                    ctx.fillStyle = COLORS.earth + '40';
+                    ctx.font = '9px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Siding', x, trackY1 - 24);
+                }
+
+                // Station name
+                ctx.fillStyle = COLORS.cream;
+                ctx.font = 'bold 11px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(s.name, x, trackY2 + 32);
+                ctx.fillStyle = COLORS.cream + '60';
+                ctx.font = '9px sans-serif';
+                ctx.fillText(s.km + ' km', x, trackY2 + 44);
+            }
+
+            // Draw trains
+            for (let t of trains) {
+                const x = kmToX(t.km);
+                const y = t.direction === 1 ? trackY1 : trackY2;
+
+                // Train body
+                ctx.fillStyle = t.color;
+                const tw = 30;
+                ctx.beginPath();
+                ctx.roundRect(x - tw / 2, y - 8, tw, 16, 3);
+                ctx.fill();
+
+                // State indicator
+                if (t.state === 'waiting') {
+                    ctx.strokeStyle = COLORS.red;
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([3, 3]);
+                    ctx.beginPath();
+                    ctx.arc(x, y, 16, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                } else if (t.state === 'stopped') {
+                    ctx.fillStyle = COLORS.yellow + '60';
+                    ctx.beginPath();
+                    ctx.arc(x, y, 14, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // Label
+                ctx.fillStyle = COLORS.cream;
+                ctx.font = 'bold 9px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(t.name, x, y + (t.direction === 1 ? -14 : 24));
+
+                // Delay marker
+                if (t.delay > 1) {
+                    ctx.fillStyle = t.delay > 3 ? COLORS.red : COLORS.yellow;
+                    ctx.font = '8px sans-serif';
+                    ctx.fillText('+' + t.delay.toFixed(0) + 'm', x + 20, y + 4);
+                }
+            }
+
+            // Km markers
+            for (let km = 0; km <= LINE_KM; km += 10) {
+                const x = kmToX(km);
+                ctx.fillStyle = COLORS.cream + '20';
+                ctx.fillRect(x, trackY2 + 16, 1, 5);
+            }
+        }
+
+        function drawAlerts() {
+            const x = 20, y = H * 0.65;
+            ctx.fillStyle = COLORS.earth;
+            ctx.font = 'bold 11px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Dispatcher Alerts', x, y);
+
+            alerts.forEach((a, i) => {
+                const age = simTime - a.time;
+                const alpha = Math.max(0.3, 1 - age / 30);
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = COLORS.yellow;
+                ctx.font = '10px sans-serif';
+                ctx.fillText('\u26a0 ' + a.msg, x, y + 16 + i * 14);
+            });
+            ctx.globalAlpha = 1;
+        }
+
+        function drawTimeClock() {
+            const hrs = Math.floor(simTime / 60) + 6; // Start at 06:00
+            const mins = Math.floor(simTime % 60);
+            const timeStr = hrs.toString().padStart(2, '0') + ':' + mins.toString().padStart(2, '0');
+
+            ctx.fillStyle = COLORS.cream;
+            ctx.font = 'bold 24px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(timeStr, W / 2, H * 0.75);
+            ctx.font = '11px sans-serif';
+            ctx.fillStyle = COLORS.cream + '60';
+            ctx.fillText('Simulation Time', W / 2, H * 0.75 + 18);
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.fillStyle = COLORS.earth;
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Train Dispatcher Console', W / 2, 35);
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '13px sans-serif';
+            ctx.fillText('Real-time train dispatching with conflict resolution and delay propagation', W / 2, 55);
+
+            drawNetwork();
+            drawAlerts();
+            drawTimeClock();
+        }
+
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        window.addEventListener('resize', resize);
+        resize();
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.1);
+            lastTime = time;
+            if (!paused) update(dt);
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('addDelay').addEventListener('click', function() {
+            if (trains.length > 0) {
+                const t = trains[Math.floor(Math.random() * trains.length)];
+                t.delay += 5 + Math.random() * 10;
+                t.speed *= 0.6;
+                addAlert('DELAY: ' + t.name + ' reduced to ' + t.speed.toFixed(0) + ' km/h');
+            }
+        });
+
+        document.getElementById('addTrain').addEventListener('click', function() {
+            const dir = Math.random() < 0.5 ? 1 : -1;
+            trains.push(createTrain(dir));
+        });
+
+        document.getElementById('simSpeedCtrl').addEventListener('input', function() {
+            simSpeed = parseInt(this.value);
+            document.getElementById('simSpeedVal').textContent = this.value;
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', function() { window.reset(); });
+
+        window.reset = function() {
+            simSpeed = 2;
+            document.getElementById('simSpeedCtrl').value = 2;
+            document.getElementById('simSpeedVal').textContent = '2';
+            init();
+        };
+
+        window.addEventListener('enhanceReady', function() {
+            if (window.enhance) { window.enhance.onPause = function(p) { paused = p; }; }
+        });
+
+        init();
+        requestAnimationFrame(animate);
+    })();
+    </script>
+</body>
+</html>

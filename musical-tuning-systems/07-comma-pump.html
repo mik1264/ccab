@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Comma Pump - Musical Tuning Systems</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .info-panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(26,26,46,0.85);
+            backdrop-filter: blur(10px); border: 1px solid #8A9A5B; border-radius: 12px;
+            padding: 15px; max-width: 310px; z-index: 1000; font-size: 0.82rem; line-height: 1.4;
+        }
+        .info-panel h2 { color: #DDA15E; margin-bottom: 8px; font-size: 1rem; }
+        .info-panel p { color: #FEFAE0; opacity: 0.8; margin-bottom: 6px; }
+        .controls {
+            position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 8px; z-index: 1000; flex-wrap: wrap; justify-content: center;
+        }
+        .controls button {
+            background: rgba(96,108,56,0.7); border: 1px solid #8A9A5B; color: #FEFAE0;
+            padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.82rem;
+            transition: all 0.2s;
+        }
+        .controls button:hover { background: rgba(138,154,91,0.8); }
+        .controls button.active { background: #DDA15E; color: #1a1a2e; }
+        .note-display {
+            position: fixed; bottom: 65px; left: 50%; transform: translateX(-50%);
+            color: #DDA15E; font-size: 0.9rem; z-index: 1000; text-align: center;
+            background: rgba(26,26,46,0.7); padding: 6px 16px; border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info-panel">
+        <h2>The Comma Pump</h2>
+        <p>In just intonation, the chord progression I-vi-ii-V-I should return to the starting pitch. But it doesn't!</p>
+        <p>Each cycle drifts down by a <strong>syntonic comma</strong> (81:80, ~21.5 cents). After a few cycles, the drift is clearly audible.</p>
+        <p>This is why equal temperament was invented -- to prevent pitch drift in common progressions.</p>
+    </div>
+    <div class="note-display" id="noteDisplay">Press Play to hear the comma pump</div>
+    <div class="controls">
+        <button id="btnJust" class="active">Just Intonation (drifting)</button>
+        <button id="btnEqual">Equal Temperament (stable)</button>
+        <button id="btnPlay">Play Comma Pump</button>
+        <button id="btnStop">Stop</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const noteDisplay = document.getElementById('noteDisplay');
+        let W, H;
+        let audioCtx = null;
+        let activeOscs = [];
+        let animTime = 0;
+        let mode = 'just';
+        let currentChord = 0;
+        let currentCycle = 0;
+        let isPlaying = false;
+        let driftCents = 0;
+        let chordTimer = null;
+        let chordHistory = [];
+
+        const syntonicComma = 1200 * Math.log2(81/80); // ~21.51 cents
+
+        // Chord progression: I - vi - ii - V - I
+        const chordNames = ['I (C)', 'vi (Am)', 'ii (Dm)', 'V (G)', 'I (C)'];
+        const chordColors = ['#8A9A5B', '#606C38', '#BC6C25', '#DDA15E', '#8A9A5B'];
+
+        // Just intonation ratios relative to current reference
+        // I = 1:1, 5:4, 3:2
+        // vi = 5:3, 1:1, 5:4 (relative to root being 5/3)
+        // ii = 9:8, 4:3, 5:3
+        // V = 3:2, 15:8, 9:4
+        // I (return) = 1:1 (but actually 80/81 of original due to syntonic comma)
+
+        function getJustChordFreqs(chordIdx, baseC) {
+            switch (chordIdx) {
+                case 0: return [baseC, baseC * 5/4, baseC * 3/2]; // C major
+                case 1: return [baseC * 5/3, baseC * 2, baseC * 5/2]; // A minor
+                case 2: return [baseC * 9/8, baseC * 4/3, baseC * 5/3]; // D minor
+                case 3: return [baseC * 3/2, baseC * 15/8, baseC * 9/4]; // G major
+                case 4: return [baseC * 2 * 80/81, baseC * 2 * 80/81 * 5/4, baseC * 2 * 80/81 * 3/2]; // C major (drifted)
+                default: return [baseC, baseC * 5/4, baseC * 3/2];
+            }
+        }
+
+        function getEqualChordFreqs(chordIdx, baseC) {
+            const semitone = Math.pow(2, 1/12);
+            switch (chordIdx) {
+                case 0: return [baseC, baseC * semitone**4, baseC * semitone**7];
+                case 1: return [baseC * semitone**9, baseC * semitone**12, baseC * semitone**16];
+                case 2: return [baseC * semitone**2, baseC * semitone**5, baseC * semitone**9];
+                case 3: return [baseC * semitone**7, baseC * semitone**11, baseC * semitone**14];
+                case 4: return [baseC * 2, baseC * 2 * semitone**4, baseC * 2 * semitone**7];
+                default: return [baseC, baseC * semitone**4, baseC * semitone**7];
+            }
+        }
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        function stopAll() {
+            activeOscs.forEach(o => { try { o.gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.05); o.osc.stop(audioCtx.currentTime + 0.1); } catch(e){} });
+            activeOscs = [];
+            if (chordTimer) { clearTimeout(chordTimer); chordTimer = null; }
+            isPlaying = false;
+        }
+
+        function playChord(freqs, duration) {
+            // Stop previous chord
+            activeOscs.forEach(o => { try { o.gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.05); o.osc.stop(audioCtx.currentTime + 0.1); } catch(e){} });
+            activeOscs = [];
+
+            freqs.forEach(f => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'triangle';
+                osc.frequency.value = f;
+                gain.gain.value = 0;
+                gain.gain.linearRampToValueAtTime(0.12, audioCtx.currentTime + 0.03);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                activeOscs.push({ osc, gain });
+            });
+        }
+
+        function startPump() {
+            initAudio();
+            stopAll();
+            isPlaying = true;
+            currentChord = 0;
+            currentCycle = 0;
+            driftCents = 0;
+            chordHistory = [];
+            nextChord();
+        }
+
+        function nextChord() {
+            if (!isPlaying) return;
+
+            let baseC = 261.63; // C4
+            if (mode === 'just') {
+                // Apply drift from previous cycles
+                baseC = baseC * Math.pow(80/81, currentCycle);
+            }
+
+            const freqs = mode === 'just'
+                ? getJustChordFreqs(currentChord, baseC)
+                : getEqualChordFreqs(currentChord, baseC);
+
+            playChord(freqs, 800);
+
+            if (mode === 'just') {
+                driftCents = currentCycle * syntonicComma + (currentChord === 4 ? syntonicComma : 0);
+            }
+
+            chordHistory.push({
+                name: chordNames[currentChord],
+                color: chordColors[currentChord],
+                drift: driftCents,
+                cycle: currentCycle,
+                freqs: freqs.map(f => f.toFixed(1))
+            });
+            if (chordHistory.length > 25) chordHistory.shift();
+
+            noteDisplay.textContent = `${chordNames[currentChord]} | Cycle ${currentCycle + 1} | Drift: ${driftCents.toFixed(1)} cents ${mode === 'just' ? '(drifting!)' : '(stable)'}`;
+
+            currentChord++;
+            if (currentChord >= 5) {
+                currentChord = 0;
+                currentCycle++;
+                if (currentCycle >= 5) {
+                    // Reset after 5 cycles
+                    chordTimer = setTimeout(() => {
+                        noteDisplay.textContent = mode === 'just'
+                            ? `After 5 cycles: drifted ${(5 * syntonicComma).toFixed(1)} cents (~1 semitone!)`
+                            : 'After 5 cycles: no drift at all (equal temperament)';
+                        stopAll();
+                    }, 800);
+                    return;
+                }
+            }
+
+            chordTimer = setTimeout(nextChord, 800);
+        }
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            // Title
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = 'bold 18px "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('THE COMMA PUMP: PITCH DRIFT IN JUST INTONATION', W / 2, 40);
+
+            // Chord progression diagram
+            const progY = 80;
+            const progW = W * 0.6;
+            const progX = (W - progW) / 2;
+            const boxW = progW / 5;
+
+            for (let i = 0; i < 5; i++) {
+                const x = progX + i * boxW;
+                const isActive = isPlaying && currentChord === i;
+
+                ctx.fillStyle = isActive ? chordColors[i] : 'rgba(255,255,255,0.05)';
+                ctx.strokeStyle = chordColors[i];
+                ctx.lineWidth = isActive ? 3 : 1;
+                ctx.beginPath();
+                ctx.roundRect(x + 5, progY, boxW - 10, 50, 8);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = isActive ? '#1a1a2e' : '#FEFAE0';
+                ctx.font = `${isActive ? 'bold ' : ''}14px 'Segoe UI', sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.fillText(chordNames[i], x + boxW / 2, progY + 22);
+                ctx.font = '10px "Segoe UI", sans-serif';
+                ctx.fillText(i < 4 ? String.fromCharCode(8594) : String.fromCharCode(8635), x + boxW - 5, progY + 45);
+            }
+
+            // Drift visualization
+            const driftY = 180;
+            const driftH = H - 280;
+            const driftW = W * 0.6;
+            const driftX = (W - driftW) / 2;
+
+            // Draw pitch level lines
+            for (let i = 0; i <= 5; i++) {
+                const y = driftY + (i / 5) * driftH;
+                ctx.strokeStyle = i === 0 ? 'rgba(138,154,91,0.5)' : 'rgba(255,255,255,0.1)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash(i === 0 ? [] : [3, 3]);
+                ctx.beginPath();
+                ctx.moveTo(driftX, y);
+                ctx.lineTo(driftX + driftW, y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                if (i > 0) {
+                    ctx.fillStyle = 'rgba(254,250,224,0.3)';
+                    ctx.font = '10px "Segoe UI", sans-serif';
+                    ctx.textAlign = 'right';
+                    ctx.fillText(`-${(i * syntonicComma).toFixed(0)}c`, driftX - 8, y + 4);
+                }
+            }
+
+            ctx.fillStyle = 'rgba(138,154,91,0.5)';
+            ctx.textAlign = 'right';
+            ctx.fillText('Starting pitch', driftX - 8, driftY + 4);
+
+            // Draw chord history as connected dots
+            if (chordHistory.length > 1) {
+                ctx.beginPath();
+                ctx.strokeStyle = mode === 'just' ? 'rgba(221,161,94,0.6)' : 'rgba(138,154,91,0.6)';
+                ctx.lineWidth = 2;
+                chordHistory.forEach((ch, i) => {
+                    const x = driftX + (i / 24) * driftW;
+                    const maxDrift = 5 * syntonicComma;
+                    const y = driftY + (ch.drift / maxDrift) * driftH;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+
+                // Dots
+                chordHistory.forEach((ch, i) => {
+                    const x = driftX + (i / 24) * driftW;
+                    const maxDrift = 5 * syntonicComma;
+                    const y = driftY + (ch.drift / maxDrift) * driftH;
+                    ctx.beginPath();
+                    ctx.arc(x, y, i === chordHistory.length - 1 ? 6 : 3, 0, Math.PI * 2);
+                    ctx.fillStyle = ch.color;
+                    ctx.fill();
+                });
+            }
+
+            // Syntonic comma explanation
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = 'bold 12px "Segoe UI", sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Syntonic Comma: 81:80 = ${syntonicComma.toFixed(2)} cents per cycle`, driftX, H - 110);
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '11px "Segoe UI", sans-serif';
+            ctx.fillText('The difference between four just fifths (3:2)^4 and two octaves + a just major third (4 * 5:4)', driftX, H - 93);
+        }
+
+        document.getElementById('btnJust').addEventListener('click', function() {
+            mode = 'just';
+            this.classList.add('active');
+            document.getElementById('btnEqual').classList.remove('active');
+        });
+        document.getElementById('btnEqual').addEventListener('click', function() {
+            mode = 'equal';
+            this.classList.add('active');
+            document.getElementById('btnJust').classList.remove('active');
+        });
+        document.getElementById('btnPlay').addEventListener('click', startPump);
+        document.getElementById('btnStop').addEventListener('click', () => { stopAll(); noteDisplay.textContent = 'Press Play to hear the comma pump'; });
+
+        function animate() {
+            animTime += 0.016;
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+        animate();
+
+        window.reset = function() {
+            stopAll();
+            mode = 'just';
+            currentChord = 0;
+            currentCycle = 0;
+            driftCents = 0;
+            chordHistory = [];
+            animTime = 0;
+            document.getElementById('btnJust').classList.add('active');
+            document.getElementById('btnEqual').classList.remove('active');
+            noteDisplay.textContent = 'Press Play to hear the comma pump';
+        };
+    })();
+    </script>
+</body>
+</html>

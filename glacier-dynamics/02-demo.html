@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Glacier Advance & Retreat - Glacier Dynamics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 15px; border-radius: 12px; z-index: 1000;
+            min-width: 230px; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 10px; font-size: 0.95rem; }
+        .ctrl-row { margin-bottom: 8px; }
+        .ctrl-row label { display: block; font-size: 0.8rem; color: #8A9A5B; margin-bottom: 2px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #8A9A5B; }
+        .ctrl-row .val { float: right; color: #DDA15E; font-size: 0.8rem; }
+        #info {
+            position: fixed; bottom: 10px; left: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 12px; border-radius: 12px; z-index: 1000;
+            max-width: 360px; font-size: 0.8rem; line-height: 1.4; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #info h4 { color: #DDA15E; margin-bottom: 4px; }
+        #stats {
+            position: fixed; bottom: 10px; right: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 12px; border-radius: 12px; z-index: 1000;
+            font-size: 0.8rem; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #stats span { color: #DDA15E; }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Glacier Advance &amp; Retreat</h3>
+        <div class="ctrl-row">
+            <label>Snowfall Rate <span class="val" id="snowVal">1.5</span> m/yr</label>
+            <input type="range" id="snowSlider" min="0.2" max="4" step="0.1" value="1.5">
+        </div>
+        <div class="ctrl-row">
+            <label>Temperature <span class="val" id="tempVal">-5</span> &deg;C</label>
+            <input type="range" id="tempSlider" min="-20" max="5" step="0.5" value="-5">
+        </div>
+        <div class="ctrl-row">
+            <label>Sim Speed <span class="val" id="speedVal">10</span>x</label>
+            <input type="range" id="speedSlider" min="1" max="50" step="1" value="10">
+        </div>
+    </div>
+    <div id="info">
+        <h4>1D Shallow-Ice Approximation</h4>
+        <p>A glacier grows when snowfall (accumulation) exceeds melting (ablation). The ice flows downhill under its own weight following Glen's flow law. Adjust snowfall and temperature to drive advance and retreat cycles.</p>
+    </div>
+    <div id="stats">
+        Year: <span id="yearDisp">0</span> | Length: <span id="lenDisp">0</span> m | Max Depth: <span id="depthDisp">0</span> m
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const snowSlider = document.getElementById('snowSlider');
+        const tempSlider = document.getElementById('tempSlider');
+        const speedSlider = document.getElementById('speedSlider');
+
+        // 1D glacier model
+        const N = 200; // grid points
+        const dx = 50; // 50m spacing => 10km domain
+        let thickness = new Float64Array(N);
+        let bedrock = new Float64Array(N);
+        let year = 0;
+
+        function initBedrock() {
+            for (let i = 0; i < N; i++) {
+                const x = i / N;
+                // Mountain slope: high at left, decreasing with valley
+                bedrock[i] = 3000 - 2500 * x + 200 * Math.sin(x * Math.PI * 3) * (1 - x);
+            }
+        }
+
+        function initModel() {
+            thickness.fill(0);
+            year = 0;
+            initBedrock();
+            // Seed with some ice at top
+            for (let i = 0; i < 30; i++) {
+                thickness[i] = 50 * (1 - i / 30);
+            }
+        }
+        initModel();
+
+        function stepModel(dt) {
+            const snow = parseFloat(snowSlider.value);
+            const temp = parseFloat(tempSlider.value);
+            document.getElementById('snowVal').textContent = snow.toFixed(1);
+            document.getElementById('tempVal').textContent = temp.toFixed(1);
+            document.getElementById('speedVal').textContent = speedSlider.value;
+
+            const rho = 917;
+            const g = 9.81;
+            const A = 2.4e-24; // flow rate factor
+            const n = 3;
+            const secPerYear = 3.154e7;
+
+            // Mass balance: accumulation above ELA, ablation below
+            const ELA = 2500 + temp * 100; // equilibrium line altitude in meters
+
+            const flux = new Float64Array(N + 1);
+
+            for (let i = 0; i < N - 1; i++) {
+                const surface_i = bedrock[i] + thickness[i];
+                const surface_ip1 = bedrock[i + 1] + thickness[i + 1];
+                const dsdx = (surface_ip1 - surface_i) / dx;
+                const H_avg = 0.5 * (thickness[i] + thickness[i + 1]);
+                // SIA flux: q = -2A/(n+2) * (rho*g)^n * H^(n+2) * |ds/dx|^(n-1) * ds/dx
+                const absDsdx = Math.abs(dsdx);
+                flux[i + 1] = -(2 * A / (n + 2)) * Math.pow(rho * g, n) *
+                    Math.pow(H_avg, n + 2) * Math.pow(absDsdx, n - 1) * dsdx * secPerYear;
+            }
+
+            const newThick = new Float64Array(N);
+            for (let i = 0; i < N; i++) {
+                const surface = bedrock[i] + thickness[i];
+                // Mass balance
+                let mb;
+                if (surface > ELA) {
+                    mb = snow * (1 + (surface - ELA) / 2000); // more snow higher up
+                } else {
+                    mb = snow - 0.005 * Math.pow(ELA - surface, 1.2) - (temp + 10) * 0.3;
+                }
+
+                const dqdt = (flux[i] - flux[i + 1]) / dx;
+                newThick[i] = Math.max(0, thickness[i] + (mb + dqdt) * dt);
+            }
+            thickness = newThick;
+            year += dt;
+        }
+
+        // Snowflake particles
+        let snowflakes = [];
+        function initSnow() {
+            snowflakes = [];
+            for (let i = 0; i < 80; i++) {
+                snowflakes.push({
+                    x: Math.random() * W,
+                    y: Math.random() * H,
+                    r: 1 + Math.random() * 2,
+                    vy: 0.5 + Math.random() * 1.5,
+                    vx: (Math.random() - 0.5) * 0.5
+                });
+            }
+        }
+        initSnow();
+
+        function draw() {
+            const speed = parseInt(speedSlider.value);
+            const dtPerFrame = speed * 0.1; // years per frame
+            for (let s = 0; s < 3; s++) {
+                stepModel(dtPerFrame / 3);
+            }
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const margin = { left: 60, right: 40, top: 60, bottom: 60 };
+            const gW = W - margin.left - margin.right;
+            const gH = H - margin.top - margin.bottom;
+
+            // Find elevation range
+            let minElev = Infinity, maxElev = -Infinity, maxThick = 0, glacierLen = 0;
+            for (let i = 0; i < N; i++) {
+                const surface = bedrock[i] + thickness[i];
+                if (bedrock[i] < minElev) minElev = bedrock[i];
+                if (surface > maxElev) maxElev = surface;
+                if (thickness[i] > maxThick) maxThick = thickness[i];
+                if (thickness[i] > 0.1) glacierLen = (i + 1) * dx;
+            }
+            const elevRange = maxElev - minElev + 200;
+
+            function toScreen(i, elev) {
+                const x = margin.left + (i / N) * gW;
+                const y = margin.top + gH - ((elev - minElev + 100) / elevRange) * gH;
+                return { x, y };
+            }
+
+            // Draw sky gradient
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+            skyGrad.addColorStop(0, '#0a0a1e');
+            skyGrad.addColorStop(0.5, '#1a2040');
+            skyGrad.addColorStop(1, '#2a3050');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, W, H);
+
+            // Draw bedrock
+            ctx.beginPath();
+            let first = toScreen(0, bedrock[0]);
+            ctx.moveTo(first.x, first.y);
+            for (let i = 1; i < N; i++) {
+                const p = toScreen(i, bedrock[i]);
+                ctx.lineTo(p.x, p.y);
+            }
+            const lastBed = toScreen(N - 1, bedrock[N - 1]);
+            ctx.lineTo(lastBed.x, H);
+            ctx.lineTo(first.x, H);
+            ctx.closePath();
+            const bedGrad = ctx.createLinearGradient(0, H * 0.3, 0, H);
+            bedGrad.addColorStop(0, '#5a4a3a');
+            bedGrad.addColorStop(0.5, '#3d3025');
+            bedGrad.addColorStop(1, '#2a201a');
+            ctx.fillStyle = bedGrad;
+            ctx.fill();
+
+            // Draw glacier ice
+            ctx.beginPath();
+            let started = false;
+            let firstIce = null;
+            for (let i = 0; i < N; i++) {
+                if (thickness[i] > 0.1) {
+                    const surface = bedrock[i] + thickness[i];
+                    const p = toScreen(i, surface);
+                    if (!started) {
+                        firstIce = { i, p };
+                        const bed = toScreen(i, bedrock[i]);
+                        ctx.moveTo(bed.x, bed.y);
+                        ctx.lineTo(p.x, p.y);
+                        started = true;
+                    } else {
+                        ctx.lineTo(p.x, p.y);
+                    }
+                }
+            }
+            if (started) {
+                // Close back along bedrock
+                for (let i = N - 1; i >= 0; i--) {
+                    if (thickness[i] > 0.1) {
+                        const p = toScreen(i, bedrock[i]);
+                        ctx.lineTo(p.x, p.y);
+                    }
+                }
+                ctx.closePath();
+                const iceGrad = ctx.createLinearGradient(0, margin.top, 0, H - margin.bottom);
+                iceGrad.addColorStop(0, 'rgba(200,225,255,0.9)');
+                iceGrad.addColorStop(0.5, 'rgba(140,185,230,0.85)');
+                iceGrad.addColorStop(1, 'rgba(80,130,190,0.8)');
+                ctx.fillStyle = iceGrad;
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(220,235,255,0.6)';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            // ELA line
+            const temp = parseFloat(tempSlider.value);
+            const ELA = 2500 + temp * 100;
+            if (ELA > minElev && ELA < maxElev + 200) {
+                const elaY = margin.top + gH - ((ELA - minElev + 100) / elevRange) * gH;
+                ctx.setLineDash([8, 4]);
+                ctx.strokeStyle = 'rgba(221,161,94,0.6)';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(margin.left, elaY);
+                ctx.lineTo(W - margin.right, elaY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = '#DDA15E';
+                ctx.font = '11px sans-serif';
+                ctx.fillText('ELA ' + ELA.toFixed(0) + 'm', W - margin.right + 5, elaY + 4);
+            }
+
+            // Snowflakes
+            const snowRate = parseFloat(snowSlider.value);
+            for (const sf of snowflakes) {
+                sf.y += sf.vy * (0.5 + snowRate * 0.3);
+                sf.x += sf.vx;
+                if (sf.y > H) { sf.y = -5; sf.x = Math.random() * W; }
+                if (sf.x < 0) sf.x = W;
+                if (sf.x > W) sf.x = 0;
+                ctx.fillStyle = 'rgba(255,255,255,0.6)';
+                ctx.beginPath();
+                ctx.arc(sf.x, sf.y, sf.r, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Stats
+            document.getElementById('yearDisp').textContent = Math.floor(year);
+            document.getElementById('lenDisp').textContent = glacierLen.toFixed(0);
+            document.getElementById('depthDisp').textContent = maxThick.toFixed(0);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Glacier Advance & Retreat', W / 2, 30);
+            ctx.font = '12px sans-serif';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText('1D Shallow-Ice Approximation', W / 2, 48);
+            ctx.textAlign = 'left';
+
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            initModel();
+            snowSlider.value = 1.5;
+            tempSlider.value = -5;
+            speedSlider.value = 10;
+            initSnow();
+        };
+
+        draw();
+    })();
+    </script>
+</body>
+</html>

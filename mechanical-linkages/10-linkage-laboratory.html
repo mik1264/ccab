@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Linkage Laboratory - Build Your Own</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; cursor: crosshair; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,50,0.85);
+            backdrop-filter: blur(10px); border-radius: 12px; padding: 16px; color: #FEFAE0;
+            font-size: 0.85rem; z-index: 100; min-width: 240px; max-height: 90vh; overflow-y: auto;
+        }
+        .panel h3 { color: #DDA15E; margin-bottom: 8px; font-size: 1rem; }
+        .panel p { color: #8A9A5B; font-size: 0.8rem; line-height: 1.5; margin-bottom: 6px; }
+        .panel label { display: block; margin: 6px 0 2px; color: #8A9A5B; font-size: 0.8rem; }
+        .panel input[type=range] { width: 100%; accent-color: #8A9A5B; }
+        .panel .value { color: #FEFAE0; float: right; }
+        .btn {
+            display: inline-block; padding: 6px 12px; margin: 3px;
+            background: rgba(138,154,91,0.3); border: 1px solid #8A9A5B;
+            color: #FEFAE0; border-radius: 8px; cursor: pointer; font-size: 0.8rem;
+        }
+        .btn:hover { background: rgba(138,154,91,0.5); }
+        .btn.active { background: rgba(221,161,94,0.4); border-color: #DDA15E; }
+        .tools { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 4px; }
+        .status { margin-top: 8px; padding: 8px; background: rgba(138,154,91,0.15); border-radius: 8px; font-size: 0.8rem; color: #8A9A5B; }
+        .info {
+            position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+            color: #8A9A5B; font-size: 0.85rem; opacity: 0.7; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="panel">
+        <h3>Linkage Laboratory</h3>
+        <p>Build custom linkages by placing joints and connecting them with bars.</p>
+        <div class="tools">
+            <button class="btn active" id="tool-joint" onclick="setTool('joint')">Add Joint</button>
+            <button class="btn" id="tool-fixed" onclick="setTool('fixed')">Fixed Joint</button>
+            <button class="btn" id="tool-link" onclick="setTool('link')">Add Link</button>
+            <button class="btn" id="tool-motor" onclick="setTool('motor')">Motor</button>
+            <button class="btn" id="tool-drag" onclick="setTool('drag')">Drag</button>
+            <button class="btn" id="tool-trace" onclick="setTool('trace')">Trace</button>
+        </div>
+        <label>Motor Speed <span class="value" id="vsp">1.0</span></label>
+        <input type="range" id="ssp" min="0" max="30" value="10">
+        <div style="margin-top:8px">
+            <button class="btn" onclick="clearAll()">Clear All</button>
+            <button class="btn" onclick="loadPreset('fourbar')">4-Bar</button>
+            <button class="btn" onclick="loadPreset('slider')">Slider</button>
+        </div>
+        <div class="status" id="status">Click to place joints, then connect them</div>
+    </div>
+    <div class="info">Click to add joints | Drag to move | Connect joints to build mechanisms</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let tool = 'joint';
+        let joints = [];
+        let links = [];
+        let motors = [];
+        let tracedJoints = new Set();
+        let traces = {};
+        let selectedJoint = -1;
+        let linkStart = -1;
+        let dragging = -1;
+        let motorSpeed = 1.0;
+        let angle = 0;
+        let paused = false;
+
+        document.getElementById('ssp').addEventListener('input', function() {
+            motorSpeed = parseFloat(this.value) / 10;
+            document.getElementById('vsp').textContent = motorSpeed.toFixed(1);
+        });
+
+        window.setTool = function(t) {
+            tool = t;
+            document.querySelectorAll('.tools .btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('tool-' + t).classList.add('active');
+            linkStart = -1;
+            updateStatus();
+        };
+
+        function updateStatus() {
+            const el = document.getElementById('status');
+            const msgs = {
+                joint: 'Click to place a movable joint',
+                fixed: 'Click to place a fixed (ground) joint',
+                link: linkStart >= 0 ? 'Click second joint to complete link' : 'Click first joint to start a link',
+                motor: 'Click a fixed joint to add a motor',
+                drag: 'Drag joints to move them',
+                trace: 'Click a joint to toggle tracing'
+            };
+            el.textContent = msgs[tool] + ' | ' + joints.length + ' joints, ' + links.length + ' links';
+        }
+
+        function findJoint(x, y) {
+            for (let i = joints.length - 1; i >= 0; i--) {
+                const dx = joints[i].x - x, dy = joints[i].y - y;
+                if (dx * dx + dy * dy < 225) return i;
+            }
+            return -1;
+        }
+
+        canvas.addEventListener('mousedown', function(e) {
+            const mx = e.clientX, my = e.clientY;
+            const jIdx = findJoint(mx, my);
+
+            if (tool === 'joint') {
+                joints.push({x: mx, y: my, fixed: false, ox: mx, oy: my});
+                updateStatus();
+            } else if (tool === 'fixed') {
+                joints.push({x: mx, y: my, fixed: true, ox: mx, oy: my});
+                updateStatus();
+            } else if (tool === 'link') {
+                if (jIdx >= 0) {
+                    if (linkStart < 0) {
+                        linkStart = jIdx;
+                        selectedJoint = jIdx;
+                    } else {
+                        if (linkStart !== jIdx) {
+                            const exists = links.some(l =>
+                                (l.a === linkStart && l.b === jIdx) ||
+                                (l.a === jIdx && l.b === linkStart)
+                            );
+                            if (!exists) {
+                                const dx = joints[linkStart].x - joints[jIdx].x;
+                                const dy = joints[linkStart].y - joints[jIdx].y;
+                                links.push({a: linkStart, b: jIdx, len: Math.sqrt(dx*dx + dy*dy)});
+                            }
+                        }
+                        linkStart = -1;
+                        selectedJoint = -1;
+                    }
+                    updateStatus();
+                }
+            } else if (tool === 'motor') {
+                if (jIdx >= 0 && joints[jIdx].fixed) {
+                    const hasMotor = motors.some(m => m.pivot === jIdx);
+                    if (!hasMotor) {
+                        // Find a link connected to this joint
+                        const connectedLink = links.find(l => l.a === jIdx || l.b === jIdx);
+                        if (connectedLink) {
+                            motors.push({pivot: jIdx, link: links.indexOf(connectedLink)});
+                        }
+                    }
+                    updateStatus();
+                }
+            } else if (tool === 'drag') {
+                dragging = jIdx;
+            } else if (tool === 'trace') {
+                if (jIdx >= 0) {
+                    if (tracedJoints.has(jIdx)) {
+                        tracedJoints.delete(jIdx);
+                        delete traces[jIdx];
+                    } else {
+                        tracedJoints.add(jIdx);
+                        traces[jIdx] = [];
+                    }
+                    updateStatus();
+                }
+            }
+        });
+
+        canvas.addEventListener('mousemove', function(e) {
+            if (dragging >= 0) {
+                joints[dragging].x = e.clientX;
+                joints[dragging].y = e.clientY;
+                if (joints[dragging].fixed) {
+                    joints[dragging].ox = e.clientX;
+                    joints[dragging].oy = e.clientY;
+                }
+                // Update link lengths for connected links
+                links.forEach(l => {
+                    if (l.a === dragging || l.b === dragging) {
+                        const dx = joints[l.a].x - joints[l.b].x;
+                        const dy = joints[l.a].y - joints[l.b].y;
+                        l.len = Math.sqrt(dx * dx + dy * dy);
+                    }
+                });
+            }
+        });
+
+        canvas.addEventListener('mouseup', function() {
+            dragging = -1;
+        });
+
+        window.clearAll = function() {
+            joints = []; links = []; motors = [];
+            tracedJoints.clear(); traces = {};
+            linkStart = -1; selectedJoint = -1;
+            updateStatus();
+        };
+
+        window.loadPreset = function(name) {
+            clearAll();
+            if (name === 'fourbar') {
+                const cx = W/2, cy = H/2;
+                joints.push({x: cx - 100, y: cy, fixed: true, ox: cx - 100, oy: cy});
+                joints.push({x: cx + 100, y: cy, fixed: true, ox: cx + 100, oy: cy});
+                joints.push({x: cx - 100 + 60, y: cy - 80, fixed: false, ox: cx - 40, oy: cy - 80});
+                joints.push({x: cx + 50, y: cy - 120, fixed: false, ox: cx + 50, oy: cy - 120});
+                links.push({a: 0, b: 2, len: 100});
+                links.push({a: 2, b: 3, len: 150});
+                links.push({a: 1, b: 3, len: 130});
+                motors.push({pivot: 0, link: 0});
+                tracedJoints.add(2);
+                tracedJoints.add(3);
+                traces[2] = [];
+                traces[3] = [];
+            } else if (name === 'slider') {
+                const cx = W/2, cy = H/2;
+                joints.push({x: cx - 80, y: cy, fixed: true, ox: cx - 80, oy: cy});
+                joints.push({x: cx - 80 + 70, y: cy - 60, fixed: false, ox: cx - 10, oy: cy - 60});
+                joints.push({x: cx + 120, y: cy, fixed: false, ox: cx + 120, oy: cy});
+                links.push({a: 0, b: 1, len: 92});
+                links.push({a: 1, b: 2, len: 170});
+                motors.push({pivot: 0, link: 0});
+                tracedJoints.add(2);
+                traces[2] = [];
+            }
+            updateStatus();
+        };
+
+        function solveConstraints() {
+            // Simple iterative constraint solver
+            for (let iter = 0; iter < 20; iter++) {
+                links.forEach(link => {
+                    const a = joints[link.a];
+                    const b = joints[link.b];
+                    const dx = b.x - a.x;
+                    const dy = b.y - a.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < 0.01) return;
+                    const diff = (dist - link.len) / dist;
+                    const moveA = a.fixed ? 0 : 0.5;
+                    const moveB = b.fixed ? 0 : 0.5;
+                    const total = moveA + moveB;
+                    if (total < 0.01) return;
+                    const corrX = dx * diff;
+                    const corrY = dy * diff;
+                    if (!a.fixed) {
+                        a.x += corrX * (moveA / total);
+                        a.y += corrY * (moveA / total);
+                    }
+                    if (!b.fixed) {
+                        b.x += corrX * -(moveB / total);
+                        b.y += corrY * -(moveB / total);
+                    }
+                });
+            }
+        }
+
+        function applyMotors() {
+            motors.forEach(motor => {
+                const pivot = joints[motor.pivot];
+                const link = links[motor.link];
+                const otherIdx = link.a === motor.pivot ? link.b : link.a;
+                const other = joints[otherIdx];
+                if (other.fixed) return;
+                const a = Math.atan2(other.y - pivot.y, other.x - pivot.x);
+                const newA = a + 0.02 * motorSpeed;
+                other.x = pivot.x + link.len * Math.cos(newA);
+                other.y = pivot.y + link.len * Math.sin(newA);
+            });
+        }
+
+        function drawJointShape(x, y, r, color, fixed) {
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            if (fixed) {
+                // Ground symbol
+                for (let i = -2; i <= 2; i++) {
+                    ctx.beginPath();
+                    ctx.moveTo(x + i * 5, y + r + 3);
+                    ctx.lineTo(x + i * 5 - 3, y + r + 9);
+                    ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (!paused) {
+                applyMotors();
+                solveConstraints();
+            }
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            // Grid
+            ctx.strokeStyle = 'rgba(138,154,91,0.05)';
+            ctx.lineWidth = 1;
+            for (let x = 0; x < W; x += 50) {
+                ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+            }
+            for (let y = 0; y < H; y += 50) {
+                ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+            }
+
+            // Draw traces
+            tracedJoints.forEach(idx => {
+                if (idx < joints.length && traces[idx]) {
+                    traces[idx].push({x: joints[idx].x, y: joints[idx].y});
+                    if (traces[idx].length > 3000) traces[idx].shift();
+
+                    if (traces[idx].length > 1) {
+                        for (let i = 1; i < traces[idx].length; i++) {
+                            const a = i / traces[idx].length;
+                            ctx.beginPath();
+                            ctx.moveTo(traces[idx][i-1].x, traces[idx][i-1].y);
+                            ctx.lineTo(traces[idx][i].x, traces[idx][i].y);
+                            ctx.strokeStyle = `rgba(221, 161, 94, ${a * 0.7})`;
+                            ctx.lineWidth = 2;
+                            ctx.stroke();
+                        }
+                    }
+                }
+            });
+
+            // Draw links
+            links.forEach(link => {
+                const a = joints[link.a];
+                const b = joints[link.b];
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.strokeStyle = '#8A9A5B';
+                ctx.lineWidth = 4;
+                ctx.lineCap = 'round';
+                ctx.stroke();
+
+                // Link length label
+                const mx = (a.x + b.x) / 2;
+                const my = (a.y + b.y) / 2;
+                ctx.font = '10px Segoe UI';
+                ctx.fillStyle = 'rgba(138,154,91,0.4)';
+                ctx.textAlign = 'center';
+                ctx.fillText(link.len.toFixed(0), mx, my - 8);
+            });
+
+            // Draw joints
+            joints.forEach((j, i) => {
+                const isSelected = i === selectedJoint || i === linkStart;
+                const isTraced = tracedJoints.has(i);
+                const hasMotor = motors.some(m => m.pivot === i);
+                let color = j.fixed ? '#606C38' : '#8A9A5B';
+                if (isTraced) color = '#DDA15E';
+                if (hasMotor) color = '#BC6C25';
+                const r = isSelected ? 10 : (j.fixed ? 8 : 6);
+
+                drawJointShape(j.x, j.y, r, color, j.fixed);
+
+                // Motor indicator
+                if (hasMotor) {
+                    ctx.beginPath();
+                    ctx.arc(j.x, j.y, 14, 0, Math.PI * 2);
+                    ctx.strokeStyle = '#BC6C25';
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([3, 3]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.font = '9px Segoe UI';
+                    ctx.fillStyle = '#BC6C25';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('M', j.x, j.y + 22);
+                }
+
+                // Joint index
+                ctx.font = '10px Segoe UI';
+                ctx.fillStyle = 'rgba(254,250,224,0.4)';
+                ctx.textAlign = 'center';
+                ctx.fillText(i.toString(), j.x, j.y - 12);
+            });
+
+            // Draw link-in-progress
+            if (tool === 'link' && linkStart >= 0) {
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                ctx.moveTo(joints[linkStart].x, joints[linkStart].y);
+                ctx.lineTo(joints[linkStart].x, joints[linkStart].y);
+                ctx.strokeStyle = 'rgba(221,161,94,0.5)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Instructions when empty
+            if (joints.length === 0) {
+                ctx.font = '18px Segoe UI';
+                ctx.fillStyle = 'rgba(138,154,91,0.4)';
+                ctx.textAlign = 'center';
+                ctx.fillText('Click to place joints, connect them with links, add motors to animate', W/2, H/2);
+                ctx.font = '14px Segoe UI';
+                ctx.fillText('Or try a preset: 4-Bar or Slider', W/2, H/2 + 30);
+            }
+        }
+
+        animate();
+        updateStatus();
+
+        window.reset = function() {
+            clearAll();
+            paused = false;
+        };
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crank-Slider Mechanism</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,50,0.85);
+            backdrop-filter: blur(10px); border-radius: 12px; padding: 16px; color: #FEFAE0;
+            font-size: 0.85rem; z-index: 100; min-width: 220px;
+        }
+        .panel h3 { color: #DDA15E; margin-bottom: 8px; font-size: 1rem; }
+        .panel p { color: #8A9A5B; font-size: 0.8rem; line-height: 1.5; margin-bottom: 8px; }
+        .panel label { display: block; margin: 6px 0 2px; color: #8A9A5B; font-size: 0.8rem; }
+        .panel input[type=range] { width: 100%; accent-color: #8A9A5B; }
+        .panel .value { color: #FEFAE0; float: right; }
+        .panel .readout { margin-top: 10px; padding: 8px; background: rgba(138,154,91,0.15); border-radius: 8px; }
+        .panel .readout div { display: flex; justify-content: space-between; margin: 2px 0; }
+        .panel .readout .lbl { color: #8A9A5B; }
+        .panel .readout .val { color: #DDA15E; font-weight: bold; }
+        .info {
+            position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+            color: #8A9A5B; font-size: 0.85rem; opacity: 0.7; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="panel">
+        <h3>Crank-Slider</h3>
+        <p>Converts rotation to reciprocating linear motion. The engine that powers cars, compressors, and pumps.</p>
+        <label>Crank Radius <span class="value" id="vc">80</span></label>
+        <input type="range" id="sc" min="30" max="150" value="80">
+        <label>Connecting Rod <span class="value" id="vr">200</span></label>
+        <input type="range" id="sr" min="100" max="350" value="200">
+        <label>Offset <span class="value" id="vo">0</span></label>
+        <input type="range" id="so" min="-80" max="80" value="0">
+        <label>Speed (RPM) <span class="value" id="vsp">60</span></label>
+        <input type="range" id="ssp" min="0" max="300" value="60">
+        <div class="readout">
+            <div><span class="lbl">Piston Pos:</span><span class="val" id="rpos">0</span></div>
+            <div><span class="lbl">Velocity:</span><span class="val" id="rvel">0</span></div>
+            <div><span class="lbl">Angle:</span><span class="val" id="rang">0</span></div>
+        </div>
+    </div>
+    <div class="info">Drag offset slider for non-zero offset crank-slider | Space to pause</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let angle = 0;
+        let paused = false;
+        let prevPistonX = 0;
+        let pistonVel = 0;
+        let posHistory = [];
+        const HISTORY_LEN = 300;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+            posHistory = [];
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let crankR = 80, rodLen = 200, offset = 0, rpm = 60;
+
+        const controls = [
+            ['sc', 'vc', v => crankR = v],
+            ['sr', 'vr', v => rodLen = v],
+            ['so', 'vo', v => offset = v],
+            ['ssp', 'vsp', v => rpm = v],
+        ];
+        controls.forEach(([sid, vid, fn]) => {
+            document.getElementById(sid).addEventListener('input', function() {
+                fn(parseFloat(this.value));
+                document.getElementById(vid).textContent = this.value;
+                posHistory = [];
+            });
+        });
+
+        function drawLink(x1, y1, x2, y2, color, width) {
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width || 4;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+        }
+
+        function drawJoint(x, y, r, color) {
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (paused) return;
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const omega = rpm * Math.PI * 2 / 60 / 60; // rad per frame at 60fps
+            angle += omega;
+            if (angle > Math.PI * 2) angle -= Math.PI * 2;
+
+            const cx = W / 2 - 100;
+            const cy = H / 2;
+
+            // Crank pin position
+            const Bx = cx + crankR * Math.cos(angle);
+            const By = cy - crankR * Math.sin(angle) + offset;
+
+            // Piston on horizontal slider at y = cy + offset
+            const sliderY = cy;
+            const dy = By - sliderY;
+            const dx2 = rodLen * rodLen - dy * dy;
+            if (dx2 < 0) return;
+            const pistonX = Bx + Math.sqrt(dx2);
+
+            // Velocity
+            pistonVel = pistonX - prevPistonX;
+            prevPistonX = pistonX;
+
+            // Position history for graph
+            posHistory.push({pos: pistonX - cx, vel: pistonVel});
+            if (posHistory.length > HISTORY_LEN) posHistory.shift();
+
+            // Draw crank circle
+            ctx.beginPath();
+            ctx.arc(cx, cy, crankR, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(138,154,91,0.2)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Draw slider rail
+            ctx.fillStyle = 'rgba(138,154,91,0.1)';
+            ctx.fillRect(cx - 20, sliderY - 20, W/2 + 100, 40);
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx - 20, sliderY - 20);
+            ctx.lineTo(cx + W/2 + 80, sliderY - 20);
+            ctx.moveTo(cx - 20, sliderY + 20);
+            ctx.lineTo(cx + W/2 + 80, sliderY + 20);
+            ctx.stroke();
+
+            // Draw piston block
+            const pistonW = 40, pistonH = 50;
+            ctx.fillStyle = 'rgba(221,161,94,0.3)';
+            ctx.fillRect(pistonX - pistonW/2, sliderY - pistonH/2, pistonW, pistonH);
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(pistonX - pistonW/2, sliderY - pistonH/2, pistonW, pistonH);
+
+            // Crosshatch on piston
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(pistonX - pistonW/2, sliderY - pistonH/2, pistonW, pistonH);
+            ctx.clip();
+            for (let i = -5; i < 10; i++) {
+                ctx.beginPath();
+                ctx.moveTo(pistonX - pistonW/2 + i * 12, sliderY - pistonH/2);
+                ctx.lineTo(pistonX - pistonW/2 + i * 12 + pistonH, sliderY + pistonH/2);
+                ctx.strokeStyle = 'rgba(221,161,94,0.15)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+            ctx.restore();
+
+            // Draw connecting rod
+            drawLink(Bx, By, pistonX, sliderY, '#DDA15E', 5);
+
+            // Draw crank arm
+            drawLink(cx, cy, Bx, By, '#8A9A5B', 6);
+
+            // Draw flywheel
+            ctx.beginPath();
+            ctx.arc(cx, cy, crankR + 10, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(96,108,56,0.3)';
+            ctx.lineWidth = 8;
+            ctx.stroke();
+
+            // Flywheel spokes
+            for (let i = 0; i < 6; i++) {
+                const a = angle + i * Math.PI / 3;
+                ctx.beginPath();
+                ctx.moveTo(cx + 15 * Math.cos(a), cy - 15 * Math.sin(a));
+                ctx.lineTo(cx + (crankR + 6) * Math.cos(a), cy - (crankR + 6) * Math.sin(a));
+                ctx.strokeStyle = 'rgba(96,108,56,0.2)';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+
+            // Joints
+            drawJoint(cx, cy, 8, '#606C38');
+            drawJoint(Bx, By, 6, '#8A9A5B');
+            drawJoint(pistonX, sliderY, 6, '#DDA15E');
+
+            // Ground hatching under crank
+            for (let i = -6; i <= 6; i++) {
+                ctx.beginPath();
+                ctx.moveTo(cx + i * 10, cy + crankR + 20);
+                ctx.lineTo(cx + i * 10 - 5, cy + crankR + 28);
+                ctx.strokeStyle = 'rgba(138,154,91,0.2)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+
+            // Draw position/velocity graph
+            const graphX = 40;
+            const graphY = H - 160;
+            const graphW = 280;
+            const graphH = 120;
+
+            ctx.fillStyle = 'rgba(30,30,50,0.7)';
+            ctx.fillRect(graphX, graphY, graphW, graphH);
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(graphX, graphY, graphW, graphH);
+
+            // Position curve
+            if (posHistory.length > 1) {
+                ctx.beginPath();
+                for (let i = 0; i < posHistory.length; i++) {
+                    const x = graphX + (i / HISTORY_LEN) * graphW;
+                    const y = graphY + graphH/2 - posHistory[i].pos * 0.2;
+                    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+                }
+                ctx.strokeStyle = '#8A9A5B';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Velocity curve
+                ctx.beginPath();
+                for (let i = 0; i < posHistory.length; i++) {
+                    const x = graphX + (i / HISTORY_LEN) * graphW;
+                    const y = graphY + graphH/2 - posHistory[i].vel * 8;
+                    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+                }
+                ctx.strokeStyle = '#DDA15E';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            ctx.font = '11px Segoe UI';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.textAlign = 'left';
+            ctx.fillText('Position', graphX + 5, graphY + 14);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fillText('Velocity', graphX + 65, graphY + 14);
+
+            // Update readouts
+            document.getElementById('rpos').textContent = (pistonX - cx).toFixed(0) + ' px';
+            document.getElementById('rvel').textContent = pistonVel.toFixed(2) + ' px/f';
+            document.getElementById('rang').textContent = (angle * 180 / Math.PI).toFixed(0) + '\u00B0';
+
+            // Labels
+            ctx.font = '12px Segoe UI';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#606C38';
+            ctx.fillText('Crank center', cx, cy + crankR + 40);
+        }
+
+        animate();
+
+        window.reset = function() {
+            angle = 0;
+            posHistory = [];
+            paused = false;
+        };
+    })();
+    </script>
+</body>
+</html>

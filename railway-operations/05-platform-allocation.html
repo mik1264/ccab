@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Platform Allocation Algorithm - Railway Operations</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,50,0.9); backdrop-filter: blur(10px);
+            padding: 12px 20px; border-radius: 12px; display: flex; gap: 14px;
+            align-items: center; z-index: 100; border: 1px solid rgba(138,154,91,0.3);
+            flex-wrap: wrap; justify-content: center;
+        }
+        #controls label { color: #FEFAE0; font-size: 0.85rem; }
+        #controls input[type=range] { width: 90px; accent-color: #8A9A5B; }
+        #controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 6px 14px;
+            border-radius: 8px; cursor: pointer; font-size: 0.85rem;
+        }
+        #controls button:hover { background: #8A9A5B; }
+        #stats {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,50,0.85);
+            backdrop-filter: blur(10px); padding: 12px 16px; border-radius: 10px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #stats h3 { color: #DDA15E; margin-bottom: 6px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div id="stats">
+        <h3>Station Status</h3>
+        <div id="statContent"></div>
+    </div>
+    <div id="controls">
+        <label>Platforms: <span id="platVal">6</span>
+            <input type="range" id="platforms" min="3" max="10" value="6">
+        </label>
+        <label>Train Rate: <span id="rateVal">3</span>/min
+            <input type="range" id="rate" min="1" max="8" value="3">
+        </label>
+        <label>Speed: <span id="speedVal">1.0</span>x
+            <input type="range" id="speed" min="0.5" max="4" step="0.5" value="1">
+        </label>
+        <button id="addExpress">+ Express</button>
+        <button id="addLocal">+ Local</button>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let paused = false;
+        let simSpeed = 1;
+
+        const COLORS = {
+            sage: '#8A9A5B', moss: '#606C38', earth: '#DDA15E', cream: '#FEFAE0',
+            red: '#e74c3c', green: '#2ecc71', blue: '#3498db', purple: '#9b59b6'
+        };
+
+        let platformCount = 6;
+        let trainRate = 3;
+        let platforms = [];
+        let trains = [];
+        let queue = [];
+        let simTime = 0;
+        let totalServed = 0;
+        let totalWait = 0;
+        let conflicts = 0;
+
+        const trainTypes = [
+            { type: 'express', color: COLORS.red, dwellTime: 60, length: 200, priority: 3 },
+            { type: 'intercity', color: COLORS.earth, dwellTime: 120, length: 180, priority: 2 },
+            { type: 'local', color: COLORS.sage, dwellTime: 180, length: 140, priority: 1 },
+            { type: 'freight', color: '#7f8c8d', dwellTime: 240, length: 220, priority: 0 }
+        ];
+
+        function init() {
+            platforms = [];
+            for (let i = 0; i < platformCount; i++) {
+                platforms.push({
+                    id: i + 1,
+                    occupied: false,
+                    train: null,
+                    dwellRemaining: 0,
+                    totalUsed: 0
+                });
+            }
+            trains = [];
+            queue = [];
+            simTime = 0;
+            totalServed = 0;
+            totalWait = 0;
+            conflicts = 0;
+        }
+
+        function createTrain(forceType) {
+            const typeIdx = forceType !== undefined ? forceType : Math.floor(Math.random() * trainTypes.length);
+            const tt = trainTypes[typeIdx];
+            return {
+                id: 'T' + (totalServed + queue.length + 1),
+                ...tt,
+                arrivalTime: simTime,
+                state: 'approaching', // approaching, dwelling, departing
+                platform: null,
+                x: -100,
+                progress: 0
+            };
+        }
+
+        function allocatePlatform(train) {
+            // First-fit with priority consideration
+            let best = null;
+            let bestScore = -Infinity;
+
+            for (let p of platforms) {
+                if (p.occupied) continue;
+                // Score: prefer platforms matching train type
+                let score = 10;
+                // Express trains prefer platforms 1-2
+                if (train.type === 'express' && p.id <= 2) score += 5;
+                // Freight prefers outer platforms
+                if (train.type === 'freight' && p.id >= platformCount - 1) score += 5;
+                // Spread usage
+                score -= p.totalUsed * 0.1;
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = p;
+                }
+            }
+            return best;
+        }
+
+        function update(dt) {
+            simTime += dt * simSpeed;
+
+            // Spawn trains
+            if (Math.random() < trainRate * dt * simSpeed / 600) {
+                queue.push(createTrain());
+            }
+
+            // Try to allocate queued trains
+            const newQueue = [];
+            for (let t of queue) {
+                const plat = allocatePlatform(t);
+                if (plat) {
+                    plat.occupied = true;
+                    plat.train = t;
+                    plat.dwellRemaining = t.dwellTime;
+                    t.platform = plat;
+                    t.state = 'approaching';
+                    t.progress = 0;
+                    trains.push(t);
+                    totalWait += simTime - t.arrivalTime;
+                } else {
+                    newQueue.push(t);
+                    if (simTime - t.arrivalTime > 60) conflicts++;
+                }
+            }
+            queue = newQueue;
+
+            // Update trains
+            for (let t of trains) {
+                if (t.state === 'approaching') {
+                    t.progress = Math.min(1, t.progress + 0.02 * simSpeed);
+                    if (t.progress >= 1) t.state = 'dwelling';
+                } else if (t.state === 'dwelling') {
+                    t.platform.dwellRemaining -= dt * simSpeed;
+                    if (t.platform.dwellRemaining <= 0) {
+                        t.state = 'departing';
+                        t.progress = 0;
+                    }
+                } else if (t.state === 'departing') {
+                    t.progress = Math.min(1, t.progress + 0.02 * simSpeed);
+                    if (t.progress >= 1) {
+                        t.platform.occupied = false;
+                        t.platform.totalUsed++;
+                        t.platform.train = null;
+                        t.state = 'gone';
+                        totalServed++;
+                    }
+                }
+            }
+            trains = trains.filter(t => t.state !== 'gone');
+        }
+
+        function drawStation() {
+            const sx = W * 0.1;
+            const sw = W * 0.8;
+            const sy = H * 0.15;
+            const platH = (H * 0.6) / platformCount;
+
+            // Station building
+            ctx.fillStyle = 'rgba(30,40,60,0.5)';
+            ctx.fillRect(sx - 20, sy - 20, sw + 40, platformCount * platH + 40);
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(sx - 20, sy - 20, sw + 40, platformCount * platH + 40);
+
+            for (let i = 0; i < platformCount; i++) {
+                const p = platforms[i];
+                const py = sy + i * platH;
+
+                // Platform surface
+                ctx.fillStyle = p.occupied ? 'rgba(221,161,94,0.08)' : 'rgba(138,154,91,0.05)';
+                ctx.fillRect(sx, py + 5, sw, platH - 10);
+
+                // Platform edge
+                ctx.fillStyle = '#3a3a55';
+                ctx.fillRect(sx, py + platH - 8, sw, 3);
+
+                // Track
+                ctx.strokeStyle = '#555577';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(sx - 50, py + platH / 2);
+                ctx.lineTo(sx + sw + 50, py + platH / 2);
+                ctx.stroke();
+
+                // Platform number
+                ctx.fillStyle = COLORS.cream + 'aa';
+                ctx.font = 'bold 14px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText('P' + p.id, sx - 8, py + platH / 2 + 5);
+
+                // Utilization bar
+                const util = p.totalUsed / Math.max(1, totalServed / platformCount);
+                ctx.fillStyle = 'rgba(138,154,91,0.3)';
+                ctx.fillRect(sx + sw + 10, py + 10, 30 * Math.min(util, 2), platH - 20);
+
+                // Draw train if present
+                if (p.train) {
+                    const t = p.train;
+                    let tx;
+                    if (t.state === 'approaching') {
+                        tx = sx - 100 + (sx + sw * 0.3 + 100) * t.progress;
+                    } else if (t.state === 'dwelling') {
+                        tx = sx + sw * 0.3;
+                    } else {
+                        tx = sx + sw * 0.3 + (sw * 0.8) * t.progress;
+                    }
+
+                    const tw = t.length * (sw / 600);
+                    ctx.fillStyle = t.color;
+                    ctx.beginPath();
+                    ctx.roundRect(tx, py + platH / 2 - 10, tw, 20, 4);
+                    ctx.fill();
+
+                    // Windows
+                    ctx.fillStyle = 'rgba(254,250,224,0.4)';
+                    for (let wx = tx + 8; wx < tx + tw - 10; wx += 14) {
+                        ctx.fillRect(wx, py + platH / 2 - 6, 8, 6);
+                    }
+
+                    // Dwell timer
+                    if (t.state === 'dwelling') {
+                        const remaining = Math.max(0, p.dwellRemaining).toFixed(0);
+                        ctx.fillStyle = COLORS.cream;
+                        ctx.font = '11px sans-serif';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(remaining + 's', tx + tw / 2, py + platH / 2 - 16);
+
+                        // Progress bar
+                        const pct = 1 - p.dwellRemaining / t.dwellTime;
+                        ctx.fillStyle = 'rgba(46,204,113,0.4)';
+                        ctx.fillRect(tx, py + platH / 2 + 14, tw * pct, 3);
+                    }
+
+                    // Label
+                    ctx.fillStyle = COLORS.cream + 'cc';
+                    ctx.font = '10px sans-serif';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(t.id + ' (' + t.type + ')', tx, py + platH / 2 + 28);
+                }
+            }
+
+            // Queue display
+            if (queue.length > 0) {
+                ctx.fillStyle = COLORS.earth;
+                ctx.font = 'bold 12px sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText('Waiting: ' + queue.length + ' trains', sx, sy + platformCount * platH + 30);
+                for (let i = 0; i < Math.min(queue.length, 8); i++) {
+                    const q = queue[i];
+                    ctx.fillStyle = q.color;
+                    ctx.beginPath();
+                    ctx.roundRect(sx + i * 35, sy + platformCount * platH + 40, 30, 12, 2);
+                    ctx.fill();
+                }
+            }
+        }
+
+        function drawTimeline() {
+            const tx = W * 0.1;
+            const tw = W * 0.8;
+            const ty = H * 0.88;
+            const th = 30;
+
+            ctx.fillStyle = 'rgba(30,40,60,0.4)';
+            ctx.fillRect(tx, ty, tw, th);
+
+            // Time markers
+            ctx.fillStyle = COLORS.cream + '60';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            const windowSize = 600;
+            for (let i = 0; i <= 6; i++) {
+                const t = simTime - windowSize + (windowSize * i / 6);
+                if (t >= 0) {
+                    const x = tx + tw * i / 6;
+                    ctx.fillText(Math.floor(t / 60) + 'm', x, ty + th + 14);
+                    ctx.strokeStyle = COLORS.cream + '20';
+                    ctx.beginPath();
+                    ctx.moveTo(x, ty);
+                    ctx.lineTo(x, ty + th);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function updateStats() {
+            const avgWait = totalServed > 0 ? (totalWait / totalServed).toFixed(1) : '0';
+            const utilization = platforms.filter(p => p.occupied).length / platformCount * 100;
+            document.getElementById('statContent').innerHTML =
+                '<div style="margin:3px 0">Served: <b>' + totalServed + '</b> trains</div>' +
+                '<div style="margin:3px 0">Queue: <b>' + queue.length + '</b></div>' +
+                '<div style="margin:3px 0">Avg Wait: <b>' + avgWait + '</b>s</div>' +
+                '<div style="margin:3px 0">Utilization: <b>' + utilization.toFixed(0) + '%</b></div>' +
+                '<div style="margin:3px 0;color:#e74c3c">Conflicts: <b>' + conflicts + '</b></div>';
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.fillStyle = COLORS.earth;
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Platform Allocation Algorithm', W / 2, 35);
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '13px sans-serif';
+            ctx.fillText('Priority-based platform assignment with conflict detection and queue management', W / 2, 55);
+
+            drawStation();
+            drawTimeline();
+
+            if (Math.floor(simTime) % 5 === 0) updateStats();
+        }
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.1);
+            lastTime = time;
+            if (!paused) update(dt);
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('platforms').addEventListener('input', function() {
+            platformCount = parseInt(this.value);
+            document.getElementById('platVal').textContent = this.value;
+            init();
+        });
+        document.getElementById('rate').addEventListener('input', function() {
+            trainRate = parseInt(this.value);
+            document.getElementById('rateVal').textContent = this.value;
+        });
+        document.getElementById('speed').addEventListener('input', function() {
+            simSpeed = parseFloat(this.value);
+            document.getElementById('speedVal').textContent = simSpeed.toFixed(1);
+        });
+        document.getElementById('addExpress').addEventListener('click', () => queue.push(createTrain(0)));
+        document.getElementById('addLocal').addEventListener('click', () => queue.push(createTrain(2)));
+
+        window.reset = function() {
+            platformCount = 6; trainRate = 3; simSpeed = 1;
+            document.getElementById('platforms').value = 6;
+            document.getElementById('platVal').textContent = '6';
+            document.getElementById('rate').value = 3;
+            document.getElementById('rateVal').textContent = '3';
+            document.getElementById('speed').value = 1;
+            document.getElementById('speedVal').textContent = '1.0';
+            init();
+        };
+
+        window.addEventListener('enhanceReady', function() {
+            if (window.enhance) { window.enhance.onPause = function(p) { paused = p; }; }
+        });
+
+        init();
+        requestAnimationFrame(animate);
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Moving Block Signaling - Railway Operations</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,50,0.9); backdrop-filter: blur(10px);
+            padding: 12px 20px; border-radius: 12px; display: flex; gap: 16px;
+            align-items: center; z-index: 100; border: 1px solid rgba(138,154,91,0.3);
+            flex-wrap: wrap; justify-content: center;
+        }
+        #controls label { color: #FEFAE0; font-size: 0.85rem; }
+        #controls input[type=range] { width: 90px; accent-color: #8A9A5B; }
+        #controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 6px 14px;
+            border-radius: 8px; cursor: pointer; font-size: 0.85rem;
+        }
+        #controls button:hover { background: #8A9A5B; }
+        #controls button.active { background: #DDA15E; color: #1a1a2e; }
+        #stats {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,50,0.85);
+            backdrop-filter: blur(10px); padding: 12px 16px; border-radius: 10px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100;
+            border: 1px solid rgba(138,154,91,0.3); min-width: 200px;
+        }
+        #stats h3 { color: #DDA15E; margin-bottom: 6px; font-size: 0.9rem; }
+        .stat-row { display: flex; justify-content: space-between; margin: 3px 0; }
+        .stat-label { color: #8A9A5B; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div id="stats">
+        <h3>Comparison Stats</h3>
+        <div class="stat-row"><span class="stat-label">Fixed Block Throughput:</span><span id="fixedTP">0</span></div>
+        <div class="stat-row"><span class="stat-label">Moving Block Throughput:</span><span id="movingTP">0</span></div>
+        <div class="stat-row"><span class="stat-label">Capacity Gain:</span><span id="gain" style="color:#2ecc71">0%</span></div>
+    </div>
+    <div id="controls">
+        <label>Trains: <span id="trainCountVal">5</span>
+            <input type="range" id="trainCount" min="3" max="10" value="5">
+        </label>
+        <label>Speed: <span id="speedVal">1.0</span>x
+            <input type="range" id="speed" min="0.2" max="3" step="0.1" value="1">
+        </label>
+        <button id="modeFixed">Fixed Block</button>
+        <button id="modeMoving" class="active">Moving Block</button>
+        <button id="modeBoth">Side by Side</button>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let paused = false;
+        let simSpeed = 1;
+        let mode = 'both'; // 'fixed', 'moving', 'both'
+        let trainCount = 5;
+
+        const BLOCK_COUNT = 10;
+        const COLORS = {
+            sage: '#8A9A5B', moss: '#606C38', earth: '#DDA15E', cream: '#FEFAE0',
+            red: '#e74c3c', yellow: '#f1c40f', green: '#2ecc71'
+        };
+
+        let fixedTrains = [];
+        let movingTrains = [];
+        let fixedPassCount = 0;
+        let movingPassCount = 0;
+        let statTime = 0;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        function createTrainSet(count) {
+            const arr = [];
+            const spacing = W / count;
+            for (let i = 0; i < count; i++) {
+                arr.push({
+                    x: i * spacing,
+                    speed: 1.5 + Math.random() * 0.5,
+                    baseSpeed: 1.5 + Math.random() * 0.5,
+                    length: 50 + Math.random() * 30,
+                    color: [COLORS.earth, COLORS.sage, COLORS.moss, '#BC6C25'][i % 4],
+                    braking: false
+                });
+            }
+            return arr;
+        }
+
+        function init() {
+            fixedTrains = createTrainSet(trainCount);
+            movingTrains = createTrainSet(trainCount);
+            // Match positions
+            for (let i = 0; i < trainCount; i++) {
+                movingTrains[i].x = fixedTrains[i].x;
+                movingTrains[i].baseSpeed = fixedTrains[i].baseSpeed;
+                movingTrains[i].speed = fixedTrains[i].speed;
+            }
+            fixedPassCount = 0;
+            movingPassCount = 0;
+            statTime = 0;
+        }
+
+        function findAhead(trainArr, idx) {
+            let minDist = Infinity;
+            let ahead = null;
+            const t = trainArr[idx];
+            for (let i = 0; i < trainArr.length; i++) {
+                if (i === idx) continue;
+                let dist = ((trainArr[i].x - trainArr[i].length) - t.x + W) % W;
+                if (dist < minDist) {
+                    minDist = dist;
+                    ahead = trainArr[i];
+                }
+            }
+            return { dist: minDist, train: ahead };
+        }
+
+        function updateFixed(dt) {
+            const blockLen = W / BLOCK_COUNT;
+            for (let i = 0; i < fixedTrains.length; i++) {
+                const t = fixedTrains[i];
+                const blockIdx = Math.floor(((t.x % W + W) % W) / blockLen);
+                const nextBlockIdx = (blockIdx + 1) % BLOCK_COUNT;
+                const nextBlockStart = nextBlockIdx * blockLen;
+
+                // Check if next block is occupied
+                let nextOccupied = false;
+                for (let j = 0; j < fixedTrains.length; j++) {
+                    if (j === i) continue;
+                    const ob = Math.floor(((fixedTrains[j].x % W + W) % W) / blockLen);
+                    const otb = Math.floor((((fixedTrains[j].x - fixedTrains[j].length) % W + W) % W) / blockLen);
+                    if (ob === nextBlockIdx || otb === nextBlockIdx) {
+                        nextOccupied = true;
+                        break;
+                    }
+                }
+
+                if (nextOccupied) {
+                    let distToBlockEnd = ((nextBlockStart - t.x) % W + W) % W;
+                    if (distToBlockEnd < 100) {
+                        t.speed = Math.max(0, t.speed - 0.08 * dt);
+                        t.braking = true;
+                    } else {
+                        t.speed = t.baseSpeed * 0.5;
+                        t.braking = true;
+                    }
+                } else {
+                    t.speed = Math.min(t.baseSpeed, t.speed + 0.03 * dt);
+                    t.braking = false;
+                }
+
+                const prevX = t.x;
+                t.x = (t.x + t.speed * simSpeed * dt) % W;
+                if (t.x < prevX) fixedPassCount++;
+            }
+        }
+
+        function updateMoving(dt) {
+            const safetyMargin = 30;
+            for (let i = 0; i < movingTrains.length; i++) {
+                const t = movingTrains[i];
+                const { dist } = findAhead(movingTrains, i);
+                const brakingDist = t.speed * 25 + safetyMargin;
+
+                if (dist < brakingDist) {
+                    const factor = Math.max(0, (dist - safetyMargin) / brakingDist);
+                    t.speed = Math.max(0, t.baseSpeed * factor);
+                    t.braking = dist < brakingDist * 0.6;
+                } else {
+                    t.speed = Math.min(t.baseSpeed, t.speed + 0.04 * dt);
+                    t.braking = false;
+                }
+
+                const prevX = t.x;
+                t.x = (t.x + t.speed * simSpeed * dt) % W;
+                if (t.x < prevX) movingPassCount++;
+            }
+        }
+
+        function drawTrack(y, label) {
+            ctx.strokeStyle = '#555577';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(0, y - 6);
+            ctx.lineTo(W, y - 6);
+            ctx.moveTo(0, y + 6);
+            ctx.lineTo(W, y + 6);
+            ctx.stroke();
+
+            ctx.strokeStyle = '#3a3a55';
+            ctx.lineWidth = 3;
+            for (let x = 0; x < W; x += 18) {
+                ctx.beginPath();
+                ctx.moveTo(x, y - 10);
+                ctx.lineTo(x, y + 10);
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = COLORS.earth;
+            ctx.font = 'bold 14px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(label, 80, y - 25);
+        }
+
+        function drawFixedBlocks(y) {
+            const blockLen = W / BLOCK_COUNT;
+            for (let i = 0; i < BLOCK_COUNT; i++) {
+                ctx.strokeStyle = 'rgba(138,154,91,0.2)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath();
+                ctx.moveTo(i * blockLen, y - 40);
+                ctx.lineTo(i * blockLen, y + 40);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Block color fill
+                let occupied = false;
+                for (let t of fixedTrains) {
+                    const bIdx = Math.floor(((t.x % W + W) % W) / blockLen);
+                    if (bIdx === i) { occupied = true; break; }
+                }
+                if (occupied) {
+                    ctx.fillStyle = 'rgba(231,76,60,0.08)';
+                    ctx.fillRect(i * blockLen, y - 35, blockLen, 70);
+                }
+            }
+        }
+
+        function drawMovingBlockZones(y) {
+            for (let i = 0; i < movingTrains.length; i++) {
+                const t = movingTrains[i];
+                const brakingDist = t.speed * 25 + 30;
+                // Safety envelope
+                ctx.fillStyle = 'rgba(46,204,113,0.08)';
+                ctx.fillRect(t.x - t.length - 10, y - 30, t.length + brakingDist + 20, 60);
+
+                // Braking distance indicator
+                ctx.strokeStyle = 'rgba(46,204,113,0.4)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(t.x, y - 25);
+                ctx.lineTo(t.x + brakingDist, y - 25);
+                ctx.lineTo(t.x + brakingDist, y + 25);
+                ctx.lineTo(t.x, y + 25);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }
+
+        function drawTrainSet(trains, y) {
+            for (let t of trains) {
+                ctx.fillStyle = t.color;
+                ctx.beginPath();
+                ctx.roundRect(t.x - t.length, y - 8, t.length, 16, 3);
+                ctx.fill();
+
+                ctx.fillStyle = 'rgba(254,250,224,0.5)';
+                for (let wx = t.x - t.length + 6; wx < t.x - 8; wx += 12) {
+                    ctx.fillRect(wx, y - 4, 6, 4);
+                }
+
+                ctx.beginPath();
+                ctx.arc(t.x - 1, y, 2.5, 0, Math.PI * 2);
+                ctx.fillStyle = t.braking ? COLORS.red : '#ffffcc';
+                ctx.fill();
+            }
+        }
+
+        function drawStats() {
+            const elapsed = Math.max(statTime / 60, 1);
+            const ftp = (fixedPassCount / elapsed).toFixed(1);
+            const mtp = (movingPassCount / elapsed).toFixed(1);
+            const gain = ftp > 0 ? (((mtp - ftp) / ftp) * 100).toFixed(0) : '0';
+
+            document.getElementById('fixedTP').textContent = ftp + '/min';
+            document.getElementById('movingTP').textContent = mtp + '/min';
+            document.getElementById('gain').textContent = (gain > 0 ? '+' : '') + gain + '%';
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.fillStyle = COLORS.earth;
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Fixed Block vs Moving Block Signaling', W / 2, 35);
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '13px sans-serif';
+            ctx.fillText('Moving block eliminates fixed boundaries, allowing closer headway.', W / 2, 55);
+
+            if (mode === 'both' || mode === 'fixed') {
+                const y = mode === 'both' ? H * 0.35 : H * 0.5;
+                drawTrack(y, 'FIXED BLOCK');
+                drawFixedBlocks(y);
+                drawTrainSet(fixedTrains, y);
+            }
+
+            if (mode === 'both' || mode === 'moving') {
+                const y = mode === 'both' ? H * 0.65 : H * 0.5;
+                drawTrack(y, 'MOVING BLOCK (CBTC)');
+                drawMovingBlockZones(y);
+                drawTrainSet(movingTrains, y);
+            }
+        }
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 16.67, 3);
+            lastTime = time;
+
+            if (!paused) {
+                updateFixed(dt);
+                updateMoving(dt);
+                statTime += dt * simSpeed;
+                if (Math.floor(statTime) % 30 === 0) drawStats();
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        // Controls
+        document.getElementById('trainCount').addEventListener('input', function() {
+            trainCount = parseInt(this.value);
+            document.getElementById('trainCountVal').textContent = this.value;
+            init();
+        });
+
+        document.getElementById('speed').addEventListener('input', function() {
+            simSpeed = parseFloat(this.value);
+            document.getElementById('speedVal').textContent = simSpeed.toFixed(1);
+        });
+
+        document.getElementById('modeFixed').addEventListener('click', function() {
+            mode = 'fixed';
+            document.querySelectorAll('#controls button').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+        });
+
+        document.getElementById('modeMoving').addEventListener('click', function() {
+            mode = 'moving';
+            document.querySelectorAll('#controls button').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+        });
+
+        document.getElementById('modeBoth').addEventListener('click', function() {
+            mode = 'both';
+            document.querySelectorAll('#controls button').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+        });
+
+        window.reset = function() {
+            init();
+            mode = 'both';
+            simSpeed = 1;
+            document.getElementById('speed').value = 1;
+            document.getElementById('speedVal').textContent = '1.0';
+            document.getElementById('trainCount').value = 5;
+            document.getElementById('trainCountVal').textContent = '5';
+            document.querySelectorAll('#controls button').forEach(b => b.classList.remove('active'));
+            document.getElementById('modeBoth').classList.add('active');
+        };
+
+        window.addEventListener('enhanceReady', function() {
+            if (window.enhance) {
+                window.enhance.onPause = function(p) { paused = p; };
+            }
+        });
+
+        init();
+        document.getElementById('modeBoth').click();
+        requestAnimationFrame(animate);
+    })();
+    </script>
+</body>
+</html>

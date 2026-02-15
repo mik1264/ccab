@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Positive Train Control (PTC) - Railway Operations</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,50,0.9); backdrop-filter: blur(10px);
+            padding: 12px 20px; border-radius: 12px; display: flex; gap: 14px;
+            align-items: center; z-index: 100; border: 1px solid rgba(138,154,91,0.3);
+            flex-wrap: wrap; justify-content: center;
+        }
+        #controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 6px 14px;
+            border-radius: 8px; cursor: pointer; font-size: 0.85rem;
+        }
+        #controls button:hover { background: #8A9A5B; }
+        #controls button.danger { background: #c0392b; }
+        #controls button.danger:hover { background: #e74c3c; }
+        #controls label { color: #FEFAE0; font-size: 0.85rem; }
+        #controls input[type=range] { width: 90px; accent-color: #8A9A5B; }
+        #cab {
+            position: fixed; top: 10px; right: 10px; background: rgba(15,15,30,0.95);
+            backdrop-filter: blur(10px); padding: 16px 20px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; min-width: 250px;
+            border: 2px solid rgba(138,154,91,0.4);
+        }
+        #cab h3 { color: #DDA15E; margin-bottom: 8px; text-align: center; font-size: 1rem; }
+        .cab-row { display: flex; justify-content: space-between; margin: 4px 0; padding: 2px 0; }
+        .cab-label { color: #8A9A5B; }
+        .cab-val { font-weight: bold; }
+        #ptcStatus {
+            text-align: center; padding: 6px; margin-top: 8px; border-radius: 6px;
+            font-weight: bold; font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div id="cab">
+        <h3>PTC Cab Display</h3>
+        <div class="cab-row"><span class="cab-label">Speed:</span><span class="cab-val" id="cabSpeed">0 km/h</span></div>
+        <div class="cab-row"><span class="cab-label">Speed Limit:</span><span class="cab-val" id="cabLimit">120 km/h</span></div>
+        <div class="cab-row"><span class="cab-label">Authority:</span><span class="cab-val" id="cabAuth">--</span></div>
+        <div class="cab-row"><span class="cab-label">Distance to Limit:</span><span class="cab-val" id="cabDist">--</span></div>
+        <div class="cab-row"><span class="cab-label">Next Signal:</span><span class="cab-val" id="cabSignal">--</span></div>
+        <div class="cab-row"><span class="cab-label">Work Zone:</span><span class="cab-val" id="cabWork">None</span></div>
+        <div class="cab-row"><span class="cab-label">GPS Position:</span><span class="cab-val" id="cabGPS">--</span></div>
+        <div id="ptcStatus">PTC ACTIVE</div>
+    </div>
+    <div id="controls">
+        <button id="accelBtn">Accelerate</button>
+        <button id="brakeBtn">Brake</button>
+        <button id="overspeedBtn" class="danger">Attempt Overspeed</button>
+        <button id="workZoneBtn">Add Work Zone</button>
+        <label>Sim Speed: <span id="simSpeedVal">1</span>x
+            <input type="range" id="simSpeedCtrl" min="1" max="5" value="1">
+        </label>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let paused = false;
+        let simSpeed = 1;
+
+        const COLORS = {
+            sage: '#8A9A5B', moss: '#606C38', earth: '#DDA15E', cream: '#FEFAE0',
+            red: '#e74c3c', yellow: '#f1c40f', green: '#2ecc71', blue: '#3498db'
+        };
+
+        const LINE_LENGTH = 20000; // meters
+        let train = {
+            x: 500,
+            speed: 0, // m/s
+            targetSpeed: 0,
+            accelerating: false,
+            braking: false,
+            ptcBraking: false,
+            ptcWarning: false
+        };
+
+        let speedLimits = [
+            { start: 0, end: 5000, limit: 120 },
+            { start: 5000, end: 8000, limit: 80 },
+            { start: 8000, end: 12000, limit: 120 },
+            { start: 12000, end: 14000, limit: 60 },
+            { start: 14000, end: 20000, limit: 120 }
+        ];
+
+        let signals = [
+            { x: 3000, aspect: 'green' },
+            { x: 7000, aspect: 'yellow' },
+            { x: 11000, aspect: 'green' },
+            { x: 15000, aspect: 'red' },
+            { x: 18000, aspect: 'green' }
+        ];
+
+        let workZones = [];
+        let ptcEvents = [];
+
+        function getCurrentSpeedLimit() {
+            for (let sl of speedLimits) {
+                if (train.x >= sl.start && train.x < sl.end) return sl.limit;
+            }
+            return 120;
+        }
+
+        function getNextRestriction() {
+            let minDist = Infinity;
+            let restriction = null;
+
+            // Check speed limit changes
+            for (let sl of speedLimits) {
+                if (sl.start > train.x && sl.limit < getCurrentSpeedLimit()) {
+                    const d = sl.start - train.x;
+                    if (d < minDist) { minDist = d; restriction = { type: 'speed', limit: sl.limit, dist: d }; }
+                }
+            }
+
+            // Check signals
+            for (let sig of signals) {
+                if (sig.x > train.x) {
+                    if (sig.aspect === 'red') {
+                        const d = sig.x - train.x;
+                        if (d < minDist) { minDist = d; restriction = { type: 'signal', aspect: sig.aspect, dist: d }; }
+                    }
+                }
+            }
+
+            // Check work zones
+            for (let wz of workZones) {
+                if (wz.start > train.x) {
+                    const d = wz.start - train.x;
+                    if (d < minDist) { minDist = d; restriction = { type: 'workzone', dist: d }; }
+                }
+            }
+
+            return restriction;
+        }
+
+        function calcBrakingDistance(currentSpeed) {
+            // v^2 = v0^2 - 2*a*d => d = v0^2 / (2*a)
+            const decel = 0.8; // m/s^2
+            return (currentSpeed * currentSpeed) / (2 * decel);
+        }
+
+        function update(dt) {
+            const speedMs = train.speed;
+            const currentLimit = getCurrentSpeedLimit() / 3.6; // convert to m/s
+            const nextRestriction = getNextRestriction();
+
+            // PTC logic
+            train.ptcWarning = false;
+            train.ptcBraking = false;
+
+            if (nextRestriction) {
+                const brakeDist = calcBrakingDistance(train.speed);
+                const warningDist = brakeDist * 1.5;
+
+                if (nextRestriction.dist < warningDist) {
+                    train.ptcWarning = true;
+                    addPTCEvent('WARNING: Approaching restriction in ' + nextRestriction.dist.toFixed(0) + 'm');
+                }
+                if (nextRestriction.dist < brakeDist * 1.1) {
+                    train.ptcBraking = true;
+                    addPTCEvent('PTC BRAKE: Emergency intervention');
+                }
+            }
+
+            // Overspeed check
+            if (train.speed > currentLimit * 1.05) {
+                train.ptcWarning = true;
+                if (train.speed > currentLimit * 1.1) {
+                    train.ptcBraking = true;
+                    addPTCEvent('PTC BRAKE: Overspeed detected');
+                }
+            }
+
+            // Work zone check
+            for (let wz of workZones) {
+                if (train.x >= wz.start - 200 && train.x <= wz.end) {
+                    if (train.speed > 5) {
+                        train.ptcBraking = true;
+                        addPTCEvent('PTC BRAKE: Work zone incursion');
+                    }
+                }
+            }
+
+            // Apply acceleration/braking
+            if (train.ptcBraking) {
+                train.speed = Math.max(0, train.speed - 1.2 * dt * simSpeed);
+            } else if (train.braking) {
+                train.speed = Math.max(0, train.speed - 0.8 * dt * simSpeed);
+            } else if (train.accelerating) {
+                train.speed = Math.min(currentLimit, train.speed + 0.5 * dt * simSpeed);
+            } else {
+                // Coast - slight deceleration
+                train.speed = Math.max(0, train.speed - 0.05 * dt * simSpeed);
+            }
+
+            train.x += train.speed * dt * simSpeed;
+
+            // Wrap around
+            if (train.x > LINE_LENGTH) {
+                train.x = 0;
+                train.speed = 0;
+            }
+
+            updateCabDisplay();
+        }
+
+        let lastEventTime = 0;
+        function addPTCEvent(msg) {
+            const now = Date.now();
+            if (now - lastEventTime < 2000) return;
+            lastEventTime = now;
+            ptcEvents.unshift({ msg, time: now });
+            if (ptcEvents.length > 5) ptcEvents.pop();
+        }
+
+        function updateCabDisplay() {
+            const speedKmh = train.speed * 3.6;
+            const limit = getCurrentSpeedLimit();
+            const nextR = getNextRestriction();
+
+            document.getElementById('cabSpeed').textContent = speedKmh.toFixed(0) + ' km/h';
+            document.getElementById('cabSpeed').style.color =
+                speedKmh > limit ? COLORS.red : speedKmh > limit * 0.9 ? COLORS.yellow : COLORS.green;
+            document.getElementById('cabLimit').textContent = limit + ' km/h';
+            document.getElementById('cabAuth').textContent = nextR ? nextR.dist.toFixed(0) + 'm' : 'Clear';
+            document.getElementById('cabDist').textContent = nextR ? nextR.dist.toFixed(0) + 'm' : '--';
+
+            // Next signal
+            let nextSig = null;
+            for (let s of signals) {
+                if (s.x > train.x) { nextSig = s; break; }
+            }
+            document.getElementById('cabSignal').textContent = nextSig ?
+                nextSig.aspect.toUpperCase() + ' (' + ((nextSig.x - train.x) / 1000).toFixed(1) + 'km)' : '--';
+            if (nextSig) {
+                document.getElementById('cabSignal').style.color =
+                    nextSig.aspect === 'red' ? COLORS.red : nextSig.aspect === 'yellow' ? COLORS.yellow : COLORS.green;
+            }
+
+            const inWorkZone = workZones.some(wz => train.x >= wz.start && train.x <= wz.end);
+            document.getElementById('cabWork').textContent = inWorkZone ? 'IN ZONE' : 'None';
+            document.getElementById('cabWork').style.color = inWorkZone ? COLORS.red : COLORS.green;
+
+            document.getElementById('cabGPS').textContent = (train.x / 1000).toFixed(2) + ' km';
+
+            const ptcEl = document.getElementById('ptcStatus');
+            if (train.ptcBraking) {
+                ptcEl.textContent = 'PTC EMERGENCY BRAKE';
+                ptcEl.style.background = COLORS.red;
+                ptcEl.style.color = 'white';
+            } else if (train.ptcWarning) {
+                ptcEl.textContent = 'PTC WARNING';
+                ptcEl.style.background = COLORS.yellow;
+                ptcEl.style.color = '#1a1a2e';
+            } else {
+                ptcEl.textContent = 'PTC ACTIVE';
+                ptcEl.style.background = COLORS.green + '40';
+                ptcEl.style.color = COLORS.green;
+            }
+        }
+
+        function drawTrackView() {
+            const trackY = H * 0.55;
+            const viewRange = 5000; // meters visible
+            const startX = train.x - viewRange * 0.3;
+            const endX = startX + viewRange;
+
+            function worldToScreen(wx) {
+                return ((wx - startX) / viewRange) * W;
+            }
+
+            // Track
+            ctx.strokeStyle = '#555577';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(0, trackY);
+            ctx.lineTo(W, trackY);
+            ctx.stroke();
+
+            // Sleepers
+            ctx.strokeStyle = '#3a3a55';
+            ctx.lineWidth = 3;
+            for (let x = Math.floor(startX / 15) * 15; x < endX; x += 15) {
+                const sx = worldToScreen(x);
+                ctx.beginPath();
+                ctx.moveTo(sx, trackY - 8);
+                ctx.lineTo(sx, trackY + 8);
+                ctx.stroke();
+            }
+
+            // Speed limit zones
+            for (let sl of speedLimits) {
+                const sx = Math.max(0, worldToScreen(sl.start));
+                const ex = Math.min(W, worldToScreen(sl.end));
+                if (ex > 0 && sx < W) {
+                    const color = sl.limit < 80 ? 'rgba(231,76,60,0.08)' :
+                                  sl.limit < 120 ? 'rgba(241,196,15,0.06)' : 'rgba(46,204,113,0.04)';
+                    ctx.fillStyle = color;
+                    ctx.fillRect(sx, trackY - 50, ex - sx, 100);
+
+                    ctx.fillStyle = COLORS.cream + '80';
+                    ctx.font = 'bold 12px sans-serif';
+                    ctx.textAlign = 'center';
+                    if (sx > 10 && sx < W - 30) {
+                        ctx.fillText(sl.limit + ' km/h', sx + 10, trackY - 55);
+                    }
+                }
+            }
+
+            // Signals
+            for (let sig of signals) {
+                const sx = worldToScreen(sig.x);
+                if (sx > -20 && sx < W + 20) {
+                    ctx.fillStyle = '#444';
+                    ctx.fillRect(sx - 2, trackY - 40, 4, 30);
+                    const color = sig.aspect === 'red' ? COLORS.red : sig.aspect === 'yellow' ? COLORS.yellow : COLORS.green;
+                    ctx.beginPath();
+                    ctx.arc(sx, trackY - 45, 8, 0, Math.PI * 2);
+                    ctx.fillStyle = color;
+                    ctx.fill();
+                    const glow = ctx.createRadialGradient(sx, trackY - 45, 3, sx, trackY - 45, 16);
+                    glow.addColorStop(0, color + '60');
+                    glow.addColorStop(1, 'transparent');
+                    ctx.fillStyle = glow;
+                    ctx.beginPath();
+                    ctx.arc(sx, trackY - 45, 16, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // Work zones
+            for (let wz of workZones) {
+                const sx = worldToScreen(wz.start);
+                const ex = worldToScreen(wz.end);
+                if (ex > 0 && sx < W) {
+                    ctx.fillStyle = 'rgba(231,76,60,0.15)';
+                    ctx.fillRect(sx, trackY - 30, ex - sx, 60);
+                    ctx.strokeStyle = COLORS.red;
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([6, 4]);
+                    ctx.strokeRect(sx, trackY - 30, ex - sx, 60);
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = COLORS.red;
+                    ctx.font = 'bold 10px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('WORK ZONE', (sx + ex) / 2, trackY - 35);
+                }
+            }
+
+            // Train
+            const tx = worldToScreen(train.x);
+            ctx.fillStyle = COLORS.earth;
+            ctx.beginPath();
+            ctx.roundRect(tx - 40, trackY - 12, 80, 24, 4);
+            ctx.fill();
+
+            // Braking distance indicator
+            const brakeDist = calcBrakingDistance(train.speed);
+            const brakeScreenDist = (brakeDist / viewRange) * W;
+            ctx.fillStyle = train.ptcBraking ? 'rgba(231,76,60,0.15)' :
+                           train.ptcWarning ? 'rgba(241,196,15,0.1)' : 'rgba(46,204,113,0.05)';
+            ctx.fillRect(tx, trackY - 20, brakeScreenDist, 40);
+
+            // GPS antenna indicator
+            ctx.fillStyle = COLORS.blue;
+            ctx.beginPath();
+            ctx.moveTo(tx, trackY - 14);
+            ctx.lineTo(tx - 4, trackY - 22);
+            ctx.lineTo(tx + 4, trackY - 22);
+            ctx.fill();
+
+            // Speedometer arc
+            drawSpeedometer(W * 0.15, H * 0.25, 70);
+        }
+
+        function drawSpeedometer(cx, cy, r) {
+            const speedKmh = train.speed * 3.6;
+            const limit = getCurrentSpeedLimit();
+            const maxDisplay = 200;
+
+            // Arc background
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, Math.PI * 0.8, Math.PI * 2.2);
+            ctx.strokeStyle = '#333355';
+            ctx.lineWidth = 8;
+            ctx.stroke();
+
+            // Limit zone
+            const limitAngle = Math.PI * 0.8 + (limit / maxDisplay) * Math.PI * 1.4;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, limitAngle, Math.PI * 2.2);
+            ctx.strokeStyle = COLORS.red + '60';
+            ctx.lineWidth = 8;
+            ctx.stroke();
+
+            // Speed arc
+            const speedAngle = Math.PI * 0.8 + (Math.min(speedKmh, maxDisplay) / maxDisplay) * Math.PI * 1.4;
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, Math.PI * 0.8, speedAngle);
+            ctx.strokeStyle = speedKmh > limit ? COLORS.red : COLORS.green;
+            ctx.lineWidth = 8;
+            ctx.stroke();
+
+            // Needle
+            const needleAngle = Math.PI * 0.8 + (Math.min(speedKmh, maxDisplay) / maxDisplay) * Math.PI * 1.4;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx + Math.cos(needleAngle) * (r - 15), cy + Math.sin(needleAngle) * (r - 15));
+            ctx.strokeStyle = COLORS.cream;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Center
+            ctx.beginPath();
+            ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+            ctx.fillStyle = COLORS.cream;
+            ctx.fill();
+
+            // Value
+            ctx.fillStyle = speedKmh > limit ? COLORS.red : COLORS.cream;
+            ctx.font = 'bold 20px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(speedKmh.toFixed(0), cx, cy + 28);
+            ctx.font = '10px sans-serif';
+            ctx.fillStyle = COLORS.cream + '80';
+            ctx.fillText('km/h', cx, cy + 42);
+        }
+
+        function drawPTCEvents() {
+            const x = 20, y = H * 0.72;
+            ctx.fillStyle = COLORS.cream + '60';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('PTC Event Log', x, y);
+
+            ptcEvents.forEach((e, i) => {
+                const age = (Date.now() - e.time) / 1000;
+                const alpha = Math.max(0.2, 1 - age / 10);
+                ctx.fillStyle = e.msg.includes('BRAKE') ? COLORS.red : COLORS.yellow;
+                ctx.globalAlpha = alpha;
+                ctx.font = '10px sans-serif';
+                ctx.fillText(e.msg, x, y + 16 + i * 14);
+            });
+            ctx.globalAlpha = 1;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.fillStyle = COLORS.earth;
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Positive Train Control (PTC)', W / 2, 35);
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '13px sans-serif';
+            ctx.fillText('GPS-based train protection: prevents overspeed, red signal overrun, and work zone intrusion', W / 2, 55);
+
+            drawTrackView();
+            drawPTCEvents();
+        }
+
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        window.addEventListener('resize', resize);
+        resize();
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.1);
+            lastTime = time;
+            if (!paused) update(dt);
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        // Hold-to-accelerate/brake
+        let accelInterval = null;
+        let brakeInterval = null;
+
+        document.getElementById('accelBtn').addEventListener('mousedown', () => { train.accelerating = true; });
+        document.getElementById('accelBtn').addEventListener('mouseup', () => { train.accelerating = false; });
+        document.getElementById('accelBtn').addEventListener('mouseleave', () => { train.accelerating = false; });
+        document.getElementById('brakeBtn').addEventListener('mousedown', () => { train.braking = true; });
+        document.getElementById('brakeBtn').addEventListener('mouseup', () => { train.braking = false; });
+        document.getElementById('brakeBtn').addEventListener('mouseleave', () => { train.braking = false; });
+
+        document.getElementById('overspeedBtn').addEventListener('click', function() {
+            train.speed = (getCurrentSpeedLimit() / 3.6) * 1.3;
+        });
+
+        document.getElementById('workZoneBtn').addEventListener('click', function() {
+            const start = train.x + 2000 + Math.random() * 3000;
+            workZones.push({ start, end: start + 500 });
+            if (workZones.length > 3) workZones.shift();
+        });
+
+        document.getElementById('simSpeedCtrl').addEventListener('input', function() {
+            simSpeed = parseInt(this.value);
+            document.getElementById('simSpeedVal').textContent = this.value;
+        });
+
+        // Keyboard controls
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'ArrowUp' || e.key === 'w') train.accelerating = true;
+            if (e.key === 'ArrowDown' || e.key === 's') train.braking = true;
+        });
+        document.addEventListener('keyup', function(e) {
+            if (e.key === 'ArrowUp' || e.key === 'w') train.accelerating = false;
+            if (e.key === 'ArrowDown' || e.key === 's') train.braking = false;
+        });
+
+        window.reset = function() {
+            train = { x: 500, speed: 0, targetSpeed: 0, accelerating: false, braking: false, ptcBraking: false, ptcWarning: false };
+            workZones = [];
+            ptcEvents = [];
+            simSpeed = 1;
+            document.getElementById('simSpeedCtrl').value = 1;
+            document.getElementById('simSpeedVal').textContent = '1';
+        };
+
+        window.addEventListener('enhanceReady', function() {
+            if (window.enhance) { window.enhance.onPause = function(p) { paused = p; }; }
+        });
+
+        requestAnimationFrame(animate);
+    })();
+    </script>
+</body>
+</html>

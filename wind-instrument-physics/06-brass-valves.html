@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Brass Valve Combinations - Wind Instrument Physics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; }
+a.back-link { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+a.back-link:hover { color: #DDA15E; }
+
+.controls {
+    position: fixed; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(26,26,46,0.92); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 16px; min-width: 240px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #DDA15E; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+.controls label { display: block; font-size: 12px; color: #8A9A5B; margin-top: 8px; }
+.controls .value { font-size: 11px; color: #8A9A5B; text-align: right; }
+.valve-btns { display: flex; gap: 8px; margin: 10px 0; }
+.valve-btn {
+    flex: 1; padding: 12px 8px; border: 2px solid #606C38; border-radius: 12px;
+    background: rgba(96,108,56,0.15); color: #8A9A5B; font-size: 16px; font-weight: bold;
+    cursor: pointer; text-align: center; transition: all 0.2s;
+}
+.valve-btn.pressed { background: #DDA15E; color: #1a1a2e; border-color: #DDA15E; transform: translateY(3px); }
+.valve-btn span { display: block; font-size: 10px; font-weight: normal; margin-top: 4px; }
+.controls select { width: 100%; background: #2a2a4e; color: #FEFAE0; border: 1px solid #606C38; border-radius: 6px; padding: 4px; margin: 4px 0; }
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 12px; border: none; border-radius: 8px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+.btn.active { background: #DDA15E; color: #1a1a2e; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Brass Valves</h3>
+    <label>Instrument</label>
+    <select id="instrument">
+        <option value="trumpet">Trumpet (Bb)</option>
+        <option value="horn">French Horn (F)</option>
+        <option value="tuba">Tuba (Bb)</option>
+    </select>
+    <label>Partial (Harmonic): <span id="partialVal" class="value">2</span></label>
+    <input type="range" id="partial" min="1" max="8" value="2" step="1">
+    <div class="valve-btns">
+        <button class="valve-btn" id="v1">1<span>M2</span></button>
+        <button class="valve-btn" id="v2">2<span>m2</span></button>
+        <button class="valve-btn" id="v3">3<span>m3</span></button>
+    </div>
+    <div style="margin-top:6px;">
+        <button class="btn" id="playBtn">Play Note</button>
+    </div>
+</div>
+
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+let instrument = 'trumpet';
+let partial = 2;
+let valves = [false, false, false];
+let time = 0;
+let audioCtx = null;
+let oscillator = null;
+let gainNode = null;
+let isPlaying = false;
+let animId;
+
+const instruments = {
+    trumpet: { baseLength: 1.37, fundamental: 116.5, name: 'Bb Trumpet' },
+    horn: { baseLength: 3.7, fundamental: 87.3, name: 'F French Horn' },
+    tuba: { baseLength: 5.5, fundamental: 58.3, name: 'Bb Tuba' }
+};
+
+// Valve length ratios (percentage of base tube length)
+const valveRatios = [
+    1 / Math.pow(2, 2/12) - 1,  // Valve 1: M2 down (2 semitones, ~12.2%)
+    1 / Math.pow(2, 1/12) - 1,  // Valve 2: m2 down (1 semitone, ~5.9%)
+    1 / Math.pow(2, 3/12) - 1   // Valve 3: m3 down (3 semitones, ~18.9%)
+];
+
+const partialEl = document.getElementById('partial');
+const instEl = document.getElementById('instrument');
+const playBtn = document.getElementById('playBtn');
+const valveBtns = [document.getElementById('v1'), document.getElementById('v2'), document.getElementById('v3')];
+
+partialEl.addEventListener('input', e => {
+    partial = +e.target.value;
+    document.getElementById('partialVal').textContent = partial;
+    updateSound();
+});
+
+instEl.addEventListener('change', e => { instrument = e.target.value; updateSound(); });
+
+valveBtns.forEach((btn, i) => {
+    btn.addEventListener('click', () => {
+        valves[i] = !valves[i];
+        btn.classList.toggle('pressed');
+        updateSound();
+    });
+});
+
+playBtn.addEventListener('click', () => { if (isPlaying) stopSound(); else startSound(); });
+
+const noteNames = ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+function freqToNote(f) {
+    if (f < 20) return '---';
+    const midi = 69 + 12 * Math.log2(f / 440);
+    const note = Math.round(midi);
+    const octave = Math.floor(note / 12) - 1;
+    const cents = Math.round((midi - note) * 100);
+    return noteNames[((note % 12) + 12) % 12] + octave + (cents !== 0 ? ` ${cents > 0 ? '+' : ''}${cents}c` : '');
+}
+
+function getTotalLength() {
+    const inst = instruments[instrument];
+    let extra = 0;
+    for (let i = 0; i < 3; i++) {
+        if (valves[i]) extra += Math.abs(valveRatios[i]) * inst.baseLength;
+    }
+    return inst.baseLength + extra;
+}
+
+function getFrequency() {
+    const totalLen = getTotalLength();
+    const inst = instruments[instrument];
+    const baseFundamental = 343 / (2 * totalLen);
+    return baseFundamental * partial;
+}
+
+function startSound() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    stopSound();
+    const freq = getFrequency();
+    oscillator = audioCtx.createOscillator();
+    gainNode = audioCtx.createGain();
+    oscillator.type = 'sawtooth';
+    oscillator.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+    gainNode.gain.linearRampToValueAtTime(0.08, audioCtx.currentTime + 0.05);
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    oscillator.start();
+    isPlaying = true;
+    playBtn.textContent = 'Stop';
+    playBtn.classList.add('active');
+}
+
+function stopSound() {
+    if (oscillator) {
+        if (gainNode) gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.05);
+        oscillator.stop(audioCtx.currentTime + 0.06);
+        oscillator = null;
+    }
+    isPlaying = false;
+    playBtn.textContent = 'Play Note';
+    playBtn.classList.remove('active');
+}
+
+function updateSound() {
+    if (isPlaying && oscillator) {
+        oscillator.frequency.setValueAtTime(getFrequency(), audioCtx.currentTime);
+    }
+}
+
+function drawValveDiagram(x, y, scale) {
+    const inst = instruments[instrument];
+    const tubeR = 6 * scale;
+
+    // Main tube
+    const mainLen = 300 * scale;
+    ctx.strokeStyle = '#606C38';
+    ctx.lineWidth = 2;
+
+    // Mouthpiece
+    ctx.beginPath();
+    ctx.moveTo(x - 30 * scale, y);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x - 35 * scale, y, 8 * scale, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = `${9 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Mouthpiece', x - 35 * scale, y - 14 * scale);
+
+    // Valve positions
+    const valveSpacing = mainLen / 4;
+    const valveNames = ['1st (M2)', '2nd (m2)', '3rd (m3)'];
+    const valveSemitones = [2, 1, 3];
+
+    for (let i = 0; i < 3; i++) {
+        const vx = x + (i + 1) * valveSpacing;
+        const pressed = valves[i];
+        const extraLen = Math.abs(valveRatios[i]) * inst.baseLength * 100 * scale;
+
+        // Main tube through valve
+        ctx.strokeStyle = pressed ? 'rgba(96,108,56,0.3)' : '#606C38';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(vx - 15 * scale, y);
+        ctx.lineTo(vx + 15 * scale, y);
+        ctx.stroke();
+
+        // Valve casing
+        ctx.fillStyle = pressed ? 'rgba(221,161,94,0.3)' : 'rgba(96,108,56,0.15)';
+        ctx.strokeStyle = pressed ? '#DDA15E' : '#606C38';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.roundRect(vx - 18 * scale, y - 30 * scale, 36 * scale, 60 * scale, 8 * scale);
+        ctx.fill();
+        ctx.stroke();
+
+        // Valve slide (extra tubing)
+        if (pressed) {
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            const slideH = 25 * scale + extraLen * 0.3;
+            ctx.beginPath();
+            ctx.moveTo(vx - 10 * scale, y);
+            ctx.lineTo(vx - 10 * scale, y + slideH);
+            ctx.lineTo(vx + 10 * scale, y + slideH);
+            ctx.lineTo(vx + 10 * scale, y);
+            ctx.stroke();
+
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = `${8 * scale}px system-ui`;
+            ctx.textAlign = 'center';
+            ctx.fillText(`+${(Math.abs(valveRatios[i]) * inst.baseLength * 100).toFixed(1)} cm`, vx, y + slideH + 12 * scale);
+        }
+
+        // Valve button
+        ctx.fillStyle = pressed ? '#DDA15E' : '#606C38';
+        ctx.beginPath();
+        ctx.arc(vx, y - (pressed ? 24 : 30) * scale, 7 * scale, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Label
+        ctx.fillStyle = pressed ? '#DDA15E' : '#8A9A5B';
+        ctx.font = `${10 * scale}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.fillText(valveNames[i], vx, y - 42 * scale);
+        ctx.fillText(`-${valveSemitones[i]} st`, vx, y - 52 * scale);
+    }
+
+    // Main tube continuation
+    ctx.strokeStyle = '#606C38';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + valveSpacing - 15 * scale, y);
+    ctx.stroke();
+    for (let i = 0; i < 2; i++) {
+        ctx.beginPath();
+        ctx.moveTo(x + (i + 1) * valveSpacing + 15 * scale, y);
+        ctx.lineTo(x + (i + 2) * valveSpacing - 15 * scale, y);
+        ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.moveTo(x + 3 * valveSpacing + 15 * scale, y);
+    ctx.lineTo(x + mainLen, y);
+    ctx.stroke();
+
+    // Bell
+    ctx.beginPath();
+    ctx.moveTo(x + mainLen, y - tubeR);
+    ctx.quadraticCurveTo(x + mainLen + 30 * scale, y - 25 * scale, x + mainLen + 40 * scale, y - 30 * scale);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + mainLen, y + tubeR);
+    ctx.quadraticCurveTo(x + mainLen + 30 * scale, y + 25 * scale, x + mainLen + 40 * scale, y + 30 * scale);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x + mainLen + 40 * scale, y, 30 * scale, -Math.PI / 2 + 0.1, Math.PI / 2 - 0.1);
+    ctx.stroke();
+
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = `${9 * scale}px system-ui`;
+    ctx.fillText('Bell', x + mainLen + 40 * scale, y + 45 * scale);
+}
+
+function draw() {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+
+    const scale = Math.min(W, H) / 700;
+    const inst = instruments[instrument];
+
+    // Title
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = `bold ${16 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText(`${inst.name} - Valve Combinations & Tubing`, W / 2, 30 * scale);
+
+    // Draw valve diagram
+    drawValveDiagram(W * 0.1, H * 0.3, scale);
+
+    // Info panel
+    const totalLen = getTotalLength();
+    const freq = getFrequency();
+    const semitones = valves[0] * 2 + valves[1] * 1 + valves[2] * 3;
+    const combName = getCombinationName();
+
+    const infoX = W * 0.05;
+    const infoY = H * 0.52;
+
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = `bold ${14 * scale}px system-ui`;
+    ctx.textAlign = 'left';
+    ctx.fillText('Current Configuration', infoX, infoY);
+
+    ctx.font = `${12 * scale}px system-ui`;
+    ctx.fillStyle = '#8A9A5B';
+    ctx.fillText(`Base tube length: ${(inst.baseLength * 100).toFixed(1)} cm`, infoX, infoY + 22 * scale);
+    ctx.fillText(`Total tube length: ${(totalLen * 100).toFixed(1)} cm`, infoX, infoY + 42 * scale);
+    ctx.fillText(`Added length: ${((totalLen - inst.baseLength) * 100).toFixed(1)} cm`, infoX, infoY + 62 * scale);
+    ctx.fillText(`Partial: ${partial} | Valves: ${combName}`, infoX, infoY + 82 * scale);
+
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = `bold ${14 * scale}px system-ui`;
+    ctx.fillText(`Sounding pitch: ${freqToNote(freq)} (${freq.toFixed(1)} Hz)`, infoX, infoY + 108 * scale);
+
+    // Valve combination chart
+    const chartX = W * 0.55;
+    const chartY = H * 0.52;
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = `bold ${13 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('All 7 Valve Combinations (Partial ' + partial + ')', chartX + 120 * scale, chartY);
+
+    const combos = [
+        { v: [false, false, false], label: 'Open' },
+        { v: [false, true, false], label: '2' },
+        { v: [true, false, false], label: '1' },
+        { v: [true, true, false], label: '1+2' },
+        { v: [false, true, true], label: '2+3' },
+        { v: [true, false, true], label: '1+3' },
+        { v: [true, true, true], label: '1+2+3' }
+    ];
+
+    const barW = 30 * scale;
+    const maxBarH = H * 0.25;
+    const maxFreq = instruments[instrument].fundamental * partial / (instruments[instrument].baseLength);
+
+    for (let i = 0; i < combos.length; i++) {
+        const c = combos[i];
+        let len = inst.baseLength;
+        for (let j = 0; j < 3; j++) {
+            if (c.v[j]) len += Math.abs(valveRatios[j]) * inst.baseLength;
+        }
+        const f = (343 / (2 * len)) * partial;
+        const barH = (f / (inst.fundamental * partial * 1.1)) * maxBarH;
+        const bx = chartX + i * (barW + 8 * scale);
+        const by = chartY + maxBarH - barH + 20 * scale;
+
+        const isCurrent = c.v[0] === valves[0] && c.v[1] === valves[1] && c.v[2] === valves[2];
+        ctx.fillStyle = isCurrent ? '#DDA15E' : 'rgba(138,154,91,0.4)';
+        ctx.fillRect(bx, by, barW, barH);
+
+        if (isCurrent) {
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(bx - 2, by - 2, barW + 4, barH + 4);
+        }
+
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = `${9 * scale}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.fillText(c.label, bx + barW / 2, chartY + maxBarH + 35 * scale);
+        ctx.fillText(f.toFixed(0), bx + barW / 2, by - 5 * scale);
+        ctx.fillText(freqToNote(f).split(' ')[0], bx + barW / 2, chartY + maxBarH + 48 * scale);
+    }
+
+    ctx.fillStyle = 'rgba(138,154,91,0.3)';
+    ctx.strokeStyle = 'rgba(138,154,91,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(chartX - 10 * scale, chartY + maxBarH + 20 * scale);
+    ctx.lineTo(chartX + 7 * (barW + 8 * scale), chartY + maxBarH + 20 * scale);
+    ctx.stroke();
+
+    // Tuning error note
+    ctx.fillStyle = 'rgba(221,161,94,0.5)';
+    ctx.font = `${10 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Valve combinations 1+3 and 1+2+3 are inherently sharp due to proportional tubing', W / 2, H - 15);
+}
+
+function getCombinationName() {
+    const pressed = [];
+    if (valves[0]) pressed.push('1');
+    if (valves[1]) pressed.push('2');
+    if (valves[2]) pressed.push('3');
+    return pressed.length ? pressed.join('+') : 'Open';
+}
+
+function animate(ts) {
+    time = ts || 0;
+    draw();
+    animId = requestAnimationFrame(animate);
+}
+
+animate();
+
+window.reset = function() {
+    instrument = 'trumpet';
+    partial = 2;
+    valves = [false, false, false];
+    instEl.value = 'trumpet';
+    partialEl.value = 2;
+    document.getElementById('partialVal').textContent = '2';
+    valveBtns.forEach(b => b.classList.remove('pressed'));
+    stopSound();
+};
+</script>
+</body>
+</html>

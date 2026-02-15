@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inverse Kinematics Chain - Biomechanics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; cursor: crosshair; }
+        a[href="index.html"] { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,60,0.85); backdrop-filter: blur(10px);
+            border-radius: 16px; padding: 16px 24px; display: flex; gap: 20px;
+            align-items: center; color: #FEFAE0; font-size: 0.85rem; z-index: 100;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        #controls input[type="range"] { width: 100px; accent-color: #8A9A5B; }
+        #controls button {
+            background: rgba(138,154,91,0.3); border: 1px solid #8A9A5B; color: #FEFAE0;
+            padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85rem;
+        }
+        #info {
+            position: fixed; top: 60px; right: 20px;
+            background: rgba(30,30,60,0.85); backdrop-filter: blur(10px);
+            border-radius: 12px; padding: 14px 18px; color: #FEFAE0;
+            font-size: 0.8rem; z-index: 100; max-width: 220px; line-height: 1.5;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <div id="info">
+        <strong style="color:#8A9A5B">Inverse Kinematics</strong><br>
+        Drag the target (gold dot) to move the end effector. The joint chain solves angles to reach.<br><br>
+        Uses FABRIK algorithm for multi-joint chains.
+    </div>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <label>Segments<input type="range" id="segments" min="2" max="10" step="1" value="4"><span id="seg-val">4</span></label>
+        <label>Seg Length<input type="range" id="segLen" min="30" max="100" step="5" value="60"><span id="segLen-val">60</span></label>
+        <label>Iterations<input type="range" id="iters" min="1" max="20" step="1" value="10"><span id="iter-val">10</span></label>
+        <button id="toggleConstrain">Constraints: ON</button>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let numSegments = 4, segLength = 60, iterations = 10;
+        let constrainAngles = true;
+        const maxAngle = Math.PI * 0.6; // Joint constraint
+
+        let target = { x: 0, y: 0 };
+        let basePos = { x: 0, y: 0 };
+        let joints = [];
+        let dragging = false;
+        let trail = [];
+
+        function initChain() {
+            basePos = { x: W / 2, y: H * 0.65 };
+            target = { x: W / 2 + 100, y: H * 0.35 };
+            joints = [];
+            for (let i = 0; i <= numSegments; i++) {
+                joints.push({ x: basePos.x, y: basePos.y - i * segLength });
+            }
+            trail = [];
+        }
+        initChain();
+
+        document.getElementById('segments').oninput = e => {
+            numSegments = +e.target.value;
+            document.getElementById('seg-val').textContent = numSegments;
+            initChain();
+        };
+        document.getElementById('segLen').oninput = e => {
+            segLength = +e.target.value;
+            document.getElementById('segLen-val').textContent = segLength;
+            initChain();
+        };
+        document.getElementById('iters').oninput = e => {
+            iterations = +e.target.value;
+            document.getElementById('iter-val').textContent = iterations;
+        };
+        document.getElementById('toggleConstrain').onclick = e => {
+            constrainAngles = !constrainAngles;
+            e.target.textContent = 'Constraints: ' + (constrainAngles ? 'ON' : 'OFF');
+        };
+
+        // FABRIK solver
+        function solveFABRIK() {
+            for (let iter = 0; iter < iterations; iter++) {
+                // Forward pass: from end effector to base
+                joints[joints.length - 1].x = target.x;
+                joints[joints.length - 1].y = target.y;
+                for (let i = joints.length - 2; i >= 0; i--) {
+                    const dx = joints[i].x - joints[i + 1].x;
+                    const dy = joints[i].y - joints[i + 1].y;
+                    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                    joints[i].x = joints[i + 1].x + (dx / dist) * segLength;
+                    joints[i].y = joints[i + 1].y + (dy / dist) * segLength;
+                }
+
+                // Backward pass: from base to end effector
+                joints[0].x = basePos.x;
+                joints[0].y = basePos.y;
+                for (let i = 1; i < joints.length; i++) {
+                    const dx = joints[i].x - joints[i - 1].x;
+                    const dy = joints[i].y - joints[i - 1].y;
+                    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                    joints[i].x = joints[i - 1].x + (dx / dist) * segLength;
+                    joints[i].y = joints[i - 1].y + (dy / dist) * segLength;
+
+                    // Angular constraints
+                    if (constrainAngles && i >= 2) {
+                        const prevAngle = Math.atan2(
+                            joints[i - 1].y - joints[i - 2].y,
+                            joints[i - 1].x - joints[i - 2].x
+                        );
+                        const currAngle = Math.atan2(
+                            joints[i].y - joints[i - 1].y,
+                            joints[i].x - joints[i - 1].x
+                        );
+                        let diff = currAngle - prevAngle;
+                        while (diff > Math.PI) diff -= Math.PI * 2;
+                        while (diff < -Math.PI) diff += Math.PI * 2;
+
+                        if (Math.abs(diff) > maxAngle) {
+                            const clampedAngle = prevAngle + Math.sign(diff) * maxAngle;
+                            joints[i].x = joints[i - 1].x + Math.cos(clampedAngle) * segLength;
+                            joints[i].y = joints[i - 1].y + Math.sin(clampedAngle) * segLength;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Mouse interaction
+        canvas.addEventListener('mousedown', e => {
+            const dx = e.clientX - target.x;
+            const dy = e.clientY - target.y;
+            if (dx * dx + dy * dy < 400) dragging = true;
+        });
+        canvas.addEventListener('mousemove', e => {
+            if (dragging) {
+                target.x = e.clientX;
+                target.y = e.clientY;
+            }
+        });
+        canvas.addEventListener('mouseup', () => dragging = false);
+
+        canvas.addEventListener('touchstart', e => {
+            e.preventDefault();
+            const t = e.touches[0];
+            target.x = t.clientX;
+            target.y = t.clientY;
+            dragging = true;
+        });
+        canvas.addEventListener('touchmove', e => {
+            e.preventDefault();
+            if (dragging) {
+                target.x = e.touches[0].clientX;
+                target.y = e.touches[0].clientY;
+            }
+        });
+        canvas.addEventListener('touchend', () => dragging = false);
+
+        function drawJointArc(j, i) {
+            if (i < 1 || i >= joints.length - 1) return;
+            const prev = joints[i - 1], next = joints[i + 1];
+            const a1 = Math.atan2(prev.y - j.y, prev.x - j.x);
+            const a2 = Math.atan2(next.y - j.y, next.x - j.x);
+            let angle = a2 - a1;
+            while (angle > Math.PI) angle -= Math.PI * 2;
+            while (angle < -Math.PI) angle += Math.PI * 2;
+
+            ctx.strokeStyle = 'rgba(221,161,94,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(j.x, j.y, 20, a1, a2, angle < 0);
+            ctx.stroke();
+
+            // Angle label
+            ctx.fillStyle = 'rgba(221,161,94,0.6)';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            const midA = a1 + angle / 2;
+            ctx.fillText(Math.abs(Math.round(angle * 180 / Math.PI)) + '°',
+                j.x + Math.cos(midA) * 30, j.y + Math.sin(midA) * 30);
+        }
+
+        function animate() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            solveFABRIK();
+
+            // Trail
+            const endJoint = joints[joints.length - 1];
+            trail.push({ x: endJoint.x, y: endJoint.y });
+            if (trail.length > 200) trail.shift();
+
+            ctx.strokeStyle = 'rgba(138,154,91,0.15)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            trail.forEach((p, i) => {
+                if (i === 0) ctx.moveTo(p.x, p.y);
+                else ctx.lineTo(p.x, p.y);
+            });
+            ctx.stroke();
+
+            // Range circle
+            const totalLen = numSegments * segLength;
+            ctx.strokeStyle = 'rgba(138,154,91,0.1)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.arc(basePos.x, basePos.y, totalLen, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Segments
+            for (let i = 0; i < joints.length - 1; i++) {
+                const a = joints[i], b = joints[i + 1];
+                const t = i / (joints.length - 1);
+
+                // Bone
+                ctx.strokeStyle = `rgba(${138 + t * 80}, ${154 - t * 50}, ${91 + t * 50}, 0.9)`;
+                ctx.lineWidth = 4 - t;
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                ctx.lineTo(b.x, b.y);
+                ctx.stroke();
+            }
+
+            // Joints and angles
+            for (let i = 0; i < joints.length; i++) {
+                const j = joints[i];
+                drawJointArc(j, i);
+
+                ctx.fillStyle = i === 0 ? '#606C38' : '#FEFAE0';
+                ctx.beginPath();
+                ctx.arc(j.x, j.y, i === 0 ? 8 : 5, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Label
+                if (i === 0) {
+                    ctx.fillStyle = '#606C38';
+                    ctx.font = '11px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Base (Fixed)', j.x, j.y + 20);
+                }
+            }
+
+            // Target
+            ctx.fillStyle = '#DDA15E';
+            ctx.beginPath();
+            ctx.arc(target.x, target.y, 10, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(221,161,94,0.5)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(target.x, target.y, 16, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Target', target.x, target.y - 20);
+
+            // Distance info
+            const distToTarget = Math.sqrt(
+                (endJoint.x - target.x) ** 2 + (endJoint.y - target.y) ** 2
+            );
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Error: ${distToTarget.toFixed(1)}px | Reach: ${totalLen}px`, 20, H - 20);
+
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            numSegments = 4; segLength = 60; iterations = 10; constrainAngles = true;
+            document.getElementById('segments').value = 4;
+            document.getElementById('segLen').value = 60;
+            document.getElementById('iters').value = 10;
+            document.getElementById('seg-val').textContent = '4';
+            document.getElementById('segLen-val').textContent = '60';
+            document.getElementById('iter-val').textContent = '10';
+            document.getElementById('toggleConstrain').textContent = 'Constraints: ON';
+            initChain();
+        };
+
+        requestAnimationFrame(animate);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

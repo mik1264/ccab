@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Yeast Population Dynamics - Fermentation Science</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a12; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; color: #FEFAE0; }
+canvas { display: block; }
+
+.controls {
+    position: fixed; top: 16px; right: 16px; z-index: 100;
+    background: rgba(30,30,20,0.92); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 18px; min-width: 240px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #DDA15E; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1.5px; }
+.controls label { display: block; font-size: 12px; color: #8A9A5B; margin-top: 8px; }
+.controls input[type=range] { width: 100%; margin: 4px 0; accent-color: #DDA15E; }
+.controls .value { font-size: 11px; color: #606C38; text-align: right; }
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 14px; border: none; border-radius: 8px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+
+.info-panel {
+    position: fixed; bottom: 16px; left: 16px; right: 16px; z-index: 100;
+    background: rgba(30,30,20,0.88); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 14px 18px;
+    border: 1px solid rgba(138,154,91,0.2);
+    font-size: 12px; color: #8A9A5B; max-width: 600px;
+}
+.info-panel h4 { color: #DDA15E; margin-bottom: 6px; font-size: 13px; }
+.info-panel .equation { color: #FEFAE0; font-family: 'Courier New', monospace; margin: 4px 0; font-size: 13px; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Monod Kinetics</h3>
+    <label>Max Growth Rate (mu_max): <span id="muVal">0.45</span> h<sup>-1</sup></label>
+    <input type="range" id="muMax" min="0.1" max="1.0" step="0.01" value="0.45">
+    <label>Half-Saturation (Ks): <span id="ksVal">2.0</span> g/L</label>
+    <input type="range" id="ks" min="0.5" max="10" step="0.1" value="2.0">
+    <label>Substrate Yield (Yx/s): <span id="yieldVal">0.5</span></label>
+    <input type="range" id="yieldCoeff" min="0.1" max="0.9" step="0.01" value="0.5">
+    <label>Initial Substrate (S0): <span id="s0Val">20</span> g/L</label>
+    <input type="range" id="s0" min="5" max="50" step="1" value="20">
+    <div style="margin-top:10px;">
+        <button class="btn" id="resetBtn">Reset</button>
+        <button class="btn" id="pauseBtn">Pause</button>
+    </div>
+</div>
+
+<div class="info-panel">
+    <h4>Monod Growth Model</h4>
+    <div class="equation">mu = mu_max * S / (Ks + S)</div>
+    <p>Saccharomyces cerevisiae (brewer's yeast) grows on glucose following Monod kinetics. The specific growth rate depends on substrate concentration, with a characteristic saturation curve. Watch the population explode during log phase, then plateau as nutrients deplete.</p>
+</div>
+
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Simulation state
+let simTime = 0;
+const dt = 0.05; // hours per frame
+let paused = false;
+let history = [];
+
+// Parameters
+let muMax = 0.45;
+let Ks = 2.0;
+let Yxs = 0.5;
+let S0 = 20;
+
+// State variables
+let X = 0.1; // biomass g/L
+let S = S0;  // substrate g/L
+let ethanol = 0; // ethanol g/L
+
+// Yeast cells for visual
+let cells = [];
+const maxCells = 800;
+
+function initCells(count) {
+    cells = [];
+    for (let i = 0; i < count; i++) {
+        cells.push({
+            x: W * 0.1 + Math.random() * W * 0.5,
+            y: H * 0.15 + Math.random() * H * 0.7,
+            r: 3 + Math.random() * 4,
+            vx: (Math.random() - 0.5) * 0.8,
+            vy: (Math.random() - 0.5) * 0.8,
+            budding: false,
+            budPhase: 0,
+            hue: 40 + Math.random() * 20,
+            opacity: 0.7 + Math.random() * 0.3
+        });
+    }
+}
+
+function resetSim() {
+    simTime = 0;
+    X = 0.1;
+    S = S0;
+    ethanol = 0;
+    history = [];
+    initCells(10);
+}
+
+// Controls
+const muSlider = document.getElementById('muMax');
+const ksSlider = document.getElementById('ks');
+const yieldSlider = document.getElementById('yieldCoeff');
+const s0Slider = document.getElementById('s0');
+
+muSlider.addEventListener('input', () => { muMax = parseFloat(muSlider.value); document.getElementById('muVal').textContent = muMax.toFixed(2); });
+ksSlider.addEventListener('input', () => { Ks = parseFloat(ksSlider.value); document.getElementById('ksVal').textContent = Ks.toFixed(1); });
+yieldSlider.addEventListener('input', () => { Yxs = parseFloat(yieldSlider.value); document.getElementById('yieldVal').textContent = Yxs.toFixed(2); });
+s0Slider.addEventListener('input', () => { S0 = parseFloat(s0Slider.value); document.getElementById('s0Val').textContent = S0.toFixed(0); resetSim(); });
+
+document.getElementById('resetBtn').addEventListener('click', resetSim);
+document.getElementById('pauseBtn').addEventListener('click', () => {
+    paused = !paused;
+    document.getElementById('pauseBtn').textContent = paused ? 'Play' : 'Pause';
+});
+
+function updateSim() {
+    if (paused || S <= 0.001) return;
+
+    // Monod kinetics
+    const mu = muMax * S / (Ks + S);
+    const dX = mu * X * dt;
+    const dS = -dX / Yxs;
+    const dEth = dX * 0.48 / Yxs; // ethanol yield
+
+    X = Math.max(0, X + dX);
+    S = Math.max(0, S + dS);
+    ethanol += dEth;
+    simTime += dt;
+
+    history.push({ t: simTime, X: X, S: S, E: ethanol, mu: mu });
+    if (history.length > 2000) history.shift();
+
+    // Update visual cells
+    const targetCells = Math.min(maxCells, Math.floor(X * 30));
+    while (cells.length < targetCells && cells.length < maxCells) {
+        const parent = cells[Math.floor(Math.random() * cells.length)];
+        if (parent) {
+            cells.push({
+                x: parent.x + (Math.random() - 0.5) * 20,
+                y: parent.y + (Math.random() - 0.5) * 20,
+                r: 3 + Math.random() * 4,
+                vx: (Math.random() - 0.5) * 0.8,
+                vy: (Math.random() - 0.5) * 0.8,
+                budding: Math.random() < 0.3,
+                budPhase: 0,
+                hue: 40 + Math.random() * 20,
+                opacity: 0.7 + Math.random() * 0.3
+            });
+        }
+    }
+}
+
+function drawCell(c) {
+    // Main cell body
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${c.hue}, 50%, 65%, ${c.opacity})`;
+    ctx.fill();
+    ctx.strokeStyle = `hsla(${c.hue}, 40%, 45%, ${c.opacity * 0.5})`;
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+
+    // Cell wall highlight
+    ctx.beginPath();
+    ctx.arc(c.x - c.r * 0.25, c.y - c.r * 0.25, c.r * 0.4, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${c.hue}, 30%, 80%, ${c.opacity * 0.3})`;
+    ctx.fill();
+
+    // Budding
+    if (c.budding) {
+        c.budPhase += 0.01;
+        const budR = c.r * 0.5 * Math.min(1, c.budPhase);
+        const angle = Math.PI * 0.3;
+        ctx.beginPath();
+        ctx.arc(c.x + Math.cos(angle) * (c.r + budR * 0.5), c.y + Math.sin(angle) * (c.r + budR * 0.5), budR, 0, Math.PI * 2);
+        ctx.fillStyle = `hsla(${c.hue + 10}, 55%, 70%, ${c.opacity})`;
+        ctx.fill();
+        if (c.budPhase > 1) {
+            c.budding = false;
+            c.budPhase = 0;
+        }
+    }
+}
+
+function moveCells() {
+    const regionLeft = W * 0.05;
+    const regionRight = W * 0.6;
+    const regionTop = H * 0.08;
+    const regionBottom = H * 0.85;
+
+    for (const c of cells) {
+        c.x += c.vx;
+        c.y += c.vy;
+        c.vx += (Math.random() - 0.5) * 0.15;
+        c.vy += (Math.random() - 0.5) * 0.15;
+        c.vx *= 0.98;
+        c.vy *= 0.98;
+
+        if (c.x < regionLeft + c.r) { c.x = regionLeft + c.r; c.vx *= -0.5; }
+        if (c.x > regionRight - c.r) { c.x = regionRight - c.r; c.vx *= -0.5; }
+        if (c.y < regionTop + c.r) { c.y = regionTop + c.r; c.vy *= -0.5; }
+        if (c.y > regionBottom - c.r) { c.y = regionBottom - c.r; c.vy *= -0.5; }
+    }
+}
+
+function drawGraph() {
+    if (history.length < 2) return;
+
+    const gx = W * 0.62;
+    const gy = H * 0.08;
+    const gw = W * 0.34;
+    const gh = H * 0.75;
+
+    // Background
+    ctx.fillStyle = 'rgba(20,20,12,0.7)';
+    ctx.beginPath();
+    ctx.roundRect(gx - 10, gy - 10, gw + 20, gh + 50, 14);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Axes
+    ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy);
+    ctx.lineTo(gx, gy + gh);
+    ctx.lineTo(gx + gw, gy + gh);
+    ctx.stroke();
+
+    // Labels
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = '12px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Time (hours)', gx + gw / 2, gy + gh + 35);
+
+    ctx.save();
+    ctx.translate(gx - 5, gy + gh / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('Concentration (g/L)', 0, -5);
+    ctx.restore();
+
+    // Title
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = 'bold 14px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Growth Curve', gx + gw / 2, gy + 5);
+
+    // Find scales
+    const maxT = Math.max(10, simTime);
+    let maxConc = Math.max(S0, 5);
+    for (const h of history) {
+        maxConc = Math.max(maxConc, h.X, h.S, h.E);
+    }
+    maxConc *= 1.1;
+
+    // Grid lines
+    ctx.strokeStyle = 'rgba(138,154,91,0.1)';
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i <= 5; i++) {
+        const y = gy + gh - (i / 5) * gh;
+        ctx.beginPath();
+        ctx.moveTo(gx, y);
+        ctx.lineTo(gx + gw, y);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(138,154,91,0.5)';
+        ctx.font = '10px system-ui';
+        ctx.textAlign = 'right';
+        ctx.fillText((maxConc * i / 5).toFixed(1), gx - 5, y + 4);
+    }
+
+    function drawCurve(data, key, color) {
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        let first = true;
+        for (const d of data) {
+            const px = gx + (d.t / maxT) * gw;
+            const py = gy + gh - (d[key] / maxConc) * gh;
+            if (first) { ctx.moveTo(px, py); first = false; }
+            else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+    }
+
+    // Draw curves
+    drawCurve(history, 'X', '#8A9A5B'); // Biomass - sage
+    drawCurve(history, 'S', '#DDA15E'); // Substrate - earth
+    drawCurve(history, 'E', '#BC6C25'); // Ethanol - terracotta
+
+    // Legend
+    const ly = gy + 20;
+    const items = [
+        { label: 'Biomass (X)', color: '#8A9A5B' },
+        { label: 'Substrate (S)', color: '#DDA15E' },
+        { label: 'Ethanol', color: '#BC6C25' }
+    ];
+    ctx.textAlign = 'left';
+    items.forEach((item, i) => {
+        ctx.fillStyle = item.color;
+        ctx.fillRect(gx + 10, ly + i * 18, 12, 3);
+        ctx.font = '11px system-ui';
+        ctx.fillText(item.label, gx + 28, ly + i * 18 + 5);
+    });
+
+    // Current values
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '11px system-ui';
+    ctx.textAlign = 'left';
+    const vy = gy + gh + 15;
+    ctx.fillText(`t=${simTime.toFixed(1)}h  X=${X.toFixed(2)}  S=${S.toFixed(2)}  EtOH=${ethanol.toFixed(2)}`, gx + 5, vy);
+}
+
+function drawFlask() {
+    // Substrate color in flask region
+    const substrateAlpha = Math.min(0.4, S / S0 * 0.4);
+    const flaskLeft = W * 0.05;
+    const flaskRight = W * 0.6;
+    const flaskTop = H * 0.08;
+    const flaskBottom = H * 0.85;
+
+    // Flask outline
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(flaskLeft, flaskTop, flaskRight - flaskLeft, flaskBottom - flaskTop, 20);
+    ctx.stroke();
+
+    // Substrate fill (diminishing)
+    const fillHeight = (S / S0) * (flaskBottom - flaskTop);
+    const gradient = ctx.createLinearGradient(0, flaskBottom - fillHeight, 0, flaskBottom);
+    gradient.addColorStop(0, `rgba(221,161,94,${substrateAlpha * 0.3})`);
+    gradient.addColorStop(1, `rgba(221,161,94,${substrateAlpha})`);
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.roundRect(flaskLeft + 2, flaskBottom - fillHeight, flaskRight - flaskLeft - 4, fillHeight, [0, 0, 18, 18]);
+    ctx.fill();
+
+    // CO2 bubbles
+    if (!paused && S > 0.01) {
+        const mu = muMax * S / (Ks + S);
+        const bubbleRate = mu * X * 0.5;
+        for (let i = 0; i < bubbleRate; i++) {
+            const bx = flaskLeft + 30 + Math.random() * (flaskRight - flaskLeft - 60);
+            const by = flaskBottom - Math.random() * fillHeight;
+            const br = 1 + Math.random() * 3;
+            ctx.beginPath();
+            ctx.arc(bx, by, br, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(254,250,224,${0.1 + Math.random() * 0.15})`;
+            ctx.fill();
+        }
+    }
+
+    // Label
+    ctx.fillStyle = '#606C38';
+    ctx.font = '12px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Fermentation Vessel', (flaskLeft + flaskRight) / 2, flaskTop - 5);
+}
+
+function draw() {
+    ctx.fillStyle = '#1a1a12';
+    ctx.fillRect(0, 0, W, H);
+
+    updateSim();
+    moveCells();
+    drawFlask();
+
+    for (const c of cells) drawCell(c);
+
+    drawGraph();
+
+    requestAnimationFrame(draw);
+}
+
+resetSim();
+draw();
+
+window.reset = function() { resetSim(); };
+</script>
+</body>
+</html>

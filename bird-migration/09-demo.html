@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Energy Budget Optimizer | Bird Migration</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #111518; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #info {
+            position: fixed; top: 10px; right: 10px; background: rgba(17,21,24,0.92);
+            backdrop-filter: blur(10px); padding: 14px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 270px;
+            border: 1px solid rgba(138,154,91,0.3); line-height: 1.6;
+        }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(17,21,24,0.92); backdrop-filter: blur(10px);
+            padding: 14px 24px; border-radius: 14px; display: flex; gap: 16px;
+            align-items: center; z-index: 100; color: #FEFAE0; font-size: 0.82rem;
+            border: 1px solid rgba(138,154,91,0.3); flex-wrap: wrap; justify-content: center;
+        }
+        #controls label { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+        #controls input[type=range] { width: 80px; accent-color: #8A9A5B; }
+        button.ctrl {
+            background: rgba(138,154,91,0.3); border: 1px solid rgba(138,154,91,0.5);
+            color: #FEFAE0; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.8rem;
+        }
+        button.ctrl:hover { background: rgba(138,154,91,0.5); }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="info">
+        <strong style="color:#DDA15E;">Energy Budget Optimizer</strong><br>
+        Migration is a tradeoff: fly <span style="color:#8A9A5B;">fast</span> (high fuel burn) or <span style="color:#DDA15E;">slow</span> (low burn, longer exposure to predators). Heavier birds burn more fuel but carry more reserves.<br>
+        <div style="margin-top:6px;font-size:0.75rem;opacity:0.7;">
+            Adjust body mass and flight speed to optimize the energy budget. The graph shows power vs speed (the U-shaped power curve).
+        </div>
+    </div>
+    <div id="controls">
+        <label>Body Mass <input type="range" id="mass" min="10" max="200" value="30"><span id="massVal">30</span>g</label>
+        <label>Flight Speed <input type="range" id="speed" min="5" max="25" value="12"><span id="spdVal">12</span> m/s</label>
+        <label>Fat % <input type="range" id="fatPct" min="5" max="50" value="20"><span id="fatVal">20</span>%</label>
+        <button class="ctrl" id="simBtn">Run Simulation</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const massSlider = document.getElementById('mass');
+        const speedSlider = document.getElementById('speed');
+        const fatSlider = document.getElementById('fatPct');
+        massSlider.oninput = () => { document.getElementById('massVal').textContent = massSlider.value; };
+        speedSlider.oninput = () => { document.getElementById('spdVal').textContent = speedSlider.value; };
+        fatSlider.oninput = () => { document.getElementById('fatVal').textContent = fatSlider.value; };
+
+        let time = 0;
+        let simRunning = false;
+        let simBird = null;
+
+        // Power curve: P = A/v + B*v^3 (induced drag + parasitic drag)
+        function getPower(mass, speed) {
+            const m = mass / 1000; // kg
+            const g = 9.81;
+            const rho = 1.225;
+            const S = 0.01 * Math.pow(mass / 30, 0.67); // wing area scales with mass
+            const AR = 7; // aspect ratio
+            const k = 1 / (Math.PI * AR * 0.85); // induced drag factor
+            const Cd0 = 0.03; // parasitic drag coefficient
+
+            const CL = (2 * m * g) / (rho * speed * speed * S);
+            const Cdi = k * CL * CL;
+            const Ptotal = 0.5 * rho * speed * speed * speed * S * (Cd0 + Cdi);
+
+            return Math.max(0, Ptotal);
+        }
+
+        function getMinPowerSpeed(mass) {
+            let minP = Infinity;
+            let minV = 10;
+            for (let v = 5; v <= 25; v += 0.5) {
+                const p = getPower(mass, v);
+                if (p < minP) { minP = p; minV = v; }
+            }
+            return { speed: minV, power: minP };
+        }
+
+        function getMaxRangeSpeed(mass) {
+            // Min P/V ratio
+            let minRatio = Infinity;
+            let bestV = 10;
+            for (let v = 5; v <= 25; v += 0.5) {
+                const ratio = getPower(mass, v) / v;
+                if (ratio < minRatio) { minRatio = ratio; bestV = v; }
+            }
+            return { speed: bestV, ratio: minRatio };
+        }
+
+        function drawPowerCurve() {
+            const mass = parseInt(massSlider.value);
+            const currentSpeed = parseInt(speedSlider.value);
+
+            const gx = W * 0.05, gy = H * 0.08;
+            const gw = W * 0.42, gh = H * 0.55;
+
+            // Background
+            ctx.fillStyle = 'rgba(17,21,24,0.8)';
+            ctx.fillRect(gx - 10, gy - 25, gw + 30, gh + 50);
+
+            ctx.font = 'bold 12px Segoe UI';
+            ctx.fillStyle = '#FEFAE0';
+            ctx.textAlign = 'center';
+            ctx.fillText('Power vs Airspeed (U-Curve)', gx + gw / 2, gy - 8);
+
+            // Axes
+            ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(gx, gy);
+            ctx.lineTo(gx, gy + gh);
+            ctx.lineTo(gx + gw, gy + gh);
+            ctx.stroke();
+
+            // Labels
+            ctx.font = '9px Segoe UI';
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.textAlign = 'center';
+            ctx.fillText('Airspeed (m/s)', gx + gw / 2, gy + gh + 22);
+            ctx.save();
+            ctx.translate(gx - 10, gy + gh / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText('Power (W)', 0, 0);
+            ctx.restore();
+
+            // Speed axis ticks
+            for (let v = 5; v <= 25; v += 5) {
+                const x = gx + ((v - 5) / 20) * gw;
+                ctx.fillText(v.toString(), x, gy + gh + 12);
+            }
+
+            // Find max power for scaling
+            let maxP = 0;
+            for (let v = 5; v <= 25; v += 0.5) {
+                maxP = Math.max(maxP, getPower(mass, v));
+            }
+            maxP *= 1.2;
+
+            // Draw curve
+            ctx.beginPath();
+            for (let v = 5; v <= 25; v += 0.2) {
+                const p = getPower(mass, v);
+                const x = gx + ((v - 5) / 20) * gw;
+                const y = gy + gh - (p / maxP) * gh;
+                if (v === 5) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+
+            // Min power speed
+            const minP = getMinPowerSpeed(mass);
+            const minPx = gx + ((minP.speed - 5) / 20) * gw;
+            const minPy = gy + gh - (minP.power / maxP) * gh;
+            ctx.beginPath();
+            ctx.arc(minPx, minPy, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fill();
+            ctx.font = '9px Segoe UI';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Vmp: ${minP.speed.toFixed(1)} m/s`, minPx + 8, minPy - 5);
+            ctx.fillText('(max endurance)', minPx + 8, minPy + 8);
+
+            // Max range speed (tangent from origin)
+            const mrS = getMaxRangeSpeed(mass);
+            const mrX = gx + ((mrS.speed - 5) / 20) * gw;
+            const mrP = getPower(mass, mrS.speed);
+            const mrY = gy + gh - (mrP / maxP) * gh;
+            ctx.beginPath();
+            ctx.arc(mrX, mrY, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+            ctx.fillStyle = '#DDA15E';
+            ctx.textAlign = 'right';
+            ctx.fillText(`Vmr: ${mrS.speed.toFixed(1)} m/s`, mrX - 8, mrY - 5);
+            ctx.fillText('(max range)', mrX - 8, mrY + 8);
+
+            // Tangent line from origin
+            ctx.setLineDash([3, 5]);
+            ctx.beginPath();
+            ctx.moveTo(gx, gy + gh);
+            ctx.lineTo(mrX + 30, mrY - 10);
+            ctx.strokeStyle = 'rgba(221,161,94,0.3)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Current speed marker
+            const curP = getPower(mass, currentSpeed);
+            const curX = gx + ((currentSpeed - 5) / 20) * gw;
+            const curY = gy + gh - (curP / maxP) * gh;
+            ctx.beginPath();
+            ctx.moveTo(curX, gy + gh);
+            ctx.lineTo(curX, curY);
+            ctx.strokeStyle = 'rgba(254,250,224,0.4)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 2]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.beginPath();
+            ctx.arc(curX, curY, 7, 0, Math.PI * 2);
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        function drawRangeEstimate() {
+            const mass = parseInt(massSlider.value);
+            const speed = parseInt(speedSlider.value);
+            const fatPct = parseInt(fatSlider.value) / 100;
+
+            const fatMass = mass * fatPct;
+            const fuelEnergy = fatMass * 39.3; // kJ (39.3 kJ/g fat, ~33% efficiency)
+            const usableEnergy = fuelEnergy * 0.33 * 1000; // Joules
+
+            const power = getPower(mass, speed);
+            const flightTime = power > 0 ? usableEnergy / power : 0; // seconds
+            const range = flightTime * speed / 1000; // km
+
+            const gx = W * 0.52, gy = H * 0.08;
+            const gw = W * 0.44, gh = H * 0.35;
+
+            ctx.fillStyle = 'rgba(17,21,24,0.8)';
+            ctx.fillRect(gx, gy - 25, gw, gh + 40);
+
+            ctx.font = 'bold 12px Segoe UI';
+            ctx.fillStyle = '#FEFAE0';
+            ctx.textAlign = 'center';
+            ctx.fillText('Flight Range Estimate', gx + gw / 2, gy - 8);
+
+            // Range bar
+            const maxRange = 12000;
+            const barY = gy + 30;
+            const barH = 25;
+
+            ctx.fillStyle = 'rgba(255,255,255,0.08)';
+            ctx.fillRect(gx + 20, barY, gw - 40, barH);
+
+            const rangeWidth = Math.min(1, range / maxRange) * (gw - 40);
+            const rangeColor = range > 5000 ? '#8A9A5B' : range > 2000 ? '#DDA15E' : '#BC6C25';
+            ctx.fillStyle = rangeColor;
+            ctx.fillRect(gx + 20, barY, rangeWidth, barH);
+
+            ctx.font = 'bold 11px Segoe UI';
+            ctx.fillStyle = '#FEFAE0';
+            ctx.textAlign = 'left';
+            ctx.fillText(`${Math.round(range).toLocaleString()} km`, gx + 25 + rangeWidth + 5, barY + 16);
+
+            // Stats
+            ctx.font = '10px Segoe UI';
+            ctx.fillStyle = 'rgba(254,250,224,0.7)';
+            ctx.textAlign = 'left';
+            let sy = barY + 45;
+            const lines = [
+                `Lean mass: ${(mass - fatMass).toFixed(0)}g | Fat: ${fatMass.toFixed(0)}g`,
+                `Total mass: ${mass}g | Fat fraction: ${(fatPct * 100).toFixed(0)}%`,
+                `Power output: ${power.toFixed(2)} W`,
+                `Flight time: ${(flightTime / 3600).toFixed(1)} hours`,
+                `Ground speed: ${speed} m/s (${(speed * 3.6).toFixed(0)} km/h)`,
+            ];
+            lines.forEach(l => {
+                ctx.fillText(l, gx + 25, sy);
+                sy += 18;
+            });
+
+            // Notable comparisons
+            sy += 10;
+            ctx.fillStyle = 'rgba(138,154,91,0.5)';
+            ctx.font = '9px Segoe UI';
+            const comparisons = [
+                { name: 'Bar-tailed Godwit', range: 11000 },
+                { name: 'Arctic Tern (annual)', range: 71000 },
+                { name: 'Ruby-throated Hummingbird', range: 800 }
+            ];
+            comparisons.forEach(c => {
+                const cw = Math.min(1, c.range / maxRange) * (gw - 40);
+                ctx.fillStyle = 'rgba(138,154,91,0.15)';
+                ctx.fillRect(gx + 20, sy - 3, cw, 10);
+                ctx.fillStyle = 'rgba(138,154,91,0.5)';
+                ctx.fillText(`${c.name}: ${c.range.toLocaleString()} km`, gx + 25, sy + 5);
+                sy += 16;
+            });
+        }
+
+        function drawSimulation() {
+            if (!simRunning || !simBird) return;
+
+            const gx = W * 0.52, gy = H * 0.52;
+            const gw = W * 0.44, gh = H * 0.35;
+
+            ctx.fillStyle = 'rgba(17,21,24,0.8)';
+            ctx.fillRect(gx, gy, gw, gh);
+
+            ctx.font = 'bold 12px Segoe UI';
+            ctx.fillStyle = '#FEFAE0';
+            ctx.textAlign = 'center';
+            ctx.fillText('Live Simulation', gx + gw / 2, gy + 18);
+
+            // Bird moving across
+            const progress = simBird.distance / simBird.maxRange;
+            const birdX = gx + 30 + progress * (gw - 60);
+            const birdY = gy + gh / 2;
+
+            // Fuel gauge
+            const fuelPct = simBird.fuel / simBird.maxFuel;
+            ctx.fillStyle = 'rgba(255,255,255,0.08)';
+            ctx.fillRect(gx + 20, gy + gh - 30, gw - 40, 10);
+            const fuelColor = fuelPct > 0.5 ? '#8A9A5B' : fuelPct > 0.2 ? '#DDA15E' : '#BC6C25';
+            ctx.fillStyle = fuelColor;
+            ctx.fillRect(gx + 20, gy + gh - 30, (gw - 40) * fuelPct, 10);
+
+            ctx.font = '9px Segoe UI';
+            ctx.fillStyle = '#FEFAE0';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Fuel: ${(fuelPct * 100).toFixed(0)}% | Distance: ${Math.round(simBird.distance)} km`, gx + 20, gy + gh - 8);
+
+            // Bird
+            const wf = Math.sin(time * 8) * 5;
+            ctx.save();
+            ctx.translate(birdX, birdY);
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.quadraticCurveTo(-10, wf, -15, wf * 1.2);
+            ctx.moveTo(0, 0);
+            ctx.quadraticCurveTo(10, wf, 15, wf * 1.2);
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.ellipse(0, 0, 4, 6, 0, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+            ctx.restore();
+
+            // Update simulation
+            const mass = simBird.currentMass;
+            const speed = parseInt(speedSlider.value);
+            const power = getPower(mass, speed);
+            const burnRate = power / (39.3 * 0.33 * 1000); // g/s fat burn
+
+            simBird.fuel -= burnRate * 0.016 * 30;
+            simBird.currentMass -= burnRate * 0.016 * 30;
+            simBird.distance += speed * 0.016 * 30 / 1000;
+
+            if (simBird.fuel <= 0) {
+                simRunning = false;
+                ctx.font = '14px Segoe UI';
+                ctx.fillStyle = '#BC6C25';
+                ctx.textAlign = 'center';
+                ctx.fillText('Fuel exhausted!', gx + gw / 2, birdY + 30);
+            }
+
+            if (progress >= 1) {
+                simRunning = false;
+                ctx.font = '14px Segoe UI';
+                ctx.fillStyle = '#8A9A5B';
+                ctx.textAlign = 'center';
+                ctx.fillText('Arrived!', gx + gw / 2, birdY + 30);
+            }
+        }
+
+        document.getElementById('simBtn').onclick = () => {
+            const mass = parseInt(massSlider.value);
+            const fatPct = parseInt(fatSlider.value) / 100;
+            const fatMass = mass * fatPct;
+            const speed = parseInt(speedSlider.value);
+            const power = getPower(mass, speed);
+            const fuelEnergy = fatMass * 39.3 * 0.33 * 1000;
+            const flightTime = power > 0 ? fuelEnergy / power : 0;
+            const maxRange = flightTime * speed / 1000;
+
+            simBird = {
+                fuel: fatMass,
+                maxFuel: fatMass,
+                currentMass: mass,
+                distance: 0,
+                maxRange: maxRange
+            };
+            simRunning = true;
+        };
+
+        function animate() {
+            ctx.fillStyle = '#111518';
+            ctx.fillRect(0, 0, W, H);
+
+            drawPowerCurve();
+            drawRangeEstimate();
+            drawSimulation();
+
+            time += 0.016;
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+
+        window.reset = function() {
+            time = 0;
+            simRunning = false;
+            simBird = null;
+        };
+    })();
+    </script>
+</body>
+</html>

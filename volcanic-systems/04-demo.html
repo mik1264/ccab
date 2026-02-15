@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pyroclastic Flow Simulation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; overflow: hidden; font-family: Georgia, serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(96,108,56,0.85); backdrop-filter: blur(10px);
+    padding: 15px 25px; border-radius: 12px; color: #FEFAE0;
+    display: flex; gap: 20px; align-items: center; z-index: 100; flex-wrap: wrap;
+    justify-content: center;
+}
+#controls label { font-size: 0.85rem; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+#controls input[type=range] { width: 110px; accent-color: #DDA15E; }
+#controls button { background: #DDA15E; color: #1a1a2e; border: none; padding: 8px 16px;
+    border-radius: 8px; cursor: pointer; font-family: Georgia; font-size: 0.85rem; }
+#info {
+    position: fixed; top: 60px; right: 20px; background: rgba(96,108,56,0.85);
+    backdrop-filter: blur(10px); padding: 15px; border-radius: 12px;
+    color: #FEFAE0; font-size: 0.8rem; max-width: 260px; z-index: 100; line-height: 1.5;
+}
+#info h3 { color: #DDA15E; margin-bottom: 8px; }
+#stats { position: fixed; top: 60px; left: 60px; color: #DDA15E; font-size: 0.8rem;
+    font-family: Georgia; z-index: 100; line-height: 1.8; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="info">
+    <h3>Pyroclastic Flows</h3>
+    <p>Pyroclastic density currents are fast-moving mixtures of hot gas, ash, and rock fragments (300-700 C, up to 700 km/h). They have two layers: a dense basal flow and a dilute ash-cloud surge above.</p>
+</div>
+<div id="stats"></div>
+<div id="controls">
+    <label>Column Collapse Mass
+        <input type="range" id="mass" min="10" max="100" value="60">
+    </label>
+    <label>Gas Content
+        <input type="range" id="gas" min="10" max="100" value="50">
+    </label>
+    <label>Terrain Roughness
+        <input type="range" id="roughness" min="0" max="100" value="30">
+    </label>
+    <button id="triggerBtn">Trigger Flow</button>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const stats = document.getElementById('stats');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+let time = 0;
+let paused = false;
+
+// Terrain
+let terrain = [];
+function generateTerrain() {
+    terrain = [];
+    const roughness = document.getElementById('roughness').value / 100;
+    const baseY = H * 0.45;
+    const peakX = W * 0.2;
+    const peakY = H * 0.2;
+
+    for (let x = 0; x <= W; x += 2) {
+        let y;
+        if (x < peakX) {
+            const t = x / peakX;
+            y = baseY - (baseY - peakY) * t + Math.sin(x * 0.03) * roughness * 15;
+        } else {
+            const t = (x - peakX) / (W - peakX);
+            const slopeY = peakY + t * (H * 0.75 - peakY);
+            y = slopeY + Math.sin(x * 0.02) * roughness * 20 + Math.sin(x * 0.07) * roughness * 8;
+        }
+        terrain.push({ x, y });
+    }
+}
+generateTerrain();
+
+function getTerrainY(x) {
+    const idx = Math.floor(x / 2);
+    if (idx < 0) return H;
+    if (idx >= terrain.length) return terrain[terrain.length - 1].y;
+    return terrain[idx].y;
+}
+
+function getTerrainSlope(x) {
+    const y1 = getTerrainY(x - 5);
+    const y2 = getTerrainY(x + 5);
+    return Math.atan2(y2 - y1, 10);
+}
+
+// Particle systems
+let denseParticles = [];
+let surgeParticles = [];
+let depositParticles = [];
+let flowActive = false;
+let flowFront = 0;
+let flowSpeed = 0;
+let flowTemp = 600;
+
+class DenseParticle {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.vx = 0; this.vy = 0;
+        this.temp = 500 + Math.random() * 200;
+        this.size = 4 + Math.random() * 6;
+        this.life = 1;
+        this.grounded = false;
+    }
+    update(dt, gasContent) {
+        if (this.grounded) {
+            this.life -= 0.001;
+            this.temp -= 5 * dt;
+            return;
+        }
+        const slope = getTerrainSlope(this.x);
+        const gravity = 400;
+        this.vx += Math.cos(slope) * gravity * Math.sin(slope) * dt;
+        this.vy += gravity * dt;
+
+        // Gas fluidization reduces friction
+        const friction = 0.98 - gasContent * 0.03;
+        this.vx *= friction;
+
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+
+        const ty = getTerrainY(this.x);
+        if (this.y > ty - this.size) {
+            this.y = ty - this.size;
+            this.vy = -Math.abs(this.vy) * 0.1;
+            if (Math.abs(this.vx) < 10) {
+                this.grounded = true;
+            }
+        }
+        this.temp -= 10 * dt;
+        if (this.x > W + 20) this.life = 0;
+    }
+}
+
+class SurgeParticle {
+    constructor(x, y) {
+        this.x = x; this.y = y;
+        this.vx = 30 + Math.random() * 60;
+        this.vy = -20 - Math.random() * 40;
+        this.temp = 300 + Math.random() * 200;
+        this.size = 10 + Math.random() * 20;
+        this.life = 1;
+        this.opacity = 0.15 + Math.random() * 0.15;
+    }
+    update(dt) {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.vy += 5 * dt; // slight upward buoyancy countered by gravity
+        this.vx *= 0.995;
+        this.size += 15 * dt;
+        this.life -= 0.005;
+        this.temp -= 20 * dt;
+    }
+}
+
+function triggerFlow() {
+    generateTerrain();
+    denseParticles = [];
+    surgeParticles = [];
+    depositParticles = [];
+    flowActive = true;
+    flowFront = W * 0.2;
+    flowSpeed = 0;
+    flowTemp = 600;
+    time = 0;
+}
+
+document.getElementById('triggerBtn').addEventListener('click', triggerFlow);
+
+let lastTime = 0;
+function animate(ts) {
+    const dt = Math.min((ts - lastTime) / 1000, 0.05);
+    lastTime = ts;
+
+    if (!paused) {
+        time += dt;
+        const mass = document.getElementById('mass').value / 100;
+        const gasContent = document.getElementById('gas').value / 100;
+
+        if (flowActive) {
+            const peakX = W * 0.2;
+            const peakY = getTerrainY(peakX);
+
+            // Emit dense particles from collapsing column
+            if (time < 4) {
+                const numNew = Math.floor(mass * 15);
+                for (let i = 0; i < numNew; i++) {
+                    const p = new DenseParticle(
+                        peakX + (Math.random() - 0.3) * 30,
+                        peakY - 20 - Math.random() * 80
+                    );
+                    p.vx = 50 + Math.random() * 100 * mass;
+                    p.vy = -20 + Math.random() * 40;
+                    denseParticles.push(p);
+                }
+
+                // Surge cloud
+                for (let i = 0; i < Math.floor(mass * 5); i++) {
+                    surgeParticles.push(new SurgeParticle(
+                        peakX + Math.random() * (flowFront - peakX) * 0.5,
+                        peakY - 30 - Math.random() * 120
+                    ));
+                }
+            }
+
+            // Update flow front
+            let maxX = flowFront;
+            for (let p of denseParticles) {
+                if (!p.grounded && p.x > maxX) maxX = p.x;
+            }
+            flowSpeed = (maxX - flowFront) / Math.max(dt, 0.001);
+            flowFront = maxX;
+
+            if (time > 6 && flowSpeed < 5) flowActive = false;
+        }
+
+        // Update particles
+        for (let p of denseParticles) p.update(dt, gasContent);
+        for (let p of surgeParticles) p.update(dt);
+        denseParticles = denseParticles.filter(p => p.life > 0);
+        surgeParticles = surgeParticles.filter(p => p.life > 0);
+        if (denseParticles.length > 3000) denseParticles.splice(0, denseParticles.length - 3000);
+        if (surgeParticles.length > 1000) surgeParticles.splice(0, surgeParticles.length - 1000);
+    }
+
+    // Draw
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+
+    // Sky gradient
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.5);
+    skyGrad.addColorStop(0, '#0a0a18');
+    skyGrad.addColorStop(1, '#1a1a2e');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, H * 0.5);
+
+    // Surge cloud (draw first, behind everything)
+    for (let p of surgeParticles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        const v = Math.floor(80 + p.temp * 0.2);
+        ctx.fillStyle = `rgba(${v+40},${v},${v-20},${p.opacity * p.life})`;
+        ctx.fill();
+    }
+
+    // Terrain
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let t of terrain) ctx.lineTo(t.x, t.y);
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    const tGrad = ctx.createLinearGradient(0, H * 0.2, 0, H);
+    tGrad.addColorStop(0, '#4a3728');
+    tGrad.addColorStop(0.5, '#3d3024');
+    tGrad.addColorStop(1, '#2a1a10');
+    ctx.fillStyle = tGrad;
+    ctx.fill();
+
+    // Dense flow particles
+    for (let p of denseParticles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * (p.grounded ? 0.8 : 1), 0, Math.PI * 2);
+        const t = Math.max(0, Math.min(1, (p.temp - 300) / 400));
+        if (t > 0.5) {
+            ctx.fillStyle = `rgba(255,${Math.floor(80 + t * 100)},${Math.floor(20 + t * 30)},${0.7 * p.life})`;
+        } else {
+            ctx.fillStyle = `rgba(${Math.floor(80 + t * 150)},${Math.floor(40 + t * 40)},30,${0.6 * p.life})`;
+        }
+        ctx.fill();
+    }
+
+    // Stats
+    const speedKmh = (flowSpeed * 3.6 * 2).toFixed(0);
+    const distKm = ((flowFront - W * 0.2) / (W * 0.8) * 15).toFixed(1);
+    stats.innerHTML = `Speed: ~${speedKmh} km/h<br>Distance: ~${distKm} km<br>Temperature: ~${Math.max(200, Math.floor(flowTemp))} C`;
+
+    requestAnimationFrame(animate);
+}
+
+window.reset = function() {
+    denseParticles = [];
+    surgeParticles = [];
+    depositParticles = [];
+    flowActive = false;
+    flowFront = 0;
+    flowSpeed = 0;
+    time = 0;
+    generateTerrain();
+};
+
+requestAnimationFrame(animate);
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

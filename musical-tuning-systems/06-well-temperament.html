@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Well Temperament - Musical Tuning Systems</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .info-panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(26,26,46,0.85);
+            backdrop-filter: blur(10px); border: 1px solid #8A9A5B; border-radius: 12px;
+            padding: 15px; max-width: 310px; z-index: 1000; font-size: 0.82rem; line-height: 1.4;
+        }
+        .info-panel h2 { color: #DDA15E; margin-bottom: 8px; font-size: 1rem; }
+        .info-panel p { color: #FEFAE0; opacity: 0.8; margin-bottom: 6px; }
+        .controls {
+            position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 8px; z-index: 1000; flex-wrap: wrap; justify-content: center;
+            max-width: 90vw;
+        }
+        .controls button {
+            background: rgba(96,108,56,0.7); border: 1px solid #8A9A5B; color: #FEFAE0;
+            padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.82rem;
+            transition: all 0.2s;
+        }
+        .controls button:hover { background: rgba(138,154,91,0.8); }
+        .controls button.active { background: #DDA15E; color: #1a1a2e; border-color: #DDA15E; }
+        .note-display {
+            position: fixed; bottom: 65px; left: 50%; transform: translateX(-50%);
+            color: #DDA15E; font-size: 0.9rem; z-index: 1000; text-align: center;
+            background: rgba(26,26,46,0.7); padding: 6px 16px; border-radius: 8px;
+            max-width: 80vw;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info-panel">
+        <h2>Well Temperament</h2>
+        <p>Well temperaments distribute the Pythagorean comma unevenly across fifths, making all keys playable while giving each key a unique color.</p>
+        <p>Bach's <em>Well-Tempered Clavier</em> showcased this -- 24 preludes and fugues in every major and minor key.</p>
+        <p>Compare: Werckmeister III, Kirnberger III, and Equal Temperament. Click a key to hear its major triad.</p>
+    </div>
+    <div class="note-display" id="noteDisplay">Select a temperament, then click a key</div>
+    <div class="controls">
+        <button id="btnWerck" class="active">Werckmeister III</button>
+        <button id="btnKirn">Kirnberger III</button>
+        <button id="btnEqual">Equal Temperament</button>
+        <button id="btnPlayScale">Play C Major Scale</button>
+        <button id="btnStop">Stop</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const noteDisplay = document.getElementById('noteDisplay');
+        let W, H;
+        let audioCtx = null;
+        let activeOscs = [];
+        let animTime = 0;
+        let currentTemp = 'werckmeister';
+        let hoveredKey = -1;
+        let playingKey = -1;
+
+        const noteNames = ['C','C#','D','Eb','E','F','F#','G','G#','A','Bb','B'];
+        const baseFreq = 261.63;
+
+        // Temperament definitions in cents from C
+        const temperaments = {
+            werckmeister: {
+                name: 'Werckmeister III (1691)',
+                // C=0, C#=90.22, D=192.18, Eb=294.13, E=390.22, F=498.04,
+                // F#=588.27, G=696.09, G#=792.18, A=888.27, Bb=996.09, B=1092.18
+                cents: [0, 90.225, 192.18, 294.135, 390.225, 498.045, 588.27, 696.09, 792.18, 888.27, 996.09, 1092.18],
+                desc: 'Four fifths narrowed by 1/4 comma, rest pure. Keys near C are purest.'
+            },
+            kirnberger: {
+                name: 'Kirnberger III (1779)',
+                cents: [0, 90.22, 193.16, 294.13, 386.31, 498.04, 590.22, 696.58, 792.18, 889.74, 996.09, 1088.27],
+                desc: 'Blends meantone purity near C with Pythagorean character in remote keys.'
+            },
+            equal: {
+                name: 'Equal Temperament (12-TET)',
+                cents: [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100],
+                desc: 'All semitones equal (100 cents). Every key sounds the same -- no character.'
+            }
+        };
+
+        function getFreq(noteIdx) {
+            const temp = temperaments[currentTemp];
+            return baseFreq * Math.pow(2, temp.cents[noteIdx] / 1200);
+        }
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        function stopAll() {
+            activeOscs.forEach(o => { try { o.gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1); o.osc.stop(audioCtx.currentTime + 0.15); } catch(e){} });
+            activeOscs = [];
+            playingKey = -1;
+        }
+
+        function playTone(freq, vol, delay, duration) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'triangle';
+            osc.frequency.value = freq;
+            const t = audioCtx.currentTime + (delay || 0);
+            gain.gain.value = 0;
+            gain.gain.linearRampToValueAtTime(vol || 0.15, t + 0.02);
+            if (duration) gain.gain.linearRampToValueAtTime(0, t + duration - 0.03);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(t);
+            if (duration) osc.stop(t + duration);
+            activeOscs.push({ osc, gain });
+        }
+
+        function playTriad(root) {
+            initAudio();
+            stopAll();
+            // Major triad: root, major 3rd (+4 semitones), fifth (+7 semitones)
+            const third = (root + 4) % 12;
+            const fifth = (root + 7) % 12;
+            const f1 = getFreq(root);
+            let f2 = getFreq(third);
+            let f3 = getFreq(fifth);
+            if (f2 < f1) f2 *= 2;
+            if (f3 < f1) f3 *= 2;
+
+            playTone(f1, 0.15);
+            playTone(f2, 0.15);
+            playTone(f3, 0.15);
+            playingKey = root;
+
+            const temp = temperaments[currentTemp];
+            const thirdCents = temp.cents[third] - temp.cents[root] + (third < root ? 1200 : 0);
+            const fifthCents = temp.cents[fifth] - temp.cents[root] + (fifth < root ? 1200 : 0);
+            const thirdDeviation = thirdCents - 386.31; // deviation from just major third
+            const fifthDeviation = fifthCents - 701.96; // deviation from just fifth
+
+            noteDisplay.textContent = `${noteNames[root]} major: 3rd=${thirdCents.toFixed(1)}c (${thirdDeviation >= 0 ? '+' : ''}${thirdDeviation.toFixed(1)}c from just) | 5th=${fifthCents.toFixed(1)}c (${fifthDeviation >= 0 ? '+' : ''}${fifthDeviation.toFixed(1)}c from just)`;
+        }
+
+        function playScale() {
+            initAudio();
+            stopAll();
+            const scaleNotes = [0, 2, 4, 5, 7, 9, 11, 12]; // C major
+            const dur = 0.5;
+            scaleNotes.forEach((n, i) => {
+                const idx = n % 12;
+                const octave = Math.floor(n / 12);
+                const freq = getFreq(idx) * (octave + 1);
+                playTone(freq, 0.2, i * dur, dur);
+            });
+            noteDisplay.textContent = `C Major Scale in ${temperaments[currentTemp].name}`;
+        }
+
+        function setTemp(t) {
+            currentTemp = t;
+            document.getElementById('btnWerck').classList.toggle('active', t === 'werckmeister');
+            document.getElementById('btnKirn').classList.toggle('active', t === 'kirnberger');
+            document.getElementById('btnEqual').classList.toggle('active', t === 'equal');
+        }
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const temp = temperaments[currentTemp];
+            const marginX = W * 0.1;
+            const keyboardY = H * 0.5;
+            const whiteKeyW = (W - marginX * 2) / 7;
+            const whiteKeyH = H * 0.25;
+            const blackKeyW = whiteKeyW * 0.6;
+            const blackKeyH = whiteKeyH * 0.6;
+
+            // Draw deviation chart above keyboard
+            const chartY = 80;
+            const chartH = H * 0.3;
+            const chartW = W - marginX * 2;
+
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = 'bold 18px "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(temp.name, W / 2, 40);
+
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '12px "Segoe UI", sans-serif';
+            ctx.fillText(temp.desc, W / 2, 60);
+
+            // Chart: deviation of each major third from pure (386.31 cents)
+            const barW = chartW / 12;
+            for (let i = 0; i < 12; i++) {
+                const thirdIdx = (i + 4) % 12;
+                const thirdCents = temp.cents[thirdIdx] - temp.cents[i] + (thirdIdx < i ? 1200 : 0);
+                const deviation = thirdCents - 386.31;
+                const maxDev = 25;
+                const barH = (deviation / maxDev) * (chartH / 2);
+                const x = marginX + i * barW;
+
+                // Bar
+                const purity = 1 - Math.abs(deviation) / maxDev;
+                const r = Math.round(138 + (221 - 138) * (1 - purity));
+                const g = Math.round(154 + (161 - 154) * (1 - purity));
+                const b = Math.round(91 + (94 - 91) * (1 - purity));
+                ctx.fillStyle = `rgba(${r},${g},${b},0.7)`;
+                const barY = chartY + chartH / 2;
+                ctx.fillRect(x + 5, barH > 0 ? barY - barH : barY, barW - 10, Math.abs(barH));
+
+                // Note label
+                ctx.fillStyle = playingKey === i ? '#DDA15E' : '#FEFAE0';
+                ctx.font = '12px "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(noteNames[i], x + barW / 2, chartY + chartH + 15);
+                ctx.fillStyle = 'rgba(254,250,224,0.5)';
+                ctx.font = '10px "Segoe UI", sans-serif';
+                ctx.fillText(`${deviation >= 0 ? '+' : ''}${deviation.toFixed(1)}c`, x + barW / 2, chartY + chartH + 28);
+            }
+
+            // Zero line
+            ctx.strokeStyle = 'rgba(221,161,94,0.4)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(marginX, chartY + chartH / 2);
+            ctx.lineTo(marginX + chartW, chartY + chartH / 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = 'rgba(221,161,94,0.6)';
+            ctx.font = '10px "Segoe UI", sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText('Pure major third (386.31c)', marginX - 5, chartY + chartH / 2 + 4);
+
+            ctx.fillText('Major third deviation from just', marginX - 5, chartY + 10);
+
+            // Draw keyboard
+            const whiteKeys = [0, 2, 4, 5, 7, 9, 11]; // C D E F G A B
+            const blackKeys = [
+                { note: 1, pos: 0.7 },  // C#
+                { note: 3, pos: 1.7 },  // Eb
+                { note: 6, pos: 3.7 },  // F#
+                { note: 8, pos: 4.7 },  // G#
+                { note: 10, pos: 5.7 }  // Bb
+            ];
+
+            // White keys
+            whiteKeys.forEach((note, i) => {
+                const x = marginX + i * whiteKeyW;
+                const isHov = hoveredKey === note;
+                const isPlay = playingKey === note;
+
+                ctx.fillStyle = isPlay ? '#DDA15E' : (isHov ? '#e8e0c8' : '#FEFAE0');
+                ctx.strokeStyle = '#606C38';
+                ctx.lineWidth = 2;
+                ctx.fillRect(x, keyboardY, whiteKeyW - 2, whiteKeyH);
+                ctx.strokeRect(x, keyboardY, whiteKeyW - 2, whiteKeyH);
+
+                ctx.fillStyle = '#1a1a2e';
+                ctx.font = '13px "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(noteNames[note], x + whiteKeyW / 2 - 1, keyboardY + whiteKeyH - 15);
+            });
+
+            // Black keys
+            blackKeys.forEach(({ note, pos }) => {
+                const x = marginX + pos * whiteKeyW - blackKeyW / 2 + whiteKeyW / 2;
+                const isHov = hoveredKey === note;
+                const isPlay = playingKey === note;
+
+                ctx.fillStyle = isPlay ? '#BC6C25' : (isHov ? '#3a3a3a' : '#1a1a2e');
+                ctx.fillRect(x, keyboardY, blackKeyW, blackKeyH);
+                ctx.strokeStyle = '#606C38';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x, keyboardY, blackKeyW, blackKeyH);
+
+                ctx.fillStyle = '#FEFAE0';
+                ctx.font = '10px "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(noteNames[note], x + blackKeyW / 2, keyboardY + blackKeyH - 10);
+            });
+        }
+
+        function getKeyAt(mx, my) {
+            const marginX = W * 0.1;
+            const keyboardY = H * 0.5;
+            const whiteKeyW = (W - marginX * 2) / 7;
+            const whiteKeyH = H * 0.25;
+            const blackKeyW = whiteKeyW * 0.6;
+            const blackKeyH = whiteKeyH * 0.6;
+
+            // Check black keys first (they overlap white keys)
+            const blackKeys = [
+                { note: 1, pos: 0.7 },
+                { note: 3, pos: 1.7 },
+                { note: 6, pos: 3.7 },
+                { note: 8, pos: 4.7 },
+                { note: 10, pos: 5.7 }
+            ];
+            for (const { note, pos } of blackKeys) {
+                const x = marginX + pos * whiteKeyW - blackKeyW / 2 + whiteKeyW / 2;
+                if (mx >= x && mx <= x + blackKeyW && my >= keyboardY && my <= keyboardY + blackKeyH) return note;
+            }
+
+            // Check white keys
+            const whiteKeys = [0, 2, 4, 5, 7, 9, 11];
+            for (let i = 0; i < 7; i++) {
+                const x = marginX + i * whiteKeyW;
+                if (mx >= x && mx <= x + whiteKeyW - 2 && my >= keyboardY && my <= keyboardY + whiteKeyH) return whiteKeys[i];
+            }
+            return -1;
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            hoveredKey = getKeyAt(e.clientX, e.clientY);
+            canvas.style.cursor = hoveredKey >= 0 ? 'pointer' : 'default';
+        });
+
+        canvas.addEventListener('click', () => {
+            if (hoveredKey >= 0) playTriad(hoveredKey);
+        });
+
+        document.getElementById('btnWerck').addEventListener('click', () => setTemp('werckmeister'));
+        document.getElementById('btnKirn').addEventListener('click', () => setTemp('kirnberger'));
+        document.getElementById('btnEqual').addEventListener('click', () => setTemp('equal'));
+        document.getElementById('btnPlayScale').addEventListener('click', playScale);
+        document.getElementById('btnStop').addEventListener('click', () => { stopAll(); noteDisplay.textContent = 'Select a temperament, then click a key'; });
+
+        function animate() {
+            animTime += 0.016;
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+        animate();
+
+        window.reset = function() {
+            stopAll();
+            currentTemp = 'werckmeister';
+            hoveredKey = -1;
+            playingKey = -1;
+            animTime = 0;
+            setTemp('werckmeister');
+            noteDisplay.textContent = 'Select a temperament, then click a key';
+        };
+    })();
+    </script>
+</body>
+</html>

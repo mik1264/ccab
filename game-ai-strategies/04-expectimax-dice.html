@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expectimax Dice Game - Game AI Strategies</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        #ui { position: fixed; top: 10px; right: 10px; z-index: 100; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+        .btn { background: rgba(138,154,91,0.3); border: 1px solid #8A9A5B; color: #FEFAE0; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 0.9rem; backdrop-filter: blur(10px); }
+        .btn:hover { background: rgba(138,154,91,0.5); }
+        .btn.active { background: rgba(221,161,94,0.4); border-color: #DDA15E; }
+        .status { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.6); backdrop-filter: blur(10px); padding: 10px 24px; border-radius: 12px; font-size: 0.9rem; border: 1px solid rgba(138,154,91,0.3); text-align: center; z-index: 100; max-width: 700px; }
+        .info { position: fixed; top: 60px; right: 10px; background: rgba(0,0,0,0.6); backdrop-filter: blur(10px); padding: 12px; border-radius: 12px; border: 1px solid rgba(138,154,91,0.3); font-size: 0.78rem; max-width: 220px; z-index: 100; }
+        .info h3 { color: #DDA15E; margin-bottom: 6px; }
+        .info p { color: #ccc; line-height: 1.4; margin-bottom: 4px; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div id="ui">
+        <button class="btn" onclick="resetGame()">New Game</button>
+    </div>
+    <div class="info">
+        <h3>Expectimax</h3>
+        <p>Unlike minimax, expectimax handles <strong>chance nodes</strong> (dice rolls) by computing expected values.</p>
+        <p>MAX nodes maximize. CHANCE nodes average over all outcomes weighted by probability.</p>
+        <p>Game: Roll a die, choose to BANK your total or CONTINUE. First to 50 wins!</p>
+    </div>
+    <div class="status" id="status">Roll the die to start!</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    resize();
+    window.addEventListener('resize', resize);
+
+    const TARGET = 50;
+    let humanBanked = 0, aiBanked = 0;
+    let humanRound = 0, aiRound = 0;
+    let currentDie = 0;
+    let turn = 'human'; // 'human', 'ai', 'rolling'
+    let gameOver = false;
+    let message = '';
+    let treeNodes = []; // For visualization
+    let dieAnim = 0;
+    let dieAnimating = false;
+    let dieResult = 0;
+
+    // Expectimax for AI decision
+    function expectimax(banked, roundTotal, depth, isChance) {
+        const total = banked + roundTotal;
+        if (total >= TARGET) return { value: 100 - depth, action: 'bank' };
+        if (depth > 8) return { value: roundTotal * 0.6, action: roundTotal > 15 ? 'bank' : 'roll' };
+
+        if (isChance) {
+            // Chance node: average over die rolls 1-6
+            let expected = 0;
+            const children = [];
+            for (let die = 1; die <= 6; die++) {
+                if (die === 1) {
+                    // Bust! Lose round total
+                    children.push({ die, value: -roundTotal * 0.8, type: 'bust' });
+                    expected += (-roundTotal * 0.8) / 6;
+                } else {
+                    const result = expectimax(banked, roundTotal + die, depth + 1, false);
+                    children.push({ die, value: result.value, type: 'continue' });
+                    expected += result.value / 6;
+                }
+            }
+            return { value: expected, children, action: 'chance' };
+        } else {
+            // MAX node: choose bank or roll
+            const bankValue = roundTotal; // guaranteed
+            const rollResult = expectimax(banked, roundTotal, depth + 1, true);
+            const rollValue = rollResult.value;
+
+            if (bankValue >= rollValue) {
+                return { value: bankValue, action: 'bank', bankV: bankValue, rollV: rollValue };
+            } else {
+                return { value: rollValue, action: 'roll', bankV: bankValue, rollV: rollValue, children: rollResult.children };
+            }
+        }
+    }
+
+    function rollDie(callback) {
+        dieAnimating = true;
+        dieAnim = 0;
+        const frames = 20;
+        const interval = setInterval(() => {
+            dieAnim++;
+            currentDie = Math.floor(Math.random() * 6) + 1;
+            if (dieAnim >= frames) {
+                clearInterval(interval);
+                dieResult = Math.floor(Math.random() * 6) + 1;
+                currentDie = dieResult;
+                dieAnimating = false;
+                callback(dieResult);
+            }
+        }, 50);
+    }
+
+    function humanRoll() {
+        if (turn !== 'human' || gameOver || dieAnimating) return;
+        turn = 'rolling';
+        rollDie(function(die) {
+            if (die === 1) {
+                humanRound = 0;
+                message = 'Bust! You rolled a 1. AI\'s turn.';
+                turn = 'ai';
+                setTimeout(aiTurn, 1000);
+            } else {
+                humanRound += die;
+                if (humanBanked + humanRound >= TARGET) {
+                    humanBanked += humanRound;
+                    humanRound = 0;
+                    gameOver = true;
+                    message = 'You win with ' + humanBanked + ' points!';
+                } else {
+                    turn = 'human';
+                    message = 'Rolled ' + die + '! Round total: ' + humanRound + '. Bank or Roll?';
+                }
+            }
+            document.getElementById('status').textContent = message;
+        });
+    }
+
+    function humanBank() {
+        if (turn !== 'human' || gameOver || humanRound === 0) return;
+        humanBanked += humanRound;
+        message = 'Banked ' + humanRound + '! Score: ' + humanBanked + '. AI\'s turn.';
+        humanRound = 0;
+        document.getElementById('status').textContent = message;
+        turn = 'ai';
+        setTimeout(aiTurn, 800);
+    }
+
+    function aiTurn() {
+        if (gameOver) return;
+        // AI uses expectimax to decide
+        const decision = expectimax(aiBanked, aiRound, 0, false);
+        treeNodes = decision;
+
+        if (decision.action === 'bank' && aiRound > 0) {
+            aiBanked += aiRound;
+            message = 'AI banks ' + aiRound + '! AI Score: ' + aiBanked + '.';
+            aiRound = 0;
+            document.getElementById('status').textContent = message;
+            if (aiBanked >= TARGET) {
+                gameOver = true;
+                message = 'AI wins with ' + aiBanked + ' points!';
+                document.getElementById('status').textContent = message;
+                return;
+            }
+            turn = 'human';
+            setTimeout(() => {
+                message += ' Your turn \u2014 click Roll!';
+                document.getElementById('status').textContent = message;
+            }, 600);
+        } else {
+            // Roll
+            turn = 'rolling';
+            rollDie(function(die) {
+                if (die === 1) {
+                    message = 'AI busted! Rolled 1. Your turn.';
+                    aiRound = 0;
+                    turn = 'human';
+                    document.getElementById('status').textContent = message;
+                } else {
+                    aiRound += die;
+                    message = 'AI rolled ' + die + ' (round: ' + aiRound + ', expected: ' +
+                        (decision.rollV !== undefined ? decision.rollV.toFixed(1) : '?') + ')';
+                    document.getElementById('status').textContent = message;
+                    if (aiBanked + aiRound >= TARGET) {
+                        aiBanked += aiRound;
+                        aiRound = 0;
+                        gameOver = true;
+                        message = 'AI wins with ' + aiBanked + ' points!';
+                        document.getElementById('status').textContent = message;
+                        return;
+                    }
+                    setTimeout(aiTurn, 700);
+                }
+            });
+        }
+    }
+
+    // Click handlers on canvas buttons
+    canvas.addEventListener('click', function(e) {
+        if (gameOver || turn !== 'human') return;
+        const mx = e.clientX, my = e.clientY;
+        // Roll button
+        const btnY = H * 0.55;
+        const btnW = 100, btnH = 40;
+        if (mx > W * 0.2 - btnW && mx < W * 0.2 && my > btnY && my < btnY + btnH) {
+            humanRoll();
+        }
+        // Bank button
+        if (mx > W * 0.2 + 10 && mx < W * 0.2 + 10 + btnW && my > btnY && my < btnY + btnH) {
+            humanBank();
+        }
+    });
+
+    function drawDie(x, y, size, value) {
+        ctx.fillStyle = '#FEFAE0';
+        ctx.strokeStyle = '#8A9A5B';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(x - size/2, y - size/2, size, size, 8);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#1a1a2e';
+        const dotR = size * 0.08;
+        const positions = {
+            1: [[0,0]],
+            2: [[-0.25,-0.25],[0.25,0.25]],
+            3: [[-0.25,-0.25],[0,0],[0.25,0.25]],
+            4: [[-0.25,-0.25],[0.25,-0.25],[-0.25,0.25],[0.25,0.25]],
+            5: [[-0.25,-0.25],[0.25,-0.25],[0,0],[-0.25,0.25],[0.25,0.25]],
+            6: [[-0.25,-0.25],[0.25,-0.25],[-0.25,0],[0.25,0],[-0.25,0.25],[0.25,0.25]]
+        };
+        if (value >= 1 && value <= 6) {
+            for (const [dx, dy] of positions[value]) {
+                ctx.beginPath();
+                ctx.arc(x + dx * size, y + dy * size, dotR, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+
+    function drawProgressBar(x, y, w, h, value, max, color, label) {
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, 4);
+        ctx.fill();
+        const fillW = Math.min(w, (value / max) * w);
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.roundRect(x, y, fillW, h, 4);
+        ctx.fill();
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = '0.7rem "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label + ': ' + value + '/' + max, x + 6, y + h/2);
+    }
+
+    function drawExpectimaxTree() {
+        if (!treeNodes || !treeNodes.children) return;
+        const baseX = W * 0.65;
+        const baseY = 80;
+
+        ctx.fillStyle = '#8A9A5B';
+        ctx.font = '0.8rem "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Expectimax Decision Tree', baseX, baseY - 10);
+
+        // Root = MAX node
+        ctx.fillStyle = '#606C38';
+        ctx.beginPath();
+        ctx.arc(baseX, baseY + 20, 18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = 'bold 0.65rem "Segoe UI", system-ui, sans-serif';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('MAX', baseX, baseY + 20);
+
+        // Bank vs Roll
+        const bankX = baseX - 100, rollX = baseX + 100;
+        const decY = baseY + 80;
+        ctx.strokeStyle = '#8A9A5B';
+        ctx.lineWidth = treeNodes.action === 'bank' ? 3 : 1;
+        ctx.beginPath(); ctx.moveTo(baseX, baseY + 38); ctx.lineTo(bankX, decY - 12); ctx.stroke();
+        ctx.lineWidth = treeNodes.action === 'roll' ? 3 : 1;
+        ctx.beginPath(); ctx.moveTo(baseX, baseY + 38); ctx.lineTo(rollX, decY - 12); ctx.stroke();
+
+        // Bank node
+        ctx.fillStyle = treeNodes.action === 'bank' ? '#DDA15E' : '#444';
+        ctx.beginPath(); ctx.arc(bankX, decY, 14, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#FEFAE0'; ctx.font = '0.6rem "Segoe UI", system-ui, sans-serif';
+        ctx.fillText('Bank', bankX, decY);
+        ctx.fillText((treeNodes.bankV !== undefined ? treeNodes.bankV.toFixed(1) : '?'), bankX, decY + 22);
+
+        // Roll/Chance node
+        ctx.fillStyle = treeNodes.action === 'roll' ? '#DDA15E' : '#444';
+        ctx.beginPath();
+        // Diamond shape for chance node
+        ctx.moveTo(rollX, decY - 14); ctx.lineTo(rollX + 14, decY);
+        ctx.lineTo(rollX, decY + 14); ctx.lineTo(rollX - 14, decY);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#FEFAE0';
+        ctx.fillText('Roll', rollX, decY);
+        ctx.fillText((treeNodes.rollV !== undefined ? treeNodes.rollV.toFixed(1) : '?'), rollX, decY + 24);
+
+        // Chance children (die outcomes)
+        if (treeNodes.children) {
+            const chanceY = decY + 70;
+            const spacing = 40;
+            const startX = rollX - 2.5 * spacing;
+            for (let i = 0; i < treeNodes.children.length; i++) {
+                const ch = treeNodes.children[i];
+                const cx = startX + i * spacing;
+                ctx.strokeStyle = ch.type === 'bust' ? '#e74c3c' : 'rgba(138,154,91,0.4)';
+                ctx.lineWidth = 1;
+                ctx.beginPath(); ctx.moveTo(rollX, decY + 14); ctx.lineTo(cx, chanceY - 10); ctx.stroke();
+
+                ctx.fillStyle = ch.type === 'bust' ? '#e74c3c' : '#8A9A5B';
+                ctx.beginPath(); ctx.arc(cx, chanceY, 10, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = '#FEFAE0';
+                ctx.font = '0.55rem "Segoe UI", system-ui, sans-serif';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(ch.die, cx, chanceY);
+                ctx.fillStyle = '#888';
+                ctx.fillText(ch.value.toFixed(1), cx, chanceY + 18);
+                ctx.fillText('1/6', cx, chanceY - 18);
+            }
+        }
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, W, H);
+        const grad = ctx.createLinearGradient(0, 0, W, H);
+        grad.addColorStop(0, '#1a1a2e');
+        grad.addColorStop(1, '#16213e');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = 'bold 1.3rem "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillText('Expectimax Dice Game', W * 0.2, 20);
+        ctx.font = '0.75rem "Segoe UI", system-ui, sans-serif';
+        ctx.fillStyle = '#888';
+        ctx.fillText('First to ' + TARGET + ' wins! Roll a 1 = bust (lose round)', W * 0.2, 44);
+
+        // Scores
+        const barX = W * 0.05, barW = W * 0.3;
+        drawProgressBar(barX, 75, barW, 22, humanBanked, TARGET, '#DDA15E', 'You');
+        drawProgressBar(barX, 105, barW, 22, aiBanked, TARGET, '#8A9A5B', 'AI');
+
+        // Round totals
+        ctx.font = '0.8rem "Segoe UI", system-ui, sans-serif';
+        ctx.fillStyle = '#FEFAE0';
+        ctx.textAlign = 'left';
+        ctx.fillText('Your round: ' + humanRound, barX, 145);
+        ctx.fillText('AI round: ' + aiRound, barX + barW * 0.5, 145);
+
+        // Die
+        const dieX = W * 0.2, dieY = H * 0.4;
+        if (currentDie > 0) {
+            const shake = dieAnimating ? (Math.random() - 0.5) * 6 : 0;
+            drawDie(dieX + shake, dieY + shake, 60, currentDie);
+        }
+
+        // Buttons
+        if (turn === 'human' && !gameOver) {
+            const btnY = H * 0.55;
+            // Roll button
+            ctx.fillStyle = 'rgba(138,154,91,0.4)';
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath(); ctx.roundRect(W * 0.2 - 100, btnY, 100, 40, 8); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '0.9rem "Segoe UI", system-ui, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Roll', W * 0.2 - 50, btnY + 20);
+
+            // Bank button
+            if (humanRound > 0) {
+                ctx.fillStyle = 'rgba(221,161,94,0.4)';
+                ctx.strokeStyle = '#DDA15E';
+                ctx.beginPath(); ctx.roundRect(W * 0.2 + 10, btnY, 100, 40, 8); ctx.fill(); ctx.stroke();
+                ctx.fillStyle = '#FEFAE0';
+                ctx.fillText('Bank ' + humanRound, W * 0.2 + 60, btnY + 20);
+            }
+        }
+
+        // Expectimax tree
+        drawExpectimaxTree();
+
+        requestAnimationFrame(draw);
+    }
+
+    function resetGame() {
+        humanBanked = 0; aiBanked = 0;
+        humanRound = 0; aiRound = 0;
+        currentDie = 0; turn = 'human';
+        gameOver = false; treeNodes = [];
+        message = 'Roll the die to start!';
+        document.getElementById('status').textContent = message;
+    }
+
+    window.reset = resetGame;
+    draw();
+    </script>
+</body>
+</html>

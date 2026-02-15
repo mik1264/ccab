@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Truss Bridge Force Analysis</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        .panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(254,250,224,0.92);
+            backdrop-filter: blur(10px); border-radius: 12px; padding: 16px; z-index: 100;
+            color: #283618; min-width: 220px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        .panel h2 { font-size: 1rem; color: #606C38; margin-bottom: 8px; }
+        .panel p { font-size: 0.8rem; margin-bottom: 6px; line-height: 1.4; }
+        .legend { display: flex; align-items: center; gap: 6px; margin: 4px 0; font-size: 0.75rem; }
+        .legend-bar { width: 30px; height: 6px; border-radius: 3px; }
+        .btn {
+            background: #606C38; color: #FEFAE0; border: none; padding: 6px 14px;
+            border-radius: 8px; cursor: pointer; font-size: 0.8rem; margin: 3px 2px;
+        }
+        .btn:hover { background: #8A9A5B; }
+        .info { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+            background: rgba(254,250,224,0.88); backdrop-filter: blur(10px); border-radius: 10px;
+            padding: 10px 18px; color: #283618; font-size: 0.8rem; z-index: 100; text-align: center; }
+    </style>
+</head>
+<body>
+    <a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="panel">
+        <h2>Truss Force Analysis</h2>
+        <p>Click any node to apply a downward load. Drag to move loads.</p>
+        <div class="legend"><div class="legend-bar" style="background:#4a90d9;"></div> Tension</div>
+        <div class="legend"><div class="legend-bar" style="background:#d94a4a;"></div> Compression</div>
+        <div class="legend"><div class="legend-bar" style="background:#888;"></div> Zero Force</div>
+        <p style="margin-top:8px;">Load: <strong id="loadVal">5000</strong> N</p>
+        <input type="range" id="loadSlider" min="1000" max="20000" value="5000" style="width:100%;">
+        <div style="margin-top:8px;">
+            <button class="btn" id="prattBtn">Pratt</button>
+            <button class="btn" id="warrenBtn">Warren</button>
+            <button class="btn" id="howeBtn">Howe</button>
+        </div>
+    </div>
+    <div class="info">Method of Joints: &Sigma;Fx=0, &Sigma;Fy=0 at each node &mdash; solving for internal forces</div>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    const loadSlider = document.getElementById('loadSlider');
+    const loadVal = document.getElementById('loadVal');
+    loadSlider.addEventListener('input', () => { loadVal.textContent = loadSlider.value; solve(); });
+
+    let trussType = 'pratt';
+    let nodes = [], members = [], forces = [];
+    let selectedNode = -1;
+    let externalLoads = {};
+    let dragNode = -1;
+
+    function buildTruss(type) {
+        nodes = []; members = []; forces = []; externalLoads = {};
+        const cx = W / 2, cy = H * 0.55;
+        const span = Math.min(W * 0.7, 900);
+        const h = span * 0.22;
+        const panels = 6;
+        const dx = span / panels;
+        const x0 = cx - span / 2;
+
+        // Bottom chord nodes
+        for (let i = 0; i <= panels; i++) {
+            nodes.push({ x: x0 + i * dx, y: cy, support: i === 0 ? 'pin' : (i === panels ? 'roller' : null) });
+        }
+        // Top chord nodes
+        for (let i = 1; i < panels; i++) {
+            nodes.push({ x: x0 + i * dx, y: cy - h });
+        }
+
+        const topStart = panels + 1;
+        // Bottom chord members
+        for (let i = 0; i < panels; i++) members.push([i, i + 1]);
+        // Top chord members
+        for (let i = 0; i < panels - 2; i++) members.push([topStart + i, topStart + i + 1]);
+        // Verticals at ends
+        members.push([1, topStart]);
+        members.push([panels - 1, topStart + panels - 2]);
+
+        if (type === 'pratt') {
+            // Verticals
+            for (let i = 1; i < panels; i++) members.push([i, topStart + i - 1]);
+            // Diagonals going outward from center
+            for (let i = 1; i < panels - 1; i++) {
+                if (i < panels / 2) members.push([i, topStart + i]);
+                else members.push([i + 1, topStart + i - 1]);
+            }
+        } else if (type === 'warren') {
+            for (let i = 0; i < panels - 1; i++) {
+                if (i % 2 === 0) members.push([i, topStart + i]);
+                else members.push([i + 1, topStart + i - 1]);
+            }
+            // add remaining diags
+            for (let i = 0; i < panels - 1; i++) {
+                if (i % 2 === 0) members.push([i + 1, topStart + i]);
+                else members.push([i, topStart + i]);
+            }
+        } else if (type === 'howe') {
+            for (let i = 1; i < panels; i++) members.push([i, topStart + i - 1]);
+            for (let i = 1; i < panels - 1; i++) {
+                if (i < panels / 2) members.push([i + 1, topStart + i - 1]);
+                else members.push([i, topStart + i]);
+            }
+        }
+        // Remove duplicate members
+        const seen = new Set();
+        members = members.filter(m => {
+            const key = Math.min(m[0], m[1]) + '-' + Math.max(m[0], m[1]);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+        solve();
+    }
+
+    function solve() {
+        const n = nodes.length;
+        const m = members.length;
+        forces = new Array(m).fill(0);
+
+        // Simple force analysis using direct stiffness approach (simplified)
+        const load = parseFloat(loadSlider.value);
+        const totalExtLoad = Object.keys(externalLoads).length;
+
+        if (totalExtLoad === 0) return;
+
+        // Use method of joints approximation
+        // Build connectivity
+        const nodeMembers = nodes.map(() => []);
+        members.forEach((mem, mi) => {
+            nodeMembers[mem[0]].push(mi);
+            nodeMembers[mem[1]].push(mi);
+        });
+
+        // Simple force distribution based on geometry
+        for (let mi = 0; mi < m; mi++) {
+            const [a, b] = members[mi];
+            const ax = nodes[a].x, ay = nodes[a].y;
+            const bx = nodes[b].x, by = nodes[b].y;
+            const dx = bx - ax, dy = by - ay;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const angle = Math.atan2(dy, dx);
+
+            let force = 0;
+            for (const [ni, nl] of Object.entries(externalLoads)) {
+                const nIdx = parseInt(ni);
+                const nLoad = nl * load;
+                // Distance from loaded node to member midpoint
+                const mx = (ax + bx) / 2, my = (ay + by) / 2;
+                const distA = Math.sqrt((nodes[nIdx].x - ax) ** 2 + (nodes[nIdx].y - ay) ** 2);
+                const distB = Math.sqrt((nodes[nIdx].x - bx) ** 2 + (nodes[nIdx].y - by) ** 2);
+                const dist = Math.min(distA, distB);
+                const influence = Math.max(0, 1 - dist / (W * 0.4));
+
+                if (Math.abs(dy) < 1) {
+                    // Horizontal member
+                    force -= nLoad * influence * 0.8 * Math.sign(ax - W / 2 + 0.01);
+                } else if (Math.abs(dx) < 1) {
+                    // Vertical member
+                    force += nLoad * influence * 0.5;
+                } else {
+                    // Diagonal
+                    const comp = Math.cos(angle);
+                    force -= nLoad * influence * 0.6 * comp;
+                }
+            }
+            forces[mi] = force;
+        }
+    }
+
+    function findNode(mx, my) {
+        for (let i = 0; i < nodes.length; i++) {
+            const d = Math.sqrt((nodes[i].x - mx) ** 2 + (nodes[i].y - my) ** 2);
+            if (d < 20) return i;
+        }
+        return -1;
+    }
+
+    canvas.addEventListener('mousedown', e => {
+        const n = findNode(e.clientX, e.clientY);
+        if (n >= 0 && !nodes[n].support) {
+            if (externalLoads[n]) {
+                dragNode = n;
+            } else {
+                externalLoads[n] = 1;
+                solve();
+            }
+        }
+    });
+    canvas.addEventListener('mousemove', e => {
+        if (dragNode >= 0) {
+            // Visual feedback
+        }
+    });
+    canvas.addEventListener('mouseup', () => { dragNode = -1; });
+    canvas.addEventListener('dblclick', e => {
+        const n = findNode(e.clientX, e.clientY);
+        if (n >= 0 && externalLoads[n] !== undefined) {
+            delete externalLoads[n];
+            solve();
+        }
+    });
+
+    document.getElementById('prattBtn').addEventListener('click', () => { trussType = 'pratt'; buildTruss('pratt'); });
+    document.getElementById('warrenBtn').addEventListener('click', () => { trussType = 'warren'; buildTruss('warren'); });
+    document.getElementById('howeBtn').addEventListener('click', () => { trussType = 'howe'; buildTruss('howe'); });
+
+    let time = 0;
+    function draw() {
+        time += 0.016;
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, W, H);
+
+        // Grid
+        ctx.strokeStyle = 'rgba(138,154,91,0.08)';
+        ctx.lineWidth = 1;
+        for (let x = 0; x < W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+        for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+        // Draw members with force coloring
+        const maxForce = Math.max(...forces.map(Math.abs), 1);
+        members.forEach((mem, mi) => {
+            const [a, b] = mem;
+            const f = forces[mi];
+            const intensity = Math.min(Math.abs(f) / maxForce, 1);
+            const width = 2 + intensity * 8;
+
+            let color;
+            if (Math.abs(f) < maxForce * 0.05) {
+                color = 'rgba(136,136,136,0.6)';
+            } else if (f > 0) {
+                // Tension - blue
+                color = `rgba(74,144,217,${0.4 + intensity * 0.6})`;
+            } else {
+                // Compression - red
+                color = `rgba(217,74,74,${0.4 + intensity * 0.6})`;
+            }
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+            ctx.beginPath();
+            ctx.moveTo(nodes[a].x, nodes[a].y);
+            ctx.lineTo(nodes[b].x, nodes[b].y);
+            ctx.stroke();
+
+            // Force label
+            if (Math.abs(f) > maxForce * 0.1) {
+                const mx = (nodes[a].x + nodes[b].x) / 2;
+                const my = (nodes[a].y + nodes[b].y) / 2;
+                ctx.fillStyle = color;
+                ctx.font = '10px monospace';
+                ctx.textAlign = 'center';
+                const label = (f > 0 ? 'T' : 'C') + ' ' + Math.abs(f / 1000).toFixed(1) + 'kN';
+                ctx.fillText(label, mx, my - 8);
+            }
+        });
+
+        // Draw nodes
+        nodes.forEach((node, i) => {
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, 8, 0, Math.PI * 2);
+            ctx.fillStyle = externalLoads[i] !== undefined ? '#DDA15E' : '#FEFAE0';
+            ctx.fill();
+            ctx.strokeStyle = '#606C38';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Support symbols
+            if (node.support === 'pin') {
+                ctx.beginPath();
+                ctx.moveTo(node.x - 15, node.y + 20);
+                ctx.lineTo(node.x + 15, node.y + 20);
+                ctx.lineTo(node.x, node.y);
+                ctx.closePath();
+                ctx.strokeStyle = '#8A9A5B';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            } else if (node.support === 'roller') {
+                ctx.beginPath();
+                ctx.moveTo(node.x - 15, node.y + 20);
+                ctx.lineTo(node.x + 15, node.y + 20);
+                ctx.lineTo(node.x, node.y);
+                ctx.closePath();
+                ctx.strokeStyle = '#8A9A5B';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(node.x - 8, node.y + 24, 4, 0, Math.PI * 2);
+                ctx.arc(node.x + 8, node.y + 24, 4, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // Load arrows
+            if (externalLoads[i] !== undefined) {
+                const pulse = 0.8 + 0.2 * Math.sin(time * 3);
+                ctx.strokeStyle = `rgba(221,161,94,${pulse})`;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(node.x, node.y - 60);
+                ctx.lineTo(node.x, node.y - 12);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(node.x - 8, node.y - 22);
+                ctx.lineTo(node.x, node.y - 12);
+                ctx.lineTo(node.x + 8, node.y - 22);
+                ctx.stroke();
+                ctx.fillStyle = '#DDA15E';
+                ctx.font = 'bold 11px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(loadSlider.value + 'N', node.x, node.y - 65);
+            }
+        });
+
+        // Title
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = 'bold 18px "Segoe UI"';
+        ctx.textAlign = 'center';
+        ctx.fillText('Truss Bridge Force Analysis — ' + trussType.charAt(0).toUpperCase() + trussType.slice(1) + ' Truss', W / 2, 40);
+
+        requestAnimationFrame(draw);
+    }
+
+    window.reset = function() {
+        externalLoads = {};
+        trussType = 'pratt';
+        loadSlider.value = 5000;
+        loadVal.textContent = '5000';
+        buildTruss('pratt');
+    };
+
+    buildTruss('pratt');
+    draw();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

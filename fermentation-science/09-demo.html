@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ethanol Toxicity & Yeast Survival - Fermentation Science</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a12; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; color: #FEFAE0; }
+canvas { display: block; }
+
+.controls {
+    position: fixed; top: 16px; right: 16px; z-index: 100;
+    background: rgba(30,30,20,0.92); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 18px; min-width: 240px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #DDA15E; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1.5px; }
+.controls label { display: block; font-size: 12px; color: #8A9A5B; margin-top: 8px; }
+.controls input[type=range] { width: 100%; margin: 4px 0; accent-color: #DDA15E; }
+.controls select {
+    width: 100%; padding: 4px 8px; margin: 4px 0; background: #2a2a1a; color: #FEFAE0;
+    border: 1px solid rgba(138,154,91,0.3); border-radius: 6px; font-size: 12px;
+}
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 14px; border: none; border-radius: 8px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+
+.info-panel {
+    position: fixed; bottom: 16px; left: 16px; z-index: 100;
+    background: rgba(30,30,20,0.88); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 14px 18px;
+    border: 1px solid rgba(138,154,91,0.2);
+    font-size: 12px; color: #8A9A5B; max-width: 520px;
+}
+.info-panel h4 { color: #DDA15E; margin-bottom: 6px; font-size: 13px; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Ethanol Tolerance</h3>
+    <label>Yeast Strain:</label>
+    <select id="strain">
+        <option value="bread">Bread Yeast (8% tolerance)</option>
+        <option value="wine">Wine Yeast (14% tolerance)</option>
+        <option value="champagne">Champagne (18% tolerance)</option>
+        <option value="turbo">Turbo Yeast (21% tolerance)</option>
+    </select>
+    <label>Sugar Load (OG): <span id="ogVal">1.080</span></label>
+    <input type="range" id="og" min="1040" max="1150" step="5" value="1080">
+    <label>Temperature: <span id="tempVal">22</span>&deg;C</label>
+    <input type="range" id="temp" min="15" max="35" step="1" value="22">
+    <label>Speed: <span id="speedVal">1</span>x</label>
+    <input type="range" id="speed" min="1" max="10" step="1" value="1">
+    <div style="margin-top:10px;">
+        <button class="btn" id="resetBtn">Reset</button>
+    </div>
+</div>
+
+<div class="info-panel">
+    <h4>Ethanol Toxicity</h4>
+    <p>Yeast are killed by their own metabolic product: ethanol damages cell membranes and denatures proteins. Different strains have evolved different alcohol tolerances. When ethanol exceeds the strain's threshold, fermentation stalls with residual sugar remaining. This is why very strong beers and wines require specialized yeasts.</p>
+</div>
+
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const strainProfiles = {
+    bread: { tolerance: 8, muMax: 0.4, name: 'Bread Yeast', color: '#DDA15E' },
+    wine: { tolerance: 14, muMax: 0.35, name: 'Wine Yeast', color: '#8A9A5B' },
+    champagne: { tolerance: 18, muMax: 0.3, name: 'Champagne Yeast', color: '#BC6C25' },
+    turbo: { tolerance: 21, muMax: 0.45, name: 'Turbo Yeast', color: '#606C38' }
+};
+
+let simTime = 0;
+let simSpeed = 1;
+let strain = strainProfiles.bread;
+let OG = 1.080;
+let temperature = 22;
+
+// State
+let gravity = 1.080;
+let biomass = 1;
+let ethanol = 0; // ABV %
+let viability = 100; // % alive
+let stressLevel = 0;
+let stalled = false;
+let history = [];
+
+// Individual yeast cells for visualization
+let cells = [];
+const MAX_CELLS = 400;
+
+function initCells() {
+    cells = [];
+    for (let i = 0; i < 30; i++) {
+        addCell();
+    }
+}
+
+function addCell() {
+    if (cells.length >= MAX_CELLS) return;
+    const region = { x: W * 0.06, y: H * 0.1, w: W * 0.45, h: H * 0.7 };
+    cells.push({
+        x: region.x + 20 + Math.random() * (region.w - 40),
+        y: region.y + 20 + Math.random() * (region.h - 40),
+        vx: (Math.random() - 0.5) * 0.6,
+        vy: (Math.random() - 0.5) * 0.6,
+        r: 3 + Math.random() * 3,
+        alive: true,
+        stressed: false,
+        budding: false,
+        budPhase: 0,
+        deathTimer: 0
+    });
+}
+
+function ethanolInhibition() {
+    if (ethanol < strain.tolerance * 0.5) return 1;
+    const frac = (ethanol - strain.tolerance * 0.5) / (strain.tolerance * 0.5);
+    return Math.max(0, 1 - frac * frac);
+}
+
+function updateSim(dt) {
+    const sugarAvailable = (gravity - 1.0) * 1000;
+    if (sugarAvailable <= 0.5) { stalled = true; return; }
+
+    const inhibition = ethanolInhibition();
+    const tempF = Math.exp(-0.02 * Math.pow(temperature - 25, 2) / 15);
+
+    // Growth
+    const mu = strain.muMax * tempF * inhibition * Math.min(1, sugarAvailable / 30);
+    biomass += mu * biomass * 0.008 * dt;
+    biomass = Math.max(0.1, Math.min(15, biomass));
+
+    // Fermentation
+    const consumption = mu * biomass * 0.12 * dt;
+    gravity = Math.max(0.995, gravity - consumption / 1000);
+    ethanol += consumption * 0.131 / 10;
+
+    // Stress and death
+    stressLevel = Math.max(0, ethanol / strain.tolerance);
+    const deathRate = Math.pow(Math.max(0, stressLevel - 0.6), 3) * 0.5;
+    viability = Math.max(0, viability - deathRate * dt);
+
+    if (viability < 5) stalled = true;
+
+    // Update visual cells
+    const targetAlive = Math.floor(cells.length * viability / 100);
+    let aliveCount = cells.filter(c => c.alive).length;
+
+    // Kill cells
+    while (aliveCount > targetAlive) {
+        const aliveCells = cells.filter(c => c.alive);
+        if (aliveCells.length === 0) break;
+        const victim = aliveCells[Math.floor(Math.random() * aliveCells.length)];
+        victim.alive = false;
+        victim.deathTimer = 0;
+        aliveCount--;
+    }
+
+    // Budding (reproduction)
+    if (inhibition > 0.3 && Math.random() < mu * 0.2 && cells.length < MAX_CELLS) {
+        addCell();
+    }
+
+    // Mark stressed cells
+    for (const c of cells) {
+        c.stressed = stressLevel > 0.5 && c.alive;
+        if (c.alive && !c.budding && Math.random() < 0.002 * mu) {
+            c.budding = true;
+            c.budPhase = 0;
+        }
+    }
+
+    simTime += dt;
+    history.push({
+        t: simTime, grav: gravity, abv: ethanol,
+        bio: biomass, via: viability, stress: stressLevel * 100
+    });
+    if (history.length > 3000) history.shift();
+}
+
+function resetSim() {
+    const key = document.getElementById('strain').value;
+    strain = strainProfiles[key];
+    OG = parseInt(document.getElementById('og').value) / 1000;
+    temperature = parseInt(document.getElementById('temp').value);
+
+    simTime = 0;
+    gravity = OG;
+    biomass = 1;
+    ethanol = 0;
+    viability = 100;
+    stressLevel = 0;
+    stalled = false;
+    history = [];
+    initCells();
+}
+
+// Controls
+document.getElementById('og').addEventListener('input', function() {
+    document.getElementById('ogVal').textContent = (parseInt(this.value) / 1000).toFixed(3);
+});
+document.getElementById('temp').addEventListener('input', function() {
+    temperature = parseInt(this.value);
+    document.getElementById('tempVal').textContent = temperature;
+});
+document.getElementById('speed').addEventListener('input', function() {
+    simSpeed = parseInt(this.value);
+    document.getElementById('speedVal').textContent = simSpeed;
+});
+document.getElementById('resetBtn').addEventListener('click', resetSim);
+document.getElementById('strain').addEventListener('change', resetSim);
+
+function drawVessel() {
+    const vx = W * 0.04;
+    const vy = H * 0.06;
+    const vw = W * 0.48;
+    const vh = H * 0.76;
+
+    // Vessel
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(vx, vy, vw, vh, 20);
+    ctx.stroke();
+
+    // Liquid - color shifts with ethanol
+    const ethanolFrac = ethanol / 25;
+    const hue = 40 - ethanolFrac * 15;
+    const lightness = 20 + ethanolFrac * 5;
+    ctx.fillStyle = `hsla(${hue}, 50%, ${lightness}%, 0.5)`;
+    ctx.fillRect(vx + 3, vy + vh * 0.04, vw - 6, vh * 0.92);
+
+    // Ethanol gradient overlay (increases from bottom)
+    if (ethanol > 2) {
+        const etGrad = ctx.createLinearGradient(0, vy, 0, vy + vh);
+        etGrad.addColorStop(0, 'rgba(188,108,37,0)');
+        etGrad.addColorStop(1, `rgba(188,108,37,${Math.min(0.3, ethanol * 0.015)})`);
+        ctx.fillStyle = etGrad;
+        ctx.fillRect(vx + 3, vy + vh * 0.04, vw - 6, vh * 0.92);
+    }
+
+    // Draw cells
+    const region = { x: vx, y: vy, w: vw, h: vh };
+    for (const c of cells) {
+        // Movement
+        c.x += c.vx;
+        c.y += c.vy;
+        c.vx += (Math.random() - 0.5) * 0.1;
+        c.vy += (Math.random() - 0.5) * 0.1;
+
+        // Dead cells sink
+        if (!c.alive) {
+            c.vy += 0.02;
+            c.deathTimer += 0.01;
+        }
+
+        c.vx *= 0.97;
+        c.vy *= 0.97;
+
+        // Bounds
+        if (c.x < region.x + 10) { c.x = region.x + 10; c.vx *= -0.5; }
+        if (c.x > region.x + region.w - 10) { c.x = region.x + region.w - 10; c.vx *= -0.5; }
+        if (c.y < region.y + 10) { c.y = region.y + 10; c.vy *= -0.5; }
+        if (c.y > region.y + region.h - 10) { c.y = region.y + region.h - 10; c.vy *= -0.5; }
+
+        // Draw
+        if (c.alive) {
+            const baseHue = c.stressed ? 20 : 45;
+            const baseSat = c.stressed ? 70 : 50;
+            const baseLight = c.stressed ? 55 : 65;
+            ctx.fillStyle = `hsla(${baseHue}, ${baseSat}%, ${baseLight}%, 0.7)`;
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Stress glow
+            if (c.stressed) {
+                ctx.beginPath();
+                ctx.arc(c.x, c.y, c.r + 3, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(188,108,37,${stressLevel * 0.15})`;
+                ctx.fill();
+            }
+
+            // Budding
+            if (c.budding) {
+                c.budPhase += 0.02;
+                const budR = c.r * 0.4 * Math.min(1, c.budPhase);
+                ctx.beginPath();
+                ctx.arc(c.x + c.r * 0.8, c.y - c.r * 0.3, budR, 0, Math.PI * 2);
+                ctx.fillStyle = `hsla(50, 50%, 70%, 0.7)`;
+                ctx.fill();
+                if (c.budPhase > 1) { c.budding = false; c.budPhase = 0; }
+            }
+
+            // Highlight
+            ctx.beginPath();
+            ctx.arc(c.x - c.r * 0.2, c.y - c.r * 0.2, c.r * 0.3, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(254,250,224,0.2)';
+            ctx.fill();
+        } else {
+            // Dead cell - gray, sinking
+            const fade = Math.max(0.1, 1 - c.deathTimer);
+            ctx.fillStyle = `rgba(100,100,80,${fade * 0.5})`;
+            ctx.beginPath();
+            ctx.arc(c.x, c.y, c.r * 0.8, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Labels
+    ctx.fillStyle = '#606C38';
+    ctx.font = '13px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${strain.name} (${strain.tolerance}% tolerance)`, vx + vw / 2, vy - 8);
+
+    if (stalled) {
+        ctx.fillStyle = '#BC6C25';
+        ctx.font = 'bold 16px system-ui';
+        ctx.fillText('FERMENTATION STALLED', vx + vw / 2, vy + vh / 2);
+    }
+
+    // Stats
+    ctx.fillStyle = 'rgba(30,30,20,0.7)';
+    ctx.beginPath();
+    ctx.roundRect(vx, vy + vh + 8, vw, 55, 10);
+    ctx.fill();
+
+    // Stress meter
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '11px system-ui';
+    ctx.textAlign = 'left';
+    ctx.fillText(`ABV: ${ethanol.toFixed(1)}% / ${strain.tolerance}% max | SG: ${gravity.toFixed(3)}`, vx + 10, vy + vh + 26);
+    ctx.fillText(`Viability: ${viability.toFixed(1)}% | Stress: ${(stressLevel * 100).toFixed(0)}%`, vx + 10, vy + vh + 43);
+
+    // Stress bar
+    ctx.fillStyle = 'rgba(138,154,91,0.2)';
+    ctx.fillRect(vx + 10, vy + vh + 50, vw - 20, 6);
+    const stressColor = stressLevel < 0.5 ? '#8A9A5B' : stressLevel < 0.8 ? '#DDA15E' : '#BC6C25';
+    ctx.fillStyle = stressColor;
+    ctx.fillRect(vx + 10, vy + vh + 50, (vw - 20) * Math.min(1, stressLevel), 6);
+}
+
+function drawGraphs() {
+    if (history.length < 2) return;
+
+    const gx = W * 0.56;
+    const gy = H * 0.06;
+    const gw = W * 0.4;
+    const gh = H * 0.36;
+    const maxT = Math.max(24, simTime);
+
+    // ABV & Gravity
+    ctx.fillStyle = 'rgba(20,20,12,0.7)';
+    ctx.beginPath();
+    ctx.roundRect(gx - 10, gy - 10, gw + 20, gh + 20, 14);
+    ctx.fill();
+
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = 'bold 13px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Ethanol Production & Gravity', gx + gw / 2, gy + 5);
+
+    ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy + 15); ctx.lineTo(gx, gy + gh); ctx.lineTo(gx + gw, gy + gh);
+    ctx.stroke();
+
+    // Tolerance line
+    const tolY = gy + gh - (strain.tolerance / 25) * (gh - 20);
+    ctx.strokeStyle = 'rgba(188,108,37,0.4)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(gx, tolY);
+    ctx.lineTo(gx + gw, tolY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#BC6C25';
+    ctx.font = '9px system-ui';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Tolerance: ${strain.tolerance}%`, gx + 5, tolY - 5);
+
+    // ABV curve
+    ctx.beginPath();
+    ctx.strokeStyle = '#DDA15E';
+    ctx.lineWidth = 2;
+    let first = true;
+    for (const d of history) {
+        const px = gx + (d.t / maxT) * gw;
+        const py = gy + gh - (d.abv / 25) * (gh - 20);
+        if (first) { ctx.moveTo(px, py); first = false; }
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Gravity
+    ctx.beginPath();
+    ctx.strokeStyle = '#8A9A5B';
+    ctx.lineWidth = 2;
+    first = true;
+    for (const d of history) {
+        const px = gx + (d.t / maxT) * gw;
+        const py = gy + gh - ((d.grav - 0.99) / (OG - 0.99 + 0.01)) * (gh - 20);
+        if (first) { ctx.moveTo(px, py); first = false; }
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = '#DDA15E'; ctx.fillRect(gx + 10, gy + 18, 12, 3);
+    ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText('ABV %', gx + 26, gy + 23);
+    ctx.fillStyle = '#8A9A5B'; ctx.fillRect(gx + 80, gy + 18, 12, 3);
+    ctx.fillText('Gravity', gx + 96, gy + 23);
+
+    // Viability & Stress
+    const gy2 = gy + gh + 50;
+    ctx.fillStyle = 'rgba(20,20,12,0.7)';
+    ctx.beginPath();
+    ctx.roundRect(gx - 10, gy2 - 10, gw + 20, gh + 20, 14);
+    ctx.fill();
+
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = 'bold 13px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Yeast Viability & Stress', gx + gw / 2, gy2 + 5);
+
+    ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy2 + 15); ctx.lineTo(gx, gy2 + gh); ctx.lineTo(gx + gw, gy2 + gh);
+    ctx.stroke();
+
+    // Viability
+    ctx.beginPath();
+    ctx.strokeStyle = '#8A9A5B';
+    ctx.lineWidth = 2;
+    first = true;
+    for (const d of history) {
+        const px = gx + (d.t / maxT) * gw;
+        const py = gy2 + gh - (d.via / 110) * (gh - 20);
+        if (first) { ctx.moveTo(px, py); first = false; }
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Stress
+    ctx.beginPath();
+    ctx.strokeStyle = '#BC6C25';
+    ctx.lineWidth = 2;
+    first = true;
+    for (const d of history) {
+        const px = gx + (d.t / maxT) * gw;
+        const py = gy2 + gh - (d.stress / 110) * (gh - 20);
+        if (first) { ctx.moveTo(px, py); first = false; }
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = '#8A9A5B'; ctx.fillRect(gx + 10, gy2 + 18, 12, 3);
+    ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText('Viability %', gx + 26, gy2 + 23);
+    ctx.fillStyle = '#BC6C25'; ctx.fillRect(gx + 110, gy2 + 18, 12, 3);
+    ctx.fillText('Stress %', gx + 126, gy2 + 23);
+
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = '11px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Time (hours)', gx + gw / 2, gy2 + gh + 15);
+}
+
+function draw() {
+    ctx.fillStyle = '#1a1a12';
+    ctx.fillRect(0, 0, W, H);
+
+    for (let i = 0; i < simSpeed; i++) updateSim(0.15);
+
+    drawVessel();
+    drawGraphs();
+
+    requestAnimationFrame(draw);
+}
+
+resetSim();
+draw();
+
+window.reset = function() { resetSim(); };
+</script>
+</body>
+</html>

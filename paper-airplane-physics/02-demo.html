@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dart vs Glider Showdown - Paper Airplane Physics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px; border-radius: 12px; width: 240px;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 8px; font-size: 0.95rem; }
+        .control-group { margin-bottom: 8px; }
+        .control-group label { display: block; color: #8A9A5B; font-size: 0.8rem; margin-bottom: 2px; }
+        .control-group input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+        .val { color: #DDA15E; font-size: 0.8rem; float: right; }
+        button {
+            width: 100%; padding: 8px; border: none; border-radius: 8px;
+            background: linear-gradient(135deg, #606C38, #8A9A5B); color: #FEFAE0;
+            font-size: 0.9rem; cursor: pointer; font-weight: bold; margin-top: 5px;
+        }
+        button:hover { opacity: 0.9; }
+        #stats {
+            position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 1000;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 10px 20px; border-radius: 12px; font-size: 0.85rem;
+            border: 1px solid rgba(138,154,91,0.3); display: flex; gap: 30px;
+        }
+        .stat-col { text-align: center; }
+        .stat-col h4 { font-size: 0.8rem; margin-bottom: 3px; }
+        .dart-color { color: #f44336; }
+        .glider-color { color: #4CAF50; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Dart vs Glider Showdown</h3>
+        <div class="control-group">
+            <label>Throw Power: <span class="val" id="powerVal">15</span> m/s</label>
+            <input type="range" id="power" min="5" max="30" value="15" step="0.5">
+        </div>
+        <div class="control-group">
+            <label>Throw Angle: <span class="val" id="angleVal">20</span>&deg;</label>
+            <input type="range" id="angle" min="-10" max="60" value="20" step="1">
+        </div>
+        <div class="control-group">
+            <label>Wind: <span class="val" id="windVal">0</span> m/s</label>
+            <input type="range" id="wind" min="-5" max="5" value="0" step="0.5">
+        </div>
+        <button id="throwBtn">Throw Both!</button>
+    </div>
+    <div id="stats">
+        <div class="stat-col">
+            <h4 class="dart-color">Dart</h4>
+            <div>Dist: <span class="dart-color" id="dartDist">0.0</span>m</div>
+            <div>Time: <span class="dart-color" id="dartTime">0.0</span>s</div>
+        </div>
+        <div class="stat-col">
+            <h4 class="glider-color">Glider</h4>
+            <div>Dist: <span class="glider-color" id="gliderDist">0.0</span>m</div>
+            <div>Time: <span class="glider-color" id="gliderTime">0.0</span>s</div>
+        </div>
+        <div class="stat-col">
+            <h4 style="color:#DDA15E;">Winner</h4>
+            <div id="winner" style="color:#DDA15E;">--</div>
+        </div>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let animId;
+        let time = 0;
+        let running = true;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Dart: narrow, heavy nose, low drag, less lift
+        // Glider: wide wings, light, more lift, more drag
+        const dartProps = {
+            name: 'Dart',
+            mass: 0.005,        // 5g
+            wingArea: 0.015,    // small wing area
+            AR: 3,              // low aspect ratio
+            cd0: 0.015,         // low parasitic drag
+            clAlpha: 4.5,       // lower lift curve slope
+            stallAngle: 18,     // stalls later
+            color: '#f44336',
+            wingSpan: 15,
+            bodyLen: 50
+        };
+
+        const gliderProps = {
+            name: 'Glider',
+            mass: 0.004,        // 4g lighter
+            wingArea: 0.06,     // large wing area
+            AR: 7,              // high aspect ratio
+            cd0: 0.025,         // more parasitic drag
+            clAlpha: 6.0,       // higher lift curve slope
+            stallAngle: 12,     // stalls earlier
+            color: '#4CAF50',
+            wingSpan: 35,
+            bodyLen: 30
+        };
+
+        let dart, glider;
+        let trails = { dart: [], glider: [] };
+        let simulating = false;
+        let simTime = 0;
+        const groundY = 0.8; // fraction of screen height
+
+        function createPlane(props, power, angleDeg, startX, startY) {
+            const angleRad = angleDeg * Math.PI / 180;
+            return {
+                x: startX,
+                y: startY,
+                vx: power * Math.cos(angleRad),
+                vy: -power * Math.sin(angleRad),
+                theta: -angleRad, // pitch angle
+                props: props,
+                landed: false,
+                dist: 0,
+                flightTime: 0,
+                startX: startX
+            };
+        }
+
+        function simulateStep(plane, dt, wind) {
+            if (plane.landed) return;
+
+            const rho = 1.225;
+            const g = 9.81;
+            const vxRel = plane.vx - wind;
+            const V = Math.sqrt(vxRel * vxRel + plane.vy * plane.vy);
+            if (V < 0.1) { plane.landed = true; return; }
+
+            // Angle of attack = flight path angle - pitch angle
+            const flightAngle = Math.atan2(-plane.vy, vxRel);
+            const aoaRad = plane.theta - flightAngle;
+            const aoaDeg = aoaRad * 180 / Math.PI;
+
+            // CL
+            let CL;
+            const effectiveAoA = Math.abs(aoaDeg);
+            if (effectiveAoA < plane.props.stallAngle) {
+                CL = plane.props.clAlpha * aoaRad;
+            } else {
+                const clMax = plane.props.clAlpha * (plane.props.stallAngle * Math.PI / 180);
+                CL = clMax * Math.sign(aoaRad) * Math.max(0, 1 - (effectiveAoA - plane.props.stallAngle) / 30);
+            }
+
+            // CD
+            const cdi = (CL * CL) / (Math.PI * plane.props.AR * 0.7);
+            const CD = plane.props.cd0 + cdi;
+
+            // Forces
+            const q = 0.5 * rho * V * V;
+            const L = q * plane.props.wingArea * CL;
+            const D = q * plane.props.wingArea * CD;
+
+            // Lift perpendicular to velocity, drag opposing velocity
+            const liftX = L * Math.sin(flightAngle);
+            const liftY = L * Math.cos(flightAngle);
+            const dragX = -D * (vxRel / V);
+            const dragY = -D * (plane.vy / V);
+
+            const ax = (liftX + dragX) / plane.props.mass;
+            const ay = g + (liftY + dragY) / plane.props.mass; // note: positive y is down on screen
+
+            // But we need to correct lift direction
+            const ax2 = (-L * Math.sin(flightAngle) + dragX) / plane.props.mass;
+            const ay2 = (g - L * Math.cos(flightAngle) + dragY) / plane.props.mass;
+
+            plane.vx += ax2 * dt;
+            plane.vy += ay2 * dt;
+
+            plane.x += plane.vx * dt;
+            plane.y += plane.vy * dt;
+
+            // Pitch gradually adjusts toward flight path
+            const targetTheta = -Math.atan2(-plane.vy, Math.max(plane.vx, 0.1));
+            plane.theta += (targetTheta - plane.theta) * 2 * dt;
+
+            plane.flightTime += dt;
+
+            // Ground collision
+            const groundPx = H * groundY;
+            if (plane.y * (H * groundY / 20) > groundPx) {
+                plane.landed = true;
+            }
+
+            plane.dist = Math.abs(plane.x - plane.startX);
+        }
+
+        function throwPlanes() {
+            const power = parseFloat(document.getElementById('power').value);
+            const angle = parseFloat(document.getElementById('angle').value);
+
+            const startX = 2;
+            const startY = 15;
+
+            dart = createPlane(dartProps, power, angle, startX, startY);
+            glider = createPlane(gliderProps, power, angle, startX, startY);
+
+            trails = { dart: [], glider: [] };
+            simulating = true;
+            simTime = 0;
+
+            document.getElementById('winner').textContent = '...';
+        }
+
+        document.getElementById('throwBtn').addEventListener('click', throwPlanes);
+
+        function worldToScreen(wx, wy) {
+            const scale = H * groundY / 20; // 20 meters fits in ground area
+            return {
+                x: 60 + wx * scale * 0.5,
+                y: H * 0.15 + wy * scale * 0.5
+            };
+        }
+
+        function drawPlane(plane) {
+            const pos = worldToScreen(plane.x, plane.y);
+            const p = plane.props;
+
+            ctx.save();
+            ctx.translate(pos.x, pos.y);
+            ctx.rotate(plane.theta);
+
+            // Body
+            ctx.beginPath();
+            ctx.moveTo(p.bodyLen / 2, 0);
+            ctx.lineTo(-p.bodyLen / 2, -3);
+            ctx.lineTo(-p.bodyLen / 2, 3);
+            ctx.closePath();
+            ctx.fillStyle = p.color;
+            ctx.fill();
+
+            // Wings
+            ctx.beginPath();
+            ctx.moveTo(5, 0);
+            ctx.lineTo(-10, -p.wingSpan / 2);
+            ctx.lineTo(-15, 0);
+            ctx.lineTo(-10, p.wingSpan / 2);
+            ctx.closePath();
+            ctx.fillStyle = p.color + '88';
+            ctx.fill();
+            ctx.strokeStyle = p.color;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        function drawTrail(trail, color) {
+            if (trail.length < 2) return;
+            ctx.beginPath();
+            ctx.moveTo(trail[0].x, trail[0].y);
+            for (let i = 1; i < trail.length; i++) {
+                ctx.lineTo(trail[i].x, trail[i].y);
+            }
+            ctx.strokeStyle = color + '66';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawGround() {
+            const gy = H * groundY;
+            ctx.fillStyle = '#2a3a1e';
+            ctx.fillRect(0, gy, W, H - gy);
+
+            // Grass texture
+            ctx.strokeStyle = '#3a5a2e';
+            ctx.lineWidth = 1;
+            for (let x = 0; x < W; x += 8) {
+                const h = 3 + Math.sin(x * 0.3 + time) * 2;
+                ctx.beginPath();
+                ctx.moveTo(x, gy);
+                ctx.lineTo(x + 2, gy - h);
+                ctx.stroke();
+            }
+
+            // Distance markers
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '11px Segoe UI, sans-serif';
+            for (let d = 5; d <= 40; d += 5) {
+                const pos = worldToScreen(d, 0);
+                if (pos.x < W - 20) {
+                    ctx.fillText(d + 'm', pos.x - 8, gy + 18);
+                    ctx.beginPath();
+                    ctx.moveTo(pos.x, gy);
+                    ctx.lineTo(pos.x, gy + 6);
+                    ctx.strokeStyle = '#FEFAE0';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function drawSky() {
+            const grad = ctx.createLinearGradient(0, 0, 0, H * groundY);
+            grad.addColorStop(0, '#0a0a1e');
+            grad.addColorStop(0.5, '#1a1a3e');
+            grad.addColorStop(1, '#2a2a4e');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, W, H * groundY);
+
+            // Clouds
+            ctx.fillStyle = 'rgba(255,255,255,0.03)';
+            for (let i = 0; i < 5; i++) {
+                const cx = (i * 300 + time * 10) % (W + 200) - 100;
+                const cy = 40 + i * 30;
+                ctx.beginPath();
+                ctx.ellipse(cx, cy, 60, 20, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // Update display values
+        function updateLabels() {
+            document.getElementById('powerVal').textContent = document.getElementById('power').value;
+            document.getElementById('angleVal').textContent = document.getElementById('angle').value;
+            document.getElementById('windVal').textContent = document.getElementById('wind').value;
+        }
+
+        document.getElementById('power').addEventListener('input', updateLabels);
+        document.getElementById('angle').addEventListener('input', updateLabels);
+        document.getElementById('wind').addEventListener('input', updateLabels);
+
+        function animate() {
+            time += 0.016;
+            ctx.clearRect(0, 0, W, H);
+
+            drawSky();
+            drawGround();
+
+            const wind = parseFloat(document.getElementById('wind').value);
+
+            if (simulating && dart && glider) {
+                const dt = 0.016;
+                const substeps = 4;
+                for (let s = 0; s < substeps; s++) {
+                    simulateStep(dart, dt / substeps, wind);
+                    simulateStep(glider, dt / substeps, wind);
+                }
+                simTime += dt;
+
+                // Record trails
+                const dp = worldToScreen(dart.x, dart.y);
+                const gp = worldToScreen(glider.x, glider.y);
+                trails.dart.push({ x: dp.x, y: dp.y });
+                trails.glider.push({ x: gp.x, y: gp.y });
+
+                // Update stats
+                document.getElementById('dartDist').textContent = dart.dist.toFixed(1);
+                document.getElementById('dartTime').textContent = dart.flightTime.toFixed(1);
+                document.getElementById('gliderDist').textContent = glider.dist.toFixed(1);
+                document.getElementById('gliderTime').textContent = glider.flightTime.toFixed(1);
+
+                if (dart.landed && glider.landed) {
+                    simulating = false;
+                    const distWinner = dart.dist > glider.dist ? 'Dart' : 'Glider';
+                    const timeWinner = dart.flightTime > glider.flightTime ? 'Dart' : 'Glider';
+                    document.getElementById('winner').textContent = distWinner + ' (dist) / ' + timeWinner + ' (time)';
+                }
+            }
+
+            // Draw trails
+            if (trails.dart.length) drawTrail(trails.dart, '#f44336');
+            if (trails.glider.length) drawTrail(trails.glider, '#4CAF50');
+
+            // Draw planes
+            if (dart && !dart.landed) drawPlane(dart);
+            else if (dart && dart.landed) {
+                const pos = worldToScreen(dart.x, dart.y);
+                ctx.fillStyle = '#f44336';
+                ctx.beginPath();
+                ctx.arc(pos.x, H * groundY - 3, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            if (glider && !glider.landed) drawPlane(glider);
+            else if (glider && glider.landed) {
+                const pos = worldToScreen(glider.x, glider.y);
+                ctx.fillStyle = '#4CAF50';
+                ctx.beginPath();
+                ctx.arc(pos.x, H * groundY - 3, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Design comparison panel
+            if (!simulating && !dart) {
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.beginPath();
+                ctx.roundRect(W / 2 - 200, H / 2 - 100, 400, 200, 12);
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+                ctx.stroke();
+
+                ctx.fillStyle = '#DDA15E';
+                ctx.font = 'bold 18px Segoe UI, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('Dart vs Glider', W / 2, H / 2 - 65);
+
+                ctx.font = '13px Segoe UI, sans-serif';
+                ctx.fillStyle = '#f44336';
+                ctx.fillText('Dart: Narrow wings, heavy nose', W / 2, H / 2 - 35);
+                ctx.fillText('Fast launch, low lift, low drag', W / 2, H / 2 - 15);
+
+                ctx.fillStyle = '#4CAF50';
+                ctx.fillText('Glider: Wide wings, light build', W / 2, H / 2 + 15);
+                ctx.fillText('Gentle flight, high lift, more drag', W / 2, H / 2 + 35);
+
+                ctx.fillStyle = '#8A9A5B';
+                ctx.fillText('Set power and angle, then hit Throw!', W / 2, H / 2 + 70);
+                ctx.textAlign = 'left';
+            }
+
+            // Wind indicator
+            if (Math.abs(wind) > 0) {
+                ctx.fillStyle = '#FEFAE0';
+                ctx.font = '12px Segoe UI, sans-serif';
+                const windLabel = wind > 0 ? 'Tailwind' : 'Headwind';
+                ctx.fillText('Wind: ' + windLabel + ' ' + Math.abs(wind) + ' m/s', W / 2 - 60, 25);
+                // Wind arrows
+                for (let i = 0; i < 5; i++) {
+                    const ax = (W / 2 - 40) + i * 25;
+                    const dir = wind > 0 ? 1 : -1;
+                    ctx.beginPath();
+                    ctx.moveTo(ax, 35);
+                    ctx.lineTo(ax + dir * 12, 35);
+                    ctx.lineTo(ax + dir * 8, 31);
+                    ctx.moveTo(ax + dir * 12, 35);
+                    ctx.lineTo(ax + dir * 8, 39);
+                    ctx.strokeStyle = 'rgba(254,250,224,0.5)';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+            }
+
+            animId = requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            dart = null;
+            glider = null;
+            trails = { dart: [], glider: [] };
+            simulating = false;
+            simTime = 0;
+            document.getElementById('power').value = 15;
+            document.getElementById('angle').value = 20;
+            document.getElementById('wind').value = 0;
+            updateLabels();
+            document.getElementById('dartDist').textContent = '0.0';
+            document.getElementById('dartTime').textContent = '0.0';
+            document.getElementById('gliderDist').textContent = '0.0';
+            document.getElementById('gliderTime').textContent = '0.0';
+            document.getElementById('winner').textContent = '--';
+        };
+
+        animate();
+    })();
+    </script>
+</body>
+</html>

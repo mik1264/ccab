@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dymaxion Icosahedron Unfold</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(254,250,224,0.12); backdrop-filter: blur(10px);
+            color: #FEFAE0; padding: 12px 24px; border-radius: 12px;
+            font-size: 0.85rem; text-align: center; pointer-events: none; z-index: 100;
+        }
+        .controls {
+            position: fixed; top: 10px; right: 10px; z-index: 100;
+            display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+        }
+        .controls label {
+            color: #FEFAE0; font-size: 0.8rem; display: flex; align-items: center; gap: 8px;
+            background: rgba(254,250,224,0.1); backdrop-filter: blur(10px);
+            padding: 6px 12px; border-radius: 8px;
+        }
+        .controls input[type=range] { width: 140px; accent-color: #8A9A5B; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="controls">
+        <label>Unfold <input type="range" id="unfold" min="0" max="100" value="0"> <span id="unfoldVal">0%</span></label>
+        <label>Rotate <input type="range" id="rotateSlider" min="0" max="360" value="0"></label>
+    </div>
+    <div class="info">Fuller's Dymaxion map: project Earth onto an icosahedron, then unfold it. Minimal distortion for all landmasses.</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H, cx, cy;
+
+        const unfoldSlider = document.getElementById('unfold');
+        const unfoldVal = document.getElementById('unfoldVal');
+        const rotateSlider = document.getElementById('rotateSlider');
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+            cx = W / 2;
+            cy = H / 2;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        unfoldSlider.addEventListener('input', () => {
+            unfoldVal.textContent = unfoldSlider.value + '%';
+        });
+
+        // Icosahedron vertices (unit sphere)
+        const phi = (1 + Math.sqrt(5)) / 2;
+        const icoRawVerts = [
+            [0, 1, phi], [0, -1, phi], [0, 1, -phi], [0, -1, -phi],
+            [1, phi, 0], [-1, phi, 0], [1, -phi, 0], [-1, -phi, 0],
+            [phi, 0, 1], [-phi, 0, 1], [phi, 0, -1], [-phi, 0, -1]
+        ];
+
+        // Normalize to unit sphere
+        const icoVerts = icoRawVerts.map(v => {
+            const len = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+            return [v[0]/len, v[1]/len, v[2]/len];
+        });
+
+        // Icosahedron faces (20 triangles)
+        const icoFaces = [
+            [0,1,8],[0,8,4],[0,4,5],[0,5,9],[0,9,1],
+            [1,6,8],[8,6,10],[8,10,4],[4,10,2],[4,2,5],
+            [5,2,11],[5,11,9],[9,11,7],[9,7,1],[1,7,6],
+            [3,6,7],[3,7,11],[3,11,2],[3,2,10],[3,10,6]
+        ];
+
+        // Simple 3D rotation
+        function rotateY(v, angle) {
+            const c = Math.cos(angle), s = Math.sin(angle);
+            return [c*v[0] + s*v[2], v[1], -s*v[0] + c*v[2]];
+        }
+        function rotateX(v, angle) {
+            const c = Math.cos(angle), s = Math.sin(angle);
+            return [v[0], c*v[1] - s*v[2], s*v[1] + c*v[2]];
+        }
+
+        // Project 3D -> 2D (simple perspective)
+        function project3D(v, scale) {
+            const d = 4;
+            const factor = d / (d + v[2]);
+            return { x: cx + v[0] * scale * factor, y: cy - v[1] * scale * factor };
+        }
+
+        // Compute face center
+        function faceCenter(face) {
+            const v0 = icoVerts[face[0]], v1 = icoVerts[face[1]], v2 = icoVerts[face[2]];
+            const c = [(v0[0]+v1[0]+v2[0])/3, (v0[1]+v1[1]+v2[1])/3, (v0[2]+v1[2]+v2[2])/3];
+            const len = Math.sqrt(c[0]*c[0]+c[1]*c[1]+c[2]*c[2]);
+            return [c[0]/len, c[1]/len, c[2]/len];
+        }
+
+        // Unfold: interpolate between 3D icosahedron and flat net
+        // For simplicity, we'll create a flat layout for the 20 triangles
+        function flatTriPos(faceIdx) {
+            const row = Math.floor(faceIdx / 5);
+            const col = faceIdx % 5;
+            const triH = 0.9;
+            const triW = 1.0;
+            const baseX = (col - 2) * triW;
+            let baseY;
+            if (row === 0) baseY = 1.5;
+            else if (row === 1) baseY = 0.5;
+            else if (row === 2) baseY = -0.5;
+            else baseY = -1.5;
+
+            const flip = (row % 2 === 1) ? -1 : 1;
+            return [
+                [baseX - triW * 0.3, baseY - triH * 0.3 * flip],
+                [baseX + triW * 0.3, baseY - triH * 0.3 * flip],
+                [baseX, baseY + triH * 0.3 * flip]
+            ];
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const unfoldT = parseFloat(unfoldSlider.value) / 100;
+            const rotAngle = parseFloat(rotateSlider.value) * Math.PI / 180;
+            const scale = Math.min(W, H) * 0.25;
+
+            // Color faces by latitude of center
+            for (let fi = 0; fi < icoFaces.length; fi++) {
+                const face = icoFaces[fi];
+                const flat = flatTriPos(fi);
+
+                const verts3D = face.map(vi => {
+                    let v = icoVerts[vi].slice();
+                    v = rotateY(v, rotAngle);
+                    v = rotateX(v, 0.3);
+                    return v;
+                });
+
+                // Interpolate between 3D projection and flat layout
+                const projected = [];
+                for (let i = 0; i < 3; i++) {
+                    const p3 = project3D(verts3D[i], scale);
+                    const pFlat = {
+                        x: cx + flat[i][0] * scale * 1.2,
+                        y: cy - flat[i][1] * scale * 1.2
+                    };
+                    projected.push({
+                        x: p3.x + (pFlat.x - p3.x) * unfoldT,
+                        y: p3.y + (pFlat.y - p3.y) * unfoldT
+                    });
+                }
+
+                // Back-face culling for 3D mode
+                if (unfoldT < 0.5) {
+                    const nx = (projected[1].x - projected[0].x) * (projected[2].y - projected[0].y) -
+                              (projected[1].y - projected[0].y) * (projected[2].x - projected[0].x);
+                    if (nx < 0 && unfoldT < 0.3) continue;
+                }
+
+                // Color based on face index (approximating geographic regions)
+                const center = faceCenter(face);
+                const lat = Math.asin(center[1]) * 180 / Math.PI;
+                const hue = ((lat + 90) / 180);
+                const r = Math.floor(138 + 83 * hue);
+                const g = Math.floor(154 - 50 * (1 - hue));
+                const b = Math.floor(91 + 3 * hue);
+
+                ctx.beginPath();
+                ctx.moveTo(projected[0].x, projected[0].y);
+                ctx.lineTo(projected[1].x, projected[1].y);
+                ctx.lineTo(projected[2].x, projected[2].y);
+                ctx.closePath();
+                ctx.fillStyle = `rgba(${r},${g},${b},0.3)`;
+                ctx.fill();
+                ctx.strokeStyle = `rgba(${r},${g},${b},0.8)`;
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+
+                // Face number
+                const centroidX = (projected[0].x + projected[1].x + projected[2].x) / 3;
+                const centroidY = (projected[0].y + projected[1].y + projected[2].y) / 3;
+                ctx.fillStyle = 'rgba(254,250,224,0.4)';
+                ctx.font = '10px "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(fi + 1, centroidX, centroidY + 4);
+            }
+
+            ctx.textAlign = 'start';
+
+            // Labels
+            ctx.fillStyle = 'rgba(254,250,224,0.6)';
+            ctx.font = '13px "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            if (unfoldT < 0.2) {
+                ctx.fillText('Icosahedron: 20 triangular faces wrap the globe with minimal distortion', cx, H - 60);
+            } else if (unfoldT > 0.8) {
+                ctx.fillText('Unfolded net: all faces laid flat -- Fuller\'s Dymaxion map', cx, H - 60);
+            } else {
+                ctx.fillText('Unfolding... ' + Math.round(unfoldT * 100) + '%', cx, H - 60);
+            }
+            ctx.textAlign = 'start';
+
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            unfoldSlider.value = 0;
+            rotateSlider.value = 0;
+            unfoldVal.textContent = '0%';
+        };
+
+        draw();
+    })();
+    </script>
+</body>
+</html>

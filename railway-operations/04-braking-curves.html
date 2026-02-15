@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Train Braking Curves (ETCS) - Railway Operations</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,50,0.9); backdrop-filter: blur(10px);
+            padding: 14px 22px; border-radius: 12px; display: flex; gap: 18px;
+            align-items: center; z-index: 100; border: 1px solid rgba(138,154,91,0.3);
+            flex-wrap: wrap; justify-content: center;
+        }
+        #controls label { color: #FEFAE0; font-size: 0.85rem; display: flex; flex-direction: column; gap: 2px; }
+        #controls input[type=range] { width: 110px; accent-color: #8A9A5B; }
+        #controls select {
+            background: #2a2a44; color: #FEFAE0; border: 1px solid #555; padding: 4px 8px;
+            border-radius: 6px; font-size: 0.85rem;
+        }
+        #info {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,50,0.9);
+            backdrop-filter: blur(10px); padding: 12px 16px; border-radius: 10px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 240px;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #info h3 { color: #DDA15E; margin-bottom: 6px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div id="info">
+        <h3>ETCS Braking Curves</h3>
+        <p>The European Train Control System calculates braking curves to ensure trains stop before danger points.</p>
+        <p style="margin-top:6px;color:#8A9A5B;">EBD = Emergency Brake, SBD = Service Brake, Warning = Driver alert</p>
+    </div>
+    <div id="controls">
+        <label>Initial Speed: <span id="speedVal">160</span> km/h
+            <input type="range" id="initSpeed" min="40" max="320" step="10" value="160">
+        </label>
+        <label>Train Mass: <span id="massVal">400</span> t
+            <input type="range" id="mass" min="100" max="1200" step="50" value="400">
+        </label>
+        <label>Grade: <span id="gradeVal">0</span>%
+            <input type="range" id="grade" min="-3" max="3" step="0.5" value="0">
+        </label>
+        <label>Brake Type
+            <select id="brakeType">
+                <option value="disc">Disc Brakes</option>
+                <option value="shoe">Shoe Brakes</option>
+                <option value="eddy">Eddy Current</option>
+            </select>
+        </label>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        const COLORS = {
+            sage: '#8A9A5B', moss: '#606C38', earth: '#DDA15E', cream: '#FEFAE0',
+            red: '#e74c3c', yellow: '#f1c40f', green: '#2ecc71', blue: '#3498db',
+            orange: '#e67e22'
+        };
+
+        let params = { speed: 160, mass: 400, grade: 0, brakeType: 'disc' };
+        let trainPos = 0; // animated train position (0-1 along track)
+        let trainSpeed = 0;
+        let braking = false;
+        let paused = false;
+
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        window.addEventListener('resize', resize);
+        resize();
+
+        const brakeCoeffs = {
+            disc: { decel: 0.9, response: 2.5 },
+            shoe: { decel: 0.65, response: 4.0 },
+            eddy: { decel: 1.2, response: 1.5 }
+        };
+
+        function calcBrakingCurve(v0_kmh, massT, gradePct, brakeType) {
+            const v0 = v0_kmh / 3.6; // m/s
+            const coeff = brakeCoeffs[brakeType];
+            const gradeDecel = 9.81 * gradePct / 100;
+            const baseDecel = coeff.decel - gradeDecel;
+            const responseTime = coeff.response;
+
+            const points = [];
+            const dt = 0.5;
+            let v = v0;
+            let d = 0;
+
+            // EBD - Emergency Brake Deceleration
+            const ebdPoints = [];
+            v = v0; d = 0;
+            const ebdDecel = baseDecel * 1.0;
+            // Response delay
+            d += v * responseTime * 0.5;
+            ebdPoints.push({ d: 0, v: v0 * 3.6 });
+            ebdPoints.push({ d, v: v0 * 3.6 });
+            while (v > 0.1) {
+                const a = ebdDecel * (0.8 + 0.2 * (v / v0));
+                v = Math.max(0, v - a * dt);
+                d += v * dt;
+                ebdPoints.push({ d, v: v * 3.6 });
+            }
+            ebdPoints.push({ d, v: 0 });
+
+            // SBD - Service Brake Deceleration
+            const sbdPoints = [];
+            v = v0; d = 0;
+            const sbdDecel = baseDecel * 0.7;
+            d += v * responseTime * 0.8;
+            sbdPoints.push({ d: 0, v: v0 * 3.6 });
+            sbdPoints.push({ d, v: v0 * 3.6 });
+            while (v > 0.1) {
+                const a = sbdDecel * (0.85 + 0.15 * (v / v0));
+                v = Math.max(0, v - a * dt);
+                d += v * dt;
+                sbdPoints.push({ d, v: v * 3.6 });
+            }
+            sbdPoints.push({ d, v: 0 });
+
+            // Warning curve (earlier intervention)
+            const warnPoints = [];
+            v = v0; d = 0;
+            const warnDecel = baseDecel * 0.55;
+            d += v * responseTime * 1.2;
+            warnPoints.push({ d: 0, v: v0 * 3.6 });
+            warnPoints.push({ d, v: v0 * 3.6 });
+            while (v > 0.1) {
+                const a = warnDecel * (0.9 + 0.1 * (v / v0));
+                v = Math.max(0, v - a * dt);
+                d += v * dt;
+                warnPoints.push({ d, v: v * 3.6 });
+            }
+            warnPoints.push({ d, v: 0 });
+
+            // Permitted speed envelope
+            const permPoints = [];
+            v = v0; d = 0;
+            const permDecel = baseDecel * 0.45;
+            d += v * responseTime * 1.5;
+            permPoints.push({ d: 0, v: v0 * 3.6 });
+            permPoints.push({ d, v: v0 * 3.6 });
+            while (v > 0.1) {
+                const a = permDecel * (0.9 + 0.1 * (v / v0));
+                v = Math.max(0, v - a * dt);
+                d += v * dt;
+                permPoints.push({ d, v: v * 3.6 });
+            }
+            permPoints.push({ d, v: 0 });
+
+            return { ebd: ebdPoints, sbd: sbdPoints, warn: warnPoints, perm: permPoints };
+        }
+
+        function drawGraph() {
+            const curves = calcBrakingCurve(params.speed, params.mass, params.grade, params.brakeType);
+
+            // Graph area
+            const gx = 80, gy = 80;
+            const gw = W - 160;
+            const gh = H - 220;
+
+            // Find max distance
+            const maxDist = Math.max(
+                curves.perm[curves.perm.length - 1].d,
+                curves.ebd[curves.ebd.length - 1].d
+            ) * 1.1;
+            const maxSpeed = params.speed * 1.15;
+
+            // Grid
+            ctx.strokeStyle = 'rgba(138,154,91,0.15)';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 10; i++) {
+                const x = gx + (gw * i / 10);
+                const y = gy + (gh * i / 10);
+                ctx.beginPath();
+                ctx.moveTo(x, gy);
+                ctx.lineTo(x, gy + gh);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(gx, y);
+                ctx.lineTo(gx + gw, y);
+                ctx.stroke();
+            }
+
+            // Axes
+            ctx.strokeStyle = COLORS.cream + '60';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(gx, gy);
+            ctx.lineTo(gx, gy + gh);
+            ctx.lineTo(gx + gw, gy + gh);
+            ctx.stroke();
+
+            // Axis labels
+            ctx.fillStyle = COLORS.cream + '80';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center';
+            for (let i = 0; i <= 5; i++) {
+                const d = (maxDist * i / 5).toFixed(0);
+                ctx.fillText(d + 'm', gx + gw * i / 5, gy + gh + 20);
+            }
+            ctx.textAlign = 'right';
+            for (let i = 0; i <= 5; i++) {
+                const v = (maxSpeed * (5 - i) / 5).toFixed(0);
+                ctx.fillText(v, gx - 8, gy + gh * i / 5 + 4);
+            }
+
+            ctx.save();
+            ctx.translate(gx - 50, gy + gh / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.textAlign = 'center';
+            ctx.fillText('Speed (km/h)', 0, 0);
+            ctx.restore();
+
+            ctx.textAlign = 'center';
+            ctx.fillText('Distance (m)', gx + gw / 2, gy + gh + 38);
+
+            // Draw curves
+            function drawCurve(points, color, width, dash) {
+                ctx.strokeStyle = color;
+                ctx.lineWidth = width;
+                ctx.setLineDash(dash || []);
+                ctx.beginPath();
+                let first = true;
+                for (let p of points) {
+                    const x = gx + (p.d / maxDist) * gw;
+                    const y = gy + gh - (p.v / maxSpeed) * gh;
+                    if (first) { ctx.moveTo(x, y); first = false; }
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Fill between perm and ebd
+            ctx.fillStyle = 'rgba(231,76,60,0.06)';
+            ctx.beginPath();
+            for (let p of curves.ebd) {
+                ctx.lineTo(gx + (p.d / maxDist) * gw, gy + gh - (p.v / maxSpeed) * gh);
+            }
+            for (let i = curves.perm.length - 1; i >= 0; i--) {
+                const p = curves.perm[i];
+                ctx.lineTo(gx + (p.d / maxDist) * gw, gy + gh - (p.v / maxSpeed) * gh);
+            }
+            ctx.fill();
+
+            drawCurve(curves.perm, COLORS.green, 2.5);
+            drawCurve(curves.warn, COLORS.yellow, 2, [6, 4]);
+            drawCurve(curves.sbd, COLORS.orange, 2.5);
+            drawCurve(curves.ebd, COLORS.red, 3);
+
+            // Danger point
+            const dpX = gx + gw * 0.95;
+            ctx.strokeStyle = COLORS.red;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(dpX, gy);
+            ctx.lineTo(dpX, gy + gh);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = COLORS.red;
+            ctx.font = 'bold 12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('DANGER POINT', dpX, gy - 8);
+
+            // Animated train dot
+            if (braking) {
+                const curveToUse = curves.sbd;
+                const idx = Math.floor(trainPos * (curveToUse.length - 1));
+                const p = curveToUse[Math.min(idx, curveToUse.length - 1)];
+                const tx = gx + (p.d / maxDist) * gw;
+                const ty = gy + gh - (p.v / maxSpeed) * gh;
+
+                ctx.beginPath();
+                ctx.arc(tx, ty, 8, 0, Math.PI * 2);
+                ctx.fillStyle = COLORS.earth;
+                ctx.fill();
+                ctx.strokeStyle = COLORS.cream;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Speed readout
+                ctx.fillStyle = COLORS.cream;
+                ctx.font = 'bold 11px sans-serif';
+                ctx.fillText(p.v.toFixed(0) + ' km/h', tx, ty - 16);
+            }
+
+            // Legend
+            const lx = gx + 20, ly = gy + 15;
+            const legendItems = [
+                { color: COLORS.red, label: 'Emergency Brake (EBD)', dash: [] },
+                { color: COLORS.orange, label: 'Service Brake (SBD)', dash: [] },
+                { color: COLORS.yellow, label: 'Warning Curve', dash: [6, 4] },
+                { color: COLORS.green, label: 'Permitted Speed', dash: [] }
+            ];
+            legendItems.forEach((item, i) => {
+                ctx.strokeStyle = item.color;
+                ctx.lineWidth = 3;
+                ctx.setLineDash(item.dash);
+                ctx.beginPath();
+                ctx.moveTo(lx, ly + i * 22);
+                ctx.lineTo(lx + 30, ly + i * 22);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.fillStyle = COLORS.cream + 'cc';
+                ctx.font = '12px sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText(item.label, lx + 38, ly + i * 22 + 4);
+            });
+
+            // Stats box
+            const ebdDist = curves.ebd[curves.ebd.length - 1].d;
+            const sbdDist = curves.sbd[curves.sbd.length - 1].d;
+            ctx.fillStyle = 'rgba(30,30,50,0.8)';
+            ctx.fillRect(gx + gw - 200, gy + 10, 190, 80);
+            ctx.fillStyle = COLORS.earth;
+            ctx.font = 'bold 12px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Braking Distances', gx + gw - 190, gy + 28);
+            ctx.font = '11px sans-serif';
+            ctx.fillStyle = COLORS.cream;
+            ctx.fillText('Emergency: ' + ebdDist.toFixed(0) + ' m', gx + gw - 190, gy + 48);
+            ctx.fillText('Service: ' + sbdDist.toFixed(0) + ' m', gx + gw - 190, gy + 65);
+            ctx.fillText('Grade effect: ' + (params.grade > 0 ? '+' : '') + (params.grade * 10).toFixed(0) + '%', gx + gw - 190, gy + 82);
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.fillStyle = COLORS.earth;
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('ETCS Braking Curve Visualization', W / 2, 35);
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '13px sans-serif';
+            ctx.fillText('Speed-distance profiles for emergency, service, and warning braking interventions', W / 2, 55);
+
+            drawGraph();
+        }
+
+        function animate() {
+            if (!paused) {
+                if (braking) {
+                    trainPos = Math.min(1, trainPos + 0.005);
+                    if (trainPos >= 1) {
+                        braking = false;
+                        setTimeout(() => { trainPos = 0; braking = true; }, 1500);
+                    }
+                }
+            }
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        function updateParams() {
+            params.speed = parseInt(document.getElementById('initSpeed').value);
+            params.mass = parseInt(document.getElementById('mass').value);
+            params.grade = parseFloat(document.getElementById('grade').value);
+            params.brakeType = document.getElementById('brakeType').value;
+            document.getElementById('speedVal').textContent = params.speed;
+            document.getElementById('massVal').textContent = params.mass;
+            document.getElementById('gradeVal').textContent = params.grade;
+        }
+
+        document.getElementById('initSpeed').addEventListener('input', updateParams);
+        document.getElementById('mass').addEventListener('input', updateParams);
+        document.getElementById('grade').addEventListener('input', updateParams);
+        document.getElementById('brakeType').addEventListener('change', updateParams);
+
+        canvas.addEventListener('click', function() {
+            trainPos = 0;
+            braking = true;
+        });
+
+        window.reset = function() {
+            params = { speed: 160, mass: 400, grade: 0, brakeType: 'disc' };
+            document.getElementById('initSpeed').value = 160;
+            document.getElementById('mass').value = 400;
+            document.getElementById('grade').value = 0;
+            document.getElementById('brakeType').value = 'disc';
+            updateParams();
+            trainPos = 0;
+            braking = false;
+        };
+
+        window.addEventListener('enhanceReady', function() {
+            if (window.enhance) { window.enhance.onPause = function(p) { paused = p; }; }
+        });
+
+        braking = true;
+        requestAnimationFrame(animate);
+    })();
+    </script>
+</body>
+</html>

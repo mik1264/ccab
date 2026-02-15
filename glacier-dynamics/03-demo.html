@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Surging Glacier - Glacier Dynamics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 15px; border-radius: 12px; z-index: 1000;
+            min-width: 220px; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 10px; font-size: 0.95rem; }
+        .ctrl-row { margin-bottom: 8px; }
+        .ctrl-row label { display: block; font-size: 0.8rem; color: #8A9A5B; margin-bottom: 2px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #8A9A5B; }
+        .ctrl-row .val { float: right; color: #DDA15E; font-size: 0.8rem; }
+        #info {
+            position: fixed; bottom: 10px; left: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 12px; border-radius: 12px; z-index: 1000;
+            max-width: 360px; font-size: 0.8rem; line-height: 1.4; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #info h4 { color: #DDA15E; margin-bottom: 4px; }
+        #phase-indicator {
+            position: fixed; top: 80px; right: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 12px; z-index: 1000;
+            font-size: 0.9rem; border: 1px solid rgba(138,154,91,0.3);
+        }
+        .surge { color: #e74c3c; font-weight: bold; }
+        .quiescent { color: #8A9A5B; }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Surging Glacier</h3>
+        <div class="ctrl-row">
+            <label>Surge Period (yr) <span class="val" id="periodVal">50</span></label>
+            <input type="range" id="periodSlider" min="10" max="100" step="5" value="50">
+        </div>
+        <div class="ctrl-row">
+            <label>Surge Duration (yr) <span class="val" id="durVal">3</span></label>
+            <input type="range" id="durSlider" min="1" max="10" step="0.5" value="3">
+        </div>
+        <div class="ctrl-row">
+            <label>Surge Speed Multiplier <span class="val" id="multVal">50</span>x</label>
+            <input type="range" id="multSlider" min="5" max="200" step="5" value="50">
+        </div>
+        <div class="ctrl-row">
+            <label>Sim Speed <span class="val" id="speedVal">5</span>x</label>
+            <input type="range" id="speedSlider" min="1" max="30" step="1" value="5">
+        </div>
+    </div>
+    <div id="phase-indicator">Phase: <span id="phaseText" class="quiescent">Quiescent</span></div>
+    <div id="info">
+        <h4>Glacier Surges</h4>
+        <p>Surge-type glaciers alternate between long quiescent periods of slow flow and brief surges where velocity increases 10-1000x. During surges, ice rapidly transfers from a reservoir zone to the terminus, causing dramatic advance. Surges may be triggered by basal water pressure changes or thermal instabilities.</p>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const periodSlider = document.getElementById('periodSlider');
+        const durSlider = document.getElementById('durSlider');
+        const multSlider = document.getElementById('multSlider');
+        const speedSlider = document.getElementById('speedSlider');
+
+        const N = 150;
+        const dx = 80;
+        let thickness = new Float64Array(N);
+        let bedrock = new Float64Array(N);
+        let velocity = new Float64Array(N);
+        let year = 0;
+        let surging = false;
+        let surgeStart = -999;
+        let velocityHistory = [];
+        const maxHistory = 400;
+
+        function initBedrock() {
+            for (let i = 0; i < N; i++) {
+                const x = i / N;
+                bedrock[i] = 3500 - 3000 * x + 150 * Math.sin(x * Math.PI * 4) * (1 - x * 0.5);
+            }
+        }
+
+        function init() {
+            initBedrock();
+            thickness.fill(0);
+            year = 0;
+            surging = false;
+            surgeStart = -999;
+            velocityHistory = [];
+            // Initial ice
+            for (let i = 0; i < 60; i++) {
+                thickness[i] = 200 * Math.max(0, 1 - (i / 60) * (i / 60));
+            }
+        }
+        init();
+
+        function stepModel(dt) {
+            const period = parseFloat(periodSlider.value);
+            const duration = parseFloat(durSlider.value);
+            const mult = parseFloat(multSlider.value);
+
+            document.getElementById('periodVal').textContent = period;
+            document.getElementById('durVal').textContent = duration;
+            document.getElementById('multVal').textContent = mult;
+            document.getElementById('speedVal').textContent = speedSlider.value;
+
+            // Check surge state
+            const cyclePos = year % period;
+            surging = cyclePos < duration;
+            const slidingFactor = surging ? mult : 1;
+
+            document.getElementById('phaseText').textContent = surging ? 'SURGING!' : 'Quiescent';
+            document.getElementById('phaseText').className = surging ? 'surge' : 'quiescent';
+
+            const rho = 917;
+            const g = 9.81;
+            const A = 2.4e-24;
+            const n = 3;
+            const secPerYear = 3.154e7;
+
+            // Mass balance
+            const ELA = 2200;
+            const snowRate = 2.0;
+
+            const flux = new Float64Array(N + 1);
+            let maxVel = 0;
+
+            for (let i = 0; i < N - 1; i++) {
+                const s_i = bedrock[i] + thickness[i];
+                const s_ip1 = bedrock[i + 1] + thickness[i + 1];
+                const dsdx = (s_ip1 - s_i) / dx;
+                const H_avg = 0.5 * (thickness[i] + thickness[i + 1]);
+                const absDsdx = Math.abs(dsdx);
+
+                // Deformation flux
+                const qDef = -(2 * A / (n + 2)) * Math.pow(rho * g, n) *
+                    Math.pow(H_avg, n + 2) * Math.pow(absDsdx, n - 1) * dsdx * secPerYear;
+
+                // Sliding flux (enhanced during surge)
+                const C = 5e-14 * slidingFactor;
+                const tauB = rho * g * H_avg * absDsdx;
+                const qSlide = -C * Math.pow(tauB, n) * H_avg * (dsdx > 0 ? -1 : 1) * secPerYear;
+
+                flux[i + 1] = qDef + qSlide;
+
+                // Velocity for display
+                const uDef = H_avg > 0 ? Math.abs(qDef / H_avg) : 0;
+                const uSlide = H_avg > 0 ? Math.abs(qSlide / H_avg) : 0;
+                velocity[i] = uDef + uSlide;
+                if (velocity[i] > maxVel) maxVel = velocity[i];
+            }
+
+            const newThick = new Float64Array(N);
+            for (let i = 0; i < N; i++) {
+                const surface = bedrock[i] + thickness[i];
+                let mb;
+                if (surface > ELA) {
+                    mb = snowRate * (1 + (surface - ELA) / 3000);
+                } else {
+                    mb = snowRate - 0.006 * Math.pow(ELA - surface, 1.1);
+                }
+                const dqdt = (flux[i] - flux[i + 1]) / dx;
+                newThick[i] = Math.max(0, thickness[i] + (mb + dqdt) * dt);
+            }
+            thickness = newThick;
+            year += dt;
+
+            // Record velocity history
+            velocityHistory.push(maxVel);
+            if (velocityHistory.length > maxHistory) velocityHistory.shift();
+        }
+
+        function draw() {
+            const speed = parseInt(speedSlider.value);
+            for (let s = 0; s < 4; s++) {
+                stepModel(speed * 0.05);
+            }
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const margin = { left: 50, right: 40, top: 60, bottom: 180 };
+            const gW = W - margin.left - margin.right;
+            const gH = H - margin.top - margin.bottom;
+
+            // Find ranges
+            let minElev = Infinity, maxElev = -Infinity;
+            for (let i = 0; i < N; i++) {
+                const surface = bedrock[i] + thickness[i];
+                if (bedrock[i] < minElev) minElev = bedrock[i];
+                if (surface > maxElev) maxElev = surface;
+            }
+            const elevRange = maxElev - minElev + 300;
+
+            function toScreen(i, elev) {
+                return {
+                    x: margin.left + (i / N) * gW,
+                    y: margin.top + gH - ((elev - minElev + 100) / elevRange) * gH
+                };
+            }
+
+            // Sky
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, margin.top + gH);
+            skyGrad.addColorStop(0, '#0a0a1e');
+            skyGrad.addColorStop(1, '#1a2040');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, W, margin.top + gH);
+
+            // Bedrock
+            ctx.beginPath();
+            let p = toScreen(0, bedrock[0]);
+            ctx.moveTo(p.x, p.y);
+            for (let i = 1; i < N; i++) {
+                p = toScreen(i, bedrock[i]);
+                ctx.lineTo(p.x, p.y);
+            }
+            ctx.lineTo(p.x, margin.top + gH);
+            ctx.lineTo(margin.left, margin.top + gH);
+            ctx.closePath();
+            ctx.fillStyle = '#3d3025';
+            ctx.fill();
+
+            // Glacier ice
+            ctx.beginPath();
+            let hasIce = false;
+            for (let i = 0; i < N; i++) {
+                if (thickness[i] > 0.1) {
+                    const s = toScreen(i, bedrock[i] + thickness[i]);
+                    if (!hasIce) { ctx.moveTo(s.x, s.y); hasIce = true; }
+                    else ctx.lineTo(s.x, s.y);
+                }
+            }
+            if (hasIce) {
+                for (let i = N - 1; i >= 0; i--) {
+                    if (thickness[i] > 0.1) {
+                        const b = toScreen(i, bedrock[i]);
+                        ctx.lineTo(b.x, b.y);
+                    }
+                }
+                ctx.closePath();
+                const iceColor = surging ? 'rgba(180,200,240,0.9)' : 'rgba(160,200,240,0.85)';
+                ctx.fillStyle = iceColor;
+                ctx.fill();
+
+                // Crevasse lines during surge
+                if (surging) {
+                    ctx.strokeStyle = 'rgba(100,150,220,0.6)';
+                    ctx.lineWidth = 1;
+                    for (let i = 5; i < N; i += 3) {
+                        if (thickness[i] > 10 && velocity[i] > 50) {
+                            const top = toScreen(i, bedrock[i] + thickness[i]);
+                            const depth = Math.min(thickness[i] * 0.3, 30);
+                            const bot = toScreen(i, bedrock[i] + thickness[i] - depth);
+                            ctx.beginPath();
+                            ctx.moveTo(top.x + (Math.random() - 0.5) * 3, top.y);
+                            ctx.lineTo(bot.x + (Math.random() - 0.5) * 5, bot.y);
+                            ctx.stroke();
+                        }
+                    }
+                }
+            }
+
+            // Velocity arrows
+            for (let i = 5; i < N; i += 8) {
+                if (thickness[i] > 5 && velocity[i] > 0.1) {
+                    const s = toScreen(i, bedrock[i] + thickness[i] * 0.7);
+                    const arrowLen = Math.min(velocity[i] * 0.03, 40);
+                    ctx.strokeStyle = surging ? 'rgba(231,76,60,0.8)' : 'rgba(221,161,94,0.6)';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(s.x, s.y);
+                    ctx.lineTo(s.x + arrowLen, s.y);
+                    ctx.stroke();
+                    if (arrowLen > 3) {
+                        ctx.beginPath();
+                        ctx.moveTo(s.x + arrowLen, s.y);
+                        ctx.lineTo(s.x + arrowLen - 5, s.y - 3);
+                        ctx.lineTo(s.x + arrowLen - 5, s.y + 3);
+                        ctx.closePath();
+                        ctx.fill();
+                    }
+                }
+            }
+
+            // Velocity time series graph at bottom
+            const graphTop = H - margin.bottom + 20;
+            const graphH = margin.bottom - 40;
+            const graphLeft = margin.left;
+            const graphRight = W - margin.right;
+            const graphW = graphRight - graphLeft;
+
+            ctx.fillStyle = 'rgba(20,20,40,0.8)';
+            ctx.fillRect(graphLeft, graphTop, graphW, graphH);
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(graphLeft, graphTop, graphW, graphH);
+
+            if (velocityHistory.length > 1) {
+                let maxV = 1;
+                for (const v of velocityHistory) if (v > maxV) maxV = v;
+
+                ctx.beginPath();
+                ctx.strokeStyle = surging ? '#e74c3c' : '#8A9A5B';
+                ctx.lineWidth = 1.5;
+                for (let i = 0; i < velocityHistory.length; i++) {
+                    const x = graphLeft + (i / maxHistory) * graphW;
+                    const y = graphTop + graphH - (velocityHistory[i] / maxV) * (graphH - 10);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Max Velocity (m/yr)', graphLeft + 5, graphTop + 12);
+            ctx.fillStyle = '#DDA15E';
+            ctx.textAlign = 'right';
+            ctx.fillText('Year: ' + Math.floor(year), graphRight - 5, graphTop + 12);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Surging Glacier', W / 2, 30);
+            ctx.font = '12px sans-serif';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText('Periodic rapid advance with basal sliding instability', W / 2, 48);
+
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            init();
+            periodSlider.value = 50;
+            durSlider.value = 3;
+            multSlider.value = 50;
+            speedSlider.value = 5;
+        };
+
+        draw();
+    })();
+    </script>
+</body>
+</html>

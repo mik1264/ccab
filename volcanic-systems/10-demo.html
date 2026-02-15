@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lahar Simulation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; overflow: hidden; font-family: Georgia, serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(96,108,56,0.85); backdrop-filter: blur(10px);
+    padding: 15px 25px; border-radius: 12px; color: #FEFAE0;
+    display: flex; gap: 20px; align-items: center; z-index: 100; flex-wrap: wrap;
+    justify-content: center;
+}
+#controls label { font-size: 0.85rem; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+#controls input[type=range] { width: 110px; accent-color: #DDA15E; }
+#controls button { background: #DDA15E; color: #1a1a2e; border: none; padding: 8px 16px;
+    border-radius: 8px; cursor: pointer; font-family: Georgia; font-size: 0.85rem; }
+#info {
+    position: fixed; top: 60px; right: 20px; background: rgba(96,108,56,0.85);
+    backdrop-filter: blur(10px); padding: 15px; border-radius: 12px;
+    color: #FEFAE0; font-size: 0.8rem; max-width: 260px; z-index: 100; line-height: 1.5;
+}
+#info h3 { color: #DDA15E; margin-bottom: 8px; }
+#stats { position: fixed; top: 60px; left: 60px; color: #DDA15E; font-size: 0.85rem;
+    font-family: Georgia; z-index: 100; line-height: 1.8; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="info">
+    <h3>Lahar (Volcanic Mudflow)</h3>
+    <p>A lahar is a destructive mudflow of volcanic debris and water. Triggered by eruptions melting snow/ice, crater lake breaches, or heavy rain on ash deposits. They can travel 60+ km at 60+ km/h.</p>
+    <p style="margin-top:6px;font-size:0.75rem;">The 1985 Nevado del Ruiz lahar killed 23,000 people in Armero, Colombia, 74 km from the summit.</p>
+</div>
+<div id="stats"></div>
+<div id="controls">
+    <label>Water Content (%)
+        <input type="range" id="water" min="20" max="80" value="50">
+    </label>
+    <label>Volume (M m3)
+        <input type="range" id="volume" min="1" max="100" value="30">
+    </label>
+    <label>Valley Width
+        <input type="range" id="valley" min="20" max="100" value="50">
+    </label>
+    <button id="triggerBtn">Trigger Lahar</button>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const stats = document.getElementById('stats');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+let time = 0;
+let paused = false;
+let laharParticles = [];
+let debrisParticles = [];
+let laharActive = false;
+let laharFront = 0;
+let laharSpeed = 0;
+
+// Valley terrain (side view with valley channel)
+let valleyFloor = [];
+let valleyLeft = [];
+let valleyRight = [];
+
+function generateTerrain() {
+    const valleyWidth = document.getElementById('valley').value / 100;
+    valleyFloor = [];
+    valleyLeft = [];
+    valleyRight = [];
+
+    for (let x = 0; x <= W; x += 3) {
+        const progress = x / W;
+        // Volcano on the left, valley going right
+        let baseY;
+        if (progress < 0.15) {
+            baseY = H * 0.25 + progress * H * 0.5 / 0.15;
+        } else {
+            baseY = H * 0.75 + Math.sin(progress * 5) * 15 - (1 - progress) * 30;
+        }
+
+        // Valley channel
+        const channelDepth = 40 + valleyWidth * 60;
+        const channelWidth = 30 + valleyWidth * 80;
+
+        valleyFloor.push({ x, y: baseY });
+        valleyLeft.push({ x, y: baseY - channelDepth + Math.sin(x * 0.02) * 10 });
+        valleyRight.push({ x, y: baseY - channelDepth + Math.sin(x * 0.025 + 2) * 10 });
+    }
+}
+generateTerrain();
+
+function getValleyY(x) {
+    const idx = Math.floor(x / 3);
+    if (idx < 0 || idx >= valleyFloor.length) return H * 0.8;
+    return valleyFloor[idx].y;
+}
+
+function getSlope(x) {
+    const y1 = getValleyY(x - 5);
+    const y2 = getValleyY(x + 5);
+    return Math.atan2(y2 - y1, 10);
+}
+
+class LaharParticle {
+    constructor(x, y, waterContent) {
+        this.x = x;
+        this.y = y;
+        this.vx = 0;
+        this.vy = 0;
+        this.waterContent = waterContent;
+        this.size = 4 + Math.random() * 8;
+        this.life = 1;
+        this.isDebris = Math.random() > waterContent;
+        this.color = this.isDebris
+            ? `rgba(${80 + Math.random() * 40},${60 + Math.random() * 30},${40 + Math.random() * 20},`
+            : `rgba(${100 + Math.random() * 30},${80 + Math.random() * 20},${50 + Math.random() * 15},`;
+        this.settled = false;
+    }
+    update(dt) {
+        if (this.settled) {
+            this.life -= 0.0005;
+            return;
+        }
+
+        const slope = getSlope(this.x);
+        const gravity = 300;
+        const viscosity = 1.5 + (1 - this.waterContent) * 5;
+
+        this.vx += Math.cos(slope) * gravity * Math.sin(slope) * dt;
+        this.vy += gravity * dt;
+        this.vx *= (1 - viscosity * dt * 0.3);
+
+        // Turbulence proportional to water content
+        this.vx += (Math.random() - 0.5) * this.waterContent * 40 * dt;
+        this.vy += (Math.random() - 0.5) * 20 * dt;
+
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+
+        const floorY = getValleyY(this.x);
+        if (this.y > floorY - this.size) {
+            this.y = floorY - this.size;
+            this.vy = -Math.abs(this.vy) * 0.05;
+            if (Math.abs(this.vx) < 5) {
+                this.settled = true;
+            }
+        }
+
+        if (this.x > W + 20) this.life = 0;
+    }
+}
+
+function triggerLahar() {
+    generateTerrain();
+    laharParticles = [];
+    debrisParticles = [];
+    laharActive = true;
+    laharFront = W * 0.1;
+    laharSpeed = 0;
+    time = 0;
+}
+
+document.getElementById('triggerBtn').addEventListener('click', triggerLahar);
+
+function drawScene() {
+    // Sky
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.4);
+    skyGrad.addColorStop(0, '#0a0a18');
+    skyGrad.addColorStop(1, '#1a1a2e');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, H * 0.4);
+
+    // Volcano silhouette
+    const peakX = W * 0.08;
+    const peakY = H * 0.15;
+    ctx.beginPath();
+    ctx.moveTo(0, H * 0.5);
+    ctx.lineTo(peakX - 20, peakY);
+    ctx.lineTo(peakX, peakY - 10);
+    ctx.lineTo(peakX + 20, peakY);
+    ctx.lineTo(W * 0.2, H * 0.55);
+
+    // Mountain fill
+    ctx.lineTo(W * 0.2, H);
+    ctx.lineTo(0, H);
+    ctx.closePath();
+    const mGrad = ctx.createLinearGradient(peakX, peakY, peakX, H);
+    mGrad.addColorStop(0, '#4a3a30');
+    mGrad.addColorStop(1, '#2a1a10');
+    ctx.fillStyle = mGrad;
+    ctx.fill();
+
+    // Snow cap
+    ctx.beginPath();
+    ctx.moveTo(peakX - 30, peakY + 30);
+    ctx.lineTo(peakX - 20, peakY);
+    ctx.lineTo(peakX, peakY - 10);
+    ctx.lineTo(peakX + 20, peakY);
+    ctx.lineTo(peakX + 30, peakY + 30);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(240,240,255,0.5)';
+    ctx.fill();
+
+    // Valley terrain
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let v of valleyFloor) ctx.lineTo(v.x, v.y);
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    const tGrad = ctx.createLinearGradient(0, H * 0.5, 0, H);
+    tGrad.addColorStop(0, '#3d3024');
+    tGrad.addColorStop(0.5, '#4a3a2a');
+    tGrad.addColorStop(1, '#2a1a10');
+    ctx.fillStyle = tGrad;
+    ctx.fill();
+
+    // Valley walls (visual depth - left bank higher)
+    ctx.beginPath();
+    ctx.moveTo(0, H * 0.4);
+    for (let v of valleyLeft) ctx.lineTo(v.x, v.y - 20);
+    ctx.lineTo(W, valleyLeft[valleyLeft.length - 1].y - 20);
+    ctx.lineTo(W, valleyLeft[valleyLeft.length - 1].y);
+    for (let i = valleyLeft.length - 1; i >= 0; i--) ctx.lineTo(valleyLeft[i].x, valleyLeft[i].y);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(60,50,40,0.4)';
+    ctx.fill();
+
+    // Town markers on the valley
+    const towns = [
+        { x: W * 0.5, name: 'Village A (15km)', pop: '5,000' },
+        { x: W * 0.75, name: 'Town B (40km)', pop: '25,000' },
+        { x: W * 0.92, name: 'City C (70km)', pop: '100,000' },
+    ];
+    for (let t of towns) {
+        const ty = getValleyY(t.x) - 50;
+        // Building silhouettes
+        for (let i = 0; i < 5; i++) {
+            const bx = t.x - 15 + i * 8;
+            const bh = 10 + Math.random() * 15;
+            ctx.fillStyle = 'rgba(80,70,60,0.6)';
+            ctx.fillRect(bx, ty - bh, 6, bh);
+        }
+        ctx.fillStyle = '#8A9A5B';
+        ctx.font = '9px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillText(t.name, t.x, ty - 30);
+        ctx.fillText(`Pop: ${t.pop}`, t.x, ty - 20);
+
+        // Warning if lahar approaching
+        if (laharFront > t.x - 50 && laharFront < t.x + 20) {
+            ctx.fillStyle = '#ff4422';
+            ctx.font = 'bold 11px Georgia';
+            ctx.fillText('WARNING!', t.x, ty - 45);
+        }
+    }
+
+    // Distance markers
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.setLineDash([3, 6]);
+    for (let km = 10; km <= 70; km += 10) {
+        const x = W * 0.15 + (km / 70) * (W * 0.8);
+        ctx.beginPath();
+        ctx.moveTo(x, H * 0.3);
+        ctx.lineTo(x, H * 0.95);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(138,154,91,0.4)';
+        ctx.font = '9px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${km} km`, x, H * 0.3);
+    }
+    ctx.setLineDash([]);
+}
+
+let lastTime = 0;
+function animate(ts) {
+    const dt = Math.min((ts - lastTime) / 1000, 0.05);
+    lastTime = ts;
+
+    if (!paused) {
+        time += dt;
+
+        if (laharActive) {
+            const waterContent = document.getElementById('water').value / 100;
+            const volume = document.getElementById('volume').value / 100;
+
+            // Emit lahar particles from the volcano flank
+            if (time < 5) {
+                const numNew = Math.floor(volume * 25);
+                const startX = W * 0.12;
+                const startY = getValleyY(startX);
+
+                for (let i = 0; i < numNew; i++) {
+                    const p = new LaharParticle(
+                        startX + (Math.random() - 0.5) * 30,
+                        startY - 10 - Math.random() * 30,
+                        waterContent
+                    );
+                    p.vx = 80 + Math.random() * 120 * volume;
+                    p.vy = -10 + Math.random() * 20;
+                    laharParticles.push(p);
+                }
+            }
+
+            // Track front
+            let maxX = laharFront;
+            for (let p of laharParticles) {
+                if (!p.settled && p.x > maxX) maxX = p.x;
+            }
+            laharSpeed = (maxX - laharFront) / Math.max(dt, 0.001);
+            laharFront = maxX;
+
+            if (time > 8 && laharSpeed < 2) laharActive = false;
+        }
+
+        for (let p of laharParticles) p.update(dt);
+        laharParticles = laharParticles.filter(p => p.life > 0);
+        if (laharParticles.length > 4000) laharParticles.splice(0, laharParticles.length - 4000);
+    }
+
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+
+    drawScene();
+
+    // Draw lahar particles
+    for (let p of laharParticles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size * (p.settled ? 0.7 : 1), 0, Math.PI * 2);
+        ctx.fillStyle = p.color + (p.life * 0.7) + ')';
+        ctx.fill();
+    }
+
+    // Splash effect at front
+    if (laharActive && laharSpeed > 10) {
+        for (let i = 0; i < 3; i++) {
+            ctx.beginPath();
+            const sx = laharFront + Math.random() * 10;
+            const sy = getValleyY(laharFront) - 10 - Math.random() * 30;
+            ctx.arc(sx, sy, 2 + Math.random() * 4, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(120,90,60,0.5)';
+            ctx.fill();
+        }
+    }
+
+    // Stats
+    const speedKmh = (laharSpeed * 1.5).toFixed(0);
+    const distKm = ((laharFront - W * 0.12) / (W * 0.85) * 75).toFixed(1);
+    stats.innerHTML = `Speed: ~${speedKmh} km/h<br>Distance: ~${distKm} km<br>Water Content: ${document.getElementById('water').value}%`;
+
+    requestAnimationFrame(animate);
+}
+
+window.reset = function() {
+    laharParticles = [];
+    debrisParticles = [];
+    laharActive = false;
+    laharFront = 0;
+    laharSpeed = 0;
+    time = 0;
+    generateTerrain();
+};
+
+requestAnimationFrame(animate);
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

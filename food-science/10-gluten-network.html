@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gluten Network Formation - Food Science</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a1a; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+        canvas { display: block; cursor: grab; }
+        canvas:active { cursor: grabbing; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            border-radius: 16px; padding: 16px 24px; display: flex; gap: 20px;
+            align-items: center; z-index: 100; flex-wrap: wrap; justify-content: center;
+        }
+        .control-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .control-group label { font-size: 0.7rem; color: #8A9A5B; text-transform: uppercase; letter-spacing: 1px; }
+        .control-group .value { font-size: 0.85rem; color: #DDA15E; font-weight: bold; }
+        input[type="range"] { width: 120px; accent-color: #8A9A5B; }
+        button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 8px 14px;
+            border-radius: 8px; cursor: pointer; font-size: 0.8rem;
+        }
+        button:hover { background: #8A9A5B; }
+        .info {
+            position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(10px); border-radius: 12px; padding: 12px 16px;
+            font-size: 0.75rem; color: #FEFAE0; max-width: 260px; z-index: 100;
+        }
+        .info h3 { color: #DDA15E; margin-bottom: 6px; font-size: 0.85rem; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h3>Gluten Network</h3>
+        <p>Kneading aligns glutenin and gliadin proteins, forming disulfide bonds that create an elastic network. Drag to "knead" the dough! Over-kneading breaks the network.</p>
+        <div id="networkState" style="margin-top:8px; color:#DDA15E; font-weight:bold;">Under-developed</div>
+    </div>
+    <div class="controls">
+        <div class="control-group">
+            <label>Hydration</label>
+            <input type="range" id="hydration" min="50" max="85" value="65">
+            <span class="value" id="hydVal">65%</span>
+        </div>
+        <div class="control-group">
+            <label>Protein %</label>
+            <input type="range" id="protein" min="8" max="15" value="12">
+            <span class="value" id="protVal">12%</span>
+        </div>
+        <div class="control-group">
+            <label>Rest Time</label>
+            <input type="range" id="rest" min="0" max="60" value="0">
+            <span class="value" id="restVal">0 min</span>
+        </div>
+        <button id="kneadBtn">Auto-Knead</button>
+        <button id="resetBtn">New Dough</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Protein nodes
+        let nodes = [];
+        let bonds = [];
+        let kneadEnergy = 0;
+        let totalKnead = 0;
+        let time = 0;
+        let autoKnead = false;
+        let mouseX = 0, mouseY = 0;
+        let dragging = false;
+        let lastMouseX = 0, lastMouseY = 0;
+
+        class ProteinNode {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.ox = x; // rest position
+                this.oy = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.type = type; // 'glutenin' or 'gliadin'
+                this.r = type === 'glutenin' ? 4 : 3;
+                this.bondCount = 0;
+            }
+
+            update(hydration) {
+                const restForce = 0.01;
+                const damping = 0.92 + (hydration - 50) * 0.001;
+
+                // Spring back to rest (elasticity)
+                this.vx += (this.ox - this.x) * restForce;
+                this.vy += (this.oy - this.y) * restForce;
+
+                // Brownian motion
+                this.vx += (Math.random() - 0.5) * 0.2;
+                this.vy += (Math.random() - 0.5) * 0.2;
+
+                this.vx *= damping;
+                this.vy *= damping;
+
+                this.x += this.vx;
+                this.y += this.vy;
+
+                // Bounds
+                this.x = Math.max(10, Math.min(W - 10, this.x));
+                this.y = Math.max(10, Math.min(H - 10, this.y));
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+                if (this.type === 'glutenin') {
+                    ctx.fillStyle = `rgba(180, 150, 100, ${0.5 + this.bondCount * 0.1})`;
+                } else {
+                    ctx.fillStyle = `rgba(220, 190, 130, ${0.5 + this.bondCount * 0.1})`;
+                }
+                ctx.fill();
+            }
+        }
+
+        function init() {
+            nodes = [];
+            bonds = [];
+            kneadEnergy = 0;
+            totalKnead = 0;
+            time = 0;
+            autoKnead = false;
+
+            const proteinPct = parseInt(document.getElementById('protein').value);
+            const count = Math.min(250, 50 + proteinPct * 12);
+
+            for (let i = 0; i < count; i++) {
+                const x = W * 0.1 + Math.random() * W * 0.8;
+                const y = H * 0.1 + Math.random() * H * 0.7;
+                const type = Math.random() < 0.6 ? 'glutenin' : 'gliadin';
+                nodes.push(new ProteinNode(x, y, type));
+            }
+        }
+        init();
+
+        function tryFormBonds() {
+            const hydration = parseInt(document.getElementById('hydration').value);
+            const bondDist = 30 + (hydration - 50) * 0.5;
+
+            for (let i = 0; i < nodes.length; i++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+                    const dx = nodes[i].x - nodes[j].x;
+                    const dy = nodes[i].y - nodes[j].y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist < bondDist) {
+                        // Check if bond already exists
+                        const exists = bonds.some(b =>
+                            (b.a === i && b.b === j) || (b.a === j && b.b === i)
+                        );
+                        if (!exists) {
+                            // Bond formation probability depends on kneading energy
+                            const prob = kneadEnergy * 0.001;
+                            // Glutenin-glutenin bonds are strongest (disulfide bonds)
+                            const typeFactor = (nodes[i].type === 'glutenin' && nodes[j].type === 'glutenin') ? 2 :
+                                (nodes[i].type !== nodes[j].type) ? 1.5 : 1;
+                            if (Math.random() < prob * typeFactor) {
+                                bonds.push({
+                                    a: i, b: j,
+                                    restLen: dist,
+                                    strength: 0.01 + Math.random() * 0.02,
+                                    type: (nodes[i].type === 'glutenin' && nodes[j].type === 'glutenin') ? 'disulfide' : 'hydrogen'
+                                });
+                                nodes[i].bondCount++;
+                                nodes[j].bondCount++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Over-kneading: break bonds
+            if (totalKnead > 500 && bonds.length > 0) {
+                const breakProb = (totalKnead - 500) * 0.00005;
+                for (let i = bonds.length - 1; i >= 0; i--) {
+                    if (Math.random() < breakProb) {
+                        nodes[bonds[i].a].bondCount--;
+                        nodes[bonds[i].b].bondCount--;
+                        bonds.splice(i, 1);
+                    }
+                }
+            }
+        }
+
+        function applyBondForces() {
+            for (let bond of bonds) {
+                const na = nodes[bond.a];
+                const nb = nodes[bond.b];
+                const dx = nb.x - na.x;
+                const dy = nb.y - na.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 0.1) continue;
+
+                const force = (dist - bond.restLen) * bond.strength;
+                const fx = (dx / dist) * force;
+                const fy = (dy / dist) * force;
+
+                na.vx += fx;
+                na.vy += fy;
+                nb.vx -= fx;
+                nb.vy -= fy;
+            }
+        }
+
+        // Mouse interaction (kneading)
+        canvas.addEventListener('mousedown', (e) => { dragging = true; lastMouseX = e.clientX; lastMouseY = e.clientY; });
+        canvas.addEventListener('mouseup', () => { dragging = false; });
+        canvas.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+            if (dragging) {
+                const dx = e.clientX - lastMouseX;
+                const dy = e.clientY - lastMouseY;
+                const speed = Math.sqrt(dx * dx + dy * dy);
+                kneadEnergy = Math.min(20, kneadEnergy + speed * 0.1);
+                totalKnead += speed * 0.05;
+
+                // Push nearby nodes
+                for (let n of nodes) {
+                    const ndx = n.x - mouseX;
+                    const ndy = n.y - mouseY;
+                    const ndist = Math.sqrt(ndx * ndx + ndy * ndy);
+                    if (ndist < 80) {
+                        const force = (80 - ndist) / 80;
+                        n.vx += dx * 0.1 * force;
+                        n.vy += dy * 0.1 * force;
+                        n.ox += dx * 0.02 * force;
+                        n.oy += dy * 0.02 * force;
+                    }
+                }
+
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            }
+        });
+
+        // Touch support
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            dragging = true;
+            const t = e.touches[0];
+            lastMouseX = t.clientX; lastMouseY = t.clientY;
+        });
+        canvas.addEventListener('touchend', () => { dragging = false; });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const t = e.touches[0];
+            mouseX = t.clientX; mouseY = t.clientY;
+            if (dragging) {
+                const dx = t.clientX - lastMouseX;
+                const dy = t.clientY - lastMouseY;
+                const speed = Math.sqrt(dx * dx + dy * dy);
+                kneadEnergy = Math.min(20, kneadEnergy + speed * 0.1);
+                totalKnead += speed * 0.05;
+                for (let n of nodes) {
+                    const ndx = n.x - mouseX;
+                    const ndy = n.y - mouseY;
+                    const ndist = Math.sqrt(ndx * ndx + ndy * ndy);
+                    if (ndist < 80) {
+                        const force = (80 - ndist) / 80;
+                        n.vx += dx * 0.1 * force;
+                        n.vy += dy * 0.1 * force;
+                    }
+                }
+                lastMouseX = t.clientX; lastMouseY = t.clientY;
+            }
+        });
+
+        document.getElementById('kneadBtn').addEventListener('click', () => { autoKnead = !autoKnead; });
+        document.getElementById('resetBtn').addEventListener('click', init);
+
+        function getNetworkState() {
+            const bondRatio = bonds.length / Math.max(1, nodes.length);
+            if (totalKnead > 600 && bondRatio < 0.8) return 'Over-kneaded';
+            if (bondRatio < 0.2) return 'Under-developed';
+            if (bondRatio < 0.6) return 'Developing';
+            if (bondRatio < 1.2) return 'Well-developed';
+            return 'Fully developed';
+        }
+
+        function animate() {
+            time++;
+            const hydration = parseInt(document.getElementById('hydration').value);
+            const rest = parseInt(document.getElementById('rest').value);
+
+            document.getElementById('hydVal').textContent = hydration + '%';
+            document.getElementById('protVal').textContent = document.getElementById('protein').value + '%';
+            document.getElementById('restVal').textContent = rest + ' min';
+
+            // Auto-knead simulation
+            if (autoKnead) {
+                const kx = W / 2 + Math.sin(time * 0.03) * W * 0.3;
+                const ky = H / 2 + Math.cos(time * 0.02) * H * 0.2;
+                kneadEnergy = Math.min(15, kneadEnergy + 0.5);
+                totalKnead += 0.3;
+
+                for (let n of nodes) {
+                    const dx = n.x - kx;
+                    const dy = n.y - ky;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < 100) {
+                        const force = (100 - dist) / 100 * 0.5;
+                        n.vx += Math.cos(time * 0.03) * force * 3;
+                        n.vy += Math.sin(time * 0.02) * force * 3;
+                    }
+                }
+            }
+
+            // Rest improves bonds
+            if (rest > 0) {
+                kneadEnergy = Math.max(0.5, kneadEnergy);
+                // Autolyse: gradual bond formation at rest
+            }
+
+            kneadEnergy *= 0.98;
+            tryFormBonds();
+            applyBondForces();
+
+            // Background
+            const doughGrad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.6);
+            doughGrad.addColorStop(0, '#e8d5a8');
+            doughGrad.addColorStop(1, '#d4c090');
+            ctx.fillStyle = doughGrad;
+            ctx.fillRect(0, 0, W, H);
+
+            // Flour particles
+            ctx.globalAlpha = 0.1;
+            for (let i = 0; i < 30; i++) {
+                const fx = (i * 167 + Math.sin(time * 0.005 + i) * 5) % W;
+                const fy = (i * 223 + Math.cos(time * 0.005 + i) * 5) % H;
+                ctx.beginPath();
+                ctx.arc(fx, fy, 15, 0, Math.PI * 2);
+                ctx.fillStyle = '#f0e8d0';
+                ctx.fill();
+            }
+            ctx.globalAlpha = 1;
+
+            // Draw bonds
+            for (let bond of bonds) {
+                const na = nodes[bond.a];
+                const nb = nodes[bond.b];
+                ctx.beginPath();
+                ctx.moveTo(na.x, na.y);
+                ctx.lineTo(nb.x, nb.y);
+                if (bond.type === 'disulfide') {
+                    ctx.strokeStyle = 'rgba(160, 120, 60, 0.4)';
+                    ctx.lineWidth = 2;
+                } else {
+                    ctx.strokeStyle = 'rgba(180, 160, 120, 0.2)';
+                    ctx.lineWidth = 1;
+                }
+                ctx.stroke();
+            }
+
+            // Update and draw nodes
+            for (let n of nodes) {
+                n.update(hydration);
+                n.draw();
+            }
+
+            // Knead indicator
+            if (dragging || autoKnead) {
+                const ix = autoKnead ? W / 2 + Math.sin(time * 0.03) * W * 0.3 : mouseX;
+                const iy = autoKnead ? H / 2 + Math.cos(time * 0.02) * H * 0.2 : mouseY;
+                ctx.beginPath();
+                ctx.arc(ix, iy, 30 + kneadEnergy * 3, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(138, 154, 91, ${0.2 + kneadEnergy * 0.03})`;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+
+            // Stats
+            const state = getNetworkState();
+            document.getElementById('networkState').textContent = state;
+
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.fillRect(10, H - 80, 180, 40);
+            ctx.font = '11px monospace';
+            ctx.fillStyle = '#DDA15E';
+            ctx.fillText(`Bonds: ${bonds.length} | Energy: ${kneadEnergy.toFixed(1)}`, 20, H - 62);
+            ctx.fillText(`Total knead: ${totalKnead.toFixed(0)}`, 20, H - 48);
+
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() { init(); };
+
+        animate();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

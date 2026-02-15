@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Goode Homolosine -- Interrupted Equal-Area</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(254,250,224,0.12); backdrop-filter: blur(10px);
+            color: #FEFAE0; padding: 12px 24px; border-radius: 12px;
+            font-size: 0.85rem; text-align: center; pointer-events: none; z-index: 100;
+        }
+        .controls {
+            position: fixed; top: 10px; right: 10px; z-index: 100;
+            display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+        }
+        .controls label, .controls button {
+            color: #FEFAE0; font-size: 0.8rem;
+            background: rgba(254,250,224,0.1); backdrop-filter: blur(10px);
+            padding: 6px 12px; border-radius: 8px; border: none; cursor: pointer;
+        }
+        .controls button:hover { background: rgba(138,154,91,0.3); }
+        .controls button.active { background: rgba(138,154,91,0.4); border: 1px solid #8A9A5B; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="controls">
+        <button id="landBtn" class="active">Land View</button>
+        <button id="oceanBtn">Ocean View</button>
+    </div>
+    <div class="info">Goode Homolosine -- equal-area interrupted projection. Sinusoidal near equator, Mollweide at high latitudes. Switch between land and ocean views.</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H, cx, cy, scale;
+        let viewMode = 'land'; // 'land' or 'ocean'
+
+        const landBtn = document.getElementById('landBtn');
+        const oceanBtn = document.getElementById('oceanBtn');
+        landBtn.addEventListener('click', () => { viewMode = 'land'; landBtn.classList.add('active'); oceanBtn.classList.remove('active'); });
+        oceanBtn.addEventListener('click', () => { viewMode = 'ocean'; oceanBtn.classList.add('active'); landBtn.classList.remove('active'); });
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+            cx = W / 2;
+            cy = H / 2;
+            scale = Math.min(W * 0.38, H * 0.42);
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const BREAK_LAT = 40.73667; // 40d 44' 11.8"
+
+        // Land-view interruptions: central meridians for each lobe
+        const landLobes = {
+            north: [
+                { cmLon: -100, minLon: -180, maxLon: -40 },
+                { cmLon: 0, minLon: -40, maxLon: 180 }
+            ],
+            south: [
+                { cmLon: -160, minLon: -180, maxLon: -100 },
+                { cmLon: -60, minLon: -100, maxLon: -20 },
+                { cmLon: 20, minLon: -20, maxLon: 80 },
+                { cmLon: 140, minLon: 80, maxLon: 180 }
+            ]
+        };
+
+        const oceanLobes = {
+            north: [
+                { cmLon: -150, minLon: -180, maxLon: -90 },
+                { cmLon: -30, minLon: -90, maxLon: 30 },
+                { cmLon: 100, minLon: 30, maxLon: 180 }
+            ],
+            south: [
+                { cmLon: 10, minLon: -180, maxLon: 180 }
+            ]
+        };
+
+        function getLobes() {
+            return viewMode === 'land' ? landLobes : oceanLobes;
+        }
+
+        function findLobe(lon, lat) {
+            const lobes = getLobes();
+            const hemisphere = lat >= 0 ? 'north' : 'south';
+            const lobeSet = lobes[hemisphere];
+            for (const lobe of lobeSet) {
+                if (lon >= lobe.minLon && lon <= lobe.maxLon) return lobe;
+            }
+            return lobeSet[0];
+        }
+
+        // Sinusoidal projection (used near equator)
+        function sinusoidalX(lon, lat, cm) {
+            return (lon - cm) * Math.PI / 180 * Math.cos(lat * Math.PI / 180);
+        }
+        function sinusoidalY(lat) {
+            return lat * Math.PI / 180;
+        }
+
+        // Mollweide (used at high latitudes)
+        function solveTheta(lat) {
+            const target = Math.PI * Math.sin(lat * Math.PI / 180);
+            let theta = lat * Math.PI / 180;
+            for (let i = 0; i < 20; i++) {
+                const dTheta = -(2 * theta + Math.sin(2 * theta) - target) / (2 + 2 * Math.cos(2 * theta));
+                theta += dTheta;
+                if (Math.abs(dTheta) < 1e-10) break;
+            }
+            return theta;
+        }
+
+        function mollweideX(lon, lat, cm) {
+            const theta = solveTheta(lat);
+            return (2 * Math.SQRT2 / Math.PI) * (lon - cm) * Math.PI / 180 * Math.cos(theta);
+        }
+        function mollweideY(lat) {
+            const theta = solveTheta(lat);
+            return Math.SQRT2 * Math.sin(theta);
+        }
+
+        function project(lon, lat) {
+            const lobe = findLobe(lon, lat);
+            const cm = lobe.cmLon;
+            const absLat = Math.abs(lat);
+            let px, py;
+
+            if (absLat <= BREAK_LAT) {
+                px = sinusoidalX(lon, lat, cm);
+                py = sinusoidalY(lat);
+            } else {
+                px = mollweideX(lon, lat, cm);
+                // Mollweide Y with offset to match sinusoidal at break latitude
+                const mollY = mollweideY(lat);
+                const sinBreakY = sinusoidalY(lat >= 0 ? BREAK_LAT : -BREAK_LAT);
+                const mollBreakY = mollweideY(lat >= 0 ? BREAK_LAT : -BREAK_LAT);
+                py = mollY + (sinBreakY - mollBreakY);
+            }
+
+            return { x: cx + px * scale, y: cy - py * scale };
+        }
+
+        function isInLobe(lon, lat) {
+            const lobe = findLobe(lon, lat);
+            return lon >= lobe.minLon && lon <= lobe.maxLon;
+        }
+
+        function drawGrid() {
+            ctx.strokeStyle = 'rgba(254,250,224,0.1)';
+            ctx.lineWidth = 0.5;
+            // Draw parallels
+            for (let lat = -80; lat <= 80; lat += 20) {
+                const lobes = getLobes();
+                const hemisphere = lat >= 0 ? 'north' : 'south';
+                for (const lobe of lobes[hemisphere]) {
+                    ctx.beginPath();
+                    for (let lon = lobe.minLon; lon <= lobe.maxLon; lon += 1) {
+                        const p = project(lon, lat);
+                        if (lon === lobe.minLon) ctx.moveTo(p.x, p.y);
+                        else ctx.lineTo(p.x, p.y);
+                    }
+                    ctx.stroke();
+                }
+            }
+            // Meridians
+            for (let lon = -180; lon <= 180; lon += 20) {
+                ctx.beginPath();
+                let started = false;
+                for (let lat = -90; lat <= 90; lat += 1) {
+                    if (!isInLobe(lon, lat)) { started = false; continue; }
+                    const p = project(lon, lat);
+                    if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+                    else ctx.lineTo(p.x, p.y);
+                }
+                ctx.stroke();
+            }
+        }
+
+        function drawLobeOutlines() {
+            ctx.strokeStyle = 'rgba(138,154,91,0.6)';
+            ctx.lineWidth = 2;
+            const lobes = getLobes();
+
+            for (const hemisphere of ['north', 'south']) {
+                for (const lobe of lobes[hemisphere]) {
+                    ctx.beginPath();
+                    const latStart = hemisphere === 'north' ? 0 : -90;
+                    const latEnd = hemisphere === 'north' ? 90 : 0;
+
+                    // Left edge
+                    for (let lat = latStart; lat <= latEnd; lat += 1) {
+                        const p = project(lobe.minLon + 0.01, lat);
+                        if (lat === latStart) ctx.moveTo(p.x, p.y);
+                        else ctx.lineTo(p.x, p.y);
+                    }
+                    // Top/bottom edge
+                    for (let lon = lobe.minLon; lon <= lobe.maxLon; lon += 1) {
+                        const p = project(lon, latEnd);
+                        ctx.lineTo(p.x, p.y);
+                    }
+                    // Right edge
+                    for (let lat = latEnd; lat >= latStart; lat -= 1) {
+                        const p = project(lobe.maxLon - 0.01, lat);
+                        ctx.lineTo(p.x, p.y);
+                    }
+                    // Bottom
+                    for (let lon = lobe.maxLon; lon >= lobe.minLon; lon -= 1) {
+                        const p = project(lon, latStart);
+                        ctx.lineTo(p.x, p.y);
+                    }
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function drawLand() {
+            const continents = [
+                [[-130,50],[-125,55],[-120,60],[-140,65],[-165,65],[-170,55],[-150,60],[-140,55],[-125,50],[-120,45],[-115,32],[-105,25],[-100,28],[-97,26],[-90,30],[-82,25],[-80,30],[-75,35],[-70,42],[-65,45],[-60,47],[-65,60],[-80,65],[-95,70],[-130,70],[-145,65],[-135,55],[-130,50]],
+                [[-80,10],[-75,12],[-60,5],[-50,0],[-35,-5],[-38,-15],[-48,-28],[-57,-38],[-68,-47],[-75,-48],[-72,-35],[-70,-18],[-77,-2],[-80,10]],
+                [[-10,36],[0,38],[5,43],[2,47],[-5,48],[-10,44],[-10,36]],
+                [[0,38],[15,38],[25,38],[30,45],[20,45],[10,46],[5,43],[0,38]],
+                [[-15,12],[-10,25],[0,35],[15,33],[25,30],[35,25],[42,2],[35,-15],[28,-33],[15,-30],[10,-5],[0,5],[-10,7],[-15,12]],
+                [[28,41],[45,40],[55,25],[72,20],[80,10],[90,20],[100,15],[110,22],[120,25],[130,35],[140,40],[145,45],[130,50],[110,45],[90,48],[75,35],[65,40],[55,45],[50,55],[60,65],[80,72],[120,70],[170,65]],
+                [[115,-10],[130,-12],[145,-15],[150,-25],[148,-35],[137,-35],[125,-30],[115,-20],[115,-10]]
+            ];
+            ctx.fillStyle = 'rgba(138,154,91,0.2)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+            ctx.lineWidth = 1;
+            for (const c of continents) {
+                ctx.beginPath();
+                for (let i = 0; i < c.length; i++) {
+                    const p = project(c[i][0], c[i][1]);
+                    if (i === 0) ctx.moveTo(p.x, p.y);
+                    else ctx.lineTo(p.x, p.y);
+                }
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+            }
+        }
+
+        // Highlight the break latitude
+        function drawBreakLine() {
+            ctx.strokeStyle = 'rgba(221,161,94,0.4)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            const lobes = getLobes();
+            for (const lat of [BREAK_LAT, -BREAK_LAT]) {
+                const hemisphere = lat >= 0 ? 'north' : 'south';
+                for (const lobe of lobes[hemisphere]) {
+                    ctx.beginPath();
+                    for (let lon = lobe.minLon; lon <= lobe.maxLon; lon += 1) {
+                        const p = project(lon, lat);
+                        if (lon === lobe.minLon) ctx.moveTo(p.x, p.y);
+                        else ctx.lineTo(p.x, p.y);
+                    }
+                    ctx.stroke();
+                }
+            }
+            ctx.setLineDash([]);
+
+            ctx.fillStyle = 'rgba(221,161,94,0.5)';
+            ctx.font = '11px "Segoe UI", sans-serif';
+            const pLabel = project(-180 + 5, BREAK_LAT + 3);
+            ctx.fillText('40.7° -- Sinusoidal/Mollweide boundary', pLabel.x, pLabel.y);
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+            drawGrid();
+            drawLobeOutlines();
+            drawLand();
+            drawBreakLine();
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            viewMode = 'land';
+            landBtn.classList.add('active');
+            oceanBtn.classList.remove('active');
+        };
+
+        draw();
+    })();
+    </script>
+</body>
+</html>

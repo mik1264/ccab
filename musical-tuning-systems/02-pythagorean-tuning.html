@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pythagorean Tuning - Musical Tuning Systems</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .info-panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(26,26,46,0.85);
+            backdrop-filter: blur(10px); border: 1px solid #8A9A5B; border-radius: 12px;
+            padding: 15px; max-width: 300px; z-index: 1000; font-size: 0.82rem; line-height: 1.4;
+        }
+        .info-panel h2 { color: #DDA15E; margin-bottom: 8px; font-size: 1rem; }
+        .info-panel p { color: #FEFAE0; opacity: 0.8; margin-bottom: 6px; }
+        .controls {
+            position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 8px; z-index: 1000; flex-wrap: wrap; justify-content: center;
+        }
+        .controls button {
+            background: rgba(96,108,56,0.7); border: 1px solid #8A9A5B; color: #FEFAE0;
+            padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.82rem;
+            transition: all 0.2s;
+        }
+        .controls button:hover { background: rgba(138,154,91,0.8); }
+        .controls button.active { background: #DDA15E; color: #1a1a2e; border-color: #DDA15E; }
+        .note-display {
+            position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%);
+            color: #DDA15E; font-size: 1rem; z-index: 1000; text-align: center;
+            background: rgba(26,26,46,0.7); padding: 6px 16px; border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info-panel">
+        <h2>Pythagorean Tuning</h2>
+        <p>Build a scale using only perfect fifths (3:2 ratio). Stack 12 fifths and you overshoot 7 octaves by the Pythagorean comma (~23.46 cents).</p>
+        <p>Click notes on the spiral to hear them. The gap between the start and end is the comma.</p>
+    </div>
+    <div class="note-display" id="noteDisplay">Click a note on the circle of fifths</div>
+    <div class="controls">
+        <button id="btnSpiral">Show Spiral</button>
+        <button id="btnComma">Play the Comma</button>
+        <button id="btnScale">Play Pythagorean Scale</button>
+        <button id="btnStop">Stop</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const noteDisplay = document.getElementById('noteDisplay');
+        let W, H, cx, cy;
+        let audioCtx = null;
+        let activeOscs = [];
+        let animTime = 0;
+        let running = true;
+        let hoveredNote = -1;
+        let playingNote = -1;
+        let showSpiral = true;
+
+        const noteNames = ['C','G','D','A','E','B','F#','C#','G#','D#','A#','F','C\''];
+        const baseFreq = 261.63; // C4
+
+        // Build Pythagorean scale by stacking fifths
+        function getPythagoreanFreqs() {
+            const freqs = [baseFreq];
+            let f = baseFreq;
+            for (let i = 1; i <= 12; i++) {
+                f = f * 3 / 2;
+                while (f > baseFreq * 2) f /= 2;
+                freqs.push(f);
+            }
+            return freqs;
+        }
+
+        // Sorted scale for playback
+        function getSortedScale() {
+            const freqs = getPythagoreanFreqs();
+            const pairs = freqs.map((f, i) => ({ freq: f, name: noteNames[i], index: i }));
+            pairs.sort((a, b) => a.freq - b.freq);
+            return pairs;
+        }
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        function stopAll() {
+            activeOscs.forEach(o => { try { o.gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1); o.osc.stop(audioCtx.currentTime + 0.15); } catch(e){} });
+            activeOscs = [];
+            playingNote = -1;
+        }
+
+        function playNote(freq, duration, delay) {
+            initAudio();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = freq;
+            gain.gain.value = 0;
+            const t = audioCtx.currentTime + (delay || 0);
+            gain.gain.linearRampToValueAtTime(0.25, t + 0.03);
+            if (duration) gain.gain.linearRampToValueAtTime(0, t + duration - 0.05);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(t);
+            if (duration) osc.stop(t + duration);
+            activeOscs.push({ osc, gain });
+            return osc;
+        }
+
+        function playSingleNote(index) {
+            initAudio();
+            stopAll();
+            const freqs = getPythagoreanFreqs();
+            const f = freqs[index];
+            playNote(f);
+            playingNote = index;
+            const cents = 1200 * Math.log2(f / baseFreq);
+            noteDisplay.textContent = `${noteNames[index]}: ${f.toFixed(2)} Hz (${cents >= 0 ? '+' : ''}${cents.toFixed(1)} cents from C)`;
+        }
+
+        function playComma() {
+            initAudio();
+            stopAll();
+            const freqs = getPythagoreanFreqs();
+            const cStart = freqs[0]; // C
+            // 12th fifth brought back to same octave
+            let c12 = baseFreq;
+            for (let i = 0; i < 12; i++) c12 = c12 * 3 / 2;
+            c12 /= Math.pow(2, 7); // bring back 7 octaves
+            playNote(cStart, 3);
+            playNote(c12, 3);
+            const commaCents = 1200 * Math.log2(c12 / cStart);
+            noteDisplay.textContent = `Pythagorean Comma: ${cStart.toFixed(2)} Hz vs ${c12.toFixed(2)} Hz = ${commaCents.toFixed(2)} cents`;
+        }
+
+        function playScale() {
+            initAudio();
+            stopAll();
+            const sorted = getSortedScale();
+            const dur = 0.5;
+            sorted.forEach((s, i) => {
+                playNote(s.freq, dur, i * dur);
+            });
+            noteDisplay.textContent = 'Playing Pythagorean scale...';
+        }
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+            cx = W / 2;
+            cy = H / 2 - 20;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const R = Math.min(W, H) * 0.32;
+            const freqs = getPythagoreanFreqs();
+
+            // Draw the circle of fifths
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(cx, cy, R, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Draw connections (fifths)
+            for (let i = 0; i < 12; i++) {
+                const a1 = (i / 12) * Math.PI * 2 - Math.PI / 2;
+                const a2 = ((i + 1) / 12) * Math.PI * 2 - Math.PI / 2;
+                const x1 = cx + Math.cos(a1) * R;
+                const y1 = cy + Math.sin(a1) * R;
+                const x2 = cx + Math.cos(a2) * R;
+                const y2 = cy + Math.sin(a2) * R;
+
+                ctx.beginPath();
+                ctx.strokeStyle = `rgba(221,161,94,${0.15 + 0.03 * i})`;
+                ctx.lineWidth = 1.5;
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+            }
+
+            // Spiral effect showing the comma
+            if (showSpiral) {
+                ctx.beginPath();
+                ctx.strokeStyle = 'rgba(221,161,94,0.4)';
+                ctx.lineWidth = 2;
+                for (let t = 0; t <= 12; t += 0.02) {
+                    const angle = (t / 12) * Math.PI * 2 - Math.PI / 2;
+                    const r = R * (1 + t * 0.008);
+                    const x = cx + Math.cos(angle) * r;
+                    const y = cy + Math.sin(angle) * r;
+                    if (t === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // Draw notes
+            for (let i = 0; i <= 12; i++) {
+                const angle = (i / 12) * Math.PI * 2 - Math.PI / 2;
+                const r = showSpiral ? R * (1 + i * 0.008) : R;
+                const x = cx + Math.cos(angle) * r;
+                const y = cy + Math.sin(angle) * r;
+
+                const isHovered = hoveredNote === i;
+                const isPlaying = playingNote === i;
+
+                // Glow for playing note
+                if (isPlaying) {
+                    const grd = ctx.createRadialGradient(x, y, 0, x, y, 30);
+                    grd.addColorStop(0, 'rgba(221,161,94,0.4)');
+                    grd.addColorStop(1, 'rgba(221,161,94,0)');
+                    ctx.fillStyle = grd;
+                    ctx.fillRect(x - 30, y - 30, 60, 60);
+                }
+
+                // Node
+                ctx.beginPath();
+                const nodeR = isHovered ? 14 : (isPlaying ? 12 : 8);
+                ctx.arc(x, y, nodeR, 0, Math.PI * 2);
+                ctx.fillStyle = i === 12 ? '#BC6C25' : (isPlaying ? '#DDA15E' : (isHovered ? '#8A9A5B' : '#606C38'));
+                ctx.fill();
+                ctx.strokeStyle = '#FEFAE0';
+                ctx.lineWidth = isHovered ? 2 : 1;
+                ctx.stroke();
+
+                // Label
+                ctx.fillStyle = '#FEFAE0';
+                ctx.font = `${isHovered ? 'bold ' : ''}13px 'Segoe UI', sans-serif`;
+                ctx.textAlign = 'center';
+                const lx = cx + Math.cos(angle) * (r + 25);
+                const ly = cy + Math.sin(angle) * (r + 25);
+                ctx.fillText(noteNames[i], lx, ly + 4);
+
+                // Frequency
+                ctx.fillStyle = 'rgba(254,250,224,0.5)';
+                ctx.font = '10px "Segoe UI", sans-serif';
+                ctx.fillText(`${freqs[i].toFixed(1)}`, lx, ly + 18);
+
+                // Cents from C
+                if (i > 0) {
+                    const cents = 1200 * Math.log2(freqs[i] / baseFreq);
+                    ctx.fillText(`${cents >= 0 ? '+' : ''}${cents.toFixed(0)}c`, lx, ly + 30);
+                }
+            }
+
+            // Comma indicator
+            if (showSpiral) {
+                const a0 = -Math.PI / 2;
+                const r0 = R;
+                const r12 = R * (1 + 12 * 0.008);
+                const x0 = cx + Math.cos(a0) * r0;
+                const y0 = cy + Math.sin(a0) * r0;
+                const x12 = cx + Math.cos(a0) * r12;
+                const y12 = cy + Math.sin(a0) * r12;
+
+                ctx.beginPath();
+                ctx.strokeStyle = '#BC6C25';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([4, 4]);
+                ctx.moveTo(x0, y0);
+                ctx.lineTo(x12, y12);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                ctx.fillStyle = '#BC6C25';
+                ctx.font = 'bold 12px "Segoe UI", sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText('Pythagorean Comma', x12 + 10, (y0 + y12) / 2);
+                ctx.font = '11px "Segoe UI", sans-serif';
+                ctx.fillText('~23.46 cents', x12 + 10, (y0 + y12) / 2 + 16);
+            }
+
+            // Title
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = 'bold 18px "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('PYTHAGOREAN TUNING: CIRCLE OF FIFTHS', cx, 40);
+
+            // Pulsing animation on playing note
+            if (playingNote >= 0) {
+                const angle = (playingNote / 12) * Math.PI * 2 - Math.PI / 2;
+                const r = showSpiral ? R * (1 + playingNote * 0.008) : R;
+                const x = cx + Math.cos(angle) * r;
+                const y = cy + Math.sin(angle) * r;
+                const pulse = Math.sin(animTime * 4) * 0.3 + 0.7;
+                ctx.beginPath();
+                ctx.arc(x, y, 20 * pulse, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(221,161,94,${0.5 * pulse})`;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        function getHoveredNote(mx, my) {
+            const R = Math.min(W, H) * 0.32;
+            const freqs = getPythagoreanFreqs();
+            for (let i = 0; i <= 12; i++) {
+                const angle = (i / 12) * Math.PI * 2 - Math.PI / 2;
+                const r = showSpiral ? R * (1 + i * 0.008) : R;
+                const x = cx + Math.cos(angle) * r;
+                const y = cy + Math.sin(angle) * r;
+                const dx = mx - x, dy = my - y;
+                if (dx * dx + dy * dy < 400) return i;
+            }
+            return -1;
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            hoveredNote = getHoveredNote(e.clientX, e.clientY);
+            canvas.style.cursor = hoveredNote >= 0 ? 'pointer' : 'default';
+        });
+
+        canvas.addEventListener('click', (e) => {
+            if (hoveredNote >= 0) playSingleNote(hoveredNote);
+        });
+
+        document.getElementById('btnSpiral').addEventListener('click', function() {
+            showSpiral = !showSpiral;
+            this.textContent = showSpiral ? 'Hide Spiral' : 'Show Spiral';
+        });
+        document.getElementById('btnComma').addEventListener('click', playComma);
+        document.getElementById('btnScale').addEventListener('click', playScale);
+        document.getElementById('btnStop').addEventListener('click', () => { stopAll(); noteDisplay.textContent = 'Click a note on the circle of fifths'; });
+
+        function animate() {
+            animTime += 0.016;
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+        animate();
+
+        window.reset = function() {
+            stopAll();
+            hoveredNote = -1;
+            playingNote = -1;
+            showSpiral = true;
+            animTime = 0;
+            noteDisplay.textContent = 'Click a note on the circle of fifths';
+        };
+    })();
+    </script>
+</body>
+</html>

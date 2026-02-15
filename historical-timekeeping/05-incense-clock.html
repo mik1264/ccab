@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Incense Clock - Historical Timekeeping</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0f0f1a; overflow: hidden; font-family: 'Georgia', serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 15px 25px;
+            border-radius: 15px; color: #FEFAE0; display: flex; gap: 20px; align-items: center;
+            font-size: 0.85rem; z-index: 100;
+        }
+        .controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .controls input[type="range"] { width: 100px; accent-color: #DDA15E; }
+        .controls .value { color: #DDA15E; font-weight: bold; }
+        .controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 8px 16px;
+            border-radius: 8px; cursor: pointer; font-family: inherit;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Burn Speed
+            <input type="range" id="speed" min="0.5" max="5" value="2" step="0.5">
+            <span class="value" id="speedVal">2x</span>
+        </label>
+        <label>Alarm Position
+            <input type="range" id="alarm" min="10" max="90" value="50" step="5">
+            <span class="value" id="alarmVal">50%</span>
+        </label>
+        <button id="resetBtn">Relight</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const speedSlider = document.getElementById('speed');
+        const alarmSlider = document.getElementById('alarm');
+        const resetBtn = document.getElementById('resetBtn');
+        const speedVal = document.getElementById('speedVal');
+        const alarmVal = document.getElementById('alarmVal');
+
+        let W, H;
+        let burnProgress = 0; // 0 to 1
+        let smokeParticles = [];
+        let ashParticles = [];
+        let bellRinging = false;
+        let bellTimer = 0;
+        let alarmTriggered = false;
+        let time = 0;
+        let lastTime = 0;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        function drawDragonBoat(cx, cy, boatLen, boatH) {
+            // Dragon boat vessel shape
+            ctx.save();
+            ctx.translate(cx, cy);
+
+            // Boat body
+            ctx.beginPath();
+            ctx.moveTo(-boatLen / 2, 0);
+            ctx.quadraticCurveTo(-boatLen / 2 - 20, -boatH * 0.3, -boatLen / 2 - 10, -boatH);
+            ctx.lineTo(boatLen / 2 + 10, -boatH);
+            ctx.quadraticCurveTo(boatLen / 2 + 20, -boatH * 0.3, boatLen / 2, 0);
+            ctx.closePath();
+
+            const boatGrad = ctx.createLinearGradient(0, 0, 0, -boatH);
+            boatGrad.addColorStop(0, '#5C3A1E');
+            boatGrad.addColorStop(1, '#8A6B3E');
+            ctx.fillStyle = boatGrad;
+            ctx.fill();
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Dragon head (left end)
+            ctx.beginPath();
+            ctx.moveTo(-boatLen / 2 - 10, -boatH);
+            ctx.quadraticCurveTo(-boatLen / 2 - 35, -boatH - 25, -boatLen / 2 - 25, -boatH - 40);
+            ctx.quadraticCurveTo(-boatLen / 2 - 15, -boatH - 30, -boatLen / 2 - 10, -boatH - 15);
+            ctx.strokeStyle = '#BC6C25';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            // Eye
+            ctx.beginPath();
+            ctx.arc(-boatLen / 2 - 22, -boatH - 28, 2, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+
+            // Dragon tail (right end)
+            ctx.beginPath();
+            ctx.moveTo(boatLen / 2 + 10, -boatH);
+            ctx.quadraticCurveTo(boatLen / 2 + 30, -boatH - 15, boatLen / 2 + 20, -boatH - 35);
+            ctx.strokeStyle = '#BC6C25';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // Support blocks
+            const blockW = 15;
+            const blockH = 10;
+            ctx.fillStyle = '#5C3A1E';
+            ctx.fillRect(-boatLen / 3 - blockW / 2, -boatH - blockH - 2, blockW, blockH);
+            ctx.fillRect(boatLen / 3 - blockW / 2, -boatH - blockH - 2, blockW, blockH);
+
+            ctx.restore();
+        }
+
+        function drawIncenseStick(cx, cy, boatLen) {
+            const stickLen = boatLen * 0.85;
+            const stickH = 4;
+            const stickY = cy - 30; // on top of supports
+            const leftX = cx - stickLen / 2;
+            const rightX = cx + stickLen / 2;
+
+            // Burn point
+            const burnX = leftX + burnProgress * stickLen;
+
+            // Unburned portion (right of burn point)
+            if (burnProgress < 1) {
+                ctx.beginPath();
+                ctx.rect(burnX, stickY - stickH / 2, rightX - burnX, stickH);
+                const stickGrad = ctx.createLinearGradient(burnX, 0, rightX, 0);
+                stickGrad.addColorStop(0, '#8B4513');
+                stickGrad.addColorStop(1, '#6B3410');
+                ctx.fillStyle = stickGrad;
+                ctx.fill();
+            }
+
+            // Burned ash (left of burn point)
+            if (burnProgress > 0) {
+                ctx.beginPath();
+                ctx.rect(leftX, stickY - stickH / 2, burnX - leftX, stickH);
+                ctx.fillStyle = 'rgba(100, 100, 100, 0.4)';
+                ctx.fill();
+                // Ash fragments falling
+                if (Math.random() < 0.02) {
+                    ashParticles.push({
+                        x: burnX - Math.random() * 20,
+                        y: stickY + stickH,
+                        vx: (Math.random() - 0.5) * 0.5,
+                        vy: 0.3 + Math.random() * 0.5,
+                        life: 1,
+                        size: 1 + Math.random() * 2
+                    });
+                }
+            }
+
+            // Ember at burn point
+            if (burnProgress < 1) {
+                ctx.beginPath();
+                ctx.arc(burnX, stickY, 4 + Math.sin(time * 5) * 1, 0, Math.PI * 2);
+                ctx.fillStyle = '#FF6600';
+                ctx.fill();
+                const glow = ctx.createRadialGradient(burnX, stickY, 0, burnX, stickY, 20);
+                glow.addColorStop(0, 'rgba(255, 100, 0, 0.3)');
+                glow.addColorStop(1, 'transparent');
+                ctx.fillStyle = glow;
+                ctx.beginPath();
+                ctx.arc(burnX, stickY, 20, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Smoke from burn point
+                for (let i = 0; i < 2; i++) {
+                    smokeParticles.push({
+                        x: burnX + (Math.random() - 0.5) * 4,
+                        y: stickY - 5,
+                        vx: (Math.random() - 0.5) * 0.8,
+                        vy: -(0.5 + Math.random() * 1.5),
+                        life: 1,
+                        size: 2 + Math.random() * 3
+                    });
+                }
+            }
+
+            // Hour markings
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = '10px Georgia';
+            ctx.textAlign = 'center';
+            for (let i = 1; i <= 12; i++) {
+                const markX = leftX + (i / 12) * stickLen;
+                ctx.beginPath();
+                ctx.moveTo(markX, stickY - stickH - 2);
+                ctx.lineTo(markX, stickY - stickH - 8);
+                ctx.strokeStyle = i / 12 < burnProgress ? 'rgba(221, 161, 94, 0.3)' : '#DDA15E';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.fillStyle = i / 12 < burnProgress ? 'rgba(221, 161, 94, 0.3)' : '#DDA15E';
+                ctx.fillText(i + 'h', markX, stickY - stickH - 12);
+            }
+
+            // Alarm thread
+            const alarmPos = parseFloat(alarmSlider.value) / 100;
+            const threadX = leftX + alarmPos * stickLen;
+            if (!alarmTriggered) {
+                // Thread across the stick
+                ctx.beginPath();
+                ctx.moveTo(threadX, stickY - 15);
+                ctx.lineTo(threadX, stickY + 15);
+                ctx.strokeStyle = '#CC3333';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 2]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Bells hanging from thread
+                drawBell(threadX - 8, stickY + 20, 6);
+                drawBell(threadX + 8, stickY + 20, 6);
+            }
+
+            return { leftX, rightX, stickY, burnX };
+        }
+
+        function drawBell(x, y, size) {
+            ctx.beginPath();
+            ctx.moveTo(x, y - size);
+            ctx.quadraticCurveTo(x - size, y - size * 0.3, x - size, y);
+            ctx.lineTo(x + size, y);
+            ctx.quadraticCurveTo(x + size, y - size * 0.3, x, y - size);
+            ctx.fillStyle = '#B8860B';
+            ctx.fill();
+            ctx.strokeStyle = '#8B6914';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            // Clapper
+            ctx.beginPath();
+            ctx.arc(x, y + 1, 2, 0, Math.PI * 2);
+            ctx.fillStyle = '#8B6914';
+            ctx.fill();
+        }
+
+        function drawPlatter(cx, cy, w) {
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, w, w * 0.15, 0, 0, Math.PI * 2);
+            const platGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, w);
+            platGrad.addColorStop(0, '#B8860B');
+            platGrad.addColorStop(1, '#8B6914');
+            ctx.fillStyle = platGrad;
+            ctx.fill();
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+
+        function drawParticles(dt) {
+            for (let i = smokeParticles.length - 1; i >= 0; i--) {
+                const p = smokeParticles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.size += dt * 3;
+                p.vx += (Math.random() - 0.5) * 0.1;
+                p.life -= dt * 0.6;
+                if (p.life <= 0) { smokeParticles.splice(i, 1); continue; }
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(180, 170, 160, ${p.life * 0.12})`;
+                ctx.fill();
+            }
+
+            for (let i = ashParticles.length - 1; i >= 0; i--) {
+                const p = ashParticles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= dt * 0.3;
+                if (p.life <= 0) { ashParticles.splice(i, 1); continue; }
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(120, 120, 120, ${p.life * 0.4})`;
+                ctx.fill();
+            }
+        }
+
+        function drawBellRing(cx, cy) {
+            if (!bellRinging) return;
+            bellTimer += 0.1;
+            if (bellTimer > 10) { bellRinging = false; return; }
+
+            // Concentric rings
+            for (let i = 0; i < 3; i++) {
+                const r = bellTimer * 15 + i * 20;
+                const alpha = Math.max(0, 1 - r / 150) * 0.5;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                ctx.strokeStyle = `rgba(221, 161, 94, ${alpha})`;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+
+            // "TING!" text
+            ctx.fillStyle = `rgba(221, 161, 94, ${Math.max(0, 1 - bellTimer / 10)})`;
+            ctx.font = 'bold 24px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('TING!', cx, cy - 50 - bellTimer * 3);
+        }
+
+        function draw(timestamp) {
+            const dt = lastTime ? Math.min((timestamp - lastTime) / 1000, 0.05) : 0.016;
+            lastTime = timestamp;
+            time += dt;
+
+            const speed = parseFloat(speedSlider.value);
+            speedVal.textContent = speed + 'x';
+            alarmVal.textContent = alarmSlider.value + '%';
+
+            // Burn
+            if (burnProgress < 1) {
+                burnProgress = Math.min(1, burnProgress + speed * 0.0003);
+
+                // Check alarm
+                const alarmPos = parseFloat(alarmSlider.value) / 100;
+                if (!alarmTriggered && burnProgress >= alarmPos) {
+                    alarmTriggered = true;
+                    bellRinging = true;
+                    bellTimer = 0;
+                }
+            }
+
+            ctx.fillStyle = '#0f0f1a';
+            ctx.fillRect(0, 0, W, H);
+
+            const cx = W / 2;
+            const cy = H / 2;
+            const boatLen = Math.min(W * 0.6, 500);
+            const boatH = 25;
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'italic 16px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Chinese Dragon Boat Incense Clock', cx, 30);
+            ctx.font = '12px Georgia';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText('Silk thread with bells marks the alarm time', cx, 50);
+
+            // Platter underneath
+            drawPlatter(cx, cy + 40, boatLen * 0.55);
+
+            // Dragon boat
+            drawDragonBoat(cx, cy + 10, boatLen, boatH);
+
+            // Incense stick
+            const stick = drawIncenseStick(cx, cy, boatLen);
+
+            // Particles
+            drawParticles(dt);
+
+            // Bell ring animation
+            if (bellRinging) {
+                const alarmPos = parseFloat(alarmSlider.value) / 100;
+                const bellX = stick.leftX + alarmPos * (stick.rightX - stick.leftX);
+                drawBellRing(bellX, cy + 40);
+            }
+
+            // Progress
+            const hoursElapsed = burnProgress * 12;
+            const hrs = Math.floor(hoursElapsed);
+            const mins = Math.floor((hoursElapsed - hrs) * 60);
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '20px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText(hrs + 'h ' + mins + 'm', cx, H - 80);
+
+            if (burnProgress >= 1) {
+                ctx.fillStyle = '#DDA15E';
+                ctx.font = 'italic 16px Georgia';
+                ctx.fillText('The incense has burned through', cx, H - 50);
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        resetBtn.addEventListener('click', () => {
+            burnProgress = 0;
+            alarmTriggered = false;
+            bellRinging = false;
+            bellTimer = 0;
+            smokeParticles = [];
+            ashParticles = [];
+        });
+
+        window.reset = function() {
+            burnProgress = 0;
+            alarmTriggered = false;
+            bellRinging = false;
+            bellTimer = 0;
+            smokeParticles = [];
+            ashParticles = [];
+            speedSlider.value = 2;
+            alarmSlider.value = 50;
+        };
+
+        requestAnimationFrame(draw);
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drawbridge &amp; Moat Mechanics - Medieval Siege Machines</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px 25px; border-radius: 15px; display: flex; gap: 20px;
+            align-items: center; z-index: 100; flex-wrap: wrap; justify-content: center;
+        }
+        .control-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .control-group label { color: #DDA15E; font-size: 0.75rem; text-transform: uppercase; }
+        .control-group input[type="range"] { width: 100px; accent-color: #8A9A5B; }
+        .control-group .value { color: #FEFAE0; font-size: 0.8rem; font-weight: bold; }
+        button {
+            background: linear-gradient(135deg, #8A9A5B, #606C38); color: #FEFAE0;
+            border: none; padding: 10px 24px; border-radius: 10px; cursor: pointer;
+            font-size: 0.9rem; font-weight: bold;
+        }
+        button:hover { transform: scale(1.05); }
+        .info {
+            position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(10px); padding: 12px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 240px;
+        }
+        .info h3 { color: #DDA15E; margin-bottom: 6px; }
+        .info p { line-height: 1.4; opacity: 0.85; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h3>Drawbridge & Moat</h3>
+        <p>Counterweight-operated bascule bridge. The windlass and chain system allows a few guards to raise a massive bridge. Adjust bridge weight and counterweight to find balance.</p>
+        <div id="stats"></div>
+    </div>
+    <div class="controls">
+        <div class="control-group">
+            <label>Bridge Mass (t)</label>
+            <input type="range" id="bridgeMass" min="1" max="10" value="4" step="0.5">
+            <span class="value" id="bridgeMassVal">4.0</span>
+        </div>
+        <div class="control-group">
+            <label>Counterweight (t)</label>
+            <input type="range" id="cwMass" min="0.5" max="8" value="3" step="0.5">
+            <span class="value" id="cwMassVal">3.0</span>
+        </div>
+        <div class="control-group">
+            <label>Moat Width (m)</label>
+            <input type="range" id="moatW" min="5" max="20" value="12" step="1">
+            <span class="value" id="moatWVal">12</span>
+        </div>
+        <button id="raiseBtn">RAISE</button>
+        <button id="lowerBtn">LOWER</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let bridgeAngle = 0; // 0 = down/open, PI/2 = up/closed
+        let angularVel = 0;
+        let raising = false;
+        let lowering = false;
+        let chainLinks = [];
+        let portcullisY = 0; // 0 = up, 1 = down
+
+        const els = {
+            bridgeMass: document.getElementById('bridgeMass'),
+            cwMass: document.getElementById('cwMass'),
+            moatW: document.getElementById('moatW')
+        };
+
+        function getP() {
+            return {
+                bridgeMass: +els.bridgeMass.value,
+                cwMass: +els.cwMass.value,
+                moatW: +els.moatW.value
+            };
+        }
+
+        function updateLabels() {
+            document.getElementById('bridgeMassVal').textContent = (+els.bridgeMass.value).toFixed(1);
+            document.getElementById('cwMassVal').textContent = (+els.cwMass.value).toFixed(1);
+            document.getElementById('moatWVal').textContent = els.moatW.value;
+        }
+        Object.values(els).forEach(e => e.addEventListener('input', updateLabels));
+
+        document.getElementById('raiseBtn').addEventListener('click', () => { raising = true; lowering = false; });
+        document.getElementById('lowerBtn').addEventListener('click', () => { lowering = true; raising = false; });
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            bridgeAngle = 0; angularVel = 0; raising = false; lowering = false;
+            portcullisY = 0;
+        });
+
+        window.reset = function() {
+            bridgeAngle = 0; angularVel = 0; raising = false; lowering = false;
+            portcullisY = 0;
+        };
+
+        function drawGatehouse(gx, groundY) {
+            const ghW = 80;
+            const ghH = 160;
+
+            // Main structure
+            ctx.fillStyle = '#5a5a5a';
+            ctx.fillRect(gx, groundY - ghH, ghW, ghH);
+
+            // Stone texture
+            ctx.strokeStyle = '#4a4a4a';
+            ctx.lineWidth = 1;
+            for (let r = 0; r < ghH / 15; r++) {
+                const y = groundY - ghH + r * 15;
+                ctx.beginPath();
+                ctx.moveTo(gx, y);
+                ctx.lineTo(gx + ghW, y);
+                ctx.stroke();
+            }
+
+            // Towers on either side
+            [-15, ghW].forEach(dx => {
+                ctx.fillStyle = '#555';
+                ctx.fillRect(gx + dx, groundY - ghH - 20, 15, ghH + 20);
+                // Merlons
+                for (let i = 0; i < 2; i++) {
+                    ctx.fillRect(gx + dx + i * 8, groundY - ghH - 30, 5, 10);
+                }
+            });
+
+            // Gate arch
+            ctx.fillStyle = '#333';
+            const archX = gx + 15;
+            const archW = ghW - 30;
+            const archH = 60;
+            ctx.beginPath();
+            ctx.moveTo(archX, groundY);
+            ctx.lineTo(archX, groundY - archH);
+            ctx.arc(archX + archW / 2, groundY - archH, archW / 2, Math.PI, 0);
+            ctx.lineTo(archX + archW, groundY);
+            ctx.closePath();
+            ctx.fill();
+
+            // Portcullis
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 3;
+            const portTop = groundY - archH - archW / 2 + 5;
+            const portBottom = portTop + (archH + archW / 2 - 5) * portcullisY;
+            if (portcullisY > 0.05) {
+                // Vertical bars
+                for (let i = 0; i < 5; i++) {
+                    const px = archX + 5 + i * (archW - 10) / 4;
+                    ctx.beginPath();
+                    ctx.moveTo(px, portTop);
+                    ctx.lineTo(px, portBottom);
+                    ctx.stroke();
+                }
+                // Horizontal bars
+                const barCount = Math.floor(portcullisY * 5);
+                for (let i = 0; i < barCount; i++) {
+                    const py = portTop + i * 12;
+                    if (py < portBottom) {
+                        ctx.beginPath();
+                        ctx.moveTo(archX + 3, py);
+                        ctx.lineTo(archX + archW - 3, py);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // Windlass room (cutaway)
+            const wrX = gx + ghW + 10;
+            const wrY = groundY - ghH + 20;
+            ctx.fillStyle = 'rgba(50,50,50,0.5)';
+            ctx.fillRect(wrX, wrY, 60, 50);
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(wrX, wrY, 60, 50);
+            ctx.fillStyle = 'rgba(254,250,224,0.3)';
+            ctx.font = '9px sans-serif';
+            ctx.fillText('Windlass', wrX + 5, wrY + 12);
+
+            // Windlass drum
+            const drumX = wrX + 30;
+            const drumY = wrY + 35;
+            ctx.strokeStyle = '#8B7355';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(drumX, drumY, 10, 0, Math.PI * 2);
+            ctx.stroke();
+            // Spokes (rotate with bridge)
+            for (let a = 0; a < 4; a++) {
+                const ang = bridgeAngle * 2 + a * Math.PI / 2;
+                ctx.beginPath();
+                ctx.moveTo(drumX, drumY);
+                ctx.lineTo(drumX + 8 * Math.cos(ang), drumY + 8 * Math.sin(ang));
+                ctx.stroke();
+            }
+
+            // Counterweight
+            const cwX = wrX + 30;
+            const cwY = wrY + 45 - bridgeAngle / (Math.PI / 2) * 30;
+            ctx.fillStyle = '#555';
+            ctx.fillRect(cwX - 8, cwY, 16, 12);
+            ctx.fillStyle = 'rgba(254,250,224,0.3)';
+            ctx.font = '8px sans-serif';
+            ctx.fillText('CW', cwX - 5, cwY + 9);
+
+            return { archX, archW, archH, ghW, gx };
+        }
+
+        function drawBridge(pivotX, pivotY, p) {
+            const bridgeLen = p.moatW * 8;
+
+            ctx.save();
+            ctx.translate(pivotX, pivotY);
+            ctx.rotate(-bridgeAngle);
+
+            // Bridge planks
+            ctx.fillStyle = '#6B4B2A';
+            ctx.fillRect(0, -4, bridgeLen, 8);
+
+            // Plank lines
+            ctx.strokeStyle = '#5A3A1A';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < bridgeLen / 8; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * 8, -4);
+                ctx.lineTo(i * 8, 4);
+                ctx.stroke();
+            }
+
+            // Cross beams
+            ctx.strokeStyle = '#7B5B3A';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(5, -4);
+            ctx.lineTo(bridgeLen - 5, 4);
+            ctx.moveTo(5, 4);
+            ctx.lineTo(bridgeLen - 5, -4);
+            ctx.stroke();
+
+            // Iron reinforcement at edges
+            ctx.fillStyle = '#555';
+            ctx.fillRect(0, -5, 5, 10);
+            ctx.fillRect(bridgeLen - 5, -5, 5, 10);
+
+            ctx.restore();
+
+            // Chains
+            const chainEndX = pivotX + bridgeLen * 0.8 * Math.cos(-bridgeAngle);
+            const chainEndY = pivotY + bridgeLen * 0.8 * Math.sin(-bridgeAngle);
+            const chainTopX = pivotX + 15;
+            const chainTopY = pivotY - 50;
+
+            ctx.strokeStyle = '#888';
+            ctx.lineWidth = 2;
+            // Chain as dashed line
+            ctx.setLineDash([4, 3]);
+            ctx.beginPath();
+            ctx.moveTo(chainEndX, chainEndY);
+            ctx.quadraticCurveTo(
+                (chainEndX + chainTopX) / 2, Math.min(chainEndY, chainTopY) - 10,
+                chainTopX, chainTopY
+            );
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawMoat(moatX, moatW, groundY) {
+            const moatD = 25;
+            // Water
+            ctx.fillStyle = '#1a3a5a';
+            ctx.beginPath();
+            ctx.moveTo(moatX, groundY);
+            ctx.lineTo(moatX + 5, groundY + moatD);
+            ctx.lineTo(moatX + moatW - 5, groundY + moatD);
+            ctx.lineTo(moatX + moatW, groundY);
+            ctx.closePath();
+            ctx.fill();
+
+            // Water surface ripples
+            ctx.strokeStyle = 'rgba(100,150,200,0.3)';
+            ctx.lineWidth = 1;
+            const t = Date.now() * 0.002;
+            for (let w = 0; w < 3; w++) {
+                ctx.beginPath();
+                for (let x = moatX + 5; x < moatX + moatW - 5; x += 3) {
+                    const y = groundY + 3 + w * 6 + Math.sin(x * 0.05 + t + w) * 1.5;
+                    if (x === moatX + 5) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+        }
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+
+            const p = getP();
+            const groundY = H * 0.65;
+            const gateX = W * 0.55;
+
+            // Sky
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+            skyGrad.addColorStop(0, '#1a2040');
+            skyGrad.addColorStop(0.5, '#2a3050');
+            skyGrad.addColorStop(1, '#3a4050');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, W, H);
+
+            // Ground
+            ctx.fillStyle = '#4a5a2a';
+            ctx.fillRect(0, groundY, W, H - groundY);
+
+            // Castle ground (higher)
+            ctx.fillStyle = '#3a4a1a';
+            ctx.fillRect(gateX, groundY - 5, W - gateX, H - groundY + 5);
+
+            // Physics
+            const G = 9.81;
+            const bridgeLen = p.moatW * 8;
+            const bridgeTorque = p.bridgeMass * G * (bridgeLen / 2) * Math.cos(bridgeAngle);
+            const cwTorque = p.cwMass * G * 30 * Math.cos(Math.PI / 2 - bridgeAngle);
+            const netTorque = bridgeTorque - cwTorque;
+
+            const windlassForce = (raising ? -25 : lowering ? 15 : 0);
+            const totalTorque = -netTorque + windlassForce;
+            const I = p.bridgeMass * bridgeLen * bridgeLen / 3;
+
+            angularVel += (totalTorque / I) * dt * 0.5;
+            angularVel *= 0.92; // damping
+            bridgeAngle += angularVel * dt;
+
+            bridgeAngle = Math.max(0, Math.min(Math.PI / 2 * 0.95, bridgeAngle));
+            if (bridgeAngle <= 0.01) { angularVel = Math.max(0, angularVel); bridgeAngle = 0; }
+            if (bridgeAngle >= Math.PI / 2 * 0.94) { angularVel = Math.min(0, angularVel); }
+
+            // Portcullis follows bridge
+            if (raising) portcullisY = Math.min(1, portcullisY + dt * 0.5);
+            if (lowering) portcullisY = Math.max(0, portcullisY - dt * 0.5);
+
+            // Moat
+            const moatX = gateX - p.moatW * 8 - 5;
+            const moatW = p.moatW * 8 + 10;
+            drawMoat(moatX, moatW, groundY);
+
+            // Gatehouse
+            drawGatehouse(gateX, groundY);
+
+            // Bridge
+            const pivotX = gateX + 15;
+            const pivotY = groundY - 2;
+            drawBridge(pivotX, pivotY, p);
+
+            // Force diagram (small overlay)
+            const fdX = 30;
+            const fdY = H * 0.35;
+            ctx.fillStyle = 'rgba(0,0,0,0.4)';
+            ctx.fillRect(fdX - 5, fdY - 50, 120, 100);
+            ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+            ctx.strokeRect(fdX - 5, fdY - 50, 120, 100);
+
+            ctx.fillStyle = 'rgba(254,250,224,0.6)';
+            ctx.font = '10px sans-serif';
+            ctx.fillText('Force Diagram', fdX, fdY - 35);
+
+            // Bridge weight arrow (down)
+            const bForce = Math.min(40, bridgeTorque * 0.3);
+            ctx.strokeStyle = '#BC6C25';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(fdX + 30, fdY - 15);
+            ctx.lineTo(fdX + 30, fdY - 15 + bForce);
+            ctx.stroke();
+            ctx.fillStyle = '#BC6C25';
+            ctx.fillText(`Bridge: ${(bridgeTorque * 0.01).toFixed(1)} kN`, fdX + 40, fdY);
+
+            // CW arrow (up)
+            const cForce = Math.min(40, cwTorque * 0.3);
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.beginPath();
+            ctx.moveTo(fdX + 30, fdY + 20);
+            ctx.lineTo(fdX + 30, fdY + 20 - cForce);
+            ctx.stroke();
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText(`CW: ${(cwTorque * 0.01).toFixed(1)} kN`, fdX + 40, fdY + 25);
+
+            // Stats
+            const angle_deg = (bridgeAngle * 180 / Math.PI).toFixed(1);
+            const balanced = Math.abs(bridgeTorque - cwTorque) < bridgeTorque * 0.1;
+            document.getElementById('stats').innerHTML = `
+                <div style="margin-top:8px;color:#8A9A5B">Angle: ${angle_deg}&deg;</div>
+                <div style="color:#DDA15E">Speed: ${(Math.abs(angularVel) * 10).toFixed(2)} rad/s</div>
+                <div style="color:${balanced ? '#8A9A5B' : '#BC6C25'};font-size:0.7rem;margin-top:4px">
+                    ${balanced ? 'Well balanced - easy to operate' : p.cwMass < p.bridgeMass * 0.6 ? 'Counterweight too light!' : 'Counterweight too heavy!'}
+                </div>
+                <div style="color:#FEFAE0;opacity:0.5;font-size:0.7rem;margin-top:2px">
+                    Portcullis: ${portcullisY > 0.5 ? 'DOWN' : 'UP'}
+                </div>
+            `;
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 16px sans-serif';
+            ctx.fillText('Drawbridge & Moat Mechanics', W * 0.15, 30);
+
+            requestAnimationFrame(animate);
+        }
+        requestAnimationFrame(animate);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

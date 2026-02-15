@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atomic Clock - Historical Timekeeping</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a1a; overflow: hidden; font-family: 'Georgia', serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 15px 25px;
+            border-radius: 15px; color: #FEFAE0; display: flex; gap: 20px; align-items: center;
+            font-size: 0.85rem; z-index: 100; flex-wrap: wrap; justify-content: center;
+        }
+        .controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .controls input[type="range"] { width: 120px; accent-color: #DDA15E; }
+        .controls .value { color: #DDA15E; font-weight: bold; }
+        .info {
+            position: fixed; top: 10px; right: 10px; color: #FEFAE0; font-size: 0.8rem;
+            background: rgba(0,0,0,0.5); padding: 10px 15px; border-radius: 10px;
+            backdrop-filter: blur(10px); z-index: 100; text-align: right; line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="info" id="info"></div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Microwave Frequency
+            <input type="range" id="freq" min="9192631000" max="9192632500" value="9192631770" step="1">
+            <span class="value" id="freqVal">9,192,631,770 Hz</span>
+        </label>
+        <label>Magnetic Field
+            <input type="range" id="bfield" min="0" max="100" value="5" step="1">
+            <span class="value" id="bVal">5%</span>
+        </label>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const freqSlider = document.getElementById('freq');
+        const bSlider = document.getElementById('bfield');
+        const freqVal = document.getElementById('freqVal');
+        const bVal = document.getElementById('bVal');
+        const infoEl = document.getElementById('info');
+
+        let W, H;
+        let time = 0;
+        let lastTime = 0;
+        let atoms = [];
+        let detectorCount = 0;
+        let detectorHistory = [];
+
+        const RESONANCE_FREQ = 9192631770;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Atom particles flowing through the apparatus
+        function spawnAtom() {
+            atoms.push({
+                x: W * 0.08,
+                y: H * 0.5 + (Math.random() - 0.5) * 40,
+                vx: 1.5 + Math.random() * 0.5,
+                state: Math.random() < 0.5 ? 3 : 4, // F=3 or F=4
+                transitioned: false,
+                detected: false
+            });
+        }
+
+        function drawApparatus() {
+            const tubeY = H * 0.5;
+            const tubeH = 60;
+            const leftX = W * 0.06;
+            const rightX = W * 0.94;
+
+            // Vacuum tube
+            ctx.fillStyle = 'rgba(40, 40, 60, 0.3)';
+            ctx.fillRect(leftX, tubeY - tubeH / 2, rightX - leftX, tubeH);
+            ctx.strokeStyle = 'rgba(138, 154, 91, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(leftX, tubeY - tubeH / 2, rightX - leftX, tubeH);
+
+            // Sections
+            const sections = [
+                { start: 0.06, end: 0.2, label: 'Cs Oven', color: 'rgba(221, 161, 94, 0.15)' },
+                { start: 0.2, end: 0.35, label: 'Magnet A\n(state selection)', color: 'rgba(100, 140, 200, 0.1)' },
+                { start: 0.35, end: 0.65, label: 'Ramsey Cavity\n(microwave)', color: 'rgba(200, 100, 100, 0.1)' },
+                { start: 0.65, end: 0.8, label: 'Magnet B\n(analysis)', color: 'rgba(100, 140, 200, 0.1)' },
+                { start: 0.8, end: 0.94, label: 'Detector', color: 'rgba(138, 154, 91, 0.15)' }
+            ];
+
+            for (const s of sections) {
+                const sx = W * s.start;
+                const sw = W * (s.end - s.start);
+                ctx.fillStyle = s.color;
+                ctx.fillRect(sx, tubeY - tubeH / 2, sw, tubeH);
+
+                // Label
+                ctx.fillStyle = '#8A9A5B';
+                ctx.font = '11px Georgia';
+                ctx.textAlign = 'center';
+                const lines = s.label.split('\n');
+                for (let i = 0; i < lines.length; i++) {
+                    ctx.fillText(lines[i], sx + sw / 2, tubeY - tubeH / 2 - 15 + i * 14);
+                }
+            }
+
+            // Oven (hot source)
+            const ovenX = W * 0.08;
+            ctx.beginPath();
+            ctx.arc(ovenX, tubeY, 20, 0, Math.PI * 2);
+            const ovenGrad = ctx.createRadialGradient(ovenX, tubeY, 0, ovenX, tubeY, 20);
+            ovenGrad.addColorStop(0, 'rgba(255, 150, 50, 0.4)');
+            ovenGrad.addColorStop(1, 'rgba(255, 100, 30, 0.1)');
+            ctx.fillStyle = ovenGrad;
+            ctx.fill();
+
+            // Magnets (blue)
+            drawMagnet(W * 0.2, tubeY, tubeH);
+            drawMagnet(W * 0.65, tubeY, tubeH);
+
+            // Microwave cavity (oscillating field lines)
+            const cavityX = W * 0.5;
+            const freq = parseFloat(freqSlider.value);
+            const detuning = Math.abs(freq - RESONANCE_FREQ);
+            const onResonance = detuning < 100;
+
+            ctx.strokeStyle = onResonance ? 'rgba(255, 100, 100, 0.4)' : 'rgba(255, 100, 100, 0.15)';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < 8; i++) {
+                const waveY = tubeY - tubeH / 2 + (i + 0.5) * tubeH / 8;
+                ctx.beginPath();
+                for (let x = W * 0.35; x < W * 0.65; x += 2) {
+                    const wx = (x - W * 0.35) / (W * 0.3);
+                    const amp = 5 * Math.sin(wx * Math.PI * 8 + time * 20);
+                    if (x === W * 0.35) ctx.moveTo(x, waveY + amp);
+                    else ctx.lineTo(x, waveY + amp);
+                }
+                ctx.stroke();
+            }
+
+            // Detector
+            const detX = W * 0.87;
+            ctx.beginPath();
+            ctx.rect(detX - 15, tubeY - 25, 30, 50);
+            ctx.fillStyle = 'rgba(138, 154, 91, 0.3)';
+            ctx.fill();
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Detector signal
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = 'bold 12px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('DET', detX, tubeY + 3);
+        }
+
+        function drawMagnet(x, y, h) {
+            // North pole
+            ctx.fillStyle = 'rgba(100, 100, 200, 0.3)';
+            ctx.fillRect(x - 5, y - h / 2 - 10, 10, 10);
+            ctx.fillStyle = '#6688CC';
+            ctx.font = '9px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('N', x, y - h / 2 - 3);
+
+            // South pole
+            ctx.fillStyle = 'rgba(200, 100, 100, 0.3)';
+            ctx.fillRect(x - 5, y + h / 2, 10, 10);
+            ctx.fillStyle = '#CC6666';
+            ctx.fillText('S', x, y + h / 2 + 9);
+        }
+
+        function drawAtoms() {
+            const freq = parseFloat(freqSlider.value);
+            const detuning = Math.abs(freq - RESONANCE_FREQ);
+            const transitionProb = Math.exp(-detuning * detuning / (200 * 200)); // Gaussian
+
+            for (let i = atoms.length - 1; i >= 0; i--) {
+                const a = atoms[i];
+                a.x += a.vx;
+
+                // State selection at Magnet A: only F=3 passes
+                if (a.x > W * 0.25 && a.x < W * 0.3 && a.state === 4) {
+                    // F=4 atoms deflected out
+                    a.y += (a.y > H * 0.5 ? 1 : -1) * 0.5;
+                    if (Math.abs(a.y - H * 0.5) > 35) {
+                        atoms.splice(i, 1);
+                        continue;
+                    }
+                }
+
+                // Microwave transition in cavity
+                if (a.x > W * 0.5 && !a.transitioned && a.state === 3) {
+                    if (Math.random() < transitionProb * 0.3) {
+                        a.state = 4;
+                        a.transitioned = true;
+                    }
+                }
+
+                // Magnet B: only F=4 (transitioned) reaches detector
+                if (a.x > W * 0.72 && a.x < W * 0.77 && a.state === 3 && !a.transitioned) {
+                    a.y += (a.y > H * 0.5 ? 1 : -1) * 0.5;
+                    if (Math.abs(a.y - H * 0.5) > 35) {
+                        atoms.splice(i, 1);
+                        continue;
+                    }
+                }
+
+                // Detection
+                if (a.x > W * 0.87 && !a.detected && a.state === 4) {
+                    a.detected = true;
+                    detectorCount++;
+                }
+
+                // Remove if past screen
+                if (a.x > W * 0.95) {
+                    atoms.splice(i, 1);
+                    continue;
+                }
+
+                // Draw atom
+                ctx.beginPath();
+                ctx.arc(a.x, a.y, 3, 0, Math.PI * 2);
+                if (a.state === 3) {
+                    ctx.fillStyle = 'rgba(100, 150, 255, 0.7)'; // F=3 blue
+                } else {
+                    ctx.fillStyle = 'rgba(255, 150, 100, 0.7)'; // F=4 orange
+                }
+                ctx.fill();
+            }
+        }
+
+        function drawResonanceCurve() {
+            const graphX = W * 0.15;
+            const graphY = H * 0.78;
+            const graphW = W * 0.7;
+            const graphH = H * 0.15;
+
+            // Background
+            ctx.fillStyle = 'rgba(20, 20, 30, 0.5)';
+            ctx.fillRect(graphX - 5, graphY - 5, graphW + 10, graphH + 30);
+            ctx.strokeStyle = 'rgba(138, 154, 91, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(graphX - 5, graphY - 5, graphW + 10, graphH + 30);
+
+            // Axes
+            ctx.strokeStyle = 'rgba(254, 250, 224, 0.3)';
+            ctx.beginPath();
+            ctx.moveTo(graphX, graphY + graphH);
+            ctx.lineTo(graphX + graphW, graphY + graphH);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(graphX, graphY);
+            ctx.lineTo(graphX, graphY + graphH);
+            ctx.stroke();
+
+            // Resonance curve (Lorentzian)
+            ctx.beginPath();
+            const center = RESONANCE_FREQ;
+            const width = 200;
+            for (let px = 0; px < graphW; px++) {
+                const f = 9192631000 + (px / graphW) * 1500;
+                const detuning = f - center;
+                const signal = 1 / (1 + (detuning / width) * (detuning / width));
+                const y = graphY + graphH - signal * graphH * 0.9;
+                if (px === 0) ctx.moveTo(graphX + px, y);
+                else ctx.lineTo(graphX + px, y);
+            }
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Current frequency marker
+            const freq = parseFloat(freqSlider.value);
+            const markerX = graphX + ((freq - 9192631000) / 1500) * graphW;
+            ctx.beginPath();
+            ctx.moveTo(markerX, graphY);
+            ctx.lineTo(markerX, graphY + graphH);
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 4]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Signal level
+            const detuning = freq - center;
+            const signal = 1 / (1 + (detuning / width) * (detuning / width));
+            const signalY = graphY + graphH - signal * graphH * 0.9;
+            ctx.beginPath();
+            ctx.arc(markerX, signalY, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+
+            // Labels
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '10px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Detector Signal vs. Microwave Frequency', graphX + graphW / 2, graphY - 12);
+            ctx.fillText('9,192,631,000', graphX, graphY + graphH + 15);
+            ctx.fillText('9,192,632,500', graphX + graphW, graphY + graphH + 15);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fillText('9,192,631,770', graphX + ((RESONANCE_FREQ - 9192631000) / 1500) * graphW, graphY + graphH + 15);
+
+            // Record history
+            detectorHistory.push(signal);
+            if (detectorHistory.length > 200) detectorHistory.shift();
+        }
+
+        function drawEnergyLevels() {
+            const elX = W * 0.05;
+            const elY = H * 0.12;
+            const elW = 120;
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '11px Georgia';
+            ctx.textAlign = 'left';
+            ctx.fillText('Cs-133 Ground State', elX, elY - 10);
+
+            // F=4 level (higher)
+            ctx.strokeStyle = 'rgba(255, 150, 100, 0.6)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(elX, elY + 10);
+            ctx.lineTo(elX + elW, elY + 10);
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(255, 150, 100, 0.8)';
+            ctx.font = '10px Georgia';
+            ctx.fillText('F = 4', elX + elW + 5, elY + 14);
+
+            // F=3 level (lower)
+            ctx.strokeStyle = 'rgba(100, 150, 255, 0.6)';
+            ctx.beginPath();
+            ctx.moveTo(elX, elY + 50);
+            ctx.lineTo(elX + elW, elY + 50);
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(100, 150, 255, 0.8)';
+            ctx.fillText('F = 3', elX + elW + 5, elY + 54);
+
+            // Transition arrow
+            const midX = elX + elW / 2;
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(midX, elY + 48);
+            ctx.lineTo(midX, elY + 12);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Wavy arrow (photon)
+            ctx.beginPath();
+            for (let y = elY + 48; y > elY + 12; y -= 2) {
+                const x = midX + 15 + Math.sin((y - elY) * 0.5) * 5;
+                if (y === elY + 48) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.strokeStyle = 'rgba(221, 161, 94, 0.5)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.fillStyle = 'rgba(221, 161, 94, 0.7)';
+            ctx.font = '9px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('9.192 GHz', midX + 15, elY + 32);
+        }
+
+        function draw(timestamp) {
+            const dt = lastTime ? Math.min((timestamp - lastTime) / 1000, 0.05) : 0.016;
+            lastTime = timestamp;
+            time += dt;
+
+            const freq = parseFloat(freqSlider.value);
+            const bfield = parseFloat(bSlider.value);
+
+            freqVal.textContent = freq.toLocaleString() + ' Hz';
+            bVal.textContent = bfield + '%';
+
+            // Spawn atoms
+            if (Math.random() < 0.3) spawnAtom();
+
+            ctx.fillStyle = '#0a0a1a';
+            ctx.fillRect(0, 0, W, H);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'italic 14px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Cesium-133 Atomic Clock', W / 2, 25);
+            ctx.font = '11px Georgia';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText('The second = 9,192,631,770 periods of the Cs-133 hyperfine transition', W / 2, 42);
+
+            // Draw apparatus
+            drawApparatus();
+
+            // Draw atoms
+            drawAtoms();
+
+            // Energy levels diagram
+            drawEnergyLevels();
+
+            // Resonance curve
+            drawResonanceCurve();
+
+            // Feedback loop indicator
+            const detuning = Math.abs(freq - RESONANCE_FREQ);
+            const onResonance = detuning < 50;
+            ctx.fillStyle = onResonance ? '#8A9A5B' : '#BC6C25';
+            ctx.font = 'bold 12px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText(
+                onResonance ? 'ON RESONANCE - Locked to transition' : 'OFF RESONANCE - Adjust frequency',
+                W / 2, H * 0.65
+            );
+
+            // Info
+            const detuningHz = (freq - RESONANCE_FREQ);
+            const signal = 1 / (1 + (detuningHz / 200) * (detuningHz / 200));
+            infoEl.innerHTML =
+                'Frequency: ' + freq.toLocaleString() + ' Hz<br>' +
+                'Detuning: ' + (detuningHz > 0 ? '+' : '') + detuningHz + ' Hz<br>' +
+                'Signal: ' + (signal * 100).toFixed(1) + '%<br>' +
+                'B-field: ' + bfield + '%<br>' +
+                'Atoms detected: ' + detectorCount + '<br>' +
+                (onResonance ? 'Frequency locked!' : 'Sweep to find resonance');
+
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            freqSlider.value = RESONANCE_FREQ;
+            bSlider.value = 5;
+            atoms = [];
+            detectorCount = 0;
+            detectorHistory = [];
+            time = 0;
+        };
+
+        requestAnimationFrame(draw);
+    })();
+    </script>
+</body>
+</html>

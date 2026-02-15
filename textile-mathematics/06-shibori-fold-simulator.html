@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shibori Fold Simulator - Textile Mathematics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; }
+a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+
+.controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center;
+    background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 12px 20px;
+    border-radius: 16px; border: 1px solid rgba(138,154,91,0.3); z-index: 100;
+}
+.controls label { font-size: 0.85rem; color: #8A9A5B; }
+.controls select, .controls button, .controls input[type=range] {
+    background: rgba(255,255,255,0.1); border: 1px solid rgba(138,154,91,0.4);
+    color: #FEFAE0; padding: 4px 10px; border-radius: 8px; font-size: 0.85rem; cursor: pointer;
+}
+.controls button:hover { background: rgba(138,154,91,0.3); }
+.controls input[type=range] { width: 80px; }
+
+.info-panel {
+    position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7);
+    backdrop-filter: blur(10px); padding: 14px 18px; border-radius: 14px;
+    border: 1px solid rgba(138,154,91,0.3); max-width: 260px; z-index: 100;
+}
+.info-panel h2 { font-size: 1rem; color: #DDA15E; margin-bottom: 6px; }
+.info-panel p { font-size: 0.8rem; line-height: 1.5; opacity: 0.8; }
+.phase-indicator { color: #8A9A5B; font-size: 0.85rem; margin-top: 8px; font-weight: bold; }
+</style>
+</head>
+<body>
+<a href="index.html">&larr; Back</a>
+
+<div class="info-panel">
+    <h2>Shibori Fold Simulator</h2>
+    <p>Simulate Japanese shibori resist-dyeing. Choose a fold technique, then watch dye diffuse through the folded fabric. The fold symmetry determines the final pattern when unfolded.</p>
+    <div class="phase-indicator" id="phaseInfo">Phase: Ready</div>
+</div>
+
+<div class="controls">
+    <label>Technique:
+        <select id="technique">
+            <option value="itajime_square">Itajime (Square)</option>
+            <option value="itajime_triangle">Itajime (Triangle)</option>
+            <option value="kumo">Kumo (Spider)</option>
+            <option value="arashi">Arashi (Storm)</option>
+            <option value="kanoko">Kanoko (Bound)</option>
+            <option value="nui">Nui (Stitched)</option>
+        </select>
+    </label>
+    <label>Dye Color:
+        <select id="dyeColor">
+            <option value="indigo">Indigo</option>
+            <option value="moss">Moss Green</option>
+            <option value="earth">Earth Brown</option>
+            <option value="berry">Berry Red</option>
+        </select>
+    </label>
+    <label>Diffusion: <input type="range" id="diffusion" min="1" max="10" value="5"></label>
+    <button id="dyeBtn">Dye Fabric</button>
+    <button id="unfoldBtn">Unfold</button>
+    <button id="resetBtn">New Fabric</button>
+</div>
+
+<canvas id="canvas"></canvas>
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+const RES = 200;
+let fabric = new Float32Array(RES * RES); // 0 = white, 1 = fully dyed
+let unfolded = null;
+let technique = 'itajime_square';
+let dyeColorName = 'indigo';
+let diffusionRate = 5;
+let phase = 'ready'; // ready, dyeing, unfolded
+let dyeProgress = 0;
+let resistMask = new Float32Array(RES * RES); // 0 = exposed, 1 = fully resisted
+
+const dyeColors = {
+    indigo: [30, 40, 100],
+    moss: [60, 80, 40],
+    earth: [140, 100, 50],
+    berry: [120, 30, 50]
+};
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+function generateResistMask() {
+    resistMask.fill(0);
+    const cx = RES / 2, cy = RES / 2;
+
+    switch(technique) {
+        case 'itajime_square': {
+            // Square accordion fold - grid pattern
+            const foldW = RES / 4;
+            const foldH = RES / 4;
+            for (let y = 0; y < RES; y++) {
+                for (let x = 0; x < RES; x++) {
+                    const fx = x % foldW;
+                    const fy = y % foldH;
+                    const distToEdge = Math.min(fx, foldW - fx, fy, foldH - fy);
+                    resistMask[y * RES + x] = Math.max(0, 1 - distToEdge / (foldW * 0.3));
+                }
+            }
+            break;
+        }
+        case 'itajime_triangle': {
+            // Triangle fold
+            const period = RES / 3;
+            for (let y = 0; y < RES; y++) {
+                for (let x = 0; x < RES; x++) {
+                    const tx = ((x % period) / period) * 2 - 1;
+                    const ty = ((y % period) / period) * 2 - 1;
+                    const triDist = Math.abs(tx) + Math.abs(ty);
+                    resistMask[y * RES + x] = Math.max(0, 1 - (1 - triDist) * 3);
+                }
+            }
+            break;
+        }
+        case 'kumo': {
+            // Spider / pleated circles
+            const numSpiders = 5 + Math.floor(Math.random() * 4);
+            const points = [];
+            for (let i = 0; i < numSpiders; i++) {
+                points.push({
+                    x: 30 + Math.random() * (RES - 60),
+                    y: 30 + Math.random() * (RES - 60),
+                    r: 15 + Math.random() * 25
+                });
+            }
+            for (let y = 0; y < RES; y++) {
+                for (let x = 0; x < RES; x++) {
+                    let maxResist = 0;
+                    for (const p of points) {
+                        const d = Math.sqrt((x - p.x) ** 2 + (y - p.y) ** 2);
+                        const rings = Math.abs(Math.sin(d / p.r * Math.PI * 3));
+                        const resist = d < p.r * 3 ? rings * Math.max(0, 1 - d / (p.r * 3)) : 0;
+                        maxResist = Math.max(maxResist, resist);
+                    }
+                    resistMask[y * RES + x] = maxResist;
+                }
+            }
+            break;
+        }
+        case 'arashi': {
+            // Diagonal wrapping
+            for (let y = 0; y < RES; y++) {
+                for (let x = 0; x < RES; x++) {
+                    const diag = (x + y * 0.7) % 30;
+                    resistMask[y * RES + x] = Math.abs(Math.sin(diag / 30 * Math.PI * 2)) * 0.8;
+                }
+            }
+            break;
+        }
+        case 'kanoko': {
+            // Bound circles in grid
+            const spacing = 25;
+            for (let y = 0; y < RES; y++) {
+                for (let x = 0; x < RES; x++) {
+                    const gx = (x % spacing) - spacing / 2;
+                    const gy = (y % spacing) - spacing / 2;
+                    const d = Math.sqrt(gx * gx + gy * gy);
+                    const ringDist = Math.abs(d - spacing * 0.3);
+                    resistMask[y * RES + x] = Math.max(0, 1 - ringDist / 4);
+                }
+            }
+            break;
+        }
+        case 'nui': {
+            // Stitched lines
+            for (let y = 0; y < RES; y++) {
+                for (let x = 0; x < RES; x++) {
+                    let resist = 0;
+                    // Horizontal stitch lines
+                    const stitchY = y % 40;
+                    if (stitchY < 3) resist = Math.max(resist, 0.9);
+                    // Gather effect
+                    const gatherDist = Math.abs(stitchY - 20);
+                    resist = Math.max(resist, Math.max(0, 1 - gatherDist / 8) * 0.6);
+                    // Vertical stitch lines
+                    const wave = Math.sin(y * 0.1) * 10;
+                    const dx = Math.abs((x + wave) % 50 - 25);
+                    if (dx < 2) resist = Math.max(resist, 0.7);
+                    resistMask[y * RES + x] = resist;
+                }
+            }
+            break;
+        }
+    }
+}
+
+function dyeStep() {
+    const rate = diffusionRate * 0.003;
+    const temp = new Float32Array(RES * RES);
+
+    for (let y = 1; y < RES - 1; y++) {
+        for (let x = 1; x < RES - 1; x++) {
+            const idx = y * RES + x;
+            const resist = resistMask[idx];
+            // Diffusion from neighbors
+            const avg = (fabric[(y-1)*RES+x] + fabric[(y+1)*RES+x] +
+                        fabric[y*RES+x-1] + fabric[y*RES+x+1]) * 0.25;
+            const diff = (avg - fabric[idx]) * rate * (1 - resist * 0.85);
+            temp[idx] = Math.min(1, fabric[idx] + diff);
+        }
+    }
+
+    // Dye from edges (immersed in dye bath)
+    for (let y = 0; y < RES; y++) {
+        const resist0 = resistMask[y * RES];
+        const resistN = resistMask[y * RES + RES - 1];
+        temp[y * RES] = Math.min(1, temp[y * RES] + rate * 0.5 * (1 - resist0 * 0.85));
+        temp[y * RES + RES - 1] = Math.min(1, temp[y * RES + RES - 1] + rate * 0.5 * (1 - resistN * 0.85));
+    }
+    for (let x = 0; x < RES; x++) {
+        const resist0 = resistMask[x];
+        const resistN = resistMask[(RES-1)*RES+x];
+        temp[x] = Math.min(1, temp[x] + rate * 0.5 * (1 - resist0 * 0.85));
+        temp[(RES-1)*RES+x] = Math.min(1, temp[(RES-1)*RES+x] + rate * 0.5 * (1 - resistN * 0.85));
+    }
+
+    fabric = temp;
+}
+
+function generateUnfolded() {
+    unfolded = new Float32Array(RES * RES);
+
+    switch(technique) {
+        case 'itajime_square': {
+            const fW = RES / 4, fH = RES / 4;
+            for (let y = 0; y < RES; y++) {
+                for (let x = 0; x < RES; x++) {
+                    const qx = Math.floor(x / fW);
+                    const qy = Math.floor(y / fH);
+                    let fx = x % fW;
+                    let fy = y % fH;
+                    if (qx % 2 === 1) fx = fW - 1 - fx;
+                    if (qy % 2 === 1) fy = fH - 1 - fy;
+                    const sx = Math.min(RES - 1, Math.floor(fx));
+                    const sy = Math.min(RES - 1, Math.floor(fy));
+                    unfolded[y * RES + x] = fabric[sy * RES + sx];
+                }
+            }
+            break;
+        }
+        case 'itajime_triangle': {
+            for (let y = 0; y < RES; y++) {
+                for (let x = 0; x < RES; x++) {
+                    const period = RES / 3;
+                    let fx = x % period;
+                    let fy = y % period;
+                    const qx = Math.floor(x / period);
+                    const qy = Math.floor(y / period);
+                    if (qx % 2 === 1) fx = period - 1 - fx;
+                    if (qy % 2 === 1) fy = period - 1 - fy;
+                    const sx = Math.min(RES - 1, Math.floor(fx * RES / period));
+                    const sy = Math.min(RES - 1, Math.floor(fy * RES / period));
+                    unfolded[y * RES + x] = fabric[sy * RES + sx];
+                }
+            }
+            break;
+        }
+        default:
+            // For non-folded techniques, just copy
+            unfolded.set(fabric);
+            break;
+    }
+}
+
+function draw() {
+    const w = canvas.width, h = canvas.height;
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, w, h);
+
+    if (phase === 'dyeing') {
+        for (let i = 0; i < 5; i++) dyeStep();
+        dyeProgress = Math.min(1, dyeProgress + 0.002);
+    }
+
+    const displayData = phase === 'unfolded' ? unfolded : fabric;
+    const dc = dyeColors[dyeColorName];
+
+    // Render fabric
+    const fabricSize = Math.min(w - 100, h - 200, 500);
+    const cellSize = fabricSize / RES;
+    const ox = (w - fabricSize) / 2;
+    const oy = (h - fabricSize) / 2 - 20;
+
+    // Create imageData for performance
+    const imgData = ctx.createImageData(RES, RES);
+    for (let y = 0; y < RES; y++) {
+        for (let x = 0; x < RES; x++) {
+            const idx = (y * RES + x) * 4;
+            const dye = displayData[y * RES + x];
+            // White fabric base
+            imgData.data[idx] = Math.floor(240 - dye * (240 - dc[0]));
+            imgData.data[idx + 1] = Math.floor(235 - dye * (235 - dc[1]));
+            imgData.data[idx + 2] = Math.floor(220 - dye * (220 - dc[2]));
+            imgData.data[idx + 3] = 255;
+        }
+    }
+
+    // Scale up the imageData
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = RES;
+    tempCanvas.height = RES;
+    tempCanvas.getContext('2d').putImageData(imgData, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tempCanvas, ox, oy, fabricSize, fabricSize);
+    ctx.imageSmoothingEnabled = true;
+
+    // Fabric border
+    ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(ox, oy, fabricSize, fabricSize);
+
+    // Resist mask overlay (when dyeing)
+    if (phase === 'dyeing') {
+        ctx.globalAlpha = 0.15;
+        for (let y = 0; y < RES; y += 4) {
+            for (let x = 0; x < RES; x += 4) {
+                const resist = resistMask[y * RES + x];
+                if (resist > 0.3) {
+                    ctx.fillStyle = `rgba(255,255,255,${resist * 0.5})`;
+                    ctx.fillRect(ox + x * cellSize, oy + y * cellSize, cellSize * 4, cellSize * 4);
+                }
+            }
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // Phase label
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = '14px monospace';
+    ctx.textAlign = 'center';
+    const label = phase === 'ready' ? 'Folded Fabric (ready for dyeing)' :
+                  phase === 'dyeing' ? `Dyeing... ${(dyeProgress * 100).toFixed(0)}%` :
+                  'Unfolded Result';
+    ctx.fillText(label, w / 2, oy - 10);
+
+    document.getElementById('phaseInfo').textContent = 'Phase: ' + label;
+
+    requestAnimationFrame(draw);
+}
+
+function resetFabric() {
+    fabric = new Float32Array(RES * RES);
+    unfolded = null;
+    phase = 'ready';
+    dyeProgress = 0;
+    generateResistMask();
+}
+
+document.getElementById('technique').addEventListener('change', (e) => {
+    technique = e.target.value;
+    resetFabric();
+});
+
+document.getElementById('dyeColor').addEventListener('change', (e) => { dyeColorName = e.target.value; });
+document.getElementById('diffusion').addEventListener('input', (e) => { diffusionRate = parseInt(e.target.value); });
+
+document.getElementById('dyeBtn').addEventListener('click', () => {
+    if (phase !== 'dyeing') {
+        fabric = new Float32Array(RES * RES);
+        dyeProgress = 0;
+        phase = 'dyeing';
+    }
+});
+
+document.getElementById('unfoldBtn').addEventListener('click', () => {
+    if (phase === 'dyeing') {
+        generateUnfolded();
+        phase = 'unfolded';
+    }
+});
+
+document.getElementById('resetBtn').addEventListener('click', resetFabric);
+
+window.reset = function() {
+    technique = 'itajime_square';
+    dyeColorName = 'indigo';
+    diffusionRate = 5;
+    document.getElementById('technique').value = 'itajime_square';
+    document.getElementById('dyeColor').value = 'indigo';
+    document.getElementById('diffusion').value = 5;
+    resetFabric();
+};
+
+generateResistMask();
+draw();
+</script>
+</body>
+</html>

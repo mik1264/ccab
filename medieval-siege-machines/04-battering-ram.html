@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Battering Ram - Medieval Siege Machines</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px 25px; border-radius: 15px; display: flex; gap: 20px;
+            align-items: center; z-index: 100; flex-wrap: wrap; justify-content: center;
+        }
+        .control-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .control-group label { color: #DDA15E; font-size: 0.75rem; text-transform: uppercase; }
+        .control-group input[type="range"] { width: 100px; accent-color: #8A9A5B; }
+        .control-group .value { color: #FEFAE0; font-size: 0.8rem; font-weight: bold; }
+        button {
+            background: linear-gradient(135deg, #8A9A5B, #606C38); color: #FEFAE0;
+            border: none; padding: 10px 24px; border-radius: 10px; cursor: pointer;
+            font-size: 0.9rem; font-weight: bold;
+        }
+        button:hover { transform: scale(1.05); }
+        .info {
+            position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(10px); padding: 12px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 220px;
+        }
+        .info h3 { color: #DDA15E; margin-bottom: 6px; }
+        .info p { line-height: 1.4; opacity: 0.85; }
+        .meter { margin-top: 8px; }
+        .meter-label { font-size: 0.7rem; opacity: 0.7; margin-bottom: 2px; }
+        .meter-bar { width: 100%; height: 8px; background: #333; border-radius: 4px; overflow: hidden; }
+        .meter-fill { height: 100%; border-radius: 4px; transition: width 0.1s; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h3>Battering Ram</h3>
+        <p>Momentum = mass x velocity. Swing the ram and watch the force transfer to the gate. Multiple hits accumulate damage.</p>
+        <div class="meter">
+            <div class="meter-label">Gate Integrity</div>
+            <div class="meter-bar"><div class="meter-fill" id="gateBar" style="width:100%;background:#8A9A5B"></div></div>
+        </div>
+        <div class="meter" style="margin-top:4px">
+            <div class="meter-label">Impact Force</div>
+            <div class="meter-bar"><div class="meter-fill" id="forceBar" style="width:0%;background:#DDA15E"></div></div>
+        </div>
+        <div id="stats" style="margin-top:8px"></div>
+    </div>
+    <div class="controls">
+        <div class="control-group">
+            <label>Ram Mass (kg)</label>
+            <input type="range" id="ramMass" min="200" max="2000" value="800" step="50">
+            <span class="value" id="ramMassVal">800</span>
+        </div>
+        <div class="control-group">
+            <label>Crew Size</label>
+            <input type="range" id="crewSize" min="4" max="20" value="10" step="1">
+            <span class="value" id="crewSizeVal">10</span>
+        </div>
+        <div class="control-group">
+            <label>Swing Speed</label>
+            <input type="range" id="swingSpeed" min="1" max="10" value="5" step="1">
+            <span class="value" id="swingSpeedVal">5</span>
+        </div>
+        <button id="swingBtn">SWING!</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let state = 'ready';
+        let ramX = 0;
+        let ramVel = 0;
+        let gateHP = 100;
+        let swingPhase = 0;
+        let hitCount = 0;
+        let lastForce = 0;
+        let screenShake = 0;
+        let debris = [];
+        let cracks = [];
+
+        const els = {
+            ramMass: document.getElementById('ramMass'),
+            crewSize: document.getElementById('crewSize'),
+            swingSpeed: document.getElementById('swingSpeed')
+        };
+
+        function getP() {
+            return {
+                ramMass: +els.ramMass.value,
+                crewSize: +els.crewSize.value,
+                swingSpeed: +els.swingSpeed.value
+            };
+        }
+
+        function updateLabels() {
+            document.getElementById('ramMassVal').textContent = els.ramMass.value;
+            document.getElementById('crewSizeVal').textContent = els.crewSize.value;
+            document.getElementById('swingSpeedVal').textContent = els.swingSpeed.value;
+        }
+        Object.values(els).forEach(e => e.addEventListener('input', updateLabels));
+
+        function swing() {
+            if (state !== 'ready' || gateHP <= 0) return;
+            state = 'swinging';
+            swingPhase = 0;
+        }
+
+        document.getElementById('swingBtn').addEventListener('click', swing);
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            state = 'ready'; ramX = 0; gateHP = 100; hitCount = 0; lastForce = 0;
+            screenShake = 0; debris = []; cracks = [];
+            document.getElementById('gateBar').style.width = '100%';
+            document.getElementById('gateBar').style.background = '#8A9A5B';
+            document.getElementById('forceBar').style.width = '0%';
+            document.getElementById('stats').innerHTML = '';
+        });
+
+        window.reset = function() {
+            state = 'ready'; ramX = 0; gateHP = 100; hitCount = 0; lastForce = 0;
+            screenShake = 0; debris = []; cracks = [];
+        };
+
+        function drawShed(baseX, gateX, groundY) {
+            const shedW = gateX - baseX + 20;
+            const shedH = 80;
+            const shedY = groundY - shedH;
+
+            // Roof (peaked)
+            ctx.fillStyle = '#5A4A2A';
+            ctx.beginPath();
+            ctx.moveTo(baseX - 10, shedY);
+            ctx.lineTo(baseX + shedW / 2, shedY - 25);
+            ctx.lineTo(baseX + shedW + 10, shedY);
+            ctx.closePath();
+            ctx.fill();
+
+            // Wet hides on roof (protection from fire)
+            ctx.fillStyle = 'rgba(80,70,50,0.6)';
+            ctx.fillRect(baseX - 5, shedY - 5, shedW + 10, 8);
+
+            // Walls
+            ctx.fillStyle = '#4A3A1A';
+            ctx.fillRect(baseX - 10, shedY, 8, shedH);
+            ctx.fillRect(baseX + shedW + 2, shedY, 8, shedH);
+
+            // Wheels
+            ctx.strokeStyle = '#5A4A2A';
+            ctx.lineWidth = 3;
+            [baseX, baseX + shedW].forEach(wx => {
+                ctx.beginPath();
+                ctx.arc(wx, groundY, 12, 0, Math.PI * 2);
+                ctx.stroke();
+            });
+        }
+
+        function drawRam(baseX, groundY, p) {
+            const ramLen = 150 + p.ramMass / 10;
+            const ramY = groundY - 40;
+            const rx = baseX + ramX;
+
+            // Suspension ropes
+            ctx.strokeStyle = '#A08050';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 4; i++) {
+                const ropeX = rx + 20 + i * (ramLen - 40) / 3;
+                ctx.beginPath();
+                ctx.moveTo(ropeX, ramY - 35);
+                ctx.lineTo(ropeX, ramY - 5);
+                ctx.stroke();
+            }
+
+            // Ram log
+            ctx.fillStyle = '#7B5B2A';
+            ctx.beginPath();
+            ctx.roundRect(rx, ramY - 8, ramLen, 16, 5);
+            ctx.fill();
+
+            // Metal bands
+            ctx.fillStyle = '#555';
+            for (let i = 0; i < 5; i++) {
+                ctx.fillRect(rx + 15 + i * ramLen / 5, ramY - 9, 4, 18);
+            }
+
+            // Iron head
+            ctx.fillStyle = '#666';
+            ctx.beginPath();
+            ctx.moveTo(rx + ramLen + 15, ramY);
+            ctx.lineTo(rx + ramLen, ramY - 10);
+            ctx.lineTo(rx + ramLen, ramY + 10);
+            ctx.closePath();
+            ctx.fill();
+
+            // Crew (stick figures)
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < p.crewSize; i++) {
+                const cx = rx + 20 + i * (ramLen - 30) / p.crewSize;
+                const side = i % 2 === 0 ? -1 : 1;
+                const cy = ramY + side * 20;
+                // Body
+                ctx.beginPath();
+                ctx.moveTo(cx, cy - 8);
+                ctx.lineTo(cx, cy + 8);
+                ctx.stroke();
+                // Head
+                ctx.beginPath();
+                ctx.arc(cx, cy - 12, 4, 0, Math.PI * 2);
+                ctx.stroke();
+                // Arms reaching to ram
+                ctx.beginPath();
+                ctx.moveTo(cx - 5, cy - 2);
+                ctx.lineTo(cx + 5, ramY);
+                ctx.stroke();
+            }
+
+            return { ramTipX: rx + ramLen + 15 };
+        }
+
+        function drawGate(gateX, groundY) {
+            const gateW = 50;
+            const gateH = 100;
+
+            // Castle wall
+            ctx.fillStyle = '#5a5a5a';
+            ctx.fillRect(gateX + gateW, groundY - 150, 60, 150);
+            ctx.fillRect(gateX - 30, groundY - 150, 30, 150);
+
+            // Merlons
+            for (let i = 0; i < 3; i++) {
+                ctx.fillRect(gateX + gateW + i * 22, groundY - 165, 14, 15);
+                ctx.fillRect(gateX - 30 + i * 12, groundY - 165, 8, 15);
+            }
+
+            // Gate arch
+            ctx.fillStyle = '#4a4a4a';
+            ctx.beginPath();
+            ctx.moveTo(gateX, groundY);
+            ctx.lineTo(gateX, groundY - gateH + 20);
+            ctx.arc(gateX + gateW / 2, groundY - gateH + 20, gateW / 2, Math.PI, 0);
+            ctx.lineTo(gateX + gateW, groundY);
+            ctx.closePath();
+            ctx.fill();
+
+            // Wooden gate
+            const gateColor = gateHP > 60 ? '#6B4B2A' : gateHP > 30 ? '#7B4B1A' : '#8B3B0A';
+            ctx.fillStyle = gateColor;
+            ctx.fillRect(gateX + 3, groundY - gateH + 25, gateW - 6, gateH - 25);
+
+            // Planks
+            ctx.strokeStyle = '#5A3A1A';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < 5; i++) {
+                const px = gateX + 3 + i * (gateW - 6) / 5;
+                ctx.beginPath();
+                ctx.moveTo(px, groundY - gateH + 25);
+                ctx.lineTo(px, groundY);
+                ctx.stroke();
+            }
+
+            // Iron studs
+            ctx.fillStyle = '#555';
+            for (let r = 0; r < 4; r++) {
+                for (let c = 0; c < 3; c++) {
+                    ctx.beginPath();
+                    ctx.arc(gateX + 12 + c * 15, groundY - gateH + 40 + r * 18, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // Cracks
+            ctx.strokeStyle = '#2a1a0a';
+            ctx.lineWidth = 2;
+            cracks.forEach(c => {
+                ctx.beginPath();
+                ctx.moveTo(c.x, c.y);
+                c.segments.forEach(s => ctx.lineTo(c.x + s.dx, c.y + s.dy));
+                ctx.stroke();
+            });
+
+            return { gateX, gateW, gateH };
+        }
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+
+            const p = getP();
+            const groundY = H * 0.78;
+            const baseX = W * 0.15;
+            const gateX = W * 0.7;
+
+            // Screen shake
+            ctx.save();
+            if (screenShake > 0) {
+                ctx.translate(
+                    (Math.random() - 0.5) * screenShake,
+                    (Math.random() - 0.5) * screenShake
+                );
+                screenShake *= 0.9;
+                if (screenShake < 0.5) screenShake = 0;
+            }
+
+            // Sky
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(-10, -10, W + 20, H + 20);
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.7);
+            skyGrad.addColorStop(0, '#1a1020');
+            skyGrad.addColorStop(1, '#2a2030');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(-10, -10, W + 20, H * 0.7 + 10);
+
+            // Ground
+            ctx.fillStyle = '#4a5a2a';
+            ctx.fillRect(-10, groundY, W + 20, H - groundY + 10);
+
+            // Physics
+            if (state === 'swinging') {
+                swingPhase += dt * p.swingSpeed * 1.5;
+                const maxSwing = 80 + p.crewSize * 5;
+
+                if (swingPhase < Math.PI) {
+                    ramX = -20 + Math.sin(swingPhase) * maxSwing;
+                } else {
+                    // Check impact
+                    const ramLen = 150 + p.ramMass / 10;
+                    const ramTipX = baseX + ramX + ramLen + 15;
+
+                    if (ramTipX >= gateX) {
+                        // Impact!
+                        const velocity = p.swingSpeed * 0.5 + p.crewSize * 0.2;
+                        const momentum = p.ramMass * velocity;
+                        const force = momentum * 0.1;
+                        lastForce = force;
+                        const damage = force * 0.02;
+                        gateHP = Math.max(0, gateHP - damage);
+                        hitCount++;
+                        screenShake = Math.min(force * 0.3, 20);
+
+                        // Add crack
+                        if (Math.random() < 0.7) {
+                            const crack = {
+                                x: gateX + 10 + Math.random() * 30,
+                                y: groundY - 80 + Math.random() * 60,
+                                segments: []
+                            };
+                            let dx = 0, dy = 0;
+                            for (let s = 0; s < 3 + Math.random() * 4; s++) {
+                                dx += (Math.random() - 0.5) * 15;
+                                dy += (Math.random() - 0.5) * 15;
+                                crack.segments.push({ dx, dy });
+                            }
+                            cracks.push(crack);
+                        }
+
+                        // Debris
+                        for (let i = 0; i < 5; i++) {
+                            debris.push({
+                                x: gateX + 25,
+                                y: groundY - 50 + Math.random() * 40,
+                                vx: 2 + Math.random() * 5,
+                                vy: -3 - Math.random() * 5,
+                                life: 1, size: 2 + Math.random() * 3
+                            });
+                        }
+
+                        state = 'recoil';
+                        ramVel = -3;
+                    }
+                }
+            }
+
+            if (state === 'recoil') {
+                ramX += ramVel;
+                ramVel *= 0.92;
+                if (Math.abs(ramVel) < 0.1) {
+                    ramX = 0;
+                    state = 'ready';
+                }
+            }
+
+            // Debris
+            debris = debris.filter(d => {
+                d.x += d.vx;
+                d.y += d.vy;
+                d.vy += 0.3;
+                d.life -= dt;
+                if (d.life > 0) {
+                    ctx.fillStyle = `rgba(100,80,50,${d.life})`;
+                    ctx.fillRect(d.x, d.y, d.size, d.size);
+                }
+                return d.life > 0;
+            });
+
+            drawGate(gateX, groundY);
+            drawShed(baseX, gateX, groundY);
+            drawRam(baseX, groundY, p);
+
+            // Gate broken effect
+            if (gateHP <= 0) {
+                ctx.fillStyle = 'rgba(221,161,94,0.3)';
+                ctx.font = 'bold 36px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('GATE BREACHED!', W / 2, H / 3);
+                ctx.textAlign = 'left';
+            }
+
+            // UI Updates
+            const gateBar = document.getElementById('gateBar');
+            gateBar.style.width = gateHP + '%';
+            gateBar.style.background = gateHP > 60 ? '#8A9A5B' : gateHP > 30 ? '#DDA15E' : '#BC6C25';
+
+            const forceBar = document.getElementById('forceBar');
+            forceBar.style.width = Math.min(100, lastForce * 0.5) + '%';
+
+            const statsDiv = document.getElementById('stats');
+            statsDiv.innerHTML = `
+                <div style="color:#8A9A5B">Hits: ${hitCount}</div>
+                <div style="color:#DDA15E">Force: ${lastForce.toFixed(0)} N</div>
+                <div style="color:#FEFAE0;opacity:0.6">Momentum: ${(p.ramMass * p.swingSpeed * 0.5).toFixed(0)} kg m/s</div>
+            `;
+
+            ctx.restore();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 16px sans-serif';
+            ctx.fillText('Battering Ram Simulator', W * 0.15, 40);
+
+            requestAnimationFrame(animate);
+        }
+        requestAnimationFrame(animate);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

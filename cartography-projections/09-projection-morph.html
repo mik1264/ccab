@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Projection Morphing -- Smooth Transitions</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(254,250,224,0.12); backdrop-filter: blur(10px);
+            color: #FEFAE0; padding: 12px 24px; border-radius: 12px;
+            font-size: 0.85rem; text-align: center; pointer-events: none; z-index: 100;
+        }
+        .controls {
+            position: fixed; top: 10px; right: 10px; z-index: 100;
+            display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+        }
+        .controls label {
+            color: #FEFAE0; font-size: 0.8rem; display: flex; align-items: center; gap: 8px;
+            background: rgba(254,250,224,0.1); backdrop-filter: blur(10px);
+            padding: 6px 12px; border-radius: 8px;
+        }
+        .controls input[type=range] { width: 140px; accent-color: #8A9A5B; }
+        .controls button {
+            background: rgba(138,154,91,0.3); border: 1px solid #8A9A5B; color: #FEFAE0;
+            padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.8rem;
+        }
+        .controls button:hover { background: rgba(138,154,91,0.5); }
+        .proj-label {
+            position: fixed; top: 55px; left: 50%; transform: translateX(-50%);
+            color: #DDA15E; font-size: 1.2rem; z-index: 100; text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="controls">
+        <label>Blend <input type="range" id="blend" min="0" max="1000" value="0"> <span id="blendVal">0%</span></label>
+        <label>Speed <input type="range" id="speed" min="0" max="100" value="30"></label>
+        <button id="autoBtn">Auto-cycle</button>
+    </div>
+    <div id="projLabel" class="proj-label">Equirectangular</div>
+    <div class="info">Watch projections smoothly morph into each other. Drag the blend slider or let it auto-cycle.</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H, cx, cy, scale;
+        let autoCycle = false;
+        let time = 0;
+
+        const blendSlider = document.getElementById('blend');
+        const blendVal = document.getElementById('blendVal');
+        const speedSlider = document.getElementById('speed');
+        const autoBtn = document.getElementById('autoBtn');
+        const projLabel = document.getElementById('projLabel');
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+            cx = W / 2;
+            cy = H / 2;
+            scale = Math.min(W * 0.38, H * 0.4);
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        autoBtn.addEventListener('click', () => {
+            autoCycle = !autoCycle;
+            autoBtn.textContent = autoCycle ? 'Manual' : 'Auto-cycle';
+            autoBtn.style.background = autoCycle ? 'rgba(221,161,94,0.3)' : 'rgba(138,154,91,0.3)';
+        });
+
+        // Projection functions - all return normalized coords [-1..1]
+        const robTable = [
+            [0,1.0000,0.0000],[5,0.9986,0.0620],[10,0.9954,0.1240],[15,0.9900,0.1860],
+            [20,0.9822,0.2480],[25,0.9730,0.3100],[30,0.9600,0.3720],[35,0.9427,0.4340],
+            [40,0.9216,0.4958],[45,0.8962,0.5571],[50,0.8679,0.6176],[55,0.8350,0.6769],
+            [60,0.7986,0.7346],[65,0.7597,0.7903],[70,0.7186,0.8435],[75,0.6732,0.8936],
+            [80,0.6213,0.9394],[85,0.5722,0.9761],[90,0.5322,1.0000]
+        ];
+
+        function interpRob(absLat) {
+            const i = Math.min(Math.floor(absLat / 5), 17);
+            const f = (absLat - i * 5) / 5;
+            return { plen: robTable[i][1] + f * (robTable[i+1][1] - robTable[i][1]), pdfe: robTable[i][2] + f * (robTable[i+1][2] - robTable[i][2]) };
+        }
+
+        function solveTheta(lat) {
+            const target = Math.PI * Math.sin(lat * Math.PI / 180);
+            let theta = lat * Math.PI / 180;
+            for (let i = 0; i < 15; i++) {
+                const d = -(2 * theta + Math.sin(2 * theta) - target) / (2 + 2 * Math.cos(2 * theta));
+                theta += d;
+                if (Math.abs(d) < 1e-10) break;
+            }
+            return theta;
+        }
+
+        const projections = {
+            equirectangular: (lon, lat) => ({ x: lon / 180, y: lat / 90 }),
+            mercator: (lon, lat) => {
+                const clamped = Math.max(-82, Math.min(82, lat));
+                const r = clamped * Math.PI / 180;
+                return { x: lon / 180, y: Math.log(Math.tan(Math.PI / 4 + r / 2)) / Math.PI };
+            },
+            robinson: (lon, lat) => {
+                const { plen, pdfe } = interpRob(Math.abs(lat));
+                return { x: plen * lon / 180, y: Math.sign(lat) * pdfe * 0.5072 };
+            },
+            mollweide: (lon, lat) => {
+                const theta = solveTheta(lat);
+                return {
+                    x: (2 * Math.SQRT2 / Math.PI) * (lon * Math.PI / 180) * Math.cos(theta),
+                    y: Math.SQRT2 * Math.sin(theta)
+                };
+            },
+            sinusoidal: (lon, lat) => {
+                const r = lat * Math.PI / 180;
+                return { x: (lon * Math.PI / 180) * Math.cos(r) / Math.PI, y: r / (Math.PI / 2) * 0.5 };
+            }
+        };
+
+        const projNames = ['equirectangular', 'mercator', 'robinson', 'mollweide', 'sinusoidal'];
+
+        function lerp(a, b, t) { return a + (b - a) * t; }
+
+        function getBlendedPoint(lon, lat, t) {
+            const totalSegments = projNames.length;
+            const segment = Math.min(Math.floor(t * totalSegments), totalSegments - 1);
+            const localT = (t * totalSegments) - segment;
+            const from = projNames[segment];
+            const to = projNames[(segment + 1) % totalSegments];
+            const p1 = projections[from](lon, lat);
+            const p2 = projections[to](lon, lat);
+            return { x: lerp(p1.x, p2.x, localT), y: lerp(p1.y, p2.y, localT) };
+        }
+
+        function getCurrentProjName(t) {
+            const totalSegments = projNames.length;
+            const segment = Math.min(Math.floor(t * totalSegments), totalSegments - 1);
+            const localT = (t * totalSegments) - segment;
+            const from = projNames[segment];
+            const to = projNames[(segment + 1) % totalSegments];
+            if (localT < 0.1) return from;
+            if (localT > 0.9) return to;
+            return from + ' → ' + to;
+        }
+
+        function drawFrame(t) {
+            // Grid
+            ctx.strokeStyle = 'rgba(254,250,224,0.1)';
+            ctx.lineWidth = 0.5;
+            for (let lon = -180; lon <= 180; lon += 30) {
+                ctx.beginPath();
+                for (let lat = -85; lat <= 85; lat += 2) {
+                    const p = getBlendedPoint(lon, lat, t);
+                    const x = cx + p.x * scale, y = cy - p.y * scale;
+                    if (lat === -85) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+            for (let lat = -80; lat <= 80; lat += 20) {
+                ctx.beginPath();
+                for (let lon = -180; lon <= 180; lon += 2) {
+                    const p = getBlendedPoint(lon, lat, t);
+                    const x = cx + p.x * scale, y = cy - p.y * scale;
+                    if (lon === -180) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+
+            // Landmasses
+            const continents = [
+                [[-130,50],[-125,55],[-120,60],[-140,65],[-165,65],[-150,60],[-125,50],[-115,32],[-105,25],[-97,26],[-90,30],[-82,25],[-80,30],[-75,35],[-70,42],[-60,47],[-65,60],[-80,65],[-130,70],[-145,65],[-130,50]],
+                [[-80,10],[-60,5],[-35,-5],[-38,-15],[-57,-38],[-75,-48],[-72,-35],[-77,-2],[-80,10]],
+                [[-15,12],[-10,25],[0,35],[25,30],[42,2],[28,-33],[10,-5],[-10,7],[-15,12]],
+                [[28,41],[55,25],[80,10],[100,15],[120,25],[140,40],[145,45],[110,45],[75,35],[55,45],[60,65],[120,70],[170,65]],
+                [[115,-10],[145,-15],[148,-35],[125,-30],[115,-10]]
+            ];
+            ctx.fillStyle = 'rgba(138,154,91,0.2)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+            ctx.lineWidth = 1.2;
+            for (const c of continents) {
+                ctx.beginPath();
+                for (let i = 0; i < c.length; i++) {
+                    const p = getBlendedPoint(c[i][0], c[i][1], t);
+                    const x = cx + p.x * scale, y = cy - p.y * scale;
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                }
+                ctx.closePath(); ctx.fill(); ctx.stroke();
+            }
+
+            // Outline
+            ctx.beginPath();
+            ctx.strokeStyle = 'rgba(138,154,91,0.6)';
+            ctx.lineWidth = 2;
+            for (let lat = -90; lat <= 90; lat++) {
+                const p = getBlendedPoint(-180, lat, t);
+                const x = cx + p.x * scale, y = cy - p.y * scale;
+                if (lat === -90) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            for (let lat = 90; lat >= -90; lat--) {
+                const p = getBlendedPoint(180, lat, t);
+                const x = cx + p.x * scale, y = cy - p.y * scale;
+                ctx.lineTo(x, y);
+            }
+            ctx.closePath(); ctx.stroke();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            if (autoCycle) {
+                time += parseFloat(speedSlider.value) * 0.00003;
+                if (time >= 1) time -= 1;
+                blendSlider.value = Math.round(time * 1000);
+            } else {
+                time = parseFloat(blendSlider.value) / 1000;
+            }
+
+            blendVal.textContent = Math.round(time * 100) + '%';
+            projLabel.textContent = getCurrentProjName(time).replace(/\b\w/g, c => c.toUpperCase());
+
+            drawFrame(time);
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            autoCycle = false;
+            time = 0;
+            blendSlider.value = 0;
+            speedSlider.value = 30;
+            autoBtn.textContent = 'Auto-cycle';
+        };
+
+        draw();
+    })();
+    </script>
+</body>
+</html>

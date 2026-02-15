@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Foucault Pendulum - Historical Timekeeping</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Georgia', serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 15px 25px;
+            border-radius: 15px; color: #FEFAE0; display: flex; gap: 20px; align-items: center;
+            font-size: 0.85rem; z-index: 100;
+        }
+        .controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .controls input[type="range"] { width: 120px; accent-color: #DDA15E; }
+        .controls .value { color: #DDA15E; font-weight: bold; }
+        .controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 8px 16px;
+            border-radius: 8px; cursor: pointer; font-family: inherit;
+        }
+        .info {
+            position: fixed; top: 10px; right: 10px; color: #FEFAE0; font-size: 0.8rem;
+            background: rgba(0,0,0,0.5); padding: 10px 15px; border-radius: 10px;
+            backdrop-filter: blur(10px); z-index: 100; text-align: right; line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="info" id="info"></div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Latitude
+            <input type="range" id="latitude" min="0" max="90" value="48" step="1">
+            <span class="value" id="latVal">48&deg;N (Paris)</span>
+        </label>
+        <label>Time Scale
+            <input type="range" id="timeScale" min="1" max="500" value="100" step="10">
+            <span class="value" id="tsVal">100x</span>
+        </label>
+        <button id="resetBtn">Reset</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const latSlider = document.getElementById('latitude');
+        const tsSlider = document.getElementById('timeScale');
+        const resetBtn = document.getElementById('resetBtn');
+        const latVal = document.getElementById('latVal');
+        const tsVal = document.getElementById('tsVal');
+        const infoEl = document.getElementById('info');
+
+        let W, H;
+        let pendX = 0, pendY = 0;
+        let pendVX = 0, pendVY = 0;
+        let precessionAngle = 0;
+        let time = 0;
+        let lastTime = 0;
+        let trailPoints = [];
+        let pegs = [];
+        let knockedPegs = new Set();
+
+        const EARTH_OMEGA = 2 * Math.PI / 86400; // rad/s (sidereal day)
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+            initPegs();
+        }
+
+        function initPegs() {
+            pegs = [];
+            knockedPegs = new Set();
+            const cx = W / 2;
+            const cy = H / 2;
+            const pegR = Math.min(W, H) * 0.28;
+            const numPegs = 36;
+            for (let i = 0; i < numPegs; i++) {
+                const a = (i / numPegs) * Math.PI * 2;
+                pegs.push({
+                    x: cx + Math.cos(a) * pegR,
+                    y: cy + Math.sin(a) * pegR,
+                    angle: a,
+                    standing: true
+                });
+            }
+        }
+
+        resize();
+        window.addEventListener('resize', resize);
+
+        function initPendulum() {
+            const amp = Math.min(W, H) * 0.22;
+            pendX = amp;
+            pendY = 0;
+            pendVX = 0;
+            pendVY = 0;
+            precessionAngle = 0;
+            time = 0;
+            trailPoints = [];
+            knockedPegs = new Set();
+            pegs.forEach(p => p.standing = true);
+        }
+        initPendulum();
+
+        function drawFloor(cx, cy) {
+            const floorR = Math.min(W, H) * 0.35;
+
+            // Floor circle
+            ctx.beginPath();
+            ctx.arc(cx, cy, floorR, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(50, 45, 40, 0.5)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(138, 154, 91, 0.3)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Compass markings
+            const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+            for (let i = 0; i < 8; i++) {
+                const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
+                const r1 = floorR * 0.9;
+                const r2 = floorR * 0.98;
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+                ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
+                ctx.strokeStyle = i % 2 === 0 ? '#DDA15E' : 'rgba(221, 161, 94, 0.4)';
+                ctx.lineWidth = i % 2 === 0 ? 2 : 1;
+                ctx.stroke();
+
+                ctx.fillStyle = i % 2 === 0 ? '#DDA15E' : 'rgba(221, 161, 94, 0.5)';
+                ctx.font = i % 2 === 0 ? 'bold 14px Georgia' : '10px Georgia';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(dirs[i], cx + Math.cos(a) * (floorR + 18), cy + Math.sin(a) * (floorR + 18));
+            }
+
+            // Degree markings
+            for (let i = 0; i < 360; i += 10) {
+                const a = (i / 360) * Math.PI * 2 - Math.PI / 2;
+                const r1 = floorR * 0.95;
+                const r2 = floorR * 0.98;
+                ctx.beginPath();
+                ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+                ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
+                ctx.strokeStyle = 'rgba(138, 154, 91, 0.2)';
+                ctx.lineWidth = 0.5;
+                ctx.stroke();
+            }
+        }
+
+        function drawPegs(cx, cy) {
+            const bobWorldX = cx + pendX;
+            const bobWorldY = cy + pendY;
+
+            for (let i = 0; i < pegs.length; i++) {
+                const p = pegs[i];
+                if (!p.standing) continue;
+
+                // Check if pendulum knocks this peg
+                const dx = bobWorldX - p.x;
+                const dy = bobWorldY - p.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 20 && !knockedPegs.has(i)) {
+                    p.standing = false;
+                    knockedPegs.add(i);
+                }
+
+                if (p.standing) {
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                    ctx.fillStyle = '#BC6C25';
+                    ctx.fill();
+                    // Small stick
+                    ctx.beginPath();
+                    ctx.moveTo(p.x, p.y);
+                    ctx.lineTo(p.x, p.y - 12);
+                    ctx.strokeStyle = '#BC6C25';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                } else {
+                    // Knocked over peg
+                    const fallAngle = p.angle + Math.PI;
+                    ctx.beginPath();
+                    ctx.moveTo(p.x, p.y);
+                    ctx.lineTo(p.x + Math.cos(fallAngle) * 12, p.y + Math.sin(fallAngle) * 12);
+                    ctx.strokeStyle = 'rgba(188, 108, 37, 0.4)';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function draw(timestamp) {
+            const dt = lastTime ? Math.min((timestamp - lastTime) / 1000, 0.05) : 0.016;
+            lastTime = timestamp;
+
+            const lat = parseFloat(latSlider.value);
+            const timeScale = parseFloat(tsSlider.value);
+            const latR = lat * Math.PI / 180;
+
+            const locations = {
+                0: 'Equator', 30: 'Cairo', 45: 'Milan', 48: 'Paris',
+                51: 'London', 60: 'Helsinki', 90: 'North Pole'
+            };
+            const nearestLoc = Object.keys(locations).reduce((a, b) =>
+                Math.abs(b - lat) < Math.abs(a - lat) ? b : a
+            );
+            latVal.textContent = lat + '\u00B0N' + (locations[nearestLoc] ? ' (' + locations[nearestLoc] + ')' : '');
+            tsVal.textContent = timeScale + 'x';
+
+            // Physics
+            const scaledDt = dt * timeScale;
+            time += scaledDt;
+
+            const pendLen = 67; // effective length for period calculation
+            const omega0 = Math.sqrt(9.81 / pendLen);
+            const omegaZ = EARTH_OMEGA * Math.sin(latR); // precession rate
+
+            // Simulate pendulum with Coriolis effect
+            const substeps = 20;
+            const subDt = scaledDt / substeps;
+            for (let s = 0; s < substeps; s++) {
+                // Restoring force (simple harmonic)
+                const ax = -omega0 * omega0 * pendX;
+                const ay = -omega0 * omega0 * pendY;
+
+                // Coriolis acceleration
+                const corX = 2 * omegaZ * pendVY;
+                const corY = -2 * omegaZ * pendVX;
+
+                // Light damping
+                const dampX = -0.001 * pendVX;
+                const dampY = -0.001 * pendVY;
+
+                pendVX += (ax + corX + dampX) * subDt;
+                pendVY += (ay + corY + dampY) * subDt;
+                pendX += pendVX * subDt;
+                pendY += pendVY * subDt;
+            }
+
+            precessionAngle = omegaZ * time;
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const cx = W / 2;
+            const cy = H / 2;
+
+            // Floor and compass
+            drawFloor(cx, cy);
+
+            // Trail (showing precession)
+            const worldBobX = cx + pendX;
+            const worldBobY = cy + pendY;
+            trailPoints.push({ x: worldBobX, y: worldBobY });
+            if (trailPoints.length > 500) trailPoints.shift();
+
+            if (trailPoints.length > 2) {
+                for (let i = 1; i < trailPoints.length; i++) {
+                    const alpha = i / trailPoints.length;
+                    ctx.beginPath();
+                    ctx.moveTo(trailPoints[i - 1].x, trailPoints[i - 1].y);
+                    ctx.lineTo(trailPoints[i].x, trailPoints[i].y);
+                    ctx.strokeStyle = `rgba(221, 161, 94, ${alpha * 0.3})`;
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            }
+
+            // Pegs
+            drawPegs(cx, cy);
+
+            // Pendulum wire (from ceiling)
+            ctx.beginPath();
+            ctx.moveTo(cx, 0);
+            ctx.lineTo(worldBobX, worldBobY);
+            ctx.strokeStyle = 'rgba(200, 200, 200, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Ceiling mount
+            ctx.beginPath();
+            ctx.arc(cx, 5, 8, 0, Math.PI * 2);
+            ctx.fillStyle = '#8A6B3E';
+            ctx.fill();
+
+            // Bob
+            ctx.beginPath();
+            ctx.arc(worldBobX, worldBobY, 12, 0, Math.PI * 2);
+            const bobGrad = ctx.createRadialGradient(worldBobX - 2, worldBobY - 2, 0, worldBobX, worldBobY, 12);
+            bobGrad.addColorStop(0, '#DDA15E');
+            bobGrad.addColorStop(1, '#8A6B3E');
+            ctx.fillStyle = bobGrad;
+            ctx.fill();
+            ctx.strokeStyle = '#BC6C25';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Bob shadow on floor
+            ctx.beginPath();
+            ctx.ellipse(worldBobX, worldBobY + 5, 8, 3, 0, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+            ctx.fill();
+
+            // Swing plane indicator
+            const planeAngle = Math.atan2(pendY, pendX);
+            const planeLen = Math.min(W, H) * 0.25;
+            ctx.beginPath();
+            ctx.moveTo(cx - Math.cos(planeAngle) * planeLen, cy - Math.sin(planeAngle) * planeLen);
+            ctx.lineTo(cx + Math.cos(planeAngle) * planeLen, cy + Math.sin(planeAngle) * planeLen);
+            ctx.strokeStyle = 'rgba(138, 154, 91, 0.2)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'italic 14px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Foucault Pendulum - Paris, 1851', cx, H - 20);
+
+            // Info
+            const precDeg = (precessionAngle * 180 / Math.PI) % 360;
+            const precRate = (omegaZ * 180 / Math.PI * 3600).toFixed(2); // deg/hr
+            const fullRotation = lat === 0 ? 'Never' : (24 / Math.sin(latR)).toFixed(1) + ' hours';
+            const elapsedHrs = (time / 3600).toFixed(1);
+
+            infoEl.innerHTML =
+                'Latitude: ' + lat + '\u00B0N<br>' +
+                'Precession: ' + precDeg.toFixed(1) + '\u00B0<br>' +
+                'Rate: ' + precRate + '\u00B0/hr<br>' +
+                'Full rotation: ' + fullRotation + '<br>' +
+                'Elapsed: ' + elapsedHrs + ' hrs<br>' +
+                'Pegs toppled: ' + knockedPegs.size + '/' + pegs.length + '<br>' +
+                '\u03A9\u2099 = \u03A9\u00B7sin(\u03C6)';
+
+            requestAnimationFrame(draw);
+        }
+
+        resetBtn.addEventListener('click', () => {
+            initPendulum();
+        });
+
+        latSlider.addEventListener('input', () => {
+            initPendulum();
+        });
+
+        window.reset = function() {
+            latSlider.value = 48;
+            tsSlider.value = 100;
+            initPendulum();
+        };
+
+        requestAnimationFrame(draw);
+    })();
+    </script>
+</body>
+</html>

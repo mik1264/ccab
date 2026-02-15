@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Overtone Series Explorer - Wind Instrument Physics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; }
+a.back-link { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+a.back-link:hover { color: #DDA15E; }
+
+.controls {
+    position: fixed; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(26,26,46,0.92); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 16px; min-width: 240px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #DDA15E; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+.controls label { display: block; font-size: 12px; color: #8A9A5B; margin-top: 6px; }
+.controls input[type=range] { width: 100%; margin: 3px 0; accent-color: #8A9A5B; }
+.controls .value { font-size: 11px; color: #8A9A5B; text-align: right; }
+.harmonic-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.harmonic-row label { margin: 0; flex: 1; font-size: 11px; }
+.harmonic-row input[type=range] { flex: 2; }
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 12px; border: none; border-radius: 8px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+.btn.active { background: #DDA15E; color: #1a1a2e; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Overtone Series</h3>
+    <label>Fundamental: <span id="fundVal" class="value">220 Hz (A3)</span></label>
+    <input type="range" id="fundamental" min="55" max="880" value="220" step="1">
+    <div style="margin-top:8px; font-size:11px; color:#DDA15E;">Harmonic Amplitudes:</div>
+    <div class="harmonic-row"><label>1 (fund)</label><input type="range" class="harm-slider" data-n="0" min="0" max="100" value="100"></div>
+    <div class="harmonic-row"><label>2 (oct)</label><input type="range" class="harm-slider" data-n="1" min="0" max="100" value="50"></div>
+    <div class="harmonic-row"><label>3 (5th)</label><input type="range" class="harm-slider" data-n="2" min="0" max="100" value="33"></div>
+    <div class="harmonic-row"><label>4 (2oct)</label><input type="range" class="harm-slider" data-n="3" min="0" max="100" value="25"></div>
+    <div class="harmonic-row"><label>5 (M3)</label><input type="range" class="harm-slider" data-n="4" min="0" max="100" value="20"></div>
+    <div class="harmonic-row"><label>6</label><input type="range" class="harm-slider" data-n="5" min="0" max="100" value="17"></div>
+    <div class="harmonic-row"><label>7</label><input type="range" class="harm-slider" data-n="6" min="0" max="100" value="14"></div>
+    <div class="harmonic-row"><label>8</label><input type="range" class="harm-slider" data-n="7" min="0" max="100" value="12"></div>
+    <div style="margin-top:8px;">
+        <button class="btn" id="playBtn">Play</button>
+        <button class="btn" id="presetClarinet">Clarinet</button>
+        <button class="btn" id="presetFlute">Flute</button>
+        <button class="btn" id="presetOboe">Oboe</button>
+    </div>
+</div>
+
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+let fundamental = 220;
+let harmonicAmps = [1.0, 0.5, 0.33, 0.25, 0.20, 0.17, 0.14, 0.12];
+let time = 0;
+let audioCtx = null;
+let oscillators = [];
+let gainNodes = [];
+let masterGain = null;
+let isPlaying = false;
+let animId;
+
+const fundEl = document.getElementById('fundamental');
+const harmSliders = document.querySelectorAll('.harm-slider');
+const playBtn = document.getElementById('playBtn');
+
+const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+function freqToNote(f) {
+    const midi = 69 + 12 * Math.log2(f / 440);
+    const note = Math.round(midi);
+    const octave = Math.floor(note / 12) - 1;
+    return noteNames[note % 12] + octave;
+}
+
+fundEl.addEventListener('input', e => {
+    fundamental = +e.target.value;
+    document.getElementById('fundVal').textContent = fundamental + ' Hz (' + freqToNote(fundamental) + ')';
+    updateSound();
+});
+
+harmSliders.forEach(sl => {
+    sl.addEventListener('input', e => {
+        harmonicAmps[+e.target.dataset.n] = +e.target.value / 100;
+        updateSound();
+    });
+});
+
+const presets = {
+    clarinet: [100, 5, 80, 5, 50, 3, 30, 2],
+    flute: [100, 30, 10, 5, 2, 1, 0, 0],
+    oboe: [100, 80, 60, 70, 50, 40, 35, 30]
+};
+
+document.getElementById('presetClarinet').addEventListener('click', () => applyPreset('clarinet'));
+document.getElementById('presetFlute').addEventListener('click', () => applyPreset('flute'));
+document.getElementById('presetOboe').addEventListener('click', () => applyPreset('oboe'));
+
+function applyPreset(name) {
+    const vals = presets[name];
+    vals.forEach((v, i) => {
+        harmonicAmps[i] = v / 100;
+        harmSliders[i].value = v;
+    });
+    updateSound();
+}
+
+playBtn.addEventListener('click', () => {
+    if (isPlaying) stopSound();
+    else startSound();
+});
+
+function startSound() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    stopSound();
+
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.12;
+    masterGain.connect(audioCtx.destination);
+
+    for (let i = 0; i < 8; i++) {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = fundamental * (i + 1);
+        gain.gain.value = harmonicAmps[i] * 0.3;
+        osc.connect(gain);
+        gain.connect(masterGain);
+        osc.start();
+        oscillators.push(osc);
+        gainNodes.push(gain);
+    }
+
+    isPlaying = true;
+    playBtn.textContent = 'Stop';
+    playBtn.classList.add('active');
+}
+
+function stopSound() {
+    oscillators.forEach(o => { try { o.stop(); } catch(e) {} });
+    oscillators = [];
+    gainNodes = [];
+    if (masterGain) { masterGain.disconnect(); masterGain = null; }
+    isPlaying = false;
+    playBtn.textContent = 'Play';
+    playBtn.classList.remove('active');
+}
+
+function updateSound() {
+    if (!isPlaying) return;
+    oscillators.forEach((osc, i) => {
+        osc.frequency.setValueAtTime(fundamental * (i + 1), audioCtx.currentTime);
+        gainNodes[i].gain.setValueAtTime(harmonicAmps[i] * 0.3, audioCtx.currentTime);
+    });
+}
+
+function draw() {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+
+    const margin = 60;
+    const chartW = (W - margin * 3) * 0.45;
+    const chartH = H * 0.35;
+
+    // Spectrum bars
+    const barX = margin;
+    const barY = margin;
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = 'bold 14px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Harmonic Spectrum', barX + chartW / 2, barY - 10);
+
+    const barW = chartW / 10;
+    for (let i = 0; i < 8; i++) {
+        const x = barX + (i + 1) * barW;
+        const h = harmonicAmps[i] * chartH * 0.9;
+        const freq = fundamental * (i + 1);
+
+        const hue = 40 + i * 15;
+        ctx.fillStyle = `hsl(${hue}, 60%, ${40 + harmonicAmps[i] * 30}%)`;
+        ctx.fillRect(x - barW * 0.35, barY + chartH - h, barW * 0.7, h);
+
+        ctx.fillStyle = '#8A9A5B';
+        ctx.font = '10px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${i + 1}`, x, barY + chartH + 15);
+        ctx.fillText(`${freq.toFixed(0)}`, x, barY + chartH + 27);
+        ctx.fillText(freqToNote(freq), x, barY + chartH + 39);
+    }
+
+    // Axis
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(barX, barY + chartH);
+    ctx.lineTo(barX + chartW, barY + chartH);
+    ctx.stroke();
+
+    // Composite waveform
+    const waveX = margin;
+    const waveY = H * 0.55;
+    const waveW = W - margin * 2;
+    const waveH = H * 0.3;
+
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = 'bold 14px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Composite Waveform', waveX + waveW / 2, waveY - 10);
+
+    // Center line
+    ctx.strokeStyle = 'rgba(138,154,91,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(waveX, waveY + waveH / 2);
+    ctx.lineTo(waveX + waveW, waveY + waveH / 2);
+    ctx.stroke();
+
+    // Draw individual harmonics faintly
+    for (let h = 0; h < 8; h++) {
+        if (harmonicAmps[h] < 0.01) continue;
+        const hue = 40 + h * 15;
+        ctx.strokeStyle = `hsla(${hue}, 60%, 50%, 0.2)`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let i = 0; i <= waveW; i++) {
+            const t = i / waveW;
+            const freq = fundamental * (h + 1);
+            const y = waveY + waveH / 2 - harmonicAmps[h] * waveH * 0.3 * Math.sin(2 * Math.PI * freq * (t / fundamental * 2) + time * 0.002 * freq * 0.01);
+            if (i === 0) ctx.moveTo(waveX + i, y);
+            else ctx.lineTo(waveX + i, y);
+        }
+        ctx.stroke();
+    }
+
+    // Draw composite waveform
+    ctx.strokeStyle = '#DDA15E';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    let maxVal = 0;
+    for (let h = 0; h < 8; h++) maxVal += harmonicAmps[h];
+    if (maxVal === 0) maxVal = 1;
+
+    for (let i = 0; i <= waveW; i++) {
+        const t = i / waveW;
+        let val = 0;
+        for (let h = 0; h < 8; h++) {
+            const freq = fundamental * (h + 1);
+            val += harmonicAmps[h] * Math.sin(2 * Math.PI * freq * (t / fundamental * 2) + time * 0.002 * freq * 0.01);
+        }
+        val /= maxVal;
+        const y = waveY + waveH / 2 - val * waveH * 0.4;
+        if (i === 0) ctx.moveTo(waveX + i, y);
+        else ctx.lineTo(waveX + i, y);
+    }
+    ctx.stroke();
+
+    // Musical staff representation (right side)
+    const staffX = W * 0.55;
+    const staffY = margin;
+    const staffW = W * 0.35;
+    const staffH = chartH;
+
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = 'bold 14px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Harmonic Series on Staff', staffX + staffW / 2, staffY - 10);
+
+    // Staff lines
+    const lineSpacing = staffH / 8;
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 5; i++) {
+        const y = staffY + lineSpacing * (i + 1.5);
+        ctx.beginPath();
+        ctx.moveTo(staffX, y);
+        ctx.lineTo(staffX + staffW, y);
+        ctx.stroke();
+    }
+
+    // Draw notes for each active harmonic
+    const intervalNames = ['Unison', 'Octave', 'P5+Oct', '2 Oct', 'M3+2Oct', 'P5+2Oct', 'm7+2Oct', '3 Oct'];
+    for (let i = 0; i < 8; i++) {
+        if (harmonicAmps[i] < 0.01) continue;
+        const freq = fundamental * (i + 1);
+        const noteX = staffX + (i + 0.5) / 8 * staffW;
+        const midi = 69 + 12 * Math.log2(freq / 440);
+        const noteY = staffY + staffH - ((midi - 40) / 50) * staffH;
+
+        const hue = 40 + i * 15;
+        const alpha = 0.4 + harmonicAmps[i] * 0.6;
+        ctx.fillStyle = `hsla(${hue}, 60%, 55%, ${alpha})`;
+        ctx.beginPath();
+        ctx.ellipse(noteX, noteY, 8, 6, -0.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#8A9A5B';
+        ctx.font = '9px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(intervalNames[i], noteX, noteY + 18);
+        ctx.fillText(freqToNote(freq), noteX, noteY - 12);
+    }
+}
+
+function animate(ts) {
+    time = ts || 0;
+    draw();
+    animId = requestAnimationFrame(animate);
+}
+
+animate();
+
+window.reset = function() {
+    fundamental = 220;
+    harmonicAmps = [1.0, 0.5, 0.33, 0.25, 0.20, 0.17, 0.14, 0.12];
+    fundEl.value = 220;
+    document.getElementById('fundVal').textContent = '220 Hz (A3)';
+    harmSliders.forEach((sl, i) => { sl.value = harmonicAmps[i] * 100; });
+    stopSound();
+};
+</script>
+</body>
+</html>

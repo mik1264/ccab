@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Luciferin-Luciferase Reaction</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a14; overflow: hidden; font-family: 'Georgia', serif; }
+canvas { display: block; }
+#info {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(10,10,20,0.85); backdrop-filter: blur(10px);
+    color: #FEFAE0; padding: 15px 25px; border-radius: 12px;
+    border: 1px solid rgba(138,154,91,0.3); max-width: 500px; text-align: center;
+    font-size: 0.85rem; line-height: 1.5;
+}
+#info h3 { color: #8A9A5B; margin-bottom: 6px; font-size: 1rem; }
+#controls {
+    position: fixed; top: 60px; right: 20px;
+    background: rgba(10,10,20,0.85); backdrop-filter: blur(10px);
+    color: #FEFAE0; padding: 12px 18px; border-radius: 10px;
+    border: 1px solid rgba(138,154,91,0.3); font-size: 0.8rem;
+}
+#controls label { display: block; margin: 6px 0 2px; color: #8A9A5B; }
+#controls input[type="range"] { width: 140px; accent-color: #8A9A5B; }
+.stage-label {
+    position: absolute; color: #DDA15E; font-size: 0.75rem;
+    text-align: center; pointer-events: none; opacity: 0;
+    transition: opacity 0.5s;
+}
+.stage-label.active { opacity: 1; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="controls">
+    <label>ATP Level</label>
+    <input type="range" id="atp" min="0" max="100" value="70">
+    <label>O₂ Concentration</label>
+    <input type="range" id="o2" min="0" max="100" value="80">
+    <label>Reaction Speed</label>
+    <input type="range" id="speed" min="1" max="10" value="5">
+</div>
+<div id="info">
+    <h3>Luciferin-Luciferase Reaction</h3>
+    Bioluminescence begins when the enzyme <em>luciferase</em> catalyzes the oxidation of <em>luciferin</em>
+    in the presence of ATP-Mg²⁺ and O₂. The excited oxyluciferin product releases a photon as it
+    returns to ground state — producing cold light with up to 41% quantum yield.
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const atpSlider = document.getElementById('atp');
+const o2Slider = document.getElementById('o2');
+const speedSlider = document.getElementById('speed');
+
+// Molecule types
+const LUCIFERIN = 0, LUCIFERASE = 1, ATP = 2, O2 = 3, COMPLEX = 4, OXYLUCIFERIN = 5, PHOTON = 6;
+const colors = {
+    [LUCIFERIN]: '#44cc44',
+    [LUCIFERASE]: '#cc7744',
+    [ATP]: '#4488ff',
+    [O2]: '#ff4444',
+    [COMPLEX]: '#ccaa00',
+    [OXYLUCIFERIN]: '#88ff88',
+    [PHOTON]: '#ffff66'
+};
+const names = {
+    [LUCIFERIN]: 'Luciferin',
+    [LUCIFERASE]: 'Luciferase',
+    [ATP]: 'ATP-Mg²⁺',
+    [O2]: 'O₂',
+    [COMPLEX]: 'LH₂-AMP',
+    [OXYLUCIFERIN]: 'Oxyluciferin*',
+    [PHOTON]: 'Photon (hν)'
+};
+const sizes = {
+    [LUCIFERIN]: 8, [LUCIFERASE]: 14, [ATP]: 7, [O2]: 5,
+    [COMPLEX]: 16, [OXYLUCIFERIN]: 10, [PHOTON]: 4
+};
+
+let molecules = [];
+let photonBursts = [];
+let time = 0;
+
+function createMolecule(type, x, y) {
+    return {
+        type, x: x || Math.random() * W, y: y || Math.random() * H,
+        vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2,
+        life: 1, age: 0, reactionTimer: 0, glow: 0
+    };
+}
+
+function init() {
+    molecules = [];
+    photonBursts = [];
+    for (let i = 0; i < 15; i++) molecules.push(createMolecule(LUCIFERIN));
+    for (let i = 0; i < 8; i++) molecules.push(createMolecule(LUCIFERASE));
+    for (let i = 0; i < 12; i++) molecules.push(createMolecule(ATP));
+    for (let i = 0; i < 12; i++) molecules.push(createMolecule(O2));
+    time = 0;
+}
+init();
+
+function spawnFromSliders() {
+    const atpVal = atpSlider.value / 100;
+    const o2Val = o2Slider.value / 100;
+    const atpCount = molecules.filter(m => m.type === ATP).length;
+    const o2Count = molecules.filter(m => m.type === O2).length;
+    if (atpCount < atpVal * 15 && Math.random() < 0.02) {
+        molecules.push(createMolecule(ATP, Math.random() < 0.5 ? -10 : W + 10, Math.random() * H));
+    }
+    if (o2Count < o2Val * 15 && Math.random() < 0.02) {
+        molecules.push(createMolecule(O2, Math.random() * W, Math.random() < 0.5 ? -10 : H + 10));
+    }
+}
+
+function dist(a, b) {
+    return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function addPhotonBurst(x, y) {
+    const count = 8 + Math.random() * 8;
+    for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 1 + Math.random() * 3;
+        photonBursts.push({
+            x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+            life: 1, radius: 2 + Math.random() * 3,
+            hue: 80 + Math.random() * 80
+        });
+    }
+}
+
+function update() {
+    const spd = speedSlider.value / 5;
+    spawnFromSliders();
+
+    // Update molecules
+    for (let i = molecules.length - 1; i >= 0; i--) {
+        const m = molecules[i];
+        m.x += m.vx * spd;
+        m.y += m.vy * spd;
+        m.age += 0.016 * spd;
+
+        // Brownian motion
+        m.vx += (Math.random() - 0.5) * 0.3 * spd;
+        m.vy += (Math.random() - 0.5) * 0.3 * spd;
+        m.vx *= 0.99;
+        m.vy *= 0.99;
+
+        // Wrap
+        if (m.x < -20) m.x = W + 20;
+        if (m.x > W + 20) m.x = -20;
+        if (m.y < -20) m.y = H + 20;
+        if (m.y > H + 20) m.y = -20;
+
+        // Glow decay
+        m.glow *= 0.95;
+
+        // Complex reaction timer
+        if (m.type === COMPLEX) {
+            m.reactionTimer += 0.016 * spd;
+            m.glow = Math.min(1, m.reactionTimer / 2);
+            if (m.reactionTimer > 2) {
+                // Find nearby O2
+                for (let j = molecules.length - 1; j >= 0; j--) {
+                    if (molecules[j].type === O2 && dist(m, molecules[j]) < 60) {
+                        // Reaction complete! Create oxyluciferin + photon burst
+                        molecules.splice(j, 1);
+                        if (j < i) i--;
+                        addPhotonBurst(m.x, m.y);
+                        // Convert to excited oxyluciferin
+                        m.type = OXYLUCIFERIN;
+                        m.glow = 1;
+                        m.reactionTimer = 0;
+                        // Release luciferase back
+                        molecules.push(createMolecule(LUCIFERASE, m.x + 10, m.y + 10));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Oxyluciferin decays back to luciferin
+        if (m.type === OXYLUCIFERIN) {
+            m.reactionTimer += 0.016 * spd;
+            m.glow = Math.max(0, 1 - m.reactionTimer / 3);
+            if (m.reactionTimer > 3) {
+                m.type = LUCIFERIN;
+                m.reactionTimer = 0;
+            }
+        }
+    }
+
+    // Check for luciferin + luciferase + ATP reactions
+    for (let i = 0; i < molecules.length; i++) {
+        const a = molecules[i];
+        if (a.type !== LUCIFERIN) continue;
+        for (let j = 0; j < molecules.length; j++) {
+            const b = molecules[j];
+            if (b.type !== LUCIFERASE || dist(a, b) > 40) continue;
+            for (let k = 0; k < molecules.length; k++) {
+                const c = molecules[k];
+                if (c.type !== ATP || dist(a, c) > 50) continue;
+                // Form complex!
+                const cx = (a.x + b.x + c.x) / 3;
+                const cy = (a.y + b.y + c.y) / 3;
+                molecules.push(createMolecule(COMPLEX, cx, cy));
+                // Remove reactants (largest index first)
+                const toRemove = [i, j, k].sort((x, y) => y - x);
+                toRemove.forEach(idx => molecules.splice(idx, 1));
+                i = -1; // restart outer loop
+                break;
+            }
+            if (i === -1) break;
+        }
+    }
+
+    // Update photon bursts
+    for (let i = photonBursts.length - 1; i >= 0; i--) {
+        const p = photonBursts[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= 0.015 * spd;
+        if (p.life <= 0) photonBursts.splice(i, 1);
+    }
+}
+
+function draw() {
+    ctx.fillStyle = 'rgba(10,10,20,0.15)';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw photon bursts
+    for (const p of photonBursts) {
+        const alpha = p.life * 0.8;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius * (2 - p.life), 0, Math.PI * 2);
+        ctx.fillStyle = `hsla(${p.hue}, 100%, 75%, ${alpha})`;
+        ctx.fill();
+        // Glow
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius * (3 - p.life), 0, Math.PI * 2);
+        ctx.fillStyle = `hsla(${p.hue}, 100%, 85%, ${alpha * 0.3})`;
+        ctx.fill();
+    }
+
+    // Draw molecules
+    for (const m of molecules) {
+        const s = sizes[m.type];
+        const col = colors[m.type];
+
+        // Glow effect
+        if (m.glow > 0.01) {
+            const grad = ctx.createRadialGradient(m.x, m.y, 0, m.x, m.y, s * 4);
+            grad.addColorStop(0, col + Math.floor(m.glow * 80).toString(16).padStart(2, '0'));
+            grad.addColorStop(1, col + '00');
+            ctx.beginPath();
+            ctx.arc(m.x, m.y, s * 4, 0, Math.PI * 2);
+            ctx.fillStyle = grad;
+            ctx.fill();
+        }
+
+        // Core
+        ctx.beginPath();
+        if (m.type === LUCIFERASE) {
+            // Y-shaped enzyme
+            ctx.save();
+            ctx.translate(m.x, m.y);
+            ctx.rotate(Math.atan2(m.vy, m.vx));
+            ctx.moveTo(-s, -s * 0.6);
+            ctx.lineTo(0, 0);
+            ctx.lineTo(-s, s * 0.6);
+            ctx.moveTo(0, 0);
+            ctx.lineTo(s, 0);
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = col;
+            ctx.stroke();
+            ctx.restore();
+        } else if (m.type === ATP) {
+            // Triangle for ATP
+            ctx.save();
+            ctx.translate(m.x, m.y);
+            for (let i = 0; i < 3; i++) {
+                const angle = (i / 3) * Math.PI * 2 - Math.PI / 2;
+                if (i === 0) ctx.moveTo(Math.cos(angle) * s, Math.sin(angle) * s);
+                else ctx.lineTo(Math.cos(angle) * s, Math.sin(angle) * s);
+            }
+            ctx.closePath();
+            ctx.fillStyle = col;
+            ctx.fill();
+            ctx.restore();
+        } else if (m.type === COMPLEX) {
+            // Pulsing hexagon
+            ctx.save();
+            ctx.translate(m.x, m.y);
+            const pulse = 1 + Math.sin(m.reactionTimer * 4) * 0.2;
+            for (let i = 0; i < 6; i++) {
+                const angle = (i / 6) * Math.PI * 2;
+                if (i === 0) ctx.moveTo(Math.cos(angle) * s * pulse, Math.sin(angle) * s * pulse);
+                else ctx.lineTo(Math.cos(angle) * s * pulse, Math.sin(angle) * s * pulse);
+            }
+            ctx.closePath();
+            const g = ctx.createRadialGradient(0, 0, 0, 0, 0, s * pulse);
+            g.addColorStop(0, '#ffff44');
+            g.addColorStop(1, col);
+            ctx.fillStyle = g;
+            ctx.fill();
+            ctx.restore();
+        } else if (m.type === PHOTON) {
+            // Star shape
+            ctx.arc(m.x, m.y, s, 0, Math.PI * 2);
+            ctx.fillStyle = '#ffff88';
+            ctx.fill();
+        } else {
+            ctx.arc(m.x, m.y, s, 0, Math.PI * 2);
+            ctx.fillStyle = col;
+            ctx.fill();
+        }
+
+        // Label
+        ctx.font = '9px Georgia';
+        ctx.fillStyle = 'rgba(254,250,224,0.6)';
+        ctx.textAlign = 'center';
+        ctx.fillText(names[m.type], m.x, m.y - s - 4);
+    }
+
+    // Legend
+    ctx.font = '11px Georgia';
+    const legendY = 70;
+    const legendX = 14;
+    const types = [LUCIFERIN, LUCIFERASE, ATP, O2, COMPLEX, OXYLUCIFERIN];
+    types.forEach((t, i) => {
+        ctx.fillStyle = colors[t];
+        ctx.beginPath();
+        ctx.arc(legendX, legendY + i * 20, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#FEFAE0';
+        ctx.textAlign = 'left';
+        ctx.fillText(names[t], legendX + 12, legendY + i * 20 + 4);
+    });
+
+    time++;
+}
+
+let paused = false;
+function loop() {
+    if (!paused) {
+        update();
+        draw();
+    }
+    requestAnimationFrame(loop);
+}
+loop();
+
+window.reset = function() {
+    init();
+    ctx.clearRect(0, 0, W, H);
+};
+
+document.addEventListener('keydown', e => {
+    if (e.code === 'Space') { e.preventDefault(); paused = !paused; }
+});
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Swimming Biomechanics - Drag &amp; Propulsion</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a1628; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; }
+        a[href="index.html"] { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(10,22,40,0.9); backdrop-filter: blur(10px);
+            border-radius: 16px; padding: 16px 24px; display: flex; gap: 20px;
+            align-items: center; color: #FEFAE0; font-size: 0.85rem; z-index: 100;
+            border: 1px solid rgba(138,154,91,0.3); flex-wrap: wrap; justify-content: center;
+        }
+        #controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        #controls input[type="range"] { width: 90px; accent-color: #8A9A5B; }
+        #controls select {
+            background: rgba(10,22,40,0.9); color: #FEFAE0; border: 1px solid #8A9A5B;
+            padding: 4px 8px; border-radius: 6px; font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <label>Stroke
+            <select id="stroke">
+                <option value="freestyle">Freestyle</option>
+                <option value="butterfly">Butterfly</option>
+                <option value="breaststroke">Breaststroke</option>
+                <option value="backstroke">Backstroke</option>
+            </select>
+        </label>
+        <label>Speed<input type="range" id="speed" min="0.2" max="2" step="0.1" value="1"><span id="speed-val">1.0x</span></label>
+        <label>Drag Coeff<input type="range" id="drag" min="0.5" max="2" step="0.1" value="1"><span id="drag-val">1.0</span></label>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let strokeType = 'freestyle', speed = 1, dragCoeff = 1;
+        let time = 0;
+        let bubbles = [];
+        let propulsionHistory = [];
+
+        document.getElementById('stroke').onchange = e => { strokeType = e.target.value; propulsionHistory = []; };
+        document.getElementById('speed').oninput = e => { speed = +e.target.value; document.getElementById('speed-val').textContent = speed.toFixed(1) + 'x'; };
+        document.getElementById('drag').oninput = e => { dragCoeff = +e.target.value; document.getElementById('drag-val').textContent = dragCoeff.toFixed(1); };
+
+        const strokeData = {
+            freestyle:    { name: 'Freestyle (Front Crawl)', speed: 2.1, strokeRate: 1.2, efficiency: 0.09 },
+            butterfly:    { name: 'Butterfly', speed: 1.9, strokeRate: 0.9, efficiency: 0.07 },
+            breaststroke: { name: 'Breaststroke', speed: 1.5, strokeRate: 0.7, efficiency: 0.06 },
+            backstroke:   { name: 'Backstroke', speed: 1.8, strokeRate: 1.1, efficiency: 0.08 }
+        };
+
+        function drawWater(waterY) {
+            // Water gradient
+            const grad = ctx.createLinearGradient(0, waterY, 0, H);
+            grad.addColorStop(0, 'rgba(20,60,120,0.4)');
+            grad.addColorStop(0.3, 'rgba(10,40,80,0.6)');
+            grad.addColorStop(1, 'rgba(5,20,50,0.8)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, waterY, W, H - waterY);
+
+            // Surface waves
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let x = 0; x < W; x += 3) {
+                const waveY = waterY + Math.sin(x * 0.02 + time * 2) * 3 +
+                             Math.sin(x * 0.05 + time * 3) * 1.5;
+                if (x === 0) ctx.moveTo(x, waveY);
+                else ctx.lineTo(x, waveY);
+            }
+            ctx.stroke();
+
+            // Lane lines
+            ctx.strokeStyle = 'rgba(221,161,94,0.15)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([10, 10]);
+            ctx.beginPath();
+            ctx.moveTo(0, waterY + 20);
+            ctx.lineTo(W, waterY + 20);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        function drawSwimmer(cx, cy, t) {
+            const sd = strokeData[strokeType];
+            const phase = (t * sd.strokeRate) % 1;
+            const bodyLen = 80;
+
+            // Body orientation
+            let bodyAngle = 0;
+            let bodyUndulation = 0;
+
+            if (strokeType === 'freestyle' || strokeType === 'backstroke') {
+                bodyAngle = Math.sin(phase * Math.PI * 2) * 0.05;
+                bodyUndulation = Math.sin(phase * Math.PI * 2) * 3;
+            } else if (strokeType === 'butterfly') {
+                bodyAngle = Math.sin(phase * Math.PI * 2) * 0.15;
+                bodyUndulation = Math.sin(phase * Math.PI * 2) * 8;
+            } else {
+                bodyAngle = Math.sin(phase * Math.PI * 2) * 0.1;
+            }
+
+            const headX = cx - bodyLen / 2;
+            const headY = cy + bodyUndulation * 0.5;
+            const hipX = cx + bodyLen / 2;
+            const hipY = cy + bodyUndulation;
+
+            // Body
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(headX, headY);
+            ctx.quadraticCurveTo(cx, cy + bodyUndulation * 0.7, hipX, hipY);
+            ctx.stroke();
+
+            // Head
+            ctx.fillStyle = '#FEFAE0';
+            ctx.beginPath();
+            ctx.arc(headX - 8, headY, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Arms
+            if (strokeType === 'freestyle') {
+                // Alternating arms
+                const arm1Phase = phase;
+                const arm2Phase = (phase + 0.5) % 1;
+
+                for (let armPhase of [arm1Phase, arm2Phase]) {
+                    let armX, armY;
+                    if (armPhase < 0.5) {
+                        // Pull phase (underwater)
+                        const sp = armPhase / 0.5;
+                        armX = headX + sp * bodyLen * 0.8;
+                        armY = headY + 15 + Math.sin(sp * Math.PI) * 15;
+                        ctx.strokeStyle = '#8A9A5B';
+                    } else {
+                        // Recovery (above water)
+                        const sp = (armPhase - 0.5) / 0.5;
+                        armX = hipX - sp * bodyLen * 0.8;
+                        armY = headY - 10 - Math.sin(sp * Math.PI) * 20;
+                        ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+                    }
+
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.moveTo(headX + 10, headY + 3);
+                    ctx.lineTo(armX, armY);
+                    ctx.stroke();
+
+                    // Hand paddle shape
+                    if (armPhase < 0.5) {
+                        ctx.fillStyle = 'rgba(138,154,91,0.4)';
+                        ctx.beginPath();
+                        ctx.ellipse(armX, armY, 8, 4, 0.3, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                }
+            } else if (strokeType === 'butterfly') {
+                // Symmetric arms
+                const armPhase = phase;
+                let armX, armY;
+                if (armPhase < 0.45) {
+                    const sp = armPhase / 0.45;
+                    armX = headX + sp * bodyLen;
+                    armY = headY + 12 + Math.sin(sp * Math.PI) * 18;
+                    ctx.strokeStyle = '#8A9A5B';
+                } else {
+                    const sp = (armPhase - 0.45) / 0.55;
+                    armX = hipX - sp * bodyLen;
+                    armY = headY - 15 - Math.sin(sp * Math.PI) * 25;
+                    ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+                }
+
+                ctx.lineWidth = 3;
+                // Both arms (top view shows one)
+                ctx.beginPath();
+                ctx.moveTo(headX + 10, headY + 3);
+                ctx.lineTo(armX, armY);
+                ctx.stroke();
+            } else if (strokeType === 'breaststroke') {
+                // Symmetric pull and glide
+                const armPhase = phase;
+                if (armPhase < 0.3) {
+                    // Outsweep
+                    const sp = armPhase / 0.3;
+                    ctx.strokeStyle = '#8A9A5B';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.moveTo(headX + 10, headY);
+                    ctx.lineTo(headX + 10 + sp * 30, headY + sp * 20);
+                    ctx.stroke();
+                } else if (armPhase < 0.5) {
+                    // Insweep
+                    const sp = (armPhase - 0.3) / 0.2;
+                    ctx.strokeStyle = '#8A9A5B';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.moveTo(headX + 10, headY);
+                    ctx.lineTo(headX + 10 + 30 * (1 - sp), headY + 20 * (1 - sp));
+                    ctx.stroke();
+                }
+            } else {
+                // Backstroke
+                const arm1Phase = phase;
+                const arm2Phase = (phase + 0.5) % 1;
+                for (let armPhase of [arm1Phase, arm2Phase]) {
+                    let armX, armY;
+                    if (armPhase < 0.5) {
+                        const sp = armPhase / 0.5;
+                        armX = headX + sp * bodyLen * 0.8;
+                        armY = headY - 10 - Math.sin(sp * Math.PI) * 12;
+                        ctx.strokeStyle = '#8A9A5B';
+                    } else {
+                        const sp = (armPhase - 0.5) / 0.5;
+                        armX = hipX - sp * bodyLen * 0.8;
+                        armY = headY + 5 + Math.sin(sp * Math.PI) * 15;
+                        ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+                    }
+                    ctx.lineWidth = 2.5;
+                    ctx.beginPath();
+                    ctx.moveTo(headX + 10, headY);
+                    ctx.lineTo(armX, armY);
+                    ctx.stroke();
+                }
+            }
+
+            // Legs/kick
+            const kickAmplitude = strokeType === 'butterfly' ? 20 : 12;
+            const kick1 = Math.sin(phase * Math.PI * 2 * (strokeType === 'freestyle' ? 3 : 1)) * kickAmplitude;
+            const kick2 = -kick1;
+
+            ctx.strokeStyle = 'rgba(254,250,224,0.6)';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.moveTo(hipX, hipY);
+            ctx.lineTo(hipX + 30, hipY + kick1);
+            ctx.stroke();
+
+            if (strokeType !== 'butterfly') {
+                ctx.beginPath();
+                ctx.moveTo(hipX, hipY);
+                ctx.lineTo(hipX + 30, hipY + kick2);
+                ctx.stroke();
+            } else {
+                ctx.beginPath();
+                ctx.moveTo(hipX, hipY);
+                ctx.lineTo(hipX + 30, hipY + kick1 * 0.9);
+                ctx.stroke();
+            }
+
+            return phase;
+        }
+
+        function drawForceVectors(cx, cy, phase) {
+            const sd = strokeData[strokeType];
+
+            // Propulsive force (backward-pointing arrow = forward propulsion)
+            let propulsion = 0;
+            if (phase < 0.5) {
+                propulsion = Math.sin(phase / 0.5 * Math.PI) * sd.speed * 40;
+            }
+
+            // Drag force (always opposing motion)
+            const drag = sd.speed * sd.speed * dragCoeff * 15;
+
+            // Net force arrow
+            const netForce = propulsion - drag;
+
+            // Propulsion arrow (green, pointing left = swimmer moves right)
+            if (propulsion > 5) {
+                ctx.strokeStyle = '#8A9A5B';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(cx + 60, cy);
+                ctx.lineTo(cx + 60 - propulsion, cy);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(cx + 60 - propulsion, cy);
+                ctx.lineTo(cx + 60 - propulsion + 8, cy - 5);
+                ctx.moveTo(cx + 60 - propulsion, cy);
+                ctx.lineTo(cx + 60 - propulsion + 8, cy + 5);
+                ctx.stroke();
+
+                ctx.fillStyle = '#8A9A5B';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('Propulsion', cx + 60 - propulsion / 2, cy - 10);
+            }
+
+            // Drag arrow (gold, pointing right)
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(cx - 60, cy);
+            ctx.lineTo(cx - 60 + drag, cy);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(cx - 60 + drag, cy);
+            ctx.lineTo(cx - 60 + drag - 8, cy - 5);
+            ctx.moveTo(cx - 60 + drag, cy);
+            ctx.lineTo(cx - 60 + drag - 8, cy + 5);
+            ctx.stroke();
+
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Drag', cx - 60 + drag / 2, cy - 10);
+
+            propulsionHistory.push({ propulsion, drag });
+            if (propulsionHistory.length > 200) propulsionHistory.shift();
+        }
+
+        function drawBubbles(swimmerX, swimmerY) {
+            // Add bubbles during pull phase
+            if (Math.random() < 0.3) {
+                bubbles.push({
+                    x: swimmerX + Math.random() * 60 - 30,
+                    y: swimmerY + Math.random() * 20 - 10,
+                    r: Math.random() * 3 + 1,
+                    vx: Math.random() * 0.5 - 0.25,
+                    vy: -Math.random() * 1 - 0.5,
+                    life: 1
+                });
+            }
+
+            ctx.fillStyle = 'rgba(138,154,91,0.2)';
+            bubbles.forEach(b => {
+                b.x += b.vx;
+                b.y += b.vy;
+                b.life -= 0.01;
+                ctx.globalAlpha = b.life * 0.5;
+                ctx.beginPath();
+                ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            ctx.globalAlpha = 1;
+            bubbles = bubbles.filter(b => b.life > 0);
+        }
+
+        function drawPowerGraph(x, y, w, h) {
+            ctx.fillStyle = 'rgba(10,22,40,0.8)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Propulsion vs Drag', x + w / 2, y + 15);
+
+            if (propulsionHistory.length < 2) return;
+
+            const gx = x + 10, gy = y + 25, gw = w - 20, gh = h - 35;
+
+            // Propulsion
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            propulsionHistory.forEach((v, i) => {
+                const px = gx + (i / 200) * gw;
+                const py = gy + gh - (v.propulsion / 100) * gh;
+                if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            });
+            ctx.stroke();
+
+            // Drag
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            propulsionHistory.forEach((v, i) => {
+                const px = gx + (i / 200) * gw;
+                const py = gy + gh - (v.drag / 100) * gh;
+                if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+            });
+            ctx.stroke();
+
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Propulsion', gx + 5, gy + 10);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fillText('Drag', gx + 65, gy + 10);
+        }
+
+        function drawStrokeInfo(x, y, w, h) {
+            const sd = strokeData[strokeType];
+
+            ctx.fillStyle = 'rgba(10,22,40,0.8)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = 'bold 12px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(sd.name, x + 15, y + 22);
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '11px sans-serif';
+            const info = [
+                `Top Speed: ${sd.speed.toFixed(1)} m/s`,
+                `Stroke Rate: ${sd.strokeRate.toFixed(1)} Hz`,
+                `Propulsive Eff: ${(sd.efficiency * 100).toFixed(0)}%`,
+                `Drag Factor: ${dragCoeff.toFixed(1)}x`
+            ];
+            info.forEach((line, i) => {
+                ctx.fillText(line, x + 15, y + 42 + i * 18);
+            });
+        }
+
+        let lastTime = 0;
+        function animate(timestamp) {
+            const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+            lastTime = timestamp;
+            time += dt * speed;
+
+            ctx.fillStyle = '#0a1628';
+            ctx.fillRect(0, 0, W, H);
+
+            const waterY = H * 0.3;
+            const swimmerY = waterY + 40;
+            const swimmerX = W * 0.4;
+
+            // Draw water
+            drawWater(waterY);
+
+            // Draw bubbles
+            drawBubbles(swimmerX, swimmerY);
+
+            // Draw swimmer
+            const phase = drawSwimmer(swimmerX, swimmerY, time);
+
+            // Draw force vectors
+            drawForceVectors(swimmerX, swimmerY + 40, phase);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 16px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Swimming Biomechanics', W / 2, 35);
+
+            // Panels
+            const panelW = Math.min(260, W * 0.28);
+            const panelX = W - panelW - 20;
+
+            drawStrokeInfo(panelX, H * 0.05, panelW, 120);
+            drawPowerGraph(panelX, H * 0.3, panelW, 150);
+
+            // Stroke comparison
+            ctx.fillStyle = 'rgba(10,22,40,0.8)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            const compY = H * 0.6;
+            ctx.beginPath();
+            ctx.roundRect(panelX, compY, panelW, 130, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Speed Comparison (m/s)', panelX + panelW / 2, compY + 15);
+
+            const strokes = ['freestyle', 'butterfly', 'backstroke', 'breaststroke'];
+            const barW = (panelW - 40) / 4 - 4;
+            strokes.forEach((s, i) => {
+                const sd = strokeData[s];
+                const bx = panelX + 20 + i * (barW + 4);
+                const bh = (sd.speed / 2.5) * 80;
+
+                ctx.fillStyle = s === strokeType ? '#8A9A5B' : 'rgba(138,154,91,0.3)';
+                ctx.fillRect(bx, compY + 110 - bh, barW, bh);
+
+                ctx.fillStyle = 'rgba(254,250,224,0.6)';
+                ctx.font = '8px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(s.slice(0, 4), bx + barW / 2, compY + 125);
+                ctx.fillText(sd.speed.toFixed(1), bx + barW / 2, compY + 105 - bh);
+            });
+
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            strokeType = 'freestyle'; speed = 1; dragCoeff = 1; time = 0;
+            bubbles = []; propulsionHistory = [];
+            document.getElementById('stroke').value = 'freestyle';
+            document.getElementById('speed').value = 1;
+            document.getElementById('drag').value = 1;
+            document.getElementById('speed-val').textContent = '1.0x';
+            document.getElementById('drag-val').textContent = '1.0';
+        };
+
+        requestAnimationFrame(animate);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

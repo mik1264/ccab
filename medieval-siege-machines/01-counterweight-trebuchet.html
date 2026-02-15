@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Counterweight Trebuchet - Medieval Siege Machines</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px 25px; border-radius: 15px; display: flex; gap: 20px;
+            align-items: center; z-index: 100; flex-wrap: wrap; justify-content: center;
+        }
+        .control-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .control-group label { color: #DDA15E; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        .control-group input[type="range"] { width: 100px; accent-color: #8A9A5B; }
+        .control-group .value { color: #FEFAE0; font-size: 0.8rem; font-weight: bold; }
+        button {
+            background: linear-gradient(135deg, #8A9A5B, #606C38); color: #FEFAE0;
+            border: none; padding: 10px 24px; border-radius: 10px; cursor: pointer;
+            font-size: 0.9rem; font-weight: bold; transition: all 0.2s;
+        }
+        button:hover { transform: scale(1.05); box-shadow: 0 4px 15px rgba(138,154,91,0.4); }
+        .info {
+            position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(10px); padding: 12px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 220px;
+        }
+        .info h3 { color: #DDA15E; margin-bottom: 6px; font-size: 0.9rem; }
+        .info p { line-height: 1.4; opacity: 0.85; }
+        .stat-line { display: flex; justify-content: space-between; margin-top: 4px; }
+        .stat-line span:last-child { color: #8A9A5B; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h3>Counterweight Trebuchet</h3>
+        <p>Adjust mass ratio & arm length, then fire! The counterweight's gravitational PE converts to projectile KE.</p>
+        <div id="stats"></div>
+    </div>
+    <div class="controls">
+        <div class="control-group">
+            <label>Counterweight (kg)</label>
+            <input type="range" id="cwMass" min="500" max="10000" value="5000" step="100">
+            <span class="value" id="cwMassVal">5000</span>
+        </div>
+        <div class="control-group">
+            <label>Projectile (kg)</label>
+            <input type="range" id="projMass" min="5" max="200" value="50" step="5">
+            <span class="value" id="projMassVal">50</span>
+        </div>
+        <div class="control-group">
+            <label>Arm Ratio</label>
+            <input type="range" id="armRatio" min="2" max="6" value="4" step="0.5">
+            <span class="value" id="armRatioVal">4:1</span>
+        </div>
+        <div class="control-group">
+            <label>Sling Length</label>
+            <input type="range" id="slingLen" min="0.5" max="2" value="1" step="0.1">
+            <span class="value" id="slingLenVal">1.0</span>
+        </div>
+        <button id="fireBtn">FIRE!</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const G = 9.81;
+        const SCALE = 3;
+        const GROUND_Y_FRAC = 0.72;
+
+        let state = 'ready';
+        let angle = 0;
+        let angularVel = 0;
+        let projectile = null;
+        let trail = [];
+        let maxDist = 0;
+        let launchVel = 0;
+
+        const sliders = {
+            cwMass: document.getElementById('cwMass'),
+            projMass: document.getElementById('projMass'),
+            armRatio: document.getElementById('armRatio'),
+            slingLen: document.getElementById('slingLen')
+        };
+
+        function getParams() {
+            return {
+                cwMass: +sliders.cwMass.value,
+                projMass: +sliders.projMass.value,
+                armRatio: +sliders.armRatio.value,
+                slingLen: +sliders.slingLen.value
+            };
+        }
+
+        function updateLabels() {
+            document.getElementById('cwMassVal').textContent = sliders.cwMass.value;
+            document.getElementById('projMassVal').textContent = sliders.projMass.value;
+            document.getElementById('armRatioVal').textContent = sliders.armRatio.value + ':1';
+            document.getElementById('slingLenVal').textContent = (+sliders.slingLen.value).toFixed(1);
+        }
+
+        Object.values(sliders).forEach(s => s.addEventListener('input', updateLabels));
+
+        const RELEASE_ANGLE = Math.PI * 0.22;
+
+        function fire() {
+            if (state !== 'ready') return;
+            state = 'firing';
+            angle = -Math.PI * 0.35;
+            angularVel = 0;
+            projectile = null;
+            trail = [];
+            maxDist = 0;
+        }
+
+        document.getElementById('fireBtn').addEventListener('click', fire);
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            state = 'ready';
+            angle = -Math.PI * 0.35;
+            angularVel = 0;
+            projectile = null;
+            trail = [];
+            maxDist = 0;
+            document.getElementById('stats').innerHTML = '';
+        });
+
+        window.reset = function() {
+            state = 'ready';
+            angle = -Math.PI * 0.35;
+            angularVel = 0;
+            projectile = null;
+            trail = [];
+            maxDist = 0;
+        };
+
+        angle = -Math.PI * 0.35;
+
+        function drawGround(groundY) {
+            const grad = ctx.createLinearGradient(0, groundY, 0, H);
+            grad.addColorStop(0, '#4a5a2a');
+            grad.addColorStop(0.3, '#3d4a22');
+            grad.addColorStop(1, '#2a3318');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, groundY, W, H - groundY);
+
+            ctx.strokeStyle = '#5a6a3a';
+            ctx.lineWidth = 1;
+            for (let x = 0; x < W; x += 30) {
+                for (let i = 0; i < 3; i++) {
+                    const gx = x + Math.random() * 20;
+                    const gy = groundY + Math.random() * 5;
+                    ctx.beginPath();
+                    ctx.moveTo(gx, gy);
+                    ctx.lineTo(gx - 2, gy - 8 - Math.random() * 6);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function drawSky() {
+            const grad = ctx.createLinearGradient(0, 0, 0, H * 0.7);
+            grad.addColorStop(0, '#0a0a1e');
+            grad.addColorStop(0.5, '#1a1a3e');
+            grad.addColorStop(1, '#2a2a3e');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, W, H);
+
+            for (let i = 0; i < 60; i++) {
+                const sx = (i * 137.5) % W;
+                const sy = (i * 97.3) % (H * 0.6);
+                const brightness = 0.3 + Math.random() * 0.7;
+                ctx.fillStyle = `rgba(255,255,220,${brightness * 0.5})`;
+                ctx.beginPath();
+                ctx.arc(sx, sy, 0.5 + Math.random(), 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function drawTrebuchet(baseX, groundY, params) {
+            const armLen = 80 * SCALE;
+            const shortArm = armLen / (params.armRatio + 1);
+            const longArm = armLen - shortArm;
+            const pivotH = 40 * SCALE;
+            const pivotX = baseX;
+            const pivotY = groundY - pivotH;
+
+            // A-frame base
+            ctx.strokeStyle = '#8B7355';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(pivotX - 30, groundY);
+            ctx.lineTo(pivotX, pivotY);
+            ctx.lineTo(pivotX + 30, groundY);
+            ctx.stroke();
+
+            // Cross braces
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(pivotX - 20, groundY - pivotH * 0.4);
+            ctx.lineTo(pivotX + 20, groundY - pivotH * 0.4);
+            ctx.stroke();
+
+            // Arm
+            const cwEndX = pivotX - shortArm * Math.cos(angle);
+            const cwEndY = pivotY - shortArm * Math.sin(angle);
+            const projEndX = pivotX + longArm * Math.cos(angle);
+            const projEndY = pivotY + longArm * Math.sin(angle);
+
+            ctx.strokeStyle = '#A0855A';
+            ctx.lineWidth = 6;
+            ctx.beginPath();
+            ctx.moveTo(cwEndX, cwEndY);
+            ctx.lineTo(projEndX, projEndY);
+            ctx.stroke();
+
+            // Pivot joint
+            ctx.fillStyle = '#666';
+            ctx.beginPath();
+            ctx.arc(pivotX, pivotY, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Counterweight
+            const cwSize = 10 + params.cwMass / 300;
+            ctx.fillStyle = '#555';
+            ctx.strokeStyle = '#777';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.rect(cwEndX - cwSize / 2, cwEndY, cwSize, cwSize);
+            ctx.fill();
+            ctx.stroke();
+
+            // Sling (if projectile not released)
+            if (!projectile) {
+                const slingPixels = params.slingLen * 40 * SCALE;
+                const slingAngle = angle + Math.PI * 0.1;
+                const slingEndX = projEndX + slingPixels * Math.cos(slingAngle);
+                const slingEndY = projEndY + slingPixels * Math.sin(slingAngle);
+
+                ctx.strokeStyle = '#A08050';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(projEndX, projEndY);
+                ctx.lineTo(slingEndX, slingEndY);
+                ctx.stroke();
+
+                // Projectile in sling
+                ctx.fillStyle = '#888';
+                ctx.beginPath();
+                ctx.arc(slingEndX, slingEndY, 5 + params.projMass / 30, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            return { pivotX, pivotY, projEndX, projEndY, longArm };
+        }
+
+        function drawCastle(x, groundY) {
+            const wallH = 100;
+            const wallW = 30;
+            ctx.fillStyle = '#5a5a5a';
+            ctx.fillRect(x, groundY - wallH, wallW, wallH);
+
+            // Merlons
+            for (let i = 0; i < 3; i++) {
+                ctx.fillRect(x + i * 12, groundY - wallH - 15, 8, 15);
+            }
+
+            ctx.fillStyle = '#4a4a4a';
+            ctx.fillRect(x + 5, groundY - wallH + 30, 10, 15);
+            ctx.fillRect(x + 5, groundY - wallH + 60, 10, 15);
+        }
+
+        function updateStats(params) {
+            const statsDiv = document.getElementById('stats');
+            let html = '';
+            if (maxDist > 0) {
+                html += `<div class="stat-line"><span>Distance:</span><span>${maxDist.toFixed(1)} m</span></div>`;
+                html += `<div class="stat-line"><span>Launch vel:</span><span>${launchVel.toFixed(1)} m/s</span></div>`;
+            }
+            html += `<div class="stat-line"><span>Mass ratio:</span><span>${(params.cwMass / params.projMass).toFixed(0)}:1</span></div>`;
+            statsDiv.innerHTML = html;
+        }
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+
+            const params = getParams();
+            const groundY = H * GROUND_Y_FRAC;
+            const baseX = W * 0.25;
+
+            drawSky();
+            drawGround(groundY);
+
+            // Distance markers
+            ctx.fillStyle = 'rgba(254,250,224,0.3)';
+            ctx.font = '11px sans-serif';
+            for (let d = 50; d <= 400; d += 50) {
+                const mx = baseX + d * SCALE * 0.3;
+                if (mx < W - 40) {
+                    ctx.fillText(d + 'm', mx, groundY + 15);
+                    ctx.strokeStyle = 'rgba(254,250,224,0.1)';
+                    ctx.beginPath();
+                    ctx.moveTo(mx, groundY);
+                    ctx.lineTo(mx, groundY - 5);
+                    ctx.stroke();
+                }
+            }
+
+            drawCastle(W * 0.8, groundY);
+
+            if (state === 'firing') {
+                const armLen = 80 * SCALE;
+                const shortArm = armLen / (params.armRatio + 1);
+                const longArm = armLen - shortArm;
+
+                const torque = params.cwMass * G * shortArm * Math.cos(angle)
+                             - params.projMass * G * longArm * Math.cos(angle);
+                const I = params.cwMass * shortArm * shortArm + params.projMass * longArm * longArm;
+
+                angularVel += (torque / I) * dt;
+                angle += angularVel * dt;
+
+                if (angle >= RELEASE_ANGLE && !projectile) {
+                    const pivotY = groundY - 40 * SCALE;
+                    const projEndX = baseX + longArm * Math.cos(angle);
+                    const projEndY = pivotY + longArm * Math.sin(angle);
+                    const slingPixels = params.slingLen * 40 * SCALE;
+
+                    const tangentialSpeed = angularVel * longArm * (1 + params.slingLen * 0.5);
+                    launchVel = tangentialSpeed * 0.15;
+
+                    const launchAngle = angle - Math.PI * 0.5;
+                    projectile = {
+                        x: projEndX,
+                        y: projEndY - slingPixels * 0.5,
+                        vx: launchVel * Math.cos(launchAngle) * SCALE * 0.3,
+                        vy: launchVel * Math.sin(launchAngle) * SCALE * 0.3,
+                        startX: projEndX
+                    };
+                    state = 'flying';
+                }
+
+                if (angle > Math.PI * 0.4 && !projectile) {
+                    state = 'done';
+                }
+            }
+
+            if (state === 'flying' && projectile) {
+                projectile.vy += G * SCALE * 0.02 * dt * 60;
+                projectile.x += projectile.vx * dt * 60;
+                projectile.y += projectile.vy * dt * 60;
+
+                trail.push({ x: projectile.x, y: projectile.y });
+                if (trail.length > 200) trail.shift();
+
+                const dist = (projectile.x - projectile.startX) / (SCALE * 0.3);
+                if (dist > maxDist) maxDist = dist;
+
+                if (projectile.y >= groundY) {
+                    state = 'done';
+                    // Impact effect
+                    for (let i = 0; i < 10; i++) {
+                        trail.push({
+                            x: projectile.x + (Math.random() - 0.5) * 20,
+                            y: groundY - Math.random() * 15,
+                            impact: true
+                        });
+                    }
+                }
+            }
+
+            // Draw trail
+            if (trail.length > 1) {
+                for (let i = 1; i < trail.length; i++) {
+                    const t = trail[i];
+                    if (t.impact) {
+                        ctx.fillStyle = '#DDA15E';
+                        ctx.beginPath();
+                        ctx.arc(t.x, t.y, 2 + Math.random() * 3, 0, Math.PI * 2);
+                        ctx.fill();
+                    } else {
+                        const alpha = i / trail.length;
+                        ctx.strokeStyle = `rgba(221,161,94,${alpha * 0.8})`;
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.moveTo(trail[i - 1].x, trail[i - 1].y);
+                        ctx.lineTo(t.x, t.y);
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // Draw flying projectile
+            if (state === 'flying' && projectile) {
+                ctx.fillStyle = '#aaa';
+                ctx.shadowColor = '#DDA15E';
+                ctx.shadowBlur = 10;
+                ctx.beginPath();
+                ctx.arc(projectile.x, projectile.y, 5 + params.projMass / 30, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+
+            drawTrebuchet(baseX, groundY, params);
+            updateStats(params);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 16px sans-serif';
+            ctx.fillText('Counterweight Trebuchet Simulator', baseX - 100, 40);
+
+            requestAnimationFrame(animate);
+        }
+
+        requestAnimationFrame(animate);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

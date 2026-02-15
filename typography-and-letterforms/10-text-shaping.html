@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text Shaping Engine | Typography & Letterforms</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30, 30, 50, 0.85); backdrop-filter: blur(10px);
+            padding: 12px 24px; border-radius: 12px; display: flex; gap: 14px;
+            align-items: center; color: #FEFAE0; font-size: 0.82rem; z-index: 100;
+            border: 1px solid rgba(138, 154, 91, 0.3); flex-wrap: wrap; justify-content: center;
+        }
+        #controls label { display: flex; align-items: center; gap: 5px; }
+        #controls input[type="text"] {
+            background: #2a2a4a; color: #FEFAE0; border: 1px solid #8A9A5B;
+            border-radius: 6px; padding: 4px 10px; width: 200px; font-size: 0.85rem;
+        }
+        #controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 6px 14px;
+            border-radius: 8px; cursor: pointer; font-size: 0.8rem;
+        }
+        #controls button:hover { background: #8A9A5B; }
+        #controls .feature-toggle {
+            display: flex; align-items: center; gap: 3px;
+            background: rgba(138, 154, 91, 0.15); padding: 4px 8px; border-radius: 6px;
+        }
+        #controls .feature-toggle.active { background: rgba(138, 154, 91, 0.4); }
+        #info {
+            position: fixed; top: 50px; right: 20px; background: rgba(30, 30, 50, 0.85);
+            backdrop-filter: blur(10px); padding: 14px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.82rem; line-height: 1.6; max-width: 260px;
+            border: 1px solid rgba(138, 154, 91, 0.3); z-index: 100;
+        }
+        #info h3 { color: #DDA15E; margin-bottom: 6px; font-size: 0.95rem; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="info">
+        <h3>Text Shaping Engine</h3>
+        <p>Visualize how OpenType features transform character sequences. Ligatures combine letter pairs, contextual alternates change shapes based on neighbors, and stylistic sets offer design variations.</p>
+    </div>
+    <div id="controls">
+        <label>Text: <input type="text" id="textInput" value="ffle office"></label>
+        <div class="feature-toggle active" id="ligaToggle" data-feature="liga"><input type="checkbox" checked> liga</div>
+        <div class="feature-toggle active" id="kernToggle" data-feature="kern"><input type="checkbox" checked> kern</div>
+        <div class="feature-toggle" id="caltToggle" data-feature="calt"><input type="checkbox"> calt</div>
+        <div class="feature-toggle" id="ssToggle" data-feature="ss01"><input type="checkbox"> ss01</div>
+        <label><input type="checkbox" id="stagesToggle" checked> Show stages</label>
+        <button id="resetBtn">Reset</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        let text = 'ffle office';
+        let features = { liga: true, kern: true, calt: false, ss01: false };
+        let showStages = true;
+        let animProgress = 0;
+
+        // Define ligature substitutions
+        const ligatures = {
+            'ff': { glyph: 'ff', desc: 'ff ligature' },
+            'fi': { glyph: 'fi', desc: 'fi ligature' },
+            'fl': { glyph: 'fl', desc: 'fl ligature' },
+            'ffi': { glyph: 'ffi', desc: 'ffi ligature' },
+            'ffl': { glyph: 'ffl', desc: 'ffl ligature' }
+        };
+
+        // Kern pairs (value in em units)
+        const kernPairs = {
+            'AV': -0.08, 'VA': -0.08, 'AW': -0.06, 'WA': -0.06,
+            'AT': -0.07, 'TA': -0.07, 'To': -0.05, 'Ty': -0.05,
+            'LT': -0.06, 'LV': -0.05, 'Pa': -0.04, 'of': -0.02,
+            'oc': -0.01, 'ic': -0.01, 'ce': -0.01
+        };
+
+        // Contextual alternates
+        const contextAlts = {
+            'e_end': { replacement: 'e', desc: 'terminal e' },
+            'a_after_o': { replacement: 'a', desc: 'contextual a' }
+        };
+
+        // Stylistic set replacements
+        const ss01Map = {
+            'a': 'a', 'g': 'g', 'e': 'e'
+        };
+
+        function applyShaping(inputText) {
+            const stages = [];
+            let chars = inputText.split('').map((c, i) => ({
+                original: c, display: c, x: 0, kern: 0, ligated: false, ssApplied: false, contextual: false
+            }));
+
+            stages.push({ name: 'Input', chars: chars.map(c => ({...c})), desc: 'Raw character sequence' });
+
+            // Stage 1: Ligature substitution
+            if (features.liga) {
+                const newChars = [];
+                let i = 0;
+                while (i < chars.length) {
+                    let matched = false;
+                    // Try 3-char ligatures first
+                    for (const len of [3, 2]) {
+                        if (i + len <= chars.length) {
+                            const seq = chars.slice(i, i + len).map(c => c.display).join('');
+                            if (ligatures[seq]) {
+                                newChars.push({
+                                    original: seq,
+                                    display: ligatures[seq].glyph,
+                                    kern: 0, ligated: true, ssApplied: false, contextual: false,
+                                    ligaDesc: ligatures[seq].desc
+                                });
+                                i += len;
+                                matched = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!matched) {
+                        newChars.push({...chars[i]});
+                        i++;
+                    }
+                }
+                chars = newChars;
+                stages.push({ name: 'GSUB: liga', chars: chars.map(c => ({...c})), desc: 'Ligature substitution' });
+            }
+
+            // Stage 2: Contextual alternates
+            if (features.calt) {
+                for (let i = 0; i < chars.length; i++) {
+                    // Last letter gets terminal form
+                    if (i === chars.length - 1 && chars[i].display === 'e') {
+                        chars[i].contextual = true;
+                        chars[i].contextDesc = 'terminal e';
+                    }
+                }
+                stages.push({ name: 'GSUB: calt', chars: chars.map(c => ({...c})), desc: 'Contextual alternates' });
+            }
+
+            // Stage 3: Stylistic set
+            if (features.ss01) {
+                for (const c of chars) {
+                    if (ss01Map[c.display] && !c.ligated) {
+                        c.ssApplied = true;
+                    }
+                }
+                stages.push({ name: 'GSUB: ss01', chars: chars.map(c => ({...c})), desc: 'Stylistic set 1' });
+            }
+
+            // Stage 4: Kerning
+            if (features.kern) {
+                for (let i = 0; i < chars.length - 1; i++) {
+                    const pair = chars[i].display.slice(-1) + chars[i + 1].display[0];
+                    if (kernPairs[pair]) {
+                        chars[i].kern = kernPairs[pair];
+                    }
+                }
+                stages.push({ name: 'GPOS: kern', chars: chars.map(c => ({...c})), desc: 'Kerning adjustment' });
+            }
+
+            return stages;
+        }
+
+        function drawGlyphBox(x, y, w, h, char, options) {
+            const { ligated, ssApplied, contextual, kern, highlighted } = options;
+
+            // Box background
+            let bgColor = 'rgba(254, 250, 224, 0.05)';
+            let borderColor = 'rgba(138, 154, 91, 0.2)';
+
+            if (ligated) { bgColor = 'rgba(221, 161, 94, 0.15)'; borderColor = 'rgba(221, 161, 94, 0.5)'; }
+            if (ssApplied) { bgColor = 'rgba(138, 154, 91, 0.15)'; borderColor = 'rgba(138, 154, 91, 0.5)'; }
+            if (contextual) { bgColor = 'rgba(188, 108, 37, 0.15)'; borderColor = 'rgba(188, 108, 37, 0.5)'; }
+
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = borderColor;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x, y, w, h);
+
+            // Character
+            ctx.font = `${h * 0.6}px Georgia, serif`;
+            ctx.fillStyle = ligated ? '#DDA15E' : ssApplied ? '#8A9A5B' : contextual ? '#BC6C25' : '#FEFAE0';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(char, x + w / 2, y + h * 0.5);
+
+            // Kern indicator
+            if (kern && kern !== 0) {
+                const kernPx = kern * w;
+                ctx.fillStyle = kern < 0 ? 'rgba(188, 108, 37, 0.5)' : 'rgba(138, 154, 91, 0.5)';
+                ctx.fillRect(x + w, y + h * 0.3, kernPx, h * 0.4);
+                ctx.font = '9px monospace';
+                ctx.fillStyle = '#BC6C25';
+                ctx.fillText(`${(kern * 1000).toFixed(0)}`, x + w + 2, y + h + 10);
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, W, H);
+
+            const stages = applyShaping(text);
+            const stageH = 70;
+            const margin = 30;
+            const charW = 45;
+
+            if (showStages) {
+                const totalH = stages.length * (stageH + 30);
+                const startY = Math.max(50, (H - totalH) / 2);
+
+                for (let s = 0; s < stages.length; s++) {
+                    const stage = stages[s];
+                    const sy = startY + s * (stageH + 30);
+                    const totalCharsW = stage.chars.reduce((sum, c) => sum + (c.display.length > 2 ? charW * 1.5 : charW), 0);
+                    let cx = (W - totalCharsW) / 2;
+
+                    // Stage label
+                    ctx.font = 'bold 12px "Segoe UI", sans-serif';
+                    ctx.fillStyle = '#DDA15E';
+                    ctx.textAlign = 'right';
+                    ctx.fillText(stage.name, (W - totalCharsW) / 2 - 15, sy + stageH / 2);
+
+                    // Stage description
+                    ctx.font = '10px "Segoe UI", sans-serif';
+                    ctx.fillStyle = 'rgba(138, 154, 91, 0.6)';
+                    ctx.fillText(stage.desc, (W - totalCharsW) / 2 - 15, sy + stageH / 2 + 14);
+
+                    // Draw characters
+                    for (const c of stage.chars) {
+                        const w = c.display.length > 2 ? charW * 1.5 : charW;
+                        drawGlyphBox(cx, sy, w, stageH, c.display, {
+                            ligated: c.ligated,
+                            ssApplied: c.ssApplied,
+                            contextual: c.contextual,
+                            kern: c.kern
+                        });
+                        cx += w + (c.kern ? c.kern * charW : 0) + 2;
+                    }
+
+                    // Arrow to next stage
+                    if (s < stages.length - 1) {
+                        const arrowY = sy + stageH + 8;
+                        ctx.strokeStyle = 'rgba(138, 154, 91, 0.3)';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(W / 2, arrowY);
+                        ctx.lineTo(W / 2, arrowY + 14);
+                        ctx.stroke();
+                        ctx.beginPath();
+                        ctx.moveTo(W / 2 - 5, arrowY + 9);
+                        ctx.lineTo(W / 2, arrowY + 14);
+                        ctx.lineTo(W / 2 + 5, arrowY + 9);
+                        ctx.stroke();
+                    }
+                }
+            } else {
+                // Just show final result
+                const finalStage = stages[stages.length - 1];
+                const totalCharsW = finalStage.chars.length * charW;
+                let cx = (W - totalCharsW) / 2;
+                const sy = (H - stageH) / 2;
+
+                for (const c of finalStage.chars) {
+                    const w = c.display.length > 2 ? charW * 1.5 : charW;
+                    drawGlyphBox(cx, sy, w, stageH * 1.5, c.display, {
+                        ligated: c.ligated,
+                        ssApplied: c.ssApplied,
+                        contextual: c.contextual,
+                        kern: c.kern
+                    });
+                    cx += w + (c.kern ? c.kern * charW : 0) + 2;
+                }
+            }
+
+            // Legend
+            const legY = H - 35;
+            ctx.font = '11px "Segoe UI", sans-serif';
+            ctx.textAlign = 'left';
+            const legItems = [
+                { color: '#DDA15E', label: 'Ligature' },
+                { color: '#8A9A5B', label: 'Stylistic' },
+                { color: '#BC6C25', label: 'Contextual' },
+                { color: 'rgba(254, 250, 224, 0.6)', label: 'Unchanged' }
+            ];
+            let lx = 20;
+            for (const item of legItems) {
+                ctx.fillStyle = item.color;
+                ctx.fillRect(lx, legY - 5, 12, 12);
+                ctx.fillText(item.label, lx + 16, legY + 5);
+                lx += ctx.measureText(item.label).width + 30;
+            }
+        }
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+            draw();
+        }
+
+        document.getElementById('textInput').addEventListener('input', e => {
+            text = e.target.value || ' ';
+            draw();
+        });
+
+        for (const feat of ['liga', 'kern', 'calt', 'ss01']) {
+            const toggle = document.getElementById(feat + 'Toggle');
+            const cb = toggle.querySelector('input');
+            cb.addEventListener('change', () => {
+                features[feat] = cb.checked;
+                toggle.classList.toggle('active', cb.checked);
+                draw();
+            });
+        }
+
+        document.getElementById('stagesToggle').addEventListener('change', e => {
+            showStages = e.target.checked;
+            draw();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            text = 'ffle office';
+            features = { liga: true, kern: true, calt: false, ss01: false };
+            showStages = true;
+            document.getElementById('textInput').value = text;
+            document.getElementById('stagesToggle').checked = true;
+            for (const feat of ['liga', 'kern', 'calt', 'ss01']) {
+                const toggle = document.getElementById(feat + 'Toggle');
+                const cb = toggle.querySelector('input');
+                cb.checked = features[feat];
+                toggle.classList.toggle('active', features[feat]);
+            }
+            draw();
+        });
+
+        window.reset = function() { document.getElementById('resetBtn').click(); };
+
+        window.addEventListener('resize', resize);
+        resize();
+        function loop() { requestAnimationFrame(loop); }
+        loop();
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beer Brewing Fermentation - Fermentation Science</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a12; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; color: #FEFAE0; }
+canvas { display: block; }
+
+.controls {
+    position: fixed; top: 16px; right: 16px; z-index: 100;
+    background: rgba(30,30,20,0.92); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 18px; min-width: 240px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #DDA15E; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1.5px; }
+.controls label { display: block; font-size: 12px; color: #8A9A5B; margin-top: 8px; }
+.controls input[type=range] { width: 100%; margin: 4px 0; accent-color: #DDA15E; }
+.controls select {
+    width: 100%; padding: 4px 8px; margin: 4px 0; background: #2a2a1a; color: #FEFAE0;
+    border: 1px solid rgba(138,154,91,0.3); border-radius: 6px; font-size: 12px;
+}
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 14px; border: none; border-radius: 8px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+
+.info-panel {
+    position: fixed; bottom: 16px; left: 16px; z-index: 100;
+    background: rgba(30,30,20,0.88); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 14px 18px;
+    border: 1px solid rgba(138,154,91,0.2);
+    font-size: 12px; color: #8A9A5B; max-width: 520px;
+}
+.info-panel h4 { color: #DDA15E; margin-bottom: 6px; font-size: 13px; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Brew Day</h3>
+    <label>Yeast Strain:</label>
+    <select id="yeastStrain">
+        <option value="ale">Ale (S. cerevisiae, 18-22C)</option>
+        <option value="lager">Lager (S. pastorianus, 8-14C)</option>
+        <option value="belgian">Belgian (high ester, 20-28C)</option>
+    </select>
+    <label>Original Gravity (OG): <span id="ogVal">1.050</span></label>
+    <input type="range" id="og" min="1030" max="1090" step="1" value="1050">
+    <label>Fermentation Temp: <span id="tempVal">20</span>&deg;C</label>
+    <input type="range" id="temp" min="5" max="35" step="1" value="20">
+    <label>Pitch Rate: <span id="pitchVal">1.0</span>x</label>
+    <input type="range" id="pitch" min="0.5" max="2.0" step="0.1" value="1.0">
+    <label>Speed: <span id="speedVal">1</span>x</label>
+    <input type="range" id="speed" min="1" max="10" step="1" value="1">
+    <div style="margin-top:10px;">
+        <button class="btn" id="resetBtn">Reset Brew</button>
+    </div>
+</div>
+
+<div class="info-panel">
+    <h4>Beer Fermentation</h4>
+    <p>Saccharomyces cerevisiae (ale) and S. pastorianus (lager) convert wort sugars into ethanol and CO2. Primary fermentation takes 3-14 days. Watch gravity drop as sugars are consumed. Esters and fusel alcohols form as byproducts, depending on temperature and yeast strain.</p>
+</div>
+
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+// Yeast strain profiles
+const strains = {
+    ale: { optTemp: 20, tempRange: 4, muMax: 0.35, attenuation: 0.76, esterFactor: 1.0, name: 'Ale Yeast' },
+    lager: { optTemp: 11, tempRange: 3, muMax: 0.2, attenuation: 0.82, esterFactor: 0.4, name: 'Lager Yeast' },
+    belgian: { optTemp: 24, tempRange: 5, muMax: 0.4, attenuation: 0.85, esterFactor: 2.5, name: 'Belgian Yeast' }
+};
+
+let simTime = 0; // hours
+let simSpeed = 1;
+let strain = strains.ale;
+
+// Brewing state
+let OG = 1.050;
+let gravity = OG;
+let temperature = 20;
+let pitchRate = 1.0;
+let yeastCells = 1.0; // relative units
+let ethanol = 0; // % ABV
+let co2 = 0;
+let esters = 0;
+let fuselAlcohols = 0;
+let diacetyl = 0;
+let phase = 'lag'; // lag, active, conditioning
+let history = [];
+let bubbles = [];
+
+function tempFactor() {
+    const diff = temperature - strain.optTemp;
+    return Math.exp(-diff * diff / (2 * strain.tempRange * strain.tempRange));
+}
+
+function updateSim(dt) {
+    const tf = tempFactor();
+    const sugarAvailable = (gravity - 1.0) * 1000;
+    const maxSugar = (OG - 1.0) * 1000;
+    const FG = OG - (OG - 1.0) * strain.attenuation;
+    const minSugar = (FG - 1.0) * 1000;
+
+    // Phase determination
+    if (simTime < 4 / pitchRate) {
+        phase = 'lag';
+    } else if (sugarAvailable > minSugar + 1) {
+        phase = 'active';
+    } else {
+        phase = 'conditioning';
+    }
+
+    if (phase === 'lag') {
+        // Yeast adapting, minimal activity
+        yeastCells += 0.05 * pitchRate * tf * dt;
+    } else if (phase === 'active') {
+        // Primary fermentation
+        const mu = strain.muMax * tf * Math.min(1, sugarAvailable / (maxSugar * 0.3));
+        yeastCells += mu * yeastCells * 0.01 * dt;
+        yeastCells = Math.min(20, yeastCells);
+
+        const consumption = mu * yeastCells * 0.15 * dt;
+        gravity = Math.max(FG, gravity - consumption / 1000);
+
+        ethanol += consumption * 0.131 / 10; // Simplified ABV calc
+        co2 += consumption * 0.05;
+
+        // Byproducts
+        const esterRate = strain.esterFactor * tf * mu * 0.02;
+        esters += esterRate * dt;
+
+        // Fusel alcohols increase with temperature
+        const fuselRate = Math.max(0, (temperature - strain.optTemp) * 0.005) * mu;
+        fuselAlcohols += fuselRate * dt;
+
+        // Diacetyl production then reabsorption
+        diacetyl += mu * 0.01 * dt;
+
+        // Bubbles
+        if (Math.random() < co2 * 0.3 * tf) {
+            bubbles.push({
+                x: W * 0.12 + Math.random() * W * 0.38,
+                y: H * 0.7,
+                r: 1 + Math.random() * 4,
+                vy: -0.5 - Math.random() * 1.0,
+                life: 1
+            });
+        }
+    } else {
+        // Conditioning - diacetyl reabsorption
+        diacetyl = Math.max(0, diacetyl - 0.005 * tf * dt);
+        yeastCells *= (1 - 0.001 * dt);
+        co2 *= 0.999;
+    }
+
+    simTime += dt;
+    history.push({
+        t: simTime, grav: gravity, abv: ethanol, cells: yeastCells,
+        est: esters, fusel: fuselAlcohols, diac: diacetyl
+    });
+    if (history.length > 3000) history.shift();
+}
+
+function resetSim() {
+    const strainKey = document.getElementById('yeastStrain').value;
+    strain = strains[strainKey];
+    OG = parseInt(document.getElementById('og').value) / 1000;
+    temperature = parseInt(document.getElementById('temp').value);
+    pitchRate = parseFloat(document.getElementById('pitch').value);
+
+    simTime = 0;
+    gravity = OG;
+    yeastCells = pitchRate;
+    ethanol = 0;
+    co2 = 0;
+    esters = 0;
+    fuselAlcohols = 0;
+    diacetyl = 0;
+    phase = 'lag';
+    history = [];
+    bubbles = [];
+}
+
+// Controls
+document.getElementById('og').addEventListener('input', function() {
+    document.getElementById('ogVal').textContent = (parseInt(this.value) / 1000).toFixed(3);
+});
+document.getElementById('temp').addEventListener('input', function() {
+    document.getElementById('tempVal').textContent = this.value;
+});
+document.getElementById('pitch').addEventListener('input', function() {
+    document.getElementById('pitchVal').textContent = parseFloat(this.value).toFixed(1);
+});
+document.getElementById('speed').addEventListener('input', function() {
+    simSpeed = parseInt(this.value);
+    document.getElementById('speedVal').textContent = simSpeed;
+});
+document.getElementById('resetBtn').addEventListener('click', resetSim);
+document.getElementById('yeastStrain').addEventListener('change', resetSim);
+
+function drawFermenter() {
+    const fx = W * 0.06;
+    const fy = H * 0.06;
+    const fw = W * 0.42;
+    const fh = H * 0.7;
+
+    // Vessel outline
+    ctx.strokeStyle = 'rgba(138,154,91,0.35)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(fx, fy, fw, fh, 20);
+    ctx.stroke();
+
+    // Wort/beer fill
+    const colorProgress = ethanol / ((OG - 1.0) * 131);
+    const hue = 35 - colorProgress * 10;
+    const lightness = 25 + colorProgress * 5;
+    ctx.fillStyle = `hsla(${hue}, 60%, ${lightness}%, 0.6)`;
+    ctx.fillRect(fx + 3, fy + fh * 0.08, fw - 6, fh * 0.9);
+
+    // Krausen (foam during active fermentation)
+    if (phase === 'active') {
+        const krausenH = 20 + co2 * 3;
+        const krausenY = fy + fh * 0.08 - krausenH * 0.5;
+        ctx.fillStyle = 'rgba(230,210,170,0.3)';
+        for (let i = 0; i < 15; i++) {
+            const bx = fx + 10 + Math.random() * (fw - 20);
+            const by = krausenY + Math.random() * krausenH;
+            const br = 5 + Math.random() * 12;
+            ctx.beginPath();
+            ctx.arc(bx, by, br, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    // Yeast in suspension
+    const yCount = Math.floor(yeastCells * 8);
+    for (let i = 0; i < Math.min(150, yCount); i++) {
+        const yx = fx + 10 + Math.random() * (fw - 20);
+        const yy = fy + fh * 0.15 + Math.random() * fh * 0.75;
+        ctx.beginPath();
+        ctx.arc(yx, yy, 1.5 + Math.random() * 2, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(221,161,94,${phase === 'conditioning' ? 0.15 : 0.4})`;
+        ctx.fill();
+    }
+
+    // CO2 bubbles
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+        const b = bubbles[i];
+        b.y += b.vy;
+        b.x += (Math.random() - 0.5) * 0.5;
+        b.life -= 0.005;
+        if (b.life <= 0 || b.y < fy) {
+            bubbles.splice(i, 1);
+            continue;
+        }
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(254,250,224,${b.life * 0.15})`;
+        ctx.fill();
+    }
+    if (bubbles.length > 300) bubbles.splice(0, 100);
+
+    // Airlock visual
+    const alX = fx + fw / 2 - 8;
+    const alY = fy - 25;
+    ctx.fillStyle = 'rgba(138,154,91,0.3)';
+    ctx.fillRect(alX, alY, 16, 30);
+    if (phase === 'active' && Math.random() < 0.3) {
+        ctx.beginPath();
+        ctx.arc(alX + 8, alY - 5, 3, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(254,250,224,0.3)';
+        ctx.fill();
+    }
+
+    // Phase indicator
+    const phaseColors = { lag: '#606C38', active: '#DDA15E', conditioning: '#8A9A5B' };
+    const phaseNames = { lag: 'Lag Phase', active: 'Active Fermentation', conditioning: 'Conditioning' };
+    ctx.fillStyle = phaseColors[phase];
+    ctx.font = 'bold 14px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText(phaseNames[phase], fx + fw / 2, fy - 30);
+
+    ctx.fillStyle = '#606C38';
+    ctx.font = '12px system-ui';
+    ctx.fillText(strain.name, fx + fw / 2, fy + fh + 20);
+
+    // Stats
+    ctx.fillStyle = 'rgba(30,30,20,0.7)';
+    ctx.beginPath();
+    ctx.roundRect(fx, fy + fh + 30, fw, 70, 10);
+    ctx.fill();
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '11px system-ui';
+    ctx.textAlign = 'left';
+    const FG = OG - (OG - 1.0) * strain.attenuation;
+    ctx.fillText(`OG: ${OG.toFixed(3)} | SG: ${gravity.toFixed(3)} | FG target: ${FG.toFixed(3)}`, fx + 10, fy + fh + 48);
+    ctx.fillText(`ABV: ${ethanol.toFixed(1)}% | Hour: ${simTime.toFixed(0)} (Day ${(simTime/24).toFixed(1)})`, fx + 10, fy + fh + 65);
+    ctx.fillText(`Attenuation: ${(((OG - gravity) / (OG - 1.0)) * 100).toFixed(1)}%`, fx + 10, fy + fh + 82);
+}
+
+function drawGraphs() {
+    if (history.length < 2) return;
+
+    const gx = W * 0.54;
+    const gy = H * 0.06;
+    const gw = W * 0.42;
+    const gh = H * 0.38;
+    const maxT = Math.max(72, simTime);
+
+    // Gravity/ABV graph
+    ctx.fillStyle = 'rgba(20,20,12,0.7)';
+    ctx.beginPath();
+    ctx.roundRect(gx - 10, gy - 10, gw + 20, gh + 20, 14);
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy + 15); ctx.lineTo(gx, gy + gh); ctx.lineTo(gx + gw, gy + gh);
+    ctx.stroke();
+
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = 'bold 13px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Gravity & ABV', gx + gw / 2, gy + 5);
+
+    // Gravity
+    ctx.beginPath();
+    ctx.strokeStyle = '#DDA15E';
+    ctx.lineWidth = 2;
+    let first = true;
+    const gravMin = 0.995;
+    const gravMax = OG + 0.005;
+    for (const d of history) {
+        const px = gx + (d.t / maxT) * gw;
+        const py = gy + gh - ((d.grav - gravMin) / (gravMax - gravMin)) * (gh - 20);
+        if (first) { ctx.moveTo(px, py); first = false; }
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // ABV
+    ctx.beginPath();
+    ctx.strokeStyle = '#BC6C25';
+    ctx.lineWidth = 2;
+    first = true;
+    const maxABV = Math.max(5, ethanol * 1.3);
+    for (const d of history) {
+        const px = gx + (d.t / maxT) * gw;
+        const py = gy + gh - (d.abv / maxABV) * (gh - 20);
+        if (first) { ctx.moveTo(px, py); first = false; }
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = '#DDA15E'; ctx.fillRect(gx + 10, gy + 18, 12, 3);
+    ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText('Gravity', gx + 26, gy + 23);
+    ctx.fillStyle = '#BC6C25'; ctx.fillRect(gx + 85, gy + 18, 12, 3);
+    ctx.fillText('ABV %', gx + 101, gy + 23);
+
+    // Byproducts graph
+    const gy2 = gy + gh + 50;
+    ctx.fillStyle = 'rgba(20,20,12,0.7)';
+    ctx.beginPath();
+    ctx.roundRect(gx - 10, gy2 - 10, gw + 20, gh + 20, 14);
+    ctx.fill();
+
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = 'bold 13px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('Flavor Compounds', gx + gw / 2, gy2 + 5);
+
+    ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy2 + 15); ctx.lineTo(gx, gy2 + gh); ctx.lineTo(gx + gw, gy2 + gh);
+    ctx.stroke();
+
+    const maxComp = Math.max(1, esters * 1.5, fuselAlcohols * 1.5, diacetyl * 1.5);
+
+    function drawCompLine(key, color) {
+        ctx.beginPath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        let f = true;
+        for (const d of history) {
+            const px = gx + (d.t / maxT) * gw;
+            const py = gy2 + gh - (d[key] / maxComp) * (gh - 20);
+            if (f) { ctx.moveTo(px, py); f = false; }
+            else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+    }
+
+    drawCompLine('est', '#8A9A5B');
+    drawCompLine('fusel', '#DDA15E');
+    drawCompLine('diac', '#BC6C25');
+
+    ctx.fillStyle = '#8A9A5B'; ctx.fillRect(gx + 10, gy2 + 18, 12, 3);
+    ctx.font = '10px system-ui'; ctx.textAlign = 'left'; ctx.fillText('Esters', gx + 26, gy2 + 23);
+    ctx.fillStyle = '#DDA15E'; ctx.fillRect(gx + 80, gy2 + 18, 12, 3);
+    ctx.fillText('Fusels', gx + 96, gy2 + 23);
+    ctx.fillStyle = '#BC6C25'; ctx.fillRect(gx + 150, gy2 + 18, 12, 3);
+    ctx.fillText('Diacetyl', gx + 166, gy2 + 23);
+}
+
+function draw() {
+    ctx.fillStyle = '#1a1a12';
+    ctx.fillRect(0, 0, W, H);
+
+    for (let i = 0; i < simSpeed; i++) updateSim(0.2);
+
+    drawFermenter();
+    drawGraphs();
+
+    requestAnimationFrame(draw);
+}
+
+resetSim();
+draw();
+
+window.reset = function() { resetSim(); };
+</script>
+</body>
+</html>

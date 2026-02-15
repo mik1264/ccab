@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gait Cycle Analysis - Biomechanics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+        canvas { display: block; }
+        a[href="index.html"] { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,60,0.85); backdrop-filter: blur(10px);
+            border-radius: 16px; padding: 16px 24px; display: flex; gap: 20px;
+            align-items: center; color: #FEFAE0; font-size: 0.85rem; z-index: 100;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        #controls input[type="range"] { width: 100px; accent-color: #8A9A5B; }
+        #phase-display {
+            position: fixed; top: 60px; left: 50%; transform: translateX(-50%);
+            background: rgba(30,30,60,0.85); backdrop-filter: blur(10px);
+            border-radius: 12px; padding: 12px 20px; color: #FEFAE0;
+            font-size: 0.9rem; z-index: 100; text-align: center;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        .phase-bar { display: flex; width: 300px; height: 20px; border-radius: 10px; overflow: hidden; margin-top: 8px; }
+        .phase-segment { height: 100%; transition: opacity 0.2s; }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <div id="phase-display">
+        <div id="phase-name">Stance Phase: Initial Contact</div>
+        <div id="cycle-pct">0%</div>
+        <div class="phase-bar" id="phase-bar"></div>
+    </div>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <label>Speed<input type="range" id="speed" min="0.1" max="3" step="0.1" value="1"><span id="speed-val">1.0x</span></label>
+        <label>Leg Length<input type="range" id="legLen" min="60" max="150" step="5" value="100"><span id="legLen-val">100</span></label>
+        <label>Stride<input type="range" id="stride" min="40" max="120" step="5" value="80"><span id="stride-val">80</span></label>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const PHASES = [
+            { name: 'Initial Contact', start: 0, end: 0.02, color: '#8A9A5B' },
+            { name: 'Loading Response', start: 0.02, end: 0.12, color: '#606C38' },
+            { name: 'Mid Stance', start: 0.12, end: 0.31, color: '#DDA15E' },
+            { name: 'Terminal Stance', start: 0.31, end: 0.50, color: '#BC6C25' },
+            { name: 'Pre-Swing', start: 0.50, end: 0.62, color: '#8A9A5B' },
+            { name: 'Initial Swing', start: 0.62, end: 0.75, color: '#A3B86C' },
+            { name: 'Mid Swing', start: 0.75, end: 0.87, color: '#B5C68A' },
+            { name: 'Terminal Swing', start: 0.87, end: 1.0, color: '#C8D4A8' }
+        ];
+
+        // Build phase bar
+        const phaseBar = document.getElementById('phase-bar');
+        PHASES.forEach(p => {
+            const seg = document.createElement('div');
+            seg.className = 'phase-segment';
+            seg.style.width = ((p.end - p.start) * 100) + '%';
+            seg.style.background = p.color;
+            phaseBar.appendChild(seg);
+        });
+
+        let cycleTime = 0;
+        let speed = 1, legLen = 100, strideLen = 80;
+
+        document.getElementById('speed').oninput = e => { speed = +e.target.value; document.getElementById('speed-val').textContent = speed.toFixed(1) + 'x'; };
+        document.getElementById('legLen').oninput = e => { legLen = +e.target.value; document.getElementById('legLen-val').textContent = legLen; };
+        document.getElementById('stride').oninput = e => { strideLen = +e.target.value; document.getElementById('stride-val').textContent = strideLen; };
+
+        function getPhase(t) {
+            for (const p of PHASES) {
+                if (t >= p.start && t < p.end) return p;
+            }
+            return PHASES[PHASES.length - 1];
+        }
+
+        function getLegAngles(t, isRight) {
+            const phase = isRight ? t : (t + 0.5) % 1;
+            let hipAngle, kneeAngle, ankleAngle;
+
+            if (phase < 0.62) {
+                // Stance phase
+                const stanceProgress = phase / 0.62;
+                hipAngle = Math.PI * 0.1 - stanceProgress * Math.PI * 0.25;
+                kneeAngle = Math.sin(stanceProgress * Math.PI) * 0.15;
+                ankleAngle = Math.sin(stanceProgress * Math.PI * 2) * 0.1;
+            } else {
+                // Swing phase
+                const swingProgress = (phase - 0.62) / 0.38;
+                hipAngle = -Math.PI * 0.15 + swingProgress * Math.PI * 0.25;
+                kneeAngle = Math.sin(swingProgress * Math.PI) * 0.8;
+                ankleAngle = -0.2 + swingProgress * 0.3;
+            }
+            return { hipAngle, kneeAngle, ankleAngle };
+        }
+
+        function drawStickFigure(x, y, t) {
+            const headR = legLen * 0.15;
+            const torsoLen = legLen * 0.55;
+            const thighLen = legLen * 0.5;
+            const shinLen = legLen * 0.5;
+            const armLen = legLen * 0.4;
+
+            // Body sway
+            const sway = Math.sin(t * Math.PI * 2) * 3;
+
+            // Hip position
+            const hipX = x + sway;
+            const hipY = y;
+
+            // Torso
+            const shoulderX = hipX;
+            const shoulderY = hipY - torsoLen;
+
+            // Head
+            const headX = shoulderX;
+            const headY = shoulderY - headR - 5;
+
+            ctx.lineWidth = 3;
+            ctx.lineCap = 'round';
+
+            // Draw both legs
+            for (let side = 0; side < 2; side++) {
+                const isRight = side === 0;
+                const { hipAngle, kneeAngle } = getLegAngles(t, isRight);
+                const alpha = isRight ? 1 : 0.6;
+
+                // Thigh
+                const kneeX = hipX + Math.sin(hipAngle) * thighLen;
+                const kneeY = hipY + Math.cos(hipAngle) * thighLen;
+
+                // Shin
+                const footAngle = hipAngle + kneeAngle;
+                const footX = kneeX + Math.sin(footAngle) * shinLen;
+                const footY = kneeY + Math.cos(footAngle) * shinLen;
+
+                // Color based on stance/swing
+                const phase = isRight ? t : (t + 0.5) % 1;
+                const inStance = phase < 0.62;
+                ctx.strokeStyle = inStance ? `rgba(138,154,91,${alpha})` : `rgba(221,161,94,${alpha})`;
+
+                ctx.beginPath();
+                ctx.moveTo(hipX, hipY);
+                ctx.lineTo(kneeX, kneeY);
+                ctx.lineTo(footX, footY);
+                ctx.stroke();
+
+                // Foot
+                ctx.beginPath();
+                ctx.moveTo(footX, footY);
+                ctx.lineTo(footX + (inStance ? 12 : 6) * Math.cos(hipAngle), footY + 3);
+                ctx.stroke();
+
+                // Joint dots
+                ctx.fillStyle = `rgba(254,250,224,${alpha})`;
+                ctx.beginPath(); ctx.arc(kneeX, kneeY, 4, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.arc(footX, footY, 3, 0, Math.PI * 2); ctx.fill();
+            }
+
+            // Torso
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(hipX, hipY);
+            ctx.lineTo(shoulderX, shoulderY);
+            ctx.stroke();
+
+            // Arms (swing opposite to legs)
+            for (let side = 0; side < 2; side++) {
+                const armSwing = Math.sin((t + (side === 0 ? 0 : 0.5)) * Math.PI * 2) * 0.4;
+                const elbowX = shoulderX + Math.sin(armSwing) * armLen * 0.5;
+                const elbowY = shoulderY + Math.cos(armSwing) * armLen * 0.5;
+                const handX = elbowX + Math.sin(armSwing + 0.3) * armLen * 0.5;
+                const handY = elbowY + Math.cos(armSwing + 0.3) * armLen * 0.5;
+
+                ctx.strokeStyle = side === 0 ? 'rgba(254,250,224,0.9)' : 'rgba(254,250,224,0.5)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(shoulderX, shoulderY);
+                ctx.lineTo(elbowX, elbowY);
+                ctx.lineTo(handX, handY);
+                ctx.stroke();
+            }
+
+            // Head
+            ctx.fillStyle = '#FEFAE0';
+            ctx.beginPath();
+            ctx.arc(headX, headY, headR, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Hip joint
+            ctx.fillStyle = '#DDA15E';
+            ctx.beginPath(); ctx.arc(hipX, hipY, 5, 0, Math.PI * 2); ctx.fill();
+        }
+
+        function drawGroundReactionForce(x, y, t) {
+            const phase = t;
+            if (phase > 0.62) return; // No GRF in swing
+
+            const stanceProgress = phase / 0.62;
+            // Double-hump GRF pattern
+            const grfMag = (Math.sin(stanceProgress * Math.PI) * 0.7 +
+                           Math.sin(stanceProgress * Math.PI * 2) * 0.3) * legLen;
+
+            if (grfMag > 5) {
+                const groundY = y + legLen + 10;
+                ctx.strokeStyle = '#DDA15E';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(x, groundY);
+                ctx.lineTo(x, groundY - grfMag);
+                ctx.stroke();
+
+                // Arrow head
+                ctx.setLineDash([]);
+                ctx.beginPath();
+                ctx.moveTo(x, groundY - grfMag);
+                ctx.lineTo(x - 5, groundY - grfMag + 10);
+                ctx.moveTo(x, groundY - grfMag);
+                ctx.lineTo(x + 5, groundY - grfMag + 10);
+                ctx.stroke();
+
+                ctx.fillStyle = '#DDA15E';
+                ctx.font = '11px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('GRF', x, groundY - grfMag - 8);
+            }
+        }
+
+        function drawTrajectory(centerX, baseY, t) {
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            for (let i = 0; i <= 100; i++) {
+                const tt = i / 100;
+                const px = centerX - strideLen + tt * strideLen * 2;
+                const py = baseY - 5 - Math.sin(tt * Math.PI) * 15;
+                if (i === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // Current position dot
+            const dotX = centerX - strideLen + t * strideLen * 2;
+            const dotY = baseY - 5 - Math.sin(t * Math.PI) * 15;
+            ctx.fillStyle = '#8A9A5B';
+            ctx.beginPath(); ctx.arc(dotX, dotY, 4, 0, Math.PI * 2); ctx.fill();
+        }
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+
+            cycleTime = (cycleTime + dt * speed * 0.8) % 1;
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const centerX = W / 2;
+            const baseY = H * 0.5;
+            const groundY = baseY + legLen + 15;
+
+            // Ground line
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, groundY);
+            ctx.lineTo(W, groundY);
+            ctx.stroke();
+
+            // Ground pattern
+            ctx.strokeStyle = 'rgba(138,154,91,0.1)';
+            for (let gx = -100; gx < W + 100; gx += 30) {
+                ctx.beginPath();
+                ctx.moveTo(gx, groundY);
+                ctx.lineTo(gx - 15, groundY + 15);
+                ctx.stroke();
+            }
+
+            // COM trajectory
+            drawTrajectory(centerX, baseY - legLen * 0.55, cycleTime);
+
+            // Stick figure
+            drawStickFigure(centerX, baseY, cycleTime);
+
+            // Ground reaction force
+            drawGroundReactionForce(centerX, baseY, cycleTime);
+
+            // Update phase display
+            const phase = getPhase(cycleTime);
+            const isStance = cycleTime < 0.62;
+            document.getElementById('phase-name').textContent =
+                (isStance ? 'Stance' : 'Swing') + ' Phase: ' + phase.name;
+            document.getElementById('cycle-pct').textContent = Math.round(cycleTime * 100) + '%';
+
+            // Highlight phase bar
+            const segs = phaseBar.children;
+            for (let i = 0; i < segs.length; i++) {
+                const p = PHASES[i];
+                segs[i].style.opacity = (cycleTime >= p.start && cycleTime < p.end) ? '1' : '0.3';
+            }
+
+            // Legend
+            ctx.fillStyle = 'rgba(254,250,224,0.6)';
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('Green = Stance leg  |  Gold = Swing leg  |  Arrow = Ground Reaction Force', 20, H - 20);
+
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            cycleTime = 0;
+            document.getElementById('speed').value = 1; speed = 1;
+            document.getElementById('legLen').value = 100; legLen = 100;
+            document.getElementById('stride').value = 80; strideLen = 80;
+            document.getElementById('speed-val').textContent = '1.0x';
+            document.getElementById('legLen-val').textContent = '100';
+            document.getElementById('stride-val').textContent = '80';
+        };
+
+        requestAnimationFrame(animate);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

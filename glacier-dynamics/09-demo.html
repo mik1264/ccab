@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Milankovitch Cycles - Glacier Dynamics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a1e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 15px; border-radius: 12px; z-index: 1000;
+            min-width: 230px; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 10px; font-size: 0.95rem; }
+        .ctrl-row { margin-bottom: 8px; }
+        .ctrl-row label { display: block; font-size: 0.8rem; color: #8A9A5B; margin-bottom: 2px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #8A9A5B; }
+        .ctrl-row .val { float: right; color: #DDA15E; font-size: 0.8rem; }
+        .ctrl-row input[type=checkbox] { accent-color: #8A9A5B; vertical-align: middle; }
+        #info {
+            position: fixed; bottom: 10px; left: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 12px; border-radius: 12px; z-index: 1000;
+            max-width: 380px; font-size: 0.8rem; line-height: 1.4; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #info h4 { color: #DDA15E; margin-bottom: 4px; }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Milankovitch Cycles</h3>
+        <div class="ctrl-row">
+            <label>Time Range (kyr) <span class="val" id="rangeVal">500</span></label>
+            <input type="range" id="rangeSlider" min="100" max="1000" step="50" value="500">
+        </div>
+        <div class="ctrl-row">
+            <label><input type="checkbox" id="eccCheck" checked> Eccentricity (~100 kyr)</label>
+        </div>
+        <div class="ctrl-row">
+            <label><input type="checkbox" id="oblCheck" checked> Obliquity (~41 kyr)</label>
+        </div>
+        <div class="ctrl-row">
+            <label><input type="checkbox" id="precCheck" checked> Precession (~23 kyr)</label>
+        </div>
+        <div class="ctrl-row">
+            <label><input type="checkbox" id="sumCheck" checked> Combined Insolation</label>
+        </div>
+        <div class="ctrl-row">
+            <label><input type="checkbox" id="iceCheck" checked> Ice Volume Response</label>
+        </div>
+    </div>
+    <div id="info">
+        <h4>Milankovitch (Orbital) Cycles</h4>
+        <p>Earth's orbit changes cyclically: <strong>eccentricity</strong> (100 kyr, orbit shape), <strong>obliquity</strong> (41 kyr, axial tilt 22.1&ndash;24.5&deg;), and <strong>precession</strong> (23 kyr, wobble). Together they modulate summer insolation at 65&deg;N, controlling whether snow survives the summer. When insolation drops below a threshold, ice sheets grow; when it rises, they retreat.</p>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const rangeSlider = document.getElementById('rangeSlider');
+        const eccCheck = document.getElementById('eccCheck');
+        const oblCheck = document.getElementById('oblCheck');
+        const precCheck = document.getElementById('precCheck');
+        const sumCheck = document.getElementById('sumCheck');
+        const iceCheck = document.getElementById('iceCheck');
+
+        let mouseX = -1;
+        canvas.addEventListener('mousemove', (e) => { mouseX = e.clientX; });
+        canvas.addEventListener('mouseleave', () => { mouseX = -1; });
+
+        // Orbital element functions
+        function eccentricity(t) {
+            // Multi-frequency eccentricity (kyr)
+            return 0.028 * Math.sin(2 * Math.PI * t / 95.8) +
+                   0.012 * Math.sin(2 * Math.PI * t / 123.8) +
+                   0.005 * Math.sin(2 * Math.PI * t / 413);
+        }
+
+        function obliquity(t) {
+            // Axial tilt oscillation (kyr)
+            return 1.0 * Math.sin(2 * Math.PI * t / 41) +
+                   0.3 * Math.sin(2 * Math.PI * t / 39.7);
+        }
+
+        function precession(t) {
+            // Precession of equinoxes (kyr)
+            return 0.8 * Math.sin(2 * Math.PI * t / 23.7) +
+                   0.5 * Math.sin(2 * Math.PI * t / 22.4) +
+                   0.3 * Math.sin(2 * Math.PI * t / 19);
+        }
+
+        function insolation(t) {
+            let val = 0;
+            if (eccCheck.checked) val += eccentricity(t) * 1.5;
+            if (oblCheck.checked) val += obliquity(t);
+            if (precCheck.checked) val += precession(t);
+            return val;
+        }
+
+        // Ice volume model (lagged response to insolation)
+        function computeIceVolume(times) {
+            const ice = new Float64Array(times.length);
+            ice[0] = 0;
+            const dt = times.length > 1 ? times[1] - times[0] : 1;
+            for (let i = 1; i < times.length; i++) {
+                const insol = insolation(times[i]);
+                // Asymmetric response: slow growth, fast decay
+                const growRate = 0.015;
+                const meltRate = 0.04;
+                const rate = insol > 0 ? -meltRate : growRate;
+                ice[i] = ice[i-1] + rate * Math.abs(insol) * dt;
+                ice[i] = Math.max(-1.5, Math.min(2.5, ice[i]));
+            }
+            return ice;
+        }
+
+        // Orbital diagram animation
+        let orbitalTime = 0;
+
+        function draw() {
+            orbitalTime += 0.005;
+
+            const timeRange = parseFloat(rangeSlider.value);
+            document.getElementById('rangeVal').textContent = timeRange;
+
+            ctx.fillStyle = '#0a0a1e';
+            ctx.fillRect(0, 0, W, H);
+
+            const margin = { left: 80, right: 40, top: 70, bottom: 50 };
+            const graphW = W - margin.left - margin.right;
+
+            // Layout: orbital diagram top-left, then 5 time series graphs
+            const orbSize = Math.min(180, H * 0.2);
+            const orbCx = margin.left + orbSize;
+            const orbCy = margin.top + orbSize * 0.7;
+
+            // Draw orbital diagram
+            // Sun
+            ctx.fillStyle = '#DDA15E';
+            ctx.beginPath();
+            ctx.arc(orbCx, orbCy, 12, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = 'rgba(221,161,94,0.2)';
+            ctx.beginPath();
+            ctx.arc(orbCx, orbCy, 20, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Orbit ellipse
+            const ecc = 0.02 + 0.03 * (1 + Math.sin(orbitalTime * 0.3));
+            const a = orbSize * 0.7;
+            const b = a * Math.sqrt(1 - ecc * ecc);
+            ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.ellipse(orbCx + a * ecc * 0.5, orbCy, a, b, 0, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Earth
+            const earthAngle = orbitalTime * 2;
+            const ex = orbCx + a * ecc * 0.5 + a * Math.cos(earthAngle);
+            const ey = orbCy + b * Math.sin(earthAngle);
+            ctx.fillStyle = '#3498db';
+            ctx.beginPath();
+            ctx.arc(ex, ey, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Axial tilt arrow
+            const tilt = 23.4 + 1.3 * Math.sin(orbitalTime * 0.7);
+            const tiltRad = tilt * Math.PI / 180;
+            ctx.strokeStyle = '#e74c3c';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(ex - 12 * Math.sin(tiltRad), ey - 12 * Math.cos(tiltRad));
+            ctx.lineTo(ex + 12 * Math.sin(tiltRad), ey + 12 * Math.cos(tiltRad));
+            ctx.stroke();
+
+            // Labels
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = '#DDA15E';
+            ctx.fillText('Sun', orbCx, orbCy + 25);
+            ctx.fillStyle = '#3498db';
+            ctx.fillText('Earth', ex, ey + 18);
+            ctx.fillStyle = '#e74c3c';
+            ctx.fillText(tilt.toFixed(1) + ' deg', ex + 20, ey - 12);
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText('e = ' + ecc.toFixed(3), orbCx + a * 0.5, orbCy + orbSize * 0.55);
+
+            // Time series graphs
+            const numGraphs = 5;
+            const graphStartY = Math.max(orbCy + orbSize * 0.5, H * 0.28);
+            const availH = H - graphStartY - margin.bottom;
+            const graphH = availH / numGraphs - 8;
+
+            const steps = 500;
+            const times = [];
+            for (let i = 0; i < steps; i++) {
+                times.push((i / steps) * timeRange);
+            }
+
+            const iceVolume = computeIceVolume(times);
+
+            const graphDefs = [
+                { fn: eccentricity, label: 'Eccentricity (~100 kyr)', color: '#e74c3c', show: eccCheck.checked },
+                { fn: obliquity, label: 'Obliquity (~41 kyr)', color: '#f39c12', show: oblCheck.checked },
+                { fn: precession, label: 'Precession (~23 kyr)', color: '#2ecc71', show: precCheck.checked },
+                { fn: insolation, label: 'Combined Insolation (65 deg N)', color: '#3498db', show: sumCheck.checked },
+                { fn: null, label: 'Ice Volume Response', color: '#9b59b6', show: iceCheck.checked, data: iceVolume }
+            ];
+
+            graphDefs.forEach((gd, gi) => {
+                const gy = graphStartY + gi * (graphH + 8);
+                const gLeft = margin.left;
+
+                // Background
+                ctx.fillStyle = 'rgba(20,20,40,0.4)';
+                ctx.fillRect(gLeft, gy, graphW, graphH);
+
+                // Label
+                ctx.fillStyle = gd.show ? gd.color : 'rgba(100,100,100,0.5)';
+                ctx.font = '10px sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText(gd.label, gLeft + 5, gy + 11);
+
+                if (!gd.show) return;
+
+                // Find range
+                let minV = Infinity, maxV = -Infinity;
+                for (let i = 0; i < steps; i++) {
+                    const v = gd.data ? gd.data[i] : gd.fn(times[i]);
+                    if (v < minV) minV = v;
+                    if (v > maxV) maxV = v;
+                }
+                const range = maxV - minV || 1;
+
+                // Zero line
+                if (minV < 0 && maxV > 0) {
+                    const zeroY = gy + graphH - (-minV / range) * (graphH - 4) - 2;
+                    ctx.strokeStyle = 'rgba(254,250,224,0.1)';
+                    ctx.lineWidth = 0.5;
+                    ctx.beginPath();
+                    ctx.moveTo(gLeft, zeroY);
+                    ctx.lineTo(gLeft + graphW, zeroY);
+                    ctx.stroke();
+                }
+
+                // Data line
+                ctx.strokeStyle = gd.color;
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                for (let i = 0; i < steps; i++) {
+                    const x = gLeft + (i / steps) * graphW;
+                    const v = gd.data ? gd.data[i] : gd.fn(times[i]);
+                    const y = gy + graphH - ((v - minV) / range) * (graphH - 4) - 2;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+
+                // Fill
+                ctx.globalAlpha = 0.1;
+                ctx.fillStyle = gd.color;
+                ctx.beginPath();
+                for (let i = 0; i < steps; i++) {
+                    const x = gLeft + (i / steps) * graphW;
+                    const v = gd.data ? gd.data[i] : gd.fn(times[i]);
+                    const y = gy + graphH - ((v - minV) / range) * (graphH - 4) - 2;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.lineTo(gLeft + graphW, gy + graphH);
+                ctx.lineTo(gLeft, gy + graphH);
+                ctx.closePath();
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            });
+
+            // Hover crosshair
+            if (mouseX > margin.left && mouseX < margin.left + graphW) {
+                ctx.setLineDash([4, 4]);
+                ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(mouseX, graphStartY);
+                ctx.lineTo(mouseX, H - margin.bottom);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                const timeFrac = (mouseX - margin.left) / graphW;
+                const timeAt = timeFrac * timeRange;
+                ctx.fillStyle = '#FEFAE0';
+                ctx.font = '11px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(timeAt.toFixed(0) + ' kyr ago', mouseX, graphStartY - 5);
+            }
+
+            // Time axis
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            const timeStep = timeRange > 500 ? 100 : 50;
+            for (let t = 0; t <= timeRange; t += timeStep) {
+                const x = margin.left + (t / timeRange) * graphW;
+                ctx.fillText(t + ' kyr', x, H - margin.bottom + 15);
+            }
+            ctx.fillText('Time Before Present', margin.left + graphW / 2, H - margin.bottom + 30);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Milankovitch Cycles & Ice Ages', W / 2, 30);
+            ctx.font = '12px sans-serif';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText('Orbital forcing of glacial-interglacial cycles', W / 2, 48);
+
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            rangeSlider.value = 500;
+            eccCheck.checked = true;
+            oblCheck.checked = true;
+            precCheck.checked = true;
+            sumCheck.checked = true;
+            iceCheck.checked = true;
+            orbitalTime = 0;
+        };
+
+        draw();
+    })();
+    </script>
+</body>
+</html>

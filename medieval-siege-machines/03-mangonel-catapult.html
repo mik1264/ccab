@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mangonel Catapult - Medieval Siege Machines</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px 25px; border-radius: 15px; display: flex; gap: 20px;
+            align-items: center; z-index: 100; flex-wrap: wrap; justify-content: center;
+        }
+        .control-group { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .control-group label { color: #DDA15E; font-size: 0.75rem; text-transform: uppercase; }
+        .control-group input[type="range"] { width: 100px; accent-color: #8A9A5B; }
+        .control-group .value { color: #FEFAE0; font-size: 0.8rem; font-weight: bold; }
+        button {
+            background: linear-gradient(135deg, #8A9A5B, #606C38); color: #FEFAE0;
+            border: none; padding: 10px 24px; border-radius: 10px; cursor: pointer;
+            font-size: 0.9rem; font-weight: bold;
+        }
+        button:hover { transform: scale(1.05); }
+        .info {
+            position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(10px); padding: 12px 18px; border-radius: 12px;
+            color: #FEFAE0; font-size: 0.8rem; z-index: 100; max-width: 220px;
+        }
+        .info h3 { color: #DDA15E; margin-bottom: 6px; }
+        .comparison { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); }
+        .comparison div { display: flex; justify-content: space-between; margin: 2px 0; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <h3>Mangonel Catapult</h3>
+        <p>Torsion-powered siege engine. Pull-rope teams wind the arm, storing energy in twisted rope bundles. Compare with trebuchet range.</p>
+        <div id="stats"></div>
+    </div>
+    <div class="controls">
+        <div class="control-group">
+            <label>Pull Force</label>
+            <input type="range" id="pullForce" min="10" max="100" value="60" step="5">
+            <span class="value" id="pullForceVal">60</span>
+        </div>
+        <div class="control-group">
+            <label>Stone Mass (kg)</label>
+            <input type="range" id="stoneMass" min="5" max="100" value="30" step="5">
+            <span class="value" id="stoneMassVal">30</span>
+        </div>
+        <div class="control-group">
+            <label>Arm Length (m)</label>
+            <input type="range" id="armLen" min="2" max="8" value="5" step="0.5">
+            <span class="value" id="armLenVal">5.0</span>
+        </div>
+        <button id="fireBtn">FIRE!</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const G = 9.81;
+        let state = 'ready';
+        let armAngle = -Math.PI * 0.4;
+        let armVel = 0;
+        let stone = null;
+        let trail = [];
+        let maxRange = 0;
+        let hits = [];
+
+        const sliders = {
+            pullForce: document.getElementById('pullForce'),
+            stoneMass: document.getElementById('stoneMass'),
+            armLen: document.getElementById('armLen')
+        };
+
+        function getP() {
+            return {
+                pullForce: +sliders.pullForce.value,
+                stoneMass: +sliders.stoneMass.value,
+                armLen: +sliders.armLen.value
+            };
+        }
+
+        function updateLabels() {
+            document.getElementById('pullForceVal').textContent = sliders.pullForce.value;
+            document.getElementById('stoneMassVal').textContent = sliders.stoneMass.value;
+            document.getElementById('armLenVal').textContent = (+sliders.armLen.value).toFixed(1);
+        }
+        Object.values(sliders).forEach(s => s.addEventListener('input', updateLabels));
+
+        function fire() {
+            if (state !== 'ready') return;
+            state = 'firing';
+            armAngle = -Math.PI * 0.4;
+            armVel = 0;
+            stone = null;
+            trail = [];
+        }
+
+        document.getElementById('fireBtn').addEventListener('click', fire);
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            state = 'ready'; armAngle = -Math.PI * 0.4; armVel = 0;
+            stone = null; trail = []; maxRange = 0; hits = [];
+            document.getElementById('stats').innerHTML = '';
+        });
+
+        window.reset = function() {
+            state = 'ready'; armAngle = -Math.PI * 0.4; armVel = 0;
+            stone = null; trail = []; maxRange = 0; hits = [];
+        };
+
+        function drawMangonel(baseX, groundY, p) {
+            const armPx = p.armLen * 25;
+            const frameH = 50;
+
+            // Wooden frame
+            ctx.fillStyle = '#6B5B3A';
+            ctx.fillRect(baseX - 40, groundY - 15, 80, 15);
+
+            // Side uprights
+            ctx.strokeStyle = '#7B6B4A';
+            ctx.lineWidth = 5;
+            [-25, 25].forEach(dx => {
+                ctx.beginPath();
+                ctx.moveTo(baseX + dx, groundY - 15);
+                ctx.lineTo(baseX + dx, groundY - frameH);
+                ctx.stroke();
+            });
+
+            // Stop bar
+            ctx.strokeStyle = '#8B6B3A';
+            ctx.lineWidth = 6;
+            ctx.beginPath();
+            ctx.moveTo(baseX - 25, groundY - frameH);
+            ctx.lineTo(baseX + 25, groundY - frameH);
+            ctx.stroke();
+
+            // Wheels
+            ctx.strokeStyle = '#5A4A2A';
+            ctx.lineWidth = 3;
+            [-35, 35].forEach(dx => {
+                ctx.beginPath();
+                ctx.arc(baseX + dx, groundY, 10, 0, Math.PI * 2);
+                ctx.stroke();
+            });
+
+            // Torsion rope bundle
+            const pivotY = groundY - frameH + 5;
+            ctx.fillStyle = '#A08050';
+            ctx.beginPath();
+            ctx.ellipse(baseX, pivotY, 10, 8, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Arm
+            const tipX = baseX + armPx * Math.cos(armAngle);
+            const tipY = pivotY + armPx * Math.sin(armAngle);
+
+            ctx.strokeStyle = '#A0855A';
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.moveTo(baseX, pivotY);
+            ctx.lineTo(tipX, tipY);
+            ctx.stroke();
+
+            // Bucket/cup at end
+            if (!stone || state === 'firing') {
+                ctx.fillStyle = '#8B7355';
+                ctx.beginPath();
+                ctx.arc(tipX, tipY, 10, 0, Math.PI);
+                ctx.fill();
+
+                if (!stone) {
+                    // Stone in bucket
+                    const stoneR = 4 + p.stoneMass / 15;
+                    ctx.fillStyle = '#888';
+                    ctx.beginPath();
+                    ctx.arc(tipX, tipY + 3, stoneR, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // Pull ropes (when ready)
+            if (state === 'ready') {
+                ctx.strokeStyle = '#C0A070';
+                ctx.lineWidth = 1.5;
+                for (let i = 0; i < 4; i++) {
+                    ctx.beginPath();
+                    ctx.moveTo(tipX - 5 + i * 3, tipY);
+                    ctx.lineTo(tipX - 15 + i * 8, groundY);
+                    ctx.stroke();
+                }
+            }
+
+            return { tipX, tipY, pivotY };
+        }
+
+        function drawCastleWall(x, groundY) {
+            ctx.fillStyle = '#5a5a5a';
+            ctx.fillRect(x, groundY - 120, 40, 120);
+            for (let i = 0; i < 4; i++) {
+                ctx.fillRect(x + i * 12 - 2, groundY - 135, 8, 15);
+            }
+            // Window
+            ctx.fillStyle = '#3a3a3a';
+            ctx.fillRect(x + 12, groundY - 90, 15, 20);
+        }
+
+        let lastTime = 0;
+        function animate(time) {
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+
+            const p = getP();
+            const groundY = H * 0.75;
+            const baseX = W * 0.18;
+
+            // Sky
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+            skyGrad.addColorStop(0, '#1a0a2e');
+            skyGrad.addColorStop(0.4, '#2a1a3e');
+            skyGrad.addColorStop(0.7, '#3a2a3e');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, W, H);
+
+            // Ground
+            const gGrad = ctx.createLinearGradient(0, groundY, 0, H);
+            gGrad.addColorStop(0, '#4a5a2a');
+            gGrad.addColorStop(1, '#2a3318');
+            ctx.fillStyle = gGrad;
+            ctx.fillRect(0, groundY, W, H - groundY);
+
+            // Distance markers
+            ctx.fillStyle = 'rgba(254,250,224,0.3)';
+            ctx.font = '11px sans-serif';
+            for (let d = 50; d <= 400; d += 50) {
+                const mx = baseX + d * 1.5;
+                if (mx < W - 40) ctx.fillText(d + 'm', mx, groundY + 15);
+            }
+
+            drawCastleWall(W * 0.82, groundY);
+
+            // Physics
+            if (state === 'firing') {
+                const torque = p.pullForce * 100;
+                const I = p.stoneMass * Math.pow(p.armLen * 25, 2);
+                armVel += (torque / I) * dt * 2000;
+                armAngle += armVel * dt;
+
+                if (armAngle >= -Math.PI * 0.05) {
+                    const speed = armVel * p.armLen * 25 * 0.12;
+                    const pivotY = groundY - 50 + 5;
+                    const tipX = baseX + p.armLen * 25 * Math.cos(armAngle);
+                    const tipY = pivotY + p.armLen * 25 * Math.sin(armAngle);
+                    const launchAngle = armAngle - Math.PI * 0.45;
+                    stone = {
+                        x: tipX, y: tipY,
+                        vx: speed * Math.cos(launchAngle),
+                        vy: speed * Math.sin(launchAngle),
+                        startX: tipX, r: 4 + p.stoneMass / 15
+                    };
+                    state = 'flying';
+                }
+
+                if (armAngle > Math.PI * 0.1 && !stone) armAngle = Math.PI * 0.1;
+            }
+
+            if (state === 'flying' && stone) {
+                stone.vy += G * 0.15 * dt * 60;
+                stone.x += stone.vx * dt * 60;
+                stone.y += stone.vy * dt * 60;
+
+                trail.push({ x: stone.x, y: stone.y });
+                if (trail.length > 200) trail.shift();
+
+                const dist = (stone.x - stone.startX) / 1.5;
+                if (dist > maxRange) maxRange = dist;
+
+                if (stone.y >= groundY) {
+                    hits.push({ x: stone.x, y: groundY, age: 0 });
+                    state = 'done';
+                }
+            }
+
+            // Trail
+            if (trail.length > 1) {
+                for (let i = 1; i < trail.length; i++) {
+                    const alpha = i / trail.length;
+                    ctx.strokeStyle = `rgba(221,161,94,${alpha * 0.7})`;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.moveTo(trail[i - 1].x, trail[i - 1].y);
+                    ctx.lineTo(trail[i].x, trail[i].y);
+                    ctx.stroke();
+                }
+            }
+
+            // Impact craters
+            hits.forEach(h => {
+                h.age += dt;
+                const a = Math.max(0, 1 - h.age * 0.5);
+                ctx.fillStyle = `rgba(100,80,50,${a})`;
+                ctx.beginPath();
+                ctx.ellipse(h.x, h.y, 12, 4, 0, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // Flying stone
+            if (state === 'flying' && stone) {
+                ctx.fillStyle = '#888';
+                ctx.shadowColor = '#DDA15E';
+                ctx.shadowBlur = 8;
+                ctx.beginPath();
+                ctx.arc(stone.x, stone.y, stone.r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+
+            drawMangonel(baseX, groundY, p);
+
+            // Stats
+            const statsDiv = document.getElementById('stats');
+            let html = '<div class="comparison">';
+            html += `<div><span>Range:</span><span style="color:#8A9A5B">${maxRange.toFixed(0)} m</span></div>`;
+            html += `<div><span>Max possible:</span><span style="color:#DDA15E">~400 m</span></div>`;
+            html += `<div><span>Trebuchet max:</span><span style="color:#666">~350 m</span></div>`;
+            html += '</div>';
+            statsDiv.innerHTML = html;
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 16px sans-serif';
+            ctx.fillText('Mangonel Catapult', baseX - 40, 40);
+
+            requestAnimationFrame(animate);
+        }
+        requestAnimationFrame(animate);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

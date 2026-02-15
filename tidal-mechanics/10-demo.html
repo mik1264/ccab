@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Laplace Tidal Equations</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; overflow: hidden; font-family: Georgia, serif; }
+canvas { display: block; }
+#controls {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(96,108,56,0.85); backdrop-filter: blur(10px);
+    padding: 15px 25px; border-radius: 12px; color: #FEFAE0;
+    display: flex; gap: 20px; align-items: center; z-index: 100; flex-wrap: wrap;
+    justify-content: center; font-size: 0.85rem;
+}
+#controls input[type="range"] { width: 110px; accent-color: #DDA15E; }
+#info {
+    position: fixed; top: 60px; right: 20px;
+    background: rgba(96,108,56,0.85); backdrop-filter: blur(10px);
+    padding: 15px; border-radius: 12px; color: #FEFAE0;
+    font-size: 0.8rem; max-width: 250px; z-index: 100; line-height: 1.5;
+}
+.val { color: #DDA15E; font-weight: bold; }
+.eq { font-style: italic; color: #8A9A5B; font-size: 0.75rem; }
+</style>
+</head>
+<body>
+<a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+<canvas id="c"></canvas>
+<div id="info">
+    <div class="val">Laplace Tidal Equations</div>
+    <br>
+    <div>Shallow-water equations on a rotating sphere describing global tidal dynamics.</div>
+    <br>
+    <div class="eq">&part;u/&part;t - fv = -g &part;&eta;/&part;x + F<sub>x</sub></div>
+    <div class="eq">&part;v/&part;t + fu = -g &part;&eta;/&part;y + F<sub>y</sub></div>
+    <div class="eq">&part;&eta;/&part;t + H(&part;u/&part;x + &part;v/&part;y) = 0</div>
+    <br>
+    <div>Where f = 2&Omega;sin(&phi;) is the Coriolis parameter</div>
+    <br>
+    <div>Kelvin waves propagate along coastlines; Poincare waves propagate in open ocean.</div>
+</div>
+<div id="controls">
+    <label>Rotation: <input type="range" id="rotation" min="0" max="2" step="0.05" value="1"> <span id="rotVal">1.0</span></label>
+    <label>Depth: <input type="range" id="depth" min="0.3" max="3" step="0.1" value="1"> <span id="depVal">1.0</span></label>
+    <label>Forcing: <input type="range" id="forcing" min="0.2" max="3" step="0.1" value="1"></label>
+    <label>Speed: <input type="range" id="speed" min="0.2" max="4" step="0.1" value="1"></label>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+let time = 0;
+let animId;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+const rotationEl = document.getElementById('rotation');
+const depthEl = document.getElementById('depth');
+const forcingEl = document.getElementById('forcing');
+const speedEl = document.getElementById('speed');
+const rotValEl = document.getElementById('rotVal');
+const depValEl = document.getElementById('depVal');
+
+rotationEl.oninput = () => rotValEl.textContent = parseFloat(rotationEl.value).toFixed(1);
+depthEl.oninput = () => depValEl.textContent = parseFloat(depthEl.value).toFixed(1);
+
+// 2D shallow water simulation on a grid
+const N = 100;
+let eta = [], u = [], v = []; // height, x-velocity, y-velocity
+let etaNew = [], uNew = [], vNew = [];
+
+function initGrid() {
+    eta = []; u = []; v = [];
+    etaNew = []; uNew = []; vNew = [];
+    for (let i = 0; i < N; i++) {
+        eta[i] = new Float64Array(N);
+        u[i] = new Float64Array(N);
+        v[i] = new Float64Array(N);
+        etaNew[i] = new Float64Array(N);
+        uNew[i] = new Float64Array(N);
+        vNew[i] = new Float64Array(N);
+    }
+}
+initGrid();
+
+function step(dt) {
+    const omega = parseFloat(rotationEl.value);
+    const depth = parseFloat(depthEl.value);
+    const force = parseFloat(forcingEl.value);
+    const g = 1.0;
+    const H0 = depth;
+    const dx = 1.0 / N;
+    const damping = 0.998;
+
+    // Tidal forcing (M2-like)
+    const forcingPhase = time * 1.5;
+
+    for (let i = 1; i < N - 1; i++) {
+        for (let j = 1; j < N - 1; j++) {
+            // Coriolis parameter varies with latitude (j)
+            const lat = (j / N - 0.5) * Math.PI;
+            const f = 2 * omega * Math.sin(lat);
+
+            // Spatial derivatives
+            const detadx = (eta[i + 1][j] - eta[i - 1][j]) / (2 * dx);
+            const detady = (eta[i][j + 1] - eta[i][j - 1]) / (2 * dx);
+            const dudx = (u[i + 1][j] - u[i - 1][j]) / (2 * dx);
+            const dvdy = (v[i][j + 1] - v[i][j - 1]) / (2 * dx);
+
+            // Tidal forcing (gravitational potential)
+            const cx = i / N - 0.5;
+            const cy = j / N - 0.5;
+            const Fx = force * 0.01 * Math.cos(forcingPhase) * cx;
+            const Fy = force * 0.01 * Math.sin(forcingPhase) * cy;
+
+            // Momentum equations with Coriolis
+            uNew[i][j] = (u[i][j] + dt * (f * v[i][j] - g * detadx + Fx)) * damping;
+            vNew[i][j] = (v[i][j] + dt * (-f * u[i][j] - g * detady + Fy)) * damping;
+
+            // Continuity equation
+            etaNew[i][j] = (eta[i][j] - dt * H0 * (dudx + dvdy)) * damping;
+        }
+    }
+
+    // Boundary conditions (reflective)
+    for (let i = 0; i < N; i++) {
+        etaNew[0][i] = etaNew[1][i];
+        etaNew[N - 1][i] = etaNew[N - 2][i];
+        etaNew[i][0] = etaNew[i][1];
+        etaNew[i][N - 1] = etaNew[i][N - 2];
+        uNew[0][i] = -uNew[1][i];
+        uNew[N - 1][i] = -uNew[N - 2][i];
+        vNew[i][0] = -vNew[i][1];
+        vNew[i][N - 1] = -vNew[i][N - 2];
+    }
+
+    // Swap
+    [eta, etaNew] = [etaNew, eta];
+    [u, uNew] = [uNew, u];
+    [v, vNew] = [vNew, v];
+}
+
+function draw() {
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, W, H);
+
+    const speed = parseFloat(speedEl.value);
+
+    // Run simulation steps
+    const stepsPerFrame = Math.ceil(speed * 3);
+    for (let s = 0; s < stepsPerFrame; s++) {
+        step(0.15);
+        time += 0.15;
+    }
+
+    // Draw the ocean basin
+    const margin = 50;
+    const size = Math.min(W - 300, H - 150) - 2 * margin;
+    const ox = margin + 20;
+    const oy = (H - size) / 2 - 20;
+    const cellSize = size / N;
+
+    // Render height field as colored cells
+    for (let i = 0; i < N; i++) {
+        for (let j = 0; j < N; j++) {
+            const h = eta[i][j];
+            const norm = Math.tanh(h * 5); // normalize to -1,1
+            let r, g2, b;
+            if (norm > 0) {
+                r = Math.floor(30 + norm * 50);
+                g2 = Math.floor(87 + norm * 80);
+                b = Math.floor(153 + norm * 70);
+            } else {
+                r = Math.floor(30 + norm * 20);
+                g2 = Math.floor(87 + norm * 50);
+                b = Math.floor(153 + norm * 40);
+            }
+            ctx.fillStyle = `rgb(${Math.max(0, r)},${Math.max(0, g2)},${Math.max(0, b)})`;
+            ctx.fillRect(ox + i * cellSize, oy + j * cellSize, cellSize + 0.5, cellSize + 0.5);
+        }
+    }
+
+    // Draw velocity arrows (sparse)
+    const arrowSkip = 8;
+    const arrowScale = cellSize * 15;
+    for (let i = arrowSkip; i < N - arrowSkip; i += arrowSkip) {
+        for (let j = arrowSkip; j < N - arrowSkip; j += arrowSkip) {
+            const ux = u[i][j];
+            const vy = v[i][j];
+            const mag = Math.sqrt(ux * ux + vy * vy);
+            if (mag > 0.001) {
+                const px = ox + (i + 0.5) * cellSize;
+                const py = oy + (j + 0.5) * cellSize;
+                const ex = px + ux * arrowScale;
+                const ey = py + vy * arrowScale;
+
+                ctx.beginPath();
+                ctx.moveTo(px, py);
+                ctx.lineTo(ex, ey);
+                ctx.strokeStyle = `rgba(254,250,224,${Math.min(mag * 20, 0.6)})`;
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Arrowhead
+                const angle = Math.atan2(ey - py, ex - px);
+                const headLen = 3;
+                ctx.beginPath();
+                ctx.moveTo(ex, ey);
+                ctx.lineTo(ex - headLen * Math.cos(angle - 0.5), ey - headLen * Math.sin(angle - 0.5));
+                ctx.moveTo(ex, ey);
+                ctx.lineTo(ex - headLen * Math.cos(angle + 0.5), ey - headLen * Math.sin(angle + 0.5));
+                ctx.stroke();
+            }
+        }
+    }
+
+    // Basin border
+    ctx.strokeStyle = '#606C38';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(ox, oy, size, size);
+
+    // Latitude labels
+    ctx.fillStyle = 'rgba(254,250,224,0.5)';
+    ctx.font = '9px Georgia';
+    ctx.textAlign = 'right';
+    for (let j = 0; j <= 4; j++) {
+        const lat = (j / 4 - 0.5) * 180;
+        const py = oy + (j / 4) * size;
+        ctx.fillText(lat.toFixed(0) + '\u00B0', ox - 5, py + 3);
+    }
+
+    // Coriolis indicator
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '11px Georgia';
+    ctx.textAlign = 'center';
+    ctx.fillText('N', ox + size / 2, oy - 8);
+    ctx.fillText('S', ox + size / 2, oy + size + 15);
+    ctx.fillText('Coriolis: f = 2\u03A9sin(\u03C6)', ox + size / 2, oy + size + 30);
+
+    // Color bar
+    const cbx = ox + size + 15;
+    const cby = oy;
+    const cbh = size;
+    const cbw = 15;
+    for (let i = 0; i < cbh; i++) {
+        const norm = 1 - 2 * i / cbh; // +1 to -1
+        let r, g2, b;
+        if (norm > 0) {
+            r = Math.floor(30 + norm * 50);
+            g2 = Math.floor(87 + norm * 80);
+            b = Math.floor(153 + norm * 70);
+        } else {
+            r = Math.floor(30 + norm * 20);
+            g2 = Math.floor(87 + norm * 50);
+            b = Math.floor(153 + norm * 40);
+        }
+        ctx.fillStyle = `rgb(${Math.max(0, r)},${Math.max(0, g2)},${Math.max(0, b)})`;
+        ctx.fillRect(cbx, cby + i, cbw, 1);
+    }
+    ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(cbx, cby, cbw, cbh);
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '9px Georgia';
+    ctx.textAlign = 'left';
+    ctx.fillText('High', cbx + cbw + 5, cby + 10);
+    ctx.fillText('Low', cbx + cbw + 5, cby + cbh - 3);
+    ctx.fillText('\u03B7', cbx + cbw + 5, cby + cbh / 2 + 3);
+
+    // Wave type legend
+    const lx = ox + size + 15;
+    const ly = oy + size + 45;
+    ctx.fillStyle = 'rgba(13,17,23,0.8)';
+    ctx.fillRect(lx - 5, ly - 15, 180, 60);
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = '11px Georgia';
+    ctx.textAlign = 'left';
+    ctx.fillText('Wave Patterns:', lx, ly);
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = '10px Georgia';
+    ctx.fillText('Kelvin: coast-trapped', lx, ly + 15);
+    ctx.fillText('Poincare: open ocean', lx, ly + 30);
+    ctx.fillText('Rossby: westward', lx, ly + 45);
+
+    animId = requestAnimationFrame(draw);
+}
+
+window.reset = function() {
+    time = 0;
+    initGrid();
+    rotationEl.value = 1; rotValEl.textContent = '1.0';
+    depthEl.value = 1; depValEl.textContent = '1.0';
+    forcingEl.value = 1;
+    speedEl.value = 1;
+};
+
+draw();
+</script>
+<script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

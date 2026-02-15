@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ice Sheet Evolution - Glacier Dynamics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a1e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 15px; border-radius: 12px; z-index: 1000;
+            min-width: 230px; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 10px; font-size: 0.95rem; }
+        .ctrl-row { margin-bottom: 8px; }
+        .ctrl-row label { display: block; font-size: 0.8rem; color: #8A9A5B; margin-bottom: 2px; }
+        .ctrl-row input[type=range] { width: 100%; accent-color: #8A9A5B; }
+        .ctrl-row .val { float: right; color: #DDA15E; font-size: 0.8rem; }
+        #info {
+            position: fixed; bottom: 10px; left: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 12px; border-radius: 12px; z-index: 1000;
+            max-width: 380px; font-size: 0.8rem; line-height: 1.4; border: 1px solid rgba(138,154,91,0.3);
+        }
+        #info h4 { color: #DDA15E; margin-bottom: 4px; }
+        #stats {
+            position: fixed; bottom: 10px; right: 10px; background: rgba(30,30,60,0.85);
+            backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 12px; z-index: 1000;
+            font-size: 0.8rem; border: 1px solid rgba(138,154,91,0.3); min-width: 180px;
+        }
+        #stats div { margin: 3px 0; }
+        #stats .label { color: #8A9A5B; }
+        #stats .value { color: #DDA15E; float: right; }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Ice Sheet Evolution</h3>
+        <div class="ctrl-row">
+            <label>Temperature Offset (&deg;C) <span class="val" id="tempVal">-5</span></label>
+            <input type="range" id="tempSlider" min="-15" max="5" step="0.5" value="-5">
+        </div>
+        <div class="ctrl-row">
+            <label>Precipitation (m/yr) <span class="val" id="precipVal">0.5</span></label>
+            <input type="range" id="precipSlider" min="0.1" max="2" step="0.05" value="0.5">
+        </div>
+        <div class="ctrl-row">
+            <label>Sim Speed <span class="val" id="speedVal">10</span>x</label>
+            <input type="range" id="speedSlider" min="1" max="50" step="1" value="10">
+        </div>
+    </div>
+    <div id="stats">
+        <div><span class="label">Year:</span> <span class="value" id="yearDisp">0</span></div>
+        <div><span class="label">Max Thickness:</span> <span class="value" id="thickDisp">0 m</span></div>
+        <div><span class="label">Area:</span> <span class="value" id="areaDisp">0 km&sup2;</span></div>
+        <div><span class="label">Volume:</span> <span class="value" id="volDisp">0 km&sup3;</span></div>
+    </div>
+    <div id="info">
+        <h4>2D Ice Sheet Model</h4>
+        <p>A continental ice sheet spreads under its own weight. The Shallow Ice Approximation computes ice flux from surface slope and thickness. Snow accumulates at high latitudes and melts at the margins. The dome-shaped profile is characteristic of real ice sheets like Greenland and Antarctica.</p>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const tempSlider = document.getElementById('tempSlider');
+        const precipSlider = document.getElementById('precipSlider');
+        const speedSlider = document.getElementById('speedSlider');
+
+        // 2D grid
+        const NX = 80;
+        const NY = 80;
+        const dx = 50000; // 50 km grid spacing
+        let thickness = [];
+        let bedrock = [];
+        let year = 0;
+
+        function init2D(arr) {
+            const a = [];
+            for (let j = 0; j < NY; j++) {
+                a[j] = new Float64Array(NX);
+            }
+            return a;
+        }
+
+        function initModel() {
+            thickness = init2D();
+            bedrock = init2D();
+            year = 0;
+
+            // Bedrock: continent with some topography
+            for (let j = 0; j < NY; j++) {
+                for (let i = 0; i < NX; i++) {
+                    const x = (i - NX / 2) / (NX / 2);
+                    const y = (j - NY / 2) / (NY / 2);
+                    const r = Math.sqrt(x * x + y * y);
+                    // Continental shape: higher in center
+                    bedrock[j][i] = 500 + 300 * Math.max(0, 1 - r * 1.2) +
+                        100 * Math.sin(x * 5) * Math.sin(y * 4) * Math.max(0, 1 - r);
+                    // Seed ice
+                    if (r < 0.15) {
+                        thickness[j][i] = 200 * (1 - r / 0.15);
+                    }
+                }
+            }
+        }
+        initModel();
+
+        function stepModel(dt) {
+            const temp = parseFloat(tempSlider.value);
+            const precip = parseFloat(precipSlider.value);
+
+            document.getElementById('tempVal').textContent = temp.toFixed(1);
+            document.getElementById('precipVal').textContent = precip.toFixed(1);
+            document.getElementById('speedVal').textContent = speedSlider.value;
+
+            const rho = 917;
+            const g = 9.81;
+            const A = 2.4e-24;
+            const n = 3;
+            const secPerYear = 3.154e7;
+
+            const newThick = init2D();
+
+            for (let j = 1; j < NY - 1; j++) {
+                for (let i = 1; i < NX - 1; i++) {
+                    const H = thickness[j][i];
+                    const s = bedrock[j][i] + H;
+
+                    // Surface gradients
+                    const dsdx = (bedrock[j][i+1] + thickness[j][i+1] - bedrock[j][i-1] - thickness[j][i-1]) / (2 * dx);
+                    const dsdy = (bedrock[j+1][i] + thickness[j+1][i] - bedrock[j-1][i] - thickness[j-1][i]) / (2 * dx);
+                    const gradS = Math.sqrt(dsdx * dsdx + dsdy * dsdy);
+
+                    // Diffusivity D = 2A/(n+2) * (rho*g)^n * H^(n+2) * |grad s|^(n-1)
+                    const D = (2 * A / (n + 2)) * Math.pow(rho * g, n) *
+                        Math.pow(Math.max(H, 0), n + 2) * Math.pow(Math.max(gradS, 1e-10), n - 1) * secPerYear;
+
+                    // Laplacian of surface
+                    const lapS = (
+                        bedrock[j][i+1] + thickness[j][i+1] +
+                        bedrock[j][i-1] + thickness[j][i-1] +
+                        bedrock[j+1][i] + thickness[j+1][i] +
+                        bedrock[j-1][i] + thickness[j-1][i] -
+                        4 * s
+                    ) / (dx * dx);
+
+                    // Mass balance
+                    const x = (i - NX / 2) / (NX / 2);
+                    const y = (j - NY / 2) / (NY / 2);
+                    const r = Math.sqrt(x * x + y * y);
+                    const lat_effect = 1 - r; // higher accumulation near center
+                    const ELA = 600 + (temp + 10) * 50;
+
+                    let mb;
+                    if (s > ELA) {
+                        mb = precip * (0.5 + lat_effect * 0.5);
+                    } else {
+                        mb = precip * 0.3 - 0.003 * Math.pow(ELA - s, 1.1) - Math.max(0, temp + 5) * 0.2;
+                    }
+
+                    const dHdt = D * lapS + mb;
+                    newThick[j][i] = Math.max(0, H + dHdt * dt);
+                }
+            }
+
+            thickness = newThick;
+            year += dt;
+        }
+
+        let mouseX = -1, mouseY = -1;
+        canvas.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+        });
+
+        function draw() {
+            const speed = parseInt(speedSlider.value);
+            for (let s = 0; s < 3; s++) {
+                stepModel(speed * 0.5);
+            }
+
+            ctx.fillStyle = '#0a0a1e';
+            ctx.fillRect(0, 0, W, H);
+
+            const margin = { left: 60, right: 60, top: 70, bottom: 60 };
+            const viewW = W - margin.left - margin.right;
+            const viewH = H - margin.top - margin.bottom;
+            const cellW = viewW / NX;
+            const cellH = viewH / NY;
+
+            // Compute stats
+            let maxThick = 0, area = 0, volume = 0;
+            for (let j = 0; j < NY; j++) {
+                for (let i = 0; i < NX; i++) {
+                    if (thickness[j][i] > 1) {
+                        area += dx * dx;
+                        volume += thickness[j][i] * dx * dx;
+                        if (thickness[j][i] > maxThick) maxThick = thickness[j][i];
+                    }
+                }
+            }
+
+            document.getElementById('yearDisp').textContent = Math.floor(year);
+            document.getElementById('thickDisp').textContent = maxThick.toFixed(0) + ' m';
+            document.getElementById('areaDisp').textContent = (area / 1e6).toFixed(0) + ' km sq';
+            document.getElementById('volDisp').textContent = (volume / 1e9).toFixed(0) + ' km cu';
+
+            // Color scale for thickness
+            function thickColor(h) {
+                if (h < 1) return null;
+                const frac = Math.min(h / Math.max(maxThick, 100), 1);
+                const r = Math.floor(200 - 130 * frac);
+                const g = Math.floor(225 - 90 * frac);
+                const b = Math.floor(250 - 60 * frac);
+                return `rgb(${r},${g},${b})`;
+            }
+
+            // Draw 2D map
+            // Bedrock first
+            for (let j = 0; j < NY; j++) {
+                for (let i = 0; i < NX; i++) {
+                    const x = margin.left + i * cellW;
+                    const y = margin.top + j * cellH;
+
+                    // Bedrock
+                    const bFrac = Math.max(0, Math.min(1, (bedrock[j][i] - 200) / 800));
+                    const br = Math.floor(40 + 30 * bFrac);
+                    const bg = Math.floor(50 + 40 * bFrac);
+                    const bb = Math.floor(25 + 20 * bFrac);
+                    ctx.fillStyle = `rgb(${br},${bg},${bb})`;
+                    ctx.fillRect(x, y, cellW + 0.5, cellH + 0.5);
+
+                    // Ice
+                    const h = thickness[j][i];
+                    if (h > 1) {
+                        const color = thickColor(h);
+                        if (color) {
+                            ctx.fillStyle = color;
+                            ctx.globalAlpha = 0.7 + 0.3 * Math.min(h / Math.max(maxThick, 100), 1);
+                            ctx.fillRect(x, y, cellW + 0.5, cellH + 0.5);
+                            ctx.globalAlpha = 1;
+                        }
+                    }
+                }
+            }
+
+            // Contour lines for ice thickness
+            if (maxThick > 100) {
+                const contourStep = maxThick > 2000 ? 500 : maxThick > 500 ? 200 : 100;
+                ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+                ctx.lineWidth = 0.5;
+                for (let level = contourStep; level < maxThick; level += contourStep) {
+                    for (let j = 1; j < NY - 1; j++) {
+                        for (let i = 1; i < NX - 1; i++) {
+                            const h = thickness[j][i];
+                            if (h >= level) {
+                                // Check if neighbor is below level
+                                if (thickness[j][i-1] < level || thickness[j][i+1] < level ||
+                                    thickness[j-1][i] < level || thickness[j+1][i] < level) {
+                                    const x = margin.left + i * cellW + cellW / 2;
+                                    const y = margin.top + j * cellH + cellH / 2;
+                                    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                                    ctx.fillRect(x - 0.5, y - 0.5, 1, 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Ice edge highlight
+            ctx.strokeStyle = 'rgba(200,225,255,0.5)';
+            ctx.lineWidth = 1;
+            for (let j = 1; j < NY - 1; j++) {
+                for (let i = 1; i < NX - 1; i++) {
+                    if (thickness[j][i] > 1) {
+                        if (thickness[j][i-1] < 1 || thickness[j][i+1] < 1 ||
+                            thickness[j-1][i] < 1 || thickness[j+1][i] < 1) {
+                            const x = margin.left + i * cellW;
+                            const y = margin.top + j * cellH;
+                            ctx.strokeRect(x, y, cellW, cellH);
+                        }
+                    }
+                }
+            }
+
+            // Mouse hover info
+            if (mouseX > margin.left && mouseX < margin.left + viewW &&
+                mouseY > margin.top && mouseY < margin.top + viewH) {
+                const gi = Math.floor((mouseX - margin.left) / cellW);
+                const gj = Math.floor((mouseY - margin.top) / cellH);
+                if (gi >= 0 && gi < NX && gj >= 0 && gj < NY) {
+                    const h = thickness[gj][gi];
+                    const b = bedrock[gj][gi];
+                    ctx.strokeStyle = 'rgba(221,161,94,0.8)';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(margin.left + gi * cellW, margin.top + gj * cellH, cellW, cellH);
+
+                    ctx.fillStyle = 'rgba(30,30,60,0.9)';
+                    ctx.fillRect(mouseX + 10, mouseY - 40, 140, 45);
+                    ctx.fillStyle = '#FEFAE0';
+                    ctx.font = '10px sans-serif';
+                    ctx.textAlign = 'left';
+                    ctx.fillText('Bed: ' + b.toFixed(0) + ' m', mouseX + 15, mouseY - 25);
+                    ctx.fillText('Ice: ' + h.toFixed(0) + ' m', mouseX + 15, mouseY - 12);
+                    ctx.fillText('Surface: ' + (b + h).toFixed(0) + ' m', mouseX + 15, mouseY + 1);
+                }
+            }
+
+            // Color bar
+            const barX = W - margin.right + 10;
+            const barW = 15;
+            const barTop = margin.top;
+            const barH = viewH;
+            for (let y = 0; y < barH; y++) {
+                const frac = 1 - y / barH;
+                const h = frac * Math.max(maxThick, 100);
+                const color = thickColor(h);
+                if (color) {
+                    ctx.fillStyle = color;
+                    ctx.fillRect(barX, barTop + y, barW, 1);
+                }
+            }
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(barX, barTop, barW, barH);
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(Math.max(maxThick, 100).toFixed(0) + 'm', barX + barW + 3, barTop + 8);
+            ctx.fillText('0m', barX + barW + 3, barTop + barH);
+
+            // Scale bar
+            const scaleKm = 500;
+            const scalePx = (scaleKm * 1000 / dx) * cellW;
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(margin.left, H - margin.bottom + 15);
+            ctx.lineTo(margin.left + scalePx, H - margin.bottom + 15);
+            ctx.stroke();
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(scaleKm + ' km', margin.left + scalePx / 2, H - margin.bottom + 30);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 18px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('2D Ice Sheet Evolution', W / 2, 30);
+            ctx.font = '12px sans-serif';
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillText('Continental-scale ice sheet growth and decay', W / 2, 48);
+
+            requestAnimationFrame(draw);
+        }
+
+        window.reset = function() {
+            tempSlider.value = -5;
+            precipSlider.value = 0.5;
+            speedSlider.value = 10;
+            initModel();
+        };
+
+        draw();
+    })();
+    </script>
+</body>
+</html>

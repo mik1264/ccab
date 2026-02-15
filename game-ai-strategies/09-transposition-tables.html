@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transposition Tables - Game AI Strategies</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        #ui { position: fixed; top: 10px; right: 10px; z-index: 100; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+        .btn { background: rgba(138,154,91,0.3); border: 1px solid #8A9A5B; color: #FEFAE0; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; backdrop-filter: blur(10px); }
+        .btn:hover { background: rgba(138,154,91,0.5); }
+        .status { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.6); backdrop-filter: blur(10px); padding: 10px 24px; border-radius: 12px; font-size: 0.9rem; border: 1px solid rgba(138,154,91,0.3); text-align: center; z-index: 100; max-width: 700px; }
+        .info { position: fixed; top: 60px; right: 10px; background: rgba(0,0,0,0.6); backdrop-filter: blur(10px); padding: 12px; border-radius: 12px; border: 1px solid rgba(138,154,91,0.3); font-size: 0.78rem; max-width: 220px; z-index: 100; }
+        .info h3 { color: #DDA15E; margin-bottom: 6px; }
+        .info p { color: #ccc; line-height: 1.4; margin-bottom: 4px; }
+        .stat { color: #8A9A5B; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div id="ui">
+        <button class="btn" onclick="resetDemo()">Reset</button>
+        <button class="btn" onclick="stepSearch()">Step</button>
+        <button class="btn" onclick="runSearch()">Run All</button>
+        <button class="btn" onclick="toggleTT()">Toggle TT: <span id="ttLabel">ON</span></button>
+    </div>
+    <div class="info">
+        <h3>Transposition Tables</h3>
+        <p>Different move orders can reach the <strong>same position</strong>. A transposition table (hash map) caches evaluated positions to avoid re-computation.</p>
+        <p>Uses <strong>Zobrist hashing</strong>: XOR random numbers for each piece/square.</p>
+        <p class="stat" id="statWithout">Without TT: --</p>
+        <p class="stat" id="statWith">With TT: --</p>
+        <p class="stat" id="statHits">TT hits: --</p>
+    </div>
+    <div class="status" id="status">Watch how transposition tables detect repeated game states and skip re-evaluation</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Simple 3x3 grid game where two players place tokens
+    // Different orders of placement can reach same state
+    let useTT = true;
+    let nodesWithout = 0, nodesWith = 0, ttHits = 0;
+
+    // We'll demonstrate on a tree where transpositions are visible
+    // Using a simple game: place A, B, C tokens on 4 slots
+    const SLOTS = 4;
+    const TOKENS = 3;
+    let searchTree = null;
+    let ttTable = {};
+    let steps = [];
+    let stepIdx = 0;
+    let allNodes = [];
+
+    function stateKey(placed) {
+        return placed.slice().sort().join('|');
+    }
+
+    function buildTree(placed, depth, isMax, useTT) {
+        const node = {
+            id: allNodes.length,
+            placed: [...placed],
+            depth,
+            isMax,
+            children: [],
+            value: null,
+            state: 'unvisited',
+            transposition: false,
+            cachedValue: null
+        };
+        allNodes.push(node);
+
+        const sk = stateKey(placed);
+
+        if (useTT && ttTable[sk] !== undefined) {
+            node.transposition = true;
+            node.cachedValue = ttTable[sk];
+            node.value = ttTable[sk];
+            ttHits++;
+            steps.push({ nodeId: node.id, type: 'tt_hit', value: node.cachedValue });
+            return node;
+        }
+
+        if (placed.length >= TOKENS || depth >= 4) {
+            // Evaluate: score based on which slots are filled
+            node.value = 0;
+            for (const p of placed) node.value += (p + 1) * (isMax ? 1 : -1);
+            if (useTT) ttTable[sk] = node.value;
+            steps.push({ nodeId: node.id, type: 'eval', value: node.value });
+            return node;
+        }
+
+        steps.push({ nodeId: node.id, type: 'visit' });
+
+        let best = isMax ? -Infinity : Infinity;
+        for (let s = 0; s < SLOTS; s++) {
+            if (placed.includes(s)) continue;
+            const child = buildTree([...placed, s], depth + 1, !isMax, useTT);
+            node.children.push(child);
+            if (isMax) best = Math.max(best, child.value);
+            else best = Math.min(best, child.value);
+        }
+
+        node.value = best;
+        if (useTT) ttTable[sk] = node.value;
+        steps.push({ nodeId: node.id, type: 'done', value: node.value });
+        return node;
+    }
+
+    function runComparison() {
+        // Without TT
+        allNodes = [];
+        steps = [];
+        ttTable = {};
+        ttHits = 0;
+        buildTree([], 0, true, false);
+        nodesWithout = allNodes.length;
+
+        // With TT
+        allNodes = [];
+        steps = [];
+        stepIdx = 0;
+        ttTable = {};
+        ttHits = 0;
+        searchTree = buildTree([], 0, true, true);
+        nodesWith = allNodes.length;
+
+        document.getElementById('statWithout').textContent = 'Without TT: ' + nodesWithout + ' nodes';
+        document.getElementById('statWith').textContent = 'With TT: ' + nodesWith + ' nodes';
+        document.getElementById('statHits').textContent = 'TT hits: ' + ttHits;
+
+        // Reset visual states
+        for (const n of allNodes) n.state = 'unvisited';
+    }
+
+    function stepSearch() {
+        if (stepIdx >= steps.length) {
+            document.getElementById('status').textContent = 'Search complete! Saved ' + (nodesWithout - nodesWith) + ' nodes with transposition table.';
+            return;
+        }
+        const s = steps[stepIdx];
+        const node = allNodes.find(n => n.id === s.nodeId);
+        if (node) {
+            switch (s.type) {
+                case 'visit': node.state = 'current'; break;
+                case 'eval': node.state = 'evaluated'; break;
+                case 'tt_hit': node.state = 'cached'; break;
+                case 'done': node.state = 'evaluated'; break;
+            }
+        }
+        stepIdx++;
+        document.getElementById('status').textContent = 'Step ' + stepIdx + '/' + steps.length +
+            (s.type === 'tt_hit' ? ' -- TRANSPOSITION HIT! Cached value: ' + s.value : '');
+    }
+
+    function runSearch() {
+        while (stepIdx < steps.length) stepSearch();
+    }
+
+    function toggleTT() {
+        useTT = !useTT;
+        document.getElementById('ttLabel').textContent = useTT ? 'ON' : 'OFF';
+        resetDemo();
+    }
+
+    function resetDemo() {
+        allNodes = [];
+        steps = [];
+        stepIdx = 0;
+        ttTable = {};
+        ttHits = 0;
+        runComparison();
+        document.getElementById('status').textContent = 'Press "Step" to walk through the search, or "Run All" to see the full result.';
+    }
+
+    // Drawing
+    function getTreePositions() {
+        if (!searchTree) return {};
+        const positions = {};
+        function layout(node, x, y, w, depth) {
+            positions[node.id] = { x, y, node };
+            if (node.children.length === 0) return;
+            const childW = w / node.children.length;
+            const startX = x - w / 2 + childW / 2;
+            const levelH = Math.min(90, (H - 140) / 5);
+            for (let i = 0; i < node.children.length; i++) {
+                layout(node.children[i], startX + i * childW, y + levelH, childW * 0.9, depth + 1);
+            }
+        }
+        layout(searchTree, W * 0.45, 80, W * 0.8, 0);
+        return positions;
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, W, H);
+        const grad = ctx.createLinearGradient(0, 0, W, H);
+        grad.addColorStop(0, '#1a1a2e');
+        grad.addColorStop(1, '#16213e');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = 'bold 1.3rem "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Transposition Tables', W * 0.45, 35);
+        ctx.font = '0.7rem "Segoe UI", system-ui, sans-serif';
+        ctx.fillStyle = '#888';
+        ctx.fillText('Same state reached by different move orders = cached result', W * 0.45, 55);
+
+        if (!searchTree) { requestAnimationFrame(draw); return; }
+
+        const positions = getTreePositions();
+
+        // Draw edges
+        function drawEdges(node) {
+            const p = positions[node.id];
+            if (!p) return;
+            for (const child of node.children) {
+                const cp = positions[child.id];
+                if (!cp) continue;
+                ctx.strokeStyle = child.transposition ? '#DDA15E' : 'rgba(138,154,91,0.3)';
+                ctx.lineWidth = child.transposition ? 2 : 1;
+                if (child.transposition) ctx.setLineDash([5, 3]);
+                else ctx.setLineDash([]);
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(cp.x, cp.y);
+                ctx.stroke();
+                drawEdges(child);
+            }
+        }
+        ctx.setLineDash([]);
+        drawEdges(searchTree);
+
+        // Draw nodes
+        for (const id in positions) {
+            const { x, y, node } = positions[id];
+            const r = 14;
+
+            let fillColor;
+            switch (node.state) {
+                case 'current': fillColor = '#3498db'; break;
+                case 'evaluated': fillColor = '#8A9A5B'; break;
+                case 'cached': fillColor = '#DDA15E'; break;
+                default: fillColor = '#333';
+            }
+
+            // Draw node shape
+            if (node.transposition) {
+                // Dashed circle for transpositions
+                ctx.setLineDash([3, 2]);
+                ctx.strokeStyle = '#DDA15E';
+                ctx.lineWidth = 2;
+                ctx.fillStyle = 'rgba(221,161,94,0.3)';
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // "TT" label
+                ctx.fillStyle = '#DDA15E';
+                ctx.font = 'bold 0.5rem "Segoe UI", system-ui, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('TT', x, y - 4);
+                if (node.cachedValue !== null) {
+                    ctx.fillText(node.cachedValue, x, y + 6);
+                }
+            } else {
+                ctx.fillStyle = fillColor;
+                ctx.beginPath();
+                if (node.isMax) {
+                    // Triangle up for MAX
+                    ctx.moveTo(x, y - r);
+                    ctx.lineTo(x + r, y + r * 0.7);
+                    ctx.lineTo(x - r, y + r * 0.7);
+                    ctx.closePath();
+                } else {
+                    // Triangle down for MIN
+                    ctx.moveTo(x, y + r);
+                    ctx.lineTo(x + r, y - r * 0.7);
+                    ctx.lineTo(x - r, y - r * 0.7);
+                    ctx.closePath();
+                }
+                ctx.fill();
+
+                if (node.value !== null && node.state !== 'unvisited') {
+                    ctx.fillStyle = '#FEFAE0';
+                    ctx.font = 'bold 0.55rem "Segoe UI", system-ui, sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(node.value, x, y);
+                }
+            }
+
+            // State label (slots filled)
+            if (node.placed.length > 0) {
+                ctx.fillStyle = '#666';
+                ctx.font = '0.45rem "Segoe UI", system-ui, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('[' + node.placed.join(',') + ']', x, y + r + 10);
+            }
+        }
+
+        // Legend
+        const legX = 20, legY = H - 100;
+        ctx.textAlign = 'left';
+        ctx.font = '0.7rem "Segoe UI", system-ui, sans-serif';
+
+        ctx.fillStyle = '#8A9A5B';
+        ctx.fillRect(legX, legY, 12, 12);
+        ctx.fillStyle = '#FEFAE0';
+        ctx.fillText('Evaluated', legX + 18, legY + 10);
+
+        ctx.fillStyle = '#DDA15E';
+        ctx.fillRect(legX, legY + 20, 12, 12);
+        ctx.fillStyle = '#FEFAE0';
+        ctx.fillText('TT Hit (cached)', legX + 18, legY + 30);
+
+        ctx.fillStyle = '#333';
+        ctx.fillRect(legX, legY + 40, 12, 12);
+        ctx.fillStyle = '#FEFAE0';
+        ctx.fillText('Unvisited', legX + 18, legY + 50);
+
+        // Savings display
+        if (nodesWithout > 0) {
+            const saved = nodesWithout - nodesWith;
+            const pct = Math.round((saved / nodesWithout) * 100);
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = 'bold 1rem "Segoe UI", system-ui, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Nodes saved: ' + saved + ' (' + pct + '%)', W * 0.45, H - 60);
+        }
+
+        requestAnimationFrame(draw);
+    }
+
+    window.reset = resetDemo;
+    resetDemo();
+    draw();
+    </script>
+</body>
+</html>

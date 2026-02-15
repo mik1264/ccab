@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vortex Wake Visualization</title>
+    <script src="../assets/js/enhance.js" defer></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 15px; align-items: center; padding: 12px 20px;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            border-radius: 12px; z-index: 1000; color: #FEFAE0; font-size: 0.85rem;
+        }
+        .controls label { display: flex; align-items: center; gap: 6px; }
+        .controls input[type="range"] { width: 80px; accent-color: #8A9A5B; }
+        .info {
+            position: fixed; top: 10px; right: 10px; max-width: 290px;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            border-radius: 12px; padding: 15px; color: #FEFAE0; font-size: 0.8rem;
+            z-index: 1000; line-height: 1.4;
+        }
+        .info h3 { color: #8A9A5B; margin-bottom: 6px; font-size: 0.95rem; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="info">
+        <h3>Vortex Wake</h3>
+        <p>Each wing stroke sheds vortices from the trailing edge and wingtips. These form a complex 3D wake structure below the hovering insect. The wake from previous strokes can interact with the current stroke through <strong>wake capture</strong>, an additional lift mechanism discovered in the 1990s. The wake pattern reveals the complete aerodynamic history of the wing.</p>
+    </div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Speed <input type="range" id="speed" min="0.3" max="2" step="0.1" value="1"> <span id="speedVal">1.0</span></label>
+        <label>Wake Persistence <input type="range" id="persist" min="50" max="300" step="10" value="150"></label>
+        <label>View <select id="view" style="background:#333;color:#FEFAE0;border:1px solid #8A9A5B;border-radius:4px;padding:2px;">
+            <option value="side">Side View</option>
+            <option value="below">Below View</option>
+        </select></label>
+    </div>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let time = 0;
+
+        // Vortex ring elements
+        const vortexRings = [];
+
+        class VortexRing {
+            constructor(x, y, radius, strength, angle) {
+                this.x = x;
+                this.y = y;
+                this.radius = radius;
+                this.strength = strength;
+                this.angle = angle; // orientation
+                this.life = 1;
+                this.age = 0;
+                this.vy = 0.3 + Math.random() * 0.2; // downwash
+                this.rotSpeed = (Math.random() - 0.5) * 0.02;
+            }
+        }
+
+        // Tip vortex trail points
+        const tipTrails = { left: [], right: [] };
+        const MAX_TIP_TRAIL = 200;
+
+        // Smoke particles for flow viz
+        const smokeParticles = [];
+        for (let i = 0; i < 400; i++) {
+            smokeParticles.push({
+                x: Math.random() * W,
+                y: Math.random() * H,
+                vx: 0, vy: 0,
+                size: 1 + Math.random() * 2,
+                life: Math.random()
+            });
+        }
+
+        function animate() {
+            const speed = parseFloat(document.getElementById('speed').value);
+            const persist = parseInt(document.getElementById('persist').value);
+            const view = document.getElementById('view').value;
+
+            ctx.fillStyle = 'rgba(26, 26, 46, 0.08)';
+            ctx.fillRect(0, 0, W, H);
+
+            const cx = W * 0.5;
+            const cy = H * 0.25;
+            const scale = Math.min(W, H) * 0.2;
+
+            // Wing stroke
+            const strokeAngle = Math.sin(time * speed * 3);
+            const strokeVel = Math.cos(time * speed * 3) * speed * 3;
+            const wingLen = scale * 0.8;
+
+            // Generate vortex rings at stroke reversal
+            const prevStroke = Math.sin((time - 0.016) * speed * 3);
+            if (prevStroke * strokeAngle < 0) {
+                // Stroke reversal - shed stopping vortex
+                const ring = new VortexRing(
+                    cx, cy + 10,
+                    wingLen * 0.4,
+                    strokeVel * 0.3,
+                    strokeAngle > 0 ? 0 : Math.PI
+                );
+                vortexRings.push(ring);
+            }
+
+            // Also shed continuous tip vortices
+            for (let side = -1; side <= 1; side += 2) {
+                const tipX = cx + side * Math.cos(strokeAngle * 0.5) * wingLen;
+                const tipY = cy - Math.abs(Math.sin(strokeAngle * 0.5)) * wingLen * 0.15;
+                const trail = side < 0 ? tipTrails.left : tipTrails.right;
+                trail.push({ x: tipX, y: tipY, strength: Math.abs(strokeVel) * 0.3 });
+                while (trail.length > persist) trail.shift();
+            }
+
+            // Update smoke particles
+            for (const p of smokeParticles) {
+                // Influence from vortex rings
+                for (const ring of vortexRings) {
+                    const dx = p.x - ring.x;
+                    const dy = p.y - ring.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist < ring.radius * 3 && dist > 2) {
+                        const influence = ring.strength * ring.life * (1 - dist / (ring.radius * 3));
+                        // Circular motion around ring
+                        p.vx += (-dy / dist) * influence * 0.15;
+                        p.vy += (dx / dist) * influence * 0.15;
+                        // Downwash
+                        p.vy += ring.life * 0.05;
+                    }
+                }
+
+                // Influence from tip vortices
+                for (const side of [tipTrails.left, tipTrails.right]) {
+                    for (let i = side.length - 1; i >= Math.max(0, side.length - 30); i--) {
+                        const t = side[i];
+                        const dx = p.x - t.x;
+                        const dy = p.y - t.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist < 60 && dist > 2) {
+                            const inf = t.strength * 0.02 * (1 - dist / 60);
+                            p.vx += (-dy / dist) * inf;
+                            p.vy += (dx / dist) * inf;
+                        }
+                    }
+                }
+
+                p.vy += 0.01; // gravity/downwash
+                p.vx *= 0.98;
+                p.vy *= 0.98;
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.002;
+
+                if (p.x < -20 || p.x > W + 20 || p.y < -20 || p.y > H + 20 || p.life <= 0) {
+                    p.x = cx + (Math.random() - 0.5) * W * 0.6;
+                    p.y = cy - 20 + Math.random() * 40;
+                    p.vx = 0;
+                    p.vy = 0;
+                    p.life = 0.5 + Math.random() * 0.5;
+                }
+
+                const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+                const alpha = Math.min(0.5, p.life * 0.4 + spd * 0.08);
+                if (spd > 0.5) {
+                    ctx.fillStyle = `rgba(221, 161, 94, ${alpha})`;
+                } else {
+                    ctx.fillStyle = `rgba(254, 250, 224, ${alpha * 0.5})`;
+                }
+                ctx.fillRect(p.x, p.y, p.size, p.size);
+            }
+
+            // Update and draw vortex rings
+            for (let i = vortexRings.length - 1; i >= 0; i--) {
+                const ring = vortexRings[i];
+                ring.y += ring.vy;
+                ring.life -= 1 / persist;
+                ring.age += 0.016;
+                ring.radius += 0.2; // rings expand
+                ring.angle += ring.rotSpeed;
+
+                if (ring.life <= 0) {
+                    vortexRings.splice(i, 1);
+                    continue;
+                }
+
+                // Draw vortex ring
+                if (view === 'side') {
+                    // Side view - rings appear as pairs of circles
+                    const alpha = ring.life * 0.5;
+                    for (let s = -1; s <= 1; s += 2) {
+                        const rx = ring.x + s * ring.radius * 0.6;
+                        const ry = ring.y;
+                        const r = ring.radius * 0.15;
+
+                        // Vortex core
+                        ctx.beginPath();
+                        for (let a = 0; a < Math.PI * 4; a += 0.1) {
+                            const spiralR = r * (1 - a / (Math.PI * 8));
+                            if (spiralR < 0.5) break;
+                            const px = rx + Math.cos(a * s + time * 4) * spiralR;
+                            const py = ry + Math.sin(a * s + time * 4) * spiralR;
+                            if (a === 0) ctx.moveTo(px, py);
+                            else ctx.lineTo(px, py);
+                        }
+                        ctx.strokeStyle = `rgba(138, 154, 91, ${alpha})`;
+                        ctx.lineWidth = 1.5;
+                        ctx.stroke();
+
+                        // Core glow
+                        const glow = ctx.createRadialGradient(rx, ry, 0, rx, ry, r * 2);
+                        glow.addColorStop(0, `rgba(138, 154, 91, ${alpha * 0.3})`);
+                        glow.addColorStop(1, 'transparent');
+                        ctx.fillStyle = glow;
+                        ctx.beginPath();
+                        ctx.arc(rx, ry, r * 2, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+
+                    // Connecting induced flow
+                    ctx.strokeStyle = `rgba(254, 250, 224, ${ring.life * 0.15})`;
+                    ctx.lineWidth = 0.5;
+                    ctx.setLineDash([2, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(ring.x - ring.radius * 0.6, ring.y);
+                    ctx.lineTo(ring.x + ring.radius * 0.6, ring.y);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                } else {
+                    // Below view - rings appear as ellipses
+                    const alpha = ring.life * 0.4;
+                    ctx.beginPath();
+                    ctx.ellipse(ring.x, ring.y, ring.radius * 0.8,
+                        ring.radius * 0.3 * (1 + ring.age * 0.3),
+                        ring.angle, 0, Math.PI * 2);
+                    ctx.strokeStyle = `rgba(138, 154, 91, ${alpha})`;
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            }
+
+            // Draw tip vortex trails
+            const trails = [
+                { trail: tipTrails.left, color: '138, 154, 91' },
+                { trail: tipTrails.right, color: '221, 161, 94' }
+            ];
+
+            for (const { trail, color } of trails) {
+                if (trail.length > 1) {
+                    for (let i = 1; i < trail.length; i++) {
+                        const alpha = (i / trail.length) * 0.5;
+                        ctx.beginPath();
+                        ctx.moveTo(trail[i - 1].x, trail[i - 1].y);
+                        ctx.lineTo(trail[i].x, trail[i].y);
+                        ctx.strokeStyle = `rgba(${color}, ${alpha})`;
+                        ctx.lineWidth = 1 + trail[i].strength * 0.5;
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            // Draw wings
+            for (let side = -1; side <= 1; side += 2) {
+                const tipX = cx + side * Math.cos(strokeAngle * 0.5) * wingLen;
+                const tipY = cy - Math.abs(Math.sin(strokeAngle * 0.5)) * wingLen * 0.15;
+
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.quadraticCurveTo(
+                    cx + side * wingLen * 0.4, cy - wingLen * 0.25,
+                    tipX, tipY
+                );
+                ctx.quadraticCurveTo(
+                    cx + side * wingLen * 0.3, cy + wingLen * 0.05,
+                    cx, cy
+                );
+                ctx.fillStyle = 'rgba(138, 154, 91, 0.5)';
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(96, 108, 56, 0.8)';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            // Body
+            ctx.fillStyle = '#606C38';
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, scale * 0.03, scale * 0.08, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Downwash indicator
+            ctx.strokeStyle = 'rgba(254, 250, 224, 0.2)';
+            ctx.lineWidth = 1;
+            const downwashY = cy + 20;
+            for (let x = cx - wingLen; x <= cx + wingLen; x += 30) {
+                ctx.beginPath();
+                ctx.moveTo(x, downwashY);
+                ctx.lineTo(x, downwashY + 15);
+                ctx.lineTo(x - 3, downwashY + 10);
+                ctx.moveTo(x, downwashY + 15);
+                ctx.lineTo(x + 3, downwashY + 10);
+                ctx.stroke();
+            }
+
+            // Wake capture label
+            const recentRings = vortexRings.filter(r => r.age < 0.5 && r.y < cy + 50);
+            if (recentRings.length > 0) {
+                ctx.fillStyle = 'rgba(221, 161, 94, 0.7)';
+                ctx.font = '11px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText('Wake capture zone', cx, cy + 40);
+            }
+
+            // Labels
+            ctx.fillStyle = 'rgba(254, 250, 224, 0.5)';
+            ctx.font = '11px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('Vortex rings shed at each stroke reversal', cx, H - 50);
+            ctx.fillText('Tip vortices trail continuously from wingtips', cx, H - 35);
+
+            document.getElementById('speedVal').textContent = speed.toFixed(1);
+
+            time += 0.016;
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            time = 0;
+            vortexRings.length = 0;
+            tipTrails.left.length = 0;
+            tipTrails.right.length = 0;
+            smokeParticles.forEach(p => { p.x = Math.random() * W; p.y = Math.random() * H; p.vx = 0; p.vy = 0; p.life = Math.random(); });
+            ctx.clearRect(0, 0, W, H);
+        };
+
+        animate();
+    })();
+    </script>
+</body>
+</html>

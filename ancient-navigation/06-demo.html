@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dead Reckoning Navigator - Ancient Navigation</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a1628; overflow: hidden; font-family: 'Georgia', serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(10, 22, 40, 0.9); backdrop-filter: blur(10px);
+            color: #FEFAE0; padding: 12px 24px; border-radius: 12px;
+            font-size: 0.9rem; text-align: center; max-width: 540px;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #ship-log {
+            position: fixed; top: 60px; right: 20px;
+            background: rgba(10,22,40,0.85); backdrop-filter: blur(10px);
+            color: #DDA15E; padding: 14px; border-radius: 12px;
+            font-size: 0.85rem; min-width: 200px;
+            border: 1px solid rgba(221,161,94,0.3);
+        }
+        #ship-log .label { color: #8A9A5B; font-size: 0.7rem; text-transform: uppercase; }
+        #ship-log .val { font-size: 1rem; margin-bottom: 6px; }
+        #ship-log .err { color: #BC6C25; font-size: 0.75rem; }
+        #helm {
+            position: fixed; bottom: 80px; right: 20px;
+            display: flex; flex-direction: column; gap: 8px; z-index: 100;
+        }
+        #helm label { color: #FEFAE0; font-size: 0.8rem; }
+        #helm input[type=range] { width: 140px; }
+        #helm button {
+            background: rgba(96,108,56,0.6); color: #FEFAE0; border: 1px solid rgba(138,154,91,0.4);
+            padding: 6px 14px; border-radius: 8px; cursor: pointer; font-family: Georgia; font-size: 0.8rem;
+        }
+        #helm button:hover { background: rgba(96,108,56,0.9); }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="ship-log">
+        <div class="label">Heading</div>
+        <div class="val" id="heading">000°</div>
+        <div class="label">Speed (knots)</div>
+        <div class="val" id="speed">0</div>
+        <div class="label">Distance Sailed</div>
+        <div class="val" id="dist">0 nm</div>
+        <div class="label">DR Position</div>
+        <div class="val" id="drPos">--</div>
+        <div class="label">True Position</div>
+        <div class="val" id="truePos">--</div>
+        <div class="err" id="errorMsg">Error: 0 nm</div>
+    </div>
+    <div id="helm">
+        <label>Heading: <input type="range" id="headingSlider" min="0" max="359" value="45"></label>
+        <label>Speed: <input type="range" id="speedSlider" min="0" max="12" value="6"></label>
+        <label>Current: <input type="range" id="currentSlider" min="0" max="50" value="15"></label>
+        <label>Wind Drift: <input type="range" id="windSlider" min="0" max="50" value="10"></label>
+        <button onclick="resetVoyage()">Reset Voyage</button>
+    </div>
+    <div id="info">
+        <strong>Dead reckoning</strong>: estimate position from speed, heading, and time. But currents and wind silently push you off course. Watch the <span style="color:#BC6C25">error accumulate</span> as the DR position (estimated) drifts from the true position.
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H, cx, cy;
+
+    let heading = 45;
+    let speed = 6;
+    let currentStrength = 0.15;
+    let windDrift = 0.1;
+
+    // Positions in nautical miles from origin
+    let drX = 0, drY = 0; // Dead reckoning estimate
+    let trueX = 0, trueY = 0; // Actual position
+    let totalDist = 0;
+    let trail = []; // DR trail
+    let trueTrail = []; // True trail
+    let startTime = 0;
+
+    const gridScale = 20; // pixels per nautical mile
+    let viewOffsetX = 0, viewOffsetY = 0;
+
+    // Chart features (islands, reefs)
+    const chartFeatures = [
+        { x: 15, y: -10, type: 'island', name: 'San Miguel' },
+        { x: 30, y: -25, type: 'island', name: 'Santa Rosa' },
+        { x: -5, y: -20, type: 'reef', name: 'Shoal' },
+        { x: 25, y: 5, type: 'island', name: 'San Nicolas' },
+        { x: 45, y: -15, type: 'island', name: 'Santa Cruz' }
+    ];
+
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+        cx = W / 2;
+        cy = H / 2;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    function worldToScreen(wx, wy) {
+        return {
+            x: cx + (wx - viewOffsetX) * gridScale,
+            y: cy - (wy - viewOffsetY) * gridScale
+        };
+    }
+
+    function drawChart(t) {
+        // Ocean background
+        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H));
+        grad.addColorStop(0, '#0d1a33');
+        grad.addColorStop(1, '#060c1a');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        // Grid
+        ctx.strokeStyle = 'rgba(138,154,91,0.08)';
+        ctx.lineWidth = 1;
+        const gridSpacing = gridScale * 5;
+        const startGridX = -Math.ceil((cx + viewOffsetX * gridScale) / gridSpacing) * gridSpacing;
+        for (let gx = startGridX; gx < W + gridSpacing; gx += gridSpacing) {
+            const sx = cx + gx - viewOffsetX * gridScale;
+            ctx.beginPath();
+            ctx.moveTo(sx, 0);
+            ctx.lineTo(sx, H);
+            ctx.stroke();
+        }
+        const startGridY = -Math.ceil((cy - viewOffsetY * gridScale) / gridSpacing) * gridSpacing;
+        for (let gy = startGridY; gy < H + gridSpacing; gy += gridSpacing) {
+            const sy = cy - gy + viewOffsetY * gridScale;
+            ctx.beginPath();
+            ctx.moveTo(0, sy);
+            ctx.lineTo(W, sy);
+            ctx.stroke();
+        }
+
+        // Origin mark
+        const origin = worldToScreen(0, 0);
+        ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(origin.x - 8, origin.y);
+        ctx.lineTo(origin.x + 8, origin.y);
+        ctx.moveTo(origin.x, origin.y - 8);
+        ctx.lineTo(origin.x, origin.y + 8);
+        ctx.stroke();
+        ctx.fillStyle = '#8A9A5B';
+        ctx.font = '10px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillText('Departure', origin.x, origin.y + 20);
+
+        // Chart features
+        chartFeatures.forEach(f => {
+            const pos = worldToScreen(f.x, f.y);
+            if (f.type === 'island') {
+                ctx.fillStyle = 'rgba(96,108,56,0.4)';
+                ctx.beginPath();
+                ctx.ellipse(pos.x, pos.y, 15, 10, 0.3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = '#606C38';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            } else {
+                ctx.strokeStyle = 'rgba(188,108,37,0.4)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, 10, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '9px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText(f.name, pos.x, pos.y + 20);
+        });
+    }
+
+    function drawTrails() {
+        // True trail
+        if (trueTrail.length > 1) {
+            ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            trueTrail.forEach((p, i) => {
+                const sp = worldToScreen(p.x, p.y);
+                if (i === 0) ctx.moveTo(sp.x, sp.y);
+                else ctx.lineTo(sp.x, sp.y);
+            });
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // DR trail
+        if (trail.length > 1) {
+            ctx.strokeStyle = 'rgba(221,161,94,0.6)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            trail.forEach((p, i) => {
+                const sp = worldToScreen(p.x, p.y);
+                if (i === 0) ctx.moveTo(sp.x, sp.y);
+                else ctx.lineTo(sp.x, sp.y);
+            });
+            ctx.stroke();
+        }
+
+        // Error line between DR and true
+        const drScreen = worldToScreen(drX, drY);
+        const trueScreen = worldToScreen(trueX, trueY);
+        ctx.strokeStyle = 'rgba(188,108,37,0.4)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        ctx.moveTo(drScreen.x, drScreen.y);
+        ctx.lineTo(trueScreen.x, trueScreen.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    function drawShip(x, y, heading, color, label) {
+        const pos = worldToScreen(x, y);
+        const a = (90 - heading) * Math.PI / 180;
+        ctx.save();
+        ctx.translate(pos.x, pos.y);
+        ctx.rotate(-a + Math.PI / 2);
+
+        // Ship shape
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(0, -12);
+        ctx.lineTo(-6, 8);
+        ctx.lineTo(0, 5);
+        ctx.lineTo(6, 8);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.restore();
+
+        // Label
+        ctx.fillStyle = color;
+        ctx.font = '9px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, pos.x, pos.y + 20);
+    }
+
+    function drawCompassRose() {
+        const rx = 80;
+        const ry = H - 100;
+        const r = 40;
+
+        ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(rx, ry, r, 0, Math.PI * 2);
+        ctx.stroke();
+
+        const dirs = ['N', 'E', 'S', 'W'];
+        for (let i = 0; i < 4; i++) {
+            const a = -Math.PI / 2 + i * Math.PI / 2;
+            ctx.strokeStyle = 'rgba(221,161,94,0.4)';
+            ctx.beginPath();
+            ctx.moveTo(rx, ry);
+            ctx.lineTo(rx + Math.cos(a) * r, ry + Math.sin(a) * r);
+            ctx.stroke();
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = '10px Georgia';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(dirs[i], rx + Math.cos(a) * (r + 12), ry + Math.sin(a) * (r + 12));
+        }
+
+        // Heading needle
+        const ha = (90 - heading) * Math.PI / 180;
+        ctx.strokeStyle = '#DDA15E';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(rx, ry);
+        ctx.lineTo(rx + Math.cos(-ha + Math.PI / 2) * r * 0.8, ry - Math.sin(-ha + Math.PI / 2) * r * 0.8);
+        ctx.stroke();
+    }
+
+    function drawCurrentArrow(t) {
+        if (currentStrength < 0.01) return;
+        const ax = 80;
+        const ay = H - 180;
+        const currentAngle = (t * 0.3) % (Math.PI * 2);
+        const len = currentStrength * 100;
+
+        ctx.strokeStyle = 'rgba(68,136,204,0.5)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        const ex = ax + Math.cos(currentAngle) * len;
+        const ey = ay + Math.sin(currentAngle) * len;
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+
+        // Arrowhead
+        const aa = currentAngle + Math.PI;
+        ctx.beginPath();
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex + Math.cos(aa + 0.4) * 8, ey + Math.sin(aa + 0.4) * 8);
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex + Math.cos(aa - 0.4) * 8, ey + Math.sin(aa - 0.4) * 8);
+        ctx.stroke();
+
+        ctx.fillStyle = 'rgba(68,136,204,0.5)';
+        ctx.font = '9px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillText('Current', ax, ay - 10);
+    }
+
+    let lastUpdate = 0;
+    function updatePosition(t) {
+        const dt = Math.min(t - lastUpdate, 50) * 0.001; // seconds
+        lastUpdate = t;
+
+        if (speed === 0) return;
+
+        const headingRad = (90 - heading) * Math.PI / 180;
+        const speedNmPerSec = speed / 3600; // knots to nm/s
+
+        // DR update (what the navigator thinks)
+        drX += Math.cos(headingRad) * speedNmPerSec * dt * 60;
+        drY += Math.sin(headingRad) * speedNmPerSec * dt * 60;
+
+        // True update (includes current and wind)
+        const currentAngle = (t * 0.001 * 0.3) % (Math.PI * 2);
+        const currentX = Math.cos(currentAngle) * currentStrength * 0.02;
+        const currentY = Math.sin(currentAngle) * currentStrength * 0.02;
+        const windX = Math.cos(headingRad + Math.PI / 4) * windDrift * 0.01;
+        const windY = Math.sin(headingRad + Math.PI / 4) * windDrift * 0.01;
+
+        trueX += Math.cos(headingRad) * speedNmPerSec * dt * 60 + currentX + windX;
+        trueY += Math.sin(headingRad) * speedNmPerSec * dt * 60 + currentY + windY;
+
+        totalDist += speedNmPerSec * dt * 60;
+
+        // Record trail
+        if (trail.length === 0 || totalDist - (trail.length - 1) * 0.5 > 0.5) {
+            trail.push({ x: drX, y: drY });
+            trueTrail.push({ x: trueX, y: trueY });
+        }
+
+        // Auto-pan view to follow ship
+        viewOffsetX += (trueX - viewOffsetX) * 0.02;
+        viewOffsetY += (trueY - viewOffsetY) * 0.02;
+
+        // Update display
+        const error = Math.sqrt((drX - trueX) ** 2 + (drY - trueY) ** 2);
+        document.getElementById('heading').textContent = heading.toString().padStart(3, '0') + '°';
+        document.getElementById('speed').textContent = speed + ' kn';
+        document.getElementById('dist').textContent = totalDist.toFixed(1) + ' nm';
+        document.getElementById('drPos').textContent = `${drX.toFixed(1)}, ${drY.toFixed(1)}`;
+        document.getElementById('truePos').textContent = `${trueX.toFixed(1)}, ${trueY.toFixed(1)}`;
+        document.getElementById('errorMsg').textContent = `DR Error: ${error.toFixed(2)} nm`;
+    }
+
+    document.getElementById('headingSlider').addEventListener('input', e => {
+        heading = parseInt(e.target.value);
+    });
+    document.getElementById('speedSlider').addEventListener('input', e => {
+        speed = parseInt(e.target.value);
+    });
+    document.getElementById('currentSlider').addEventListener('input', e => {
+        currentStrength = parseInt(e.target.value) / 100;
+    });
+    document.getElementById('windSlider').addEventListener('input', e => {
+        windDrift = parseInt(e.target.value) / 100;
+    });
+
+    function resetVoyage() {
+        drX = drY = trueX = trueY = totalDist = 0;
+        trail = [];
+        trueTrail = [];
+        viewOffsetX = viewOffsetY = 0;
+    }
+
+    function draw(t) {
+        updatePosition(t);
+        drawChart(t * 0.001);
+        drawTrails();
+        drawShip(drX, drY, heading, '#DDA15E', 'DR Est.');
+        drawShip(trueX, trueY, heading, '#8A9A5B', 'True');
+        drawCompassRose();
+        drawCurrentArrow(t * 0.001);
+        requestAnimationFrame(draw);
+    }
+
+    window.reset = function() {
+        resetVoyage();
+        heading = 45;
+        speed = 6;
+        currentStrength = 0.15;
+        windDrift = 0.1;
+        document.getElementById('headingSlider').value = 45;
+        document.getElementById('speedSlider').value = 6;
+        document.getElementById('currentSlider').value = 15;
+        document.getElementById('windSlider').value = 10;
+    };
+
+    requestAnimationFrame(draw);
+    </script>
+</body>
+</html>

@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>A* Pathfinding - Game AI Strategies</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        #ui { position: fixed; top: 10px; right: 10px; z-index: 100; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
+        .btn { background: rgba(138,154,91,0.3); border: 1px solid #8A9A5B; color: #FEFAE0; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; backdrop-filter: blur(10px); }
+        .btn:hover { background: rgba(138,154,91,0.5); }
+        .btn.active { background: rgba(221,161,94,0.4); border-color: #DDA15E; }
+        .status { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.6); backdrop-filter: blur(10px); padding: 10px 24px; border-radius: 12px; font-size: 0.9rem; border: 1px solid rgba(138,154,91,0.3); text-align: center; z-index: 100; max-width: 700px; }
+        .legend { position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%); display: flex; gap: 14px; font-size: 0.75rem; z-index: 100; flex-wrap: wrap; justify-content: center; }
+        .legend-item { display: flex; align-items: center; gap: 4px; }
+        .legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div id="ui">
+        <button class="btn" onclick="resetGrid()">Clear</button>
+        <button class="btn" onclick="randomWalls()">Random Walls</button>
+        <button class="btn" onclick="startSearch()">Find Path</button>
+        <button class="btn" id="btnAStar" onclick="setAlgo('astar')">A*</button>
+        <button class="btn" id="btnDijkstra" onclick="setAlgo('dijkstra')">Dijkstra</button>
+        <button class="btn" id="btnGreedy" onclick="setAlgo('greedy')">Greedy BFS</button>
+        <button class="btn" onclick="toggleMode()">Mode: <span id="modeLabel">Draw Walls</span></button>
+    </div>
+    <div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#8A9A5B"></div> Start</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#DDA15E"></div> Goal</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#444"></div> Wall</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#3498db"></div> Open (frontier)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#606C38"></div> Closed (visited)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#f1c40f"></div> Path</div>
+    </div>
+    <div class="status" id="status">Draw walls by clicking, then press "Find Path". Drag start/goal to reposition.</div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    resize();
+    window.addEventListener('resize', resize);
+
+    const GRID_W = 40, GRID_H = 25;
+    let grid = []; // 0=empty, 1=wall
+    let start = { r: 12, c: 5 };
+    let goal = { r: 12, c: 34 };
+    let openSet = [];
+    let closedSet = new Set();
+    let cameFrom = {};
+    let gScore = {};
+    let fScore = {};
+    let path = [];
+    let searching = false;
+    let searchDone = false;
+    let algo = 'astar';
+    let drawMode = 'wall'; // 'wall', 'start', 'goal'
+    let mouseDown = false;
+    let hoverCell = { r: -1, c: -1 };
+    let searchStepTimer = null;
+    let nodesExpanded = 0;
+
+    function initGrid() {
+        grid = [];
+        for (let r = 0; r < GRID_H; r++) grid.push(Array(GRID_W).fill(0));
+    }
+
+    function clearSearch() {
+        openSet = [];
+        closedSet = new Set();
+        cameFrom = {};
+        gScore = {};
+        fScore = {};
+        path = [];
+        searching = false;
+        searchDone = false;
+        nodesExpanded = 0;
+        if (searchStepTimer) clearInterval(searchStepTimer);
+    }
+
+    function key(r, c) { return r * GRID_W + c; }
+
+    function heuristic(r1, c1, r2, c2) {
+        // Manhattan distance
+        return Math.abs(r1 - r2) + Math.abs(c1 - c2);
+    }
+
+    function startSearch() {
+        clearSearch();
+        const sk = key(start.r, start.c);
+        gScore[sk] = 0;
+        const h = algo === 'dijkstra' ? 0 : heuristic(start.r, start.c, goal.r, goal.c);
+        fScore[sk] = algo === 'greedy' ? h : gScore[sk] + h;
+        openSet.push({ r: start.r, c: start.c, f: fScore[sk] });
+        searching = true;
+        searchDone = false;
+        document.getElementById('status').textContent = 'Searching with ' + algo.toUpperCase() + '...';
+
+        searchStepTimer = setInterval(searchStep, 15);
+    }
+
+    function searchStep() {
+        if (!searching || openSet.length === 0) {
+            searching = false;
+            if (searchStepTimer) clearInterval(searchStepTimer);
+            if (path.length === 0) {
+                document.getElementById('status').textContent = 'No path found! Expanded ' + nodesExpanded + ' nodes.';
+            }
+            return;
+        }
+
+        // Find lowest f in openSet
+        openSet.sort((a, b) => a.f - b.f);
+        const current = openSet.shift();
+        const ck = key(current.r, current.c);
+
+        if (current.r === goal.r && current.c === goal.c) {
+            // Reconstruct path
+            path = [];
+            let k = ck;
+            while (k !== undefined) {
+                path.push({ r: Math.floor(k / GRID_W), c: k % GRID_W });
+                k = cameFrom[k];
+            }
+            path.reverse();
+            searching = false;
+            searchDone = true;
+            if (searchStepTimer) clearInterval(searchStepTimer);
+            document.getElementById('status').textContent = algo.toUpperCase() + ': Path found! Length: ' + path.length + ', Expanded: ' + nodesExpanded + ' nodes';
+            return;
+        }
+
+        closedSet.add(ck);
+        nodesExpanded++;
+
+        // Neighbors (4-directional)
+        const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+        for (const [dr, dc] of dirs) {
+            const nr = current.r + dr, nc = current.c + dc;
+            if (nr < 0 || nr >= GRID_H || nc < 0 || nc >= GRID_W) continue;
+            if (grid[nr][nc] === 1) continue;
+            const nk = key(nr, nc);
+            if (closedSet.has(nk)) continue;
+
+            const tentG = (gScore[ck] || 0) + 1;
+            if (tentG < (gScore[nk] || Infinity)) {
+                cameFrom[nk] = ck;
+                gScore[nk] = tentG;
+                const h = algo === 'dijkstra' ? 0 : heuristic(nr, nc, goal.r, goal.c);
+                fScore[nk] = algo === 'greedy' ? h : tentG + h;
+
+                if (!openSet.find(n => n.r === nr && n.c === nc)) {
+                    openSet.push({ r: nr, c: nc, f: fScore[nk] });
+                }
+            }
+        }
+    }
+
+    function setAlgo(a) {
+        algo = a;
+        document.querySelectorAll('#ui .btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('btn' + a.charAt(0).toUpperCase() + a.slice(1).replace('star', 'Star')).classList.add('active');
+        clearSearch();
+    }
+
+    function toggleMode() {
+        const modes = ['wall', 'start', 'goal'];
+        const labels = ['Draw Walls', 'Move Start', 'Move Goal'];
+        const idx = (modes.indexOf(drawMode) + 1) % modes.length;
+        drawMode = modes[idx];
+        document.getElementById('modeLabel').textContent = labels[idx];
+    }
+
+    function resetGrid() {
+        initGrid();
+        clearSearch();
+        document.getElementById('status').textContent = 'Grid cleared. Draw walls and press "Find Path".';
+    }
+
+    function randomWalls() {
+        initGrid();
+        clearSearch();
+        for (let r = 0; r < GRID_H; r++) {
+            for (let c = 0; c < GRID_W; c++) {
+                if (r === start.r && c === start.c) continue;
+                if (r === goal.r && c === goal.c) continue;
+                if (Math.random() < 0.28) grid[r][c] = 1;
+            }
+        }
+    }
+
+    // Mouse interaction
+    canvas.addEventListener('mousemove', function(e) {
+        const cellW = Math.min((W - 40) / GRID_W, (H - 140) / GRID_H);
+        const gridX = (W - GRID_W * cellW) / 2;
+        const gridY = 50;
+        const c = Math.floor((e.clientX - gridX) / cellW);
+        const r = Math.floor((e.clientY - gridY) / cellW);
+        hoverCell = { r, c };
+        if (mouseDown && !searching) {
+            if (drawMode === 'wall' && r >= 0 && r < GRID_H && c >= 0 && c < GRID_W) {
+                if (!(r === start.r && c === start.c) && !(r === goal.r && c === goal.c)) {
+                    grid[r][c] = 1;
+                    clearSearch();
+                }
+            } else if (drawMode === 'start') {
+                if (r >= 0 && r < GRID_H && c >= 0 && c < GRID_W && grid[r][c] === 0) {
+                    start = { r, c }; clearSearch();
+                }
+            } else if (drawMode === 'goal') {
+                if (r >= 0 && r < GRID_H && c >= 0 && c < GRID_W && grid[r][c] === 0) {
+                    goal = { r, c }; clearSearch();
+                }
+            }
+        }
+    });
+
+    canvas.addEventListener('mousedown', function(e) {
+        mouseDown = true;
+        const cellW = Math.min((W - 40) / GRID_W, (H - 140) / GRID_H);
+        const gridX = (W - GRID_W * cellW) / 2;
+        const gridY = 50;
+        const c = Math.floor((e.clientX - gridX) / cellW);
+        const r = Math.floor((e.clientY - gridY) / cellW);
+        if (r >= 0 && r < GRID_H && c >= 0 && c < GRID_W && !searching) {
+            if (drawMode === 'wall') {
+                if (!(r === start.r && c === start.c) && !(r === goal.r && c === goal.c)) {
+                    grid[r][c] = grid[r][c] === 1 ? 0 : 1;
+                    clearSearch();
+                }
+            } else if (drawMode === 'start') {
+                if (grid[r][c] === 0) { start = { r, c }; clearSearch(); }
+            } else if (drawMode === 'goal') {
+                if (grid[r][c] === 0) { goal = { r, c }; clearSearch(); }
+            }
+        }
+    });
+
+    canvas.addEventListener('mouseup', () => mouseDown = false);
+
+    function draw() {
+        ctx.clearRect(0, 0, W, H);
+        const grad = ctx.createLinearGradient(0, 0, W, H);
+        grad.addColorStop(0, '#1a1a2e');
+        grad.addColorStop(1, '#16213e');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = 'bold 1.2rem "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('A* Pathfinding (vs Dijkstra & Greedy BFS)', W / 2, 30);
+
+        const cellW = Math.min((W - 40) / GRID_W, (H - 140) / GRID_H);
+        const gridX = (W - GRID_W * cellW) / 2;
+        const gridY = 50;
+
+        // Path set for fast lookup
+        const pathSet = new Set();
+        for (const p of path) pathSet.add(key(p.r, p.c));
+        const openSetKeys = new Set();
+        for (const o of openSet) openSetKeys.add(key(o.r, o.c));
+
+        for (let r = 0; r < GRID_H; r++) {
+            for (let c = 0; c < GRID_W; c++) {
+                const x = gridX + c * cellW;
+                const y = gridY + r * cellW;
+                const k = key(r, c);
+
+                let color;
+                if (r === start.r && c === start.c) color = '#8A9A5B';
+                else if (r === goal.r && c === goal.c) color = '#DDA15E';
+                else if (grid[r][c] === 1) color = '#333';
+                else if (pathSet.has(k)) color = '#f1c40f';
+                else if (closedSet.has(k)) color = 'rgba(96,108,56,0.35)';
+                else if (openSetKeys.has(k)) color = 'rgba(52,152,219,0.4)';
+                else color = 'rgba(254,250,224,0.05)';
+
+                ctx.fillStyle = color;
+                ctx.fillRect(x + 0.5, y + 0.5, cellW - 1, cellW - 1);
+
+                // Show f-score for open/closed nodes
+                if (cellW > 16 && (closedSet.has(k) || openSetKeys.has(k)) && fScore[k] !== undefined) {
+                    ctx.fillStyle = 'rgba(254,250,224,0.4)';
+                    ctx.font = (cellW * 0.3) + 'px "Segoe UI", system-ui, sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(Math.round(fScore[k]), x + cellW / 2, y + cellW / 2);
+                }
+            }
+        }
+
+        // Start/Goal labels
+        ctx.font = 'bold ' + (cellW * 0.5) + 'px "Segoe UI", system-ui, sans-serif';
+        ctx.fillStyle = '#FEFAE0';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('S', gridX + start.c * cellW + cellW / 2, gridY + start.r * cellW + cellW / 2);
+        ctx.fillText('G', gridX + goal.c * cellW + cellW / 2, gridY + goal.r * cellW + cellW / 2);
+
+        requestAnimationFrame(draw);
+    }
+
+    window.reset = function() { resetGrid(); };
+    initGrid();
+    setAlgo('astar');
+    draw();
+    </script>
+</body>
+</html>

@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clepsydra (Water Clock) - Historical Timekeeping</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Georgia', serif; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 15px 25px;
+            border-radius: 15px; color: #FEFAE0; display: flex; gap: 20px; align-items: center;
+            font-size: 0.85rem; z-index: 100; flex-wrap: wrap; justify-content: center;
+        }
+        .controls label { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .controls input[type="range"] { width: 100px; accent-color: #DDA15E; }
+        .controls .value { color: #DDA15E; font-weight: bold; }
+        .controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 8px 16px;
+            border-radius: 8px; cursor: pointer; font-family: inherit;
+        }
+        .controls button:hover { background: #8A9A5B; }
+        .info {
+            position: fixed; top: 10px; right: 10px; color: #FEFAE0; font-size: 0.8rem;
+            background: rgba(0,0,0,0.5); padding: 10px 15px; border-radius: 10px;
+            backdrop-filter: blur(10px); z-index: 100; text-align: right; line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <div class="info" id="info"></div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Orifice Size
+            <input type="range" id="orifice" min="2" max="20" value="8" step="1">
+            <span class="value" id="orificeVal">8</span>
+        </label>
+        <label>Vessel Shape
+            <input type="range" id="shape" min="0" max="100" value="0" step="1">
+            <span class="value" id="shapeVal">Cylinder</span>
+        </label>
+        <button id="resetBtn">Refill</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const orificeSlider = document.getElementById('orifice');
+        const shapeSlider = document.getElementById('shape');
+        const resetBtn = document.getElementById('resetBtn');
+        const orificeVal = document.getElementById('orificeVal');
+        const shapeVal = document.getElementById('shapeVal');
+        const infoEl = document.getElementById('info');
+
+        let W, H;
+        let waterLevel = 1.0; // 0 to 1
+        let drips = [];
+        let collected = 0;
+        let elapsed = 0;
+        let lastTime = 0;
+        let markings = [];
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        function vesselWidth(y, shapeFactor) {
+            // y: 0 = bottom, 1 = top
+            // shapeFactor: 0 = cylinder, 1 = conical (clepsydra shape for linear flow)
+            const s = shapeFactor / 100;
+            // Linear: constant width, Clepsydra: wider at top (paraboloid)
+            const base = 0.6;
+            const taper = s * 0.4;
+            return base + taper * Math.pow(y, 0.5);
+        }
+
+        function flowRate(waterH, orificeR) {
+            // Torricelli's law: v = sqrt(2*g*h)
+            // Q = Cd * A * v = Cd * pi * r^2 * sqrt(2*g*h)
+            const g = 9.81;
+            const Cd = 0.6; // discharge coefficient
+            const r = orificeR / 1000;
+            const A = Math.PI * r * r;
+            return Cd * A * Math.sqrt(2 * g * Math.max(0, waterH));
+        }
+
+        function drawVessel(cx, cy, vesselH, maxW, sf) {
+            // Draw vessel outline
+            ctx.beginPath();
+            const steps = 40;
+            for (let i = 0; i <= steps; i++) {
+                const y = i / steps;
+                const w = vesselWidth(y, sf) * maxW;
+                const px = cx - w / 2;
+                const py = cy + vesselH / 2 - y * vesselH;
+                if (i === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            for (let i = steps; i >= 0; i--) {
+                const y = i / steps;
+                const w = vesselWidth(y, sf) * maxW;
+                const px = cx + w / 2;
+                const py = cy + vesselH / 2 - y * vesselH;
+                ctx.lineTo(px, py);
+            }
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(180, 160, 120, 0.3)';
+            ctx.fill();
+            ctx.strokeStyle = '#BC6C25';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // Water
+            if (waterLevel > 0.001) {
+                ctx.beginPath();
+                const wSteps = 40;
+                // Bottom edge
+                for (let i = 0; i <= wSteps; i++) {
+                    const y = i / wSteps * waterLevel;
+                    const w = vesselWidth(y, sf) * maxW;
+                    const px = cx - w / 2;
+                    const py = cy + vesselH / 2 - y * vesselH;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                // Water surface
+                const surfW = vesselWidth(waterLevel, sf) * maxW;
+                ctx.lineTo(cx + surfW / 2, cy + vesselH / 2 - waterLevel * vesselH);
+                // Right edge down
+                for (let i = wSteps; i >= 0; i--) {
+                    const y = i / wSteps * waterLevel;
+                    const w = vesselWidth(y, sf) * maxW;
+                    const px = cx + w / 2;
+                    const py = cy + vesselH / 2 - y * vesselH;
+                    ctx.lineTo(px, py);
+                }
+                ctx.closePath();
+                const waterGrad = ctx.createLinearGradient(cx, cy + vesselH / 2, cx, cy + vesselH / 2 - waterLevel * vesselH);
+                waterGrad.addColorStop(0, 'rgba(60, 120, 180, 0.7)');
+                waterGrad.addColorStop(1, 'rgba(100, 160, 220, 0.5)');
+                ctx.fillStyle = waterGrad;
+                ctx.fill();
+            }
+
+            // Hour markings on vessel
+            ctx.fillStyle = '#DDA15E';
+            ctx.font = '12px Georgia';
+            ctx.textAlign = 'right';
+            for (let i = 1; i <= 12; i++) {
+                const y = i / 12;
+                const w = vesselWidth(y, sf) * maxW;
+                const mx = cx - w / 2 - 8;
+                const my = cy + vesselH / 2 - y * vesselH;
+                ctx.fillText(i + 'h', mx, my + 4);
+                ctx.beginPath();
+                ctx.moveTo(cx - w / 2, my);
+                ctx.lineTo(cx - w / 2 + 10, my);
+                ctx.strokeStyle = '#DDA15E';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+
+            // Orifice at bottom
+            const orificeR = parseFloat(orificeSlider.value);
+            const botW = vesselWidth(0, sf) * maxW;
+            ctx.beginPath();
+            ctx.arc(cx, cy + vesselH / 2 + 5, orificeR * 0.8, 0, Math.PI * 2);
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fill();
+            ctx.strokeStyle = '#BC6C25';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            return { bottom: cy + vesselH / 2, orificeX: cx };
+        }
+
+        function drawCollectionVessel(cx, cy, w, h) {
+            ctx.beginPath();
+            ctx.rect(cx - w / 2, cy - h, w, h);
+            ctx.fillStyle = 'rgba(180, 160, 120, 0.2)';
+            ctx.fill();
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Collected water
+            const collectedH = Math.min(collected / 1.0, 1) * h;
+            if (collectedH > 0) {
+                const waterGrad = ctx.createLinearGradient(cx, cy, cx, cy - collectedH);
+                waterGrad.addColorStop(0, 'rgba(60, 120, 180, 0.6)');
+                waterGrad.addColorStop(1, 'rgba(100, 160, 220, 0.4)');
+                ctx.fillStyle = waterGrad;
+                ctx.fillRect(cx - w / 2 + 2, cy - collectedH, w - 4, collectedH);
+            }
+        }
+
+        function update(dt) {
+            if (waterLevel <= 0) return;
+
+            const orificeR = parseFloat(orificeSlider.value);
+            const sf = parseFloat(shapeSlider.value);
+            const vesselH = 1.0; // normalized
+
+            // Flow rate depends on current water height
+            const Q = flowRate(waterLevel * vesselH, orificeR) * 0.3;
+            waterLevel = Math.max(0, waterLevel - Q * dt);
+            collected = Math.min(1, collected + Q * dt);
+            elapsed += dt;
+
+            // Spawn drips
+            if (waterLevel > 0.001 && Math.random() < Q * 200 * dt) {
+                drips.push({
+                    x: W / 2 + (Math.random() - 0.5) * 4,
+                    y: H * 0.55,
+                    vy: 1,
+                    life: 1
+                });
+            }
+        }
+
+        function draw(timestamp) {
+            const dt = lastTime ? Math.min((timestamp - lastTime) / 1000, 0.05) : 0.016;
+            lastTime = timestamp;
+
+            const sf = parseFloat(shapeSlider.value);
+            orificeVal.textContent = orificeSlider.value;
+            shapeVal.textContent = sf < 30 ? 'Cylinder' : sf < 70 ? 'Tapered' : 'Clepsydra';
+
+            update(dt);
+
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            // Title
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'italic 16px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Clepsydra - Egyptian Outflow Water Clock', W / 2, 40);
+
+            const vesselH = H * 0.4;
+            const maxW = Math.min(W * 0.3, 200);
+            const vesselInfo = drawVessel(W / 2, H * 0.33, vesselH, maxW, sf);
+
+            // Collection vessel
+            drawCollectionVessel(W / 2, H * 0.85, maxW * 0.8, H * 0.15);
+
+            // Draw drips
+            for (let i = drips.length - 1; i >= 0; i--) {
+                const d = drips[i];
+                d.y += d.vy * 3;
+                d.vy += 0.3;
+                d.life -= dt * 2;
+                if (d.y > H * 0.85 || d.life <= 0) {
+                    drips.splice(i, 1);
+                    continue;
+                }
+                ctx.beginPath();
+                ctx.ellipse(d.x, d.y, 2, 4, 0, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(100, 160, 220, ${d.life * 0.7})`;
+                ctx.fill();
+            }
+
+            // Flow rate visualization
+            const orificeR = parseFloat(orificeSlider.value);
+            const currentQ = flowRate(waterLevel, orificeR);
+
+            // Info
+            const hours = Math.floor(elapsed / 3);
+            const mins = Math.floor((elapsed / 3 - hours) * 60);
+            infoEl.innerHTML =
+                'Water Level: ' + (waterLevel * 100).toFixed(1) + '%<br>' +
+                'Flow Rate: ' + (currentQ * 1000).toFixed(2) + ' mL/s<br>' +
+                'Elapsed: ' + hours + 'h ' + mins + 'm<br>' +
+                'Torricelli: v = \u221A(2gh)';
+
+            requestAnimationFrame(draw);
+        }
+
+        resetBtn.addEventListener('click', () => {
+            waterLevel = 1.0;
+            collected = 0;
+            elapsed = 0;
+            drips = [];
+        });
+
+        window.reset = function() {
+            waterLevel = 1.0;
+            collected = 0;
+            elapsed = 0;
+            drips = [];
+            orificeSlider.value = 8;
+            shapeSlider.value = 0;
+        };
+
+        requestAnimationFrame(draw);
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reed Vibration Simulator - Wind Instrument Physics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; }
+a.back-link { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+a.back-link:hover { color: #DDA15E; }
+
+.controls {
+    position: fixed; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(26,26,46,0.92); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 16px; min-width: 230px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #DDA15E; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+.controls label { display: block; font-size: 12px; color: #8A9A5B; margin-top: 8px; }
+.controls input[type=range] { width: 100%; margin: 4px 0; accent-color: #8A9A5B; }
+.controls select { width: 100%; background: #2a2a4e; color: #FEFAE0; border: 1px solid #606C38; border-radius: 6px; padding: 4px; margin: 4px 0; }
+.controls .value { font-size: 11px; color: #8A9A5B; text-align: right; }
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 14px; border: none; border-radius: 8px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+.btn.active { background: #DDA15E; color: #1a1a2e; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Reed Vibration</h3>
+    <label>Reed Type</label>
+    <select id="reedType">
+        <option value="clarinet">Clarinet (Single Reed)</option>
+        <option value="oboe">Oboe (Double Reed)</option>
+        <option value="bassoon">Bassoon (Double Reed)</option>
+    </select>
+    <label>Blowing Pressure: <span id="pressureVal" class="value">50%</span></label>
+    <input type="range" id="pressure" min="0" max="100" value="50">
+    <label>Reed Stiffness: <span id="stiffVal" class="value">50%</span></label>
+    <input type="range" id="stiffness" min="10" max="90" value="50">
+    <label>Lip Force: <span id="lipVal" class="value">50%</span></label>
+    <input type="range" id="lipForce" min="10" max="90" value="50">
+    <div style="margin-top:10px;">
+        <button class="btn" id="playBtn">Play Sound</button>
+    </div>
+</div>
+
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+let pressure = 50;
+let stiffness = 50;
+let lipForce = 50;
+let reedType = 'clarinet';
+let time = 0;
+let audioCtx = null;
+let isPlaying = false;
+let scriptNode = null;
+let animId;
+
+// Reed physics state
+let reedPos = 0;
+let reedVel = 0;
+const dt = 1 / 60;
+
+const pressureEl = document.getElementById('pressure');
+const stiffnessEl = document.getElementById('stiffness');
+const lipForceEl = document.getElementById('lipForce');
+const reedTypeEl = document.getElementById('reedType');
+const playBtn = document.getElementById('playBtn');
+
+pressureEl.addEventListener('input', e => { pressure = +e.target.value; document.getElementById('pressureVal').textContent = pressure + '%'; });
+stiffnessEl.addEventListener('input', e => { stiffness = +e.target.value; document.getElementById('stiffVal').textContent = stiffness + '%'; });
+lipForceEl.addEventListener('input', e => { lipForce = +e.target.value; document.getElementById('lipVal').textContent = lipForce + '%'; });
+reedTypeEl.addEventListener('change', e => { reedType = e.target.value; });
+
+playBtn.addEventListener('click', () => {
+    if (isPlaying) stopSound();
+    else startSound();
+});
+
+function getReedParams() {
+    const params = {
+        clarinet: { naturalFreq: 1500, damping: 0.05, mass: 0.0004, openArea: 1.0 },
+        oboe: { naturalFreq: 2000, damping: 0.08, mass: 0.0002, openArea: 0.6 },
+        bassoon: { naturalFreq: 800, damping: 0.04, mass: 0.001, openArea: 1.4 }
+    };
+    return params[reedType];
+}
+
+function startSound() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    stopSound();
+
+    const bufferSize = 2048;
+    scriptNode = audioCtx.createScriptProcessor(bufferSize, 0, 1);
+    const gainNode = audioCtx.createGain();
+    gainNode.gain.value = 0.12;
+
+    let phase = 0;
+    let reedY = 0;
+    let reedV = 0;
+    const sr = audioCtx.sampleRate;
+
+    scriptNode.onaudioprocess = function(e) {
+        const output = e.outputBuffer.getChannelData(0);
+        const p = getReedParams();
+        const omega0 = p.naturalFreq * 2 * Math.PI * (stiffness / 50);
+        const gamma = p.damping * (100 - lipForce) / 50;
+        const blowP = (pressure / 100) * 3000;
+        const dt_audio = 1 / sr;
+
+        for (let i = 0; i < bufferSize; i++) {
+            const opening = Math.max(0, 1 - reedY);
+            const flow = opening * Math.sqrt(Math.max(0, blowP));
+            const pForce = blowP * (1 - reedY) * 0.001;
+            const springForce = -omega0 * omega0 * reedY;
+            const dampForce = -gamma * omega0 * reedV;
+            const accel = springForce + dampForce + pForce / p.mass;
+
+            reedV += accel * dt_audio;
+            reedY += reedV * dt_audio;
+            reedY = Math.max(-0.5, Math.min(1.2, reedY));
+
+            output[i] = flow * 0.002 * Math.sin(phase);
+            phase += (omega0 * 0.1) * dt_audio;
+        }
+    };
+
+    scriptNode.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    isPlaying = true;
+    playBtn.textContent = 'Stop Sound';
+    playBtn.classList.add('active');
+}
+
+function stopSound() {
+    if (scriptNode) {
+        scriptNode.disconnect();
+        scriptNode = null;
+    }
+    isPlaying = false;
+    playBtn.textContent = 'Play Sound';
+    playBtn.classList.remove('active');
+}
+
+function drawMouthpiece(cx, cy, scale) {
+    const isSingle = reedType === 'clarinet';
+
+    // Mouthpiece body
+    ctx.fillStyle = '#3a3a5e';
+    ctx.strokeStyle = '#606C38';
+    ctx.lineWidth = 2;
+
+    if (isSingle) {
+        ctx.beginPath();
+        ctx.moveTo(cx - 60 * scale, cy - 25 * scale);
+        ctx.lineTo(cx + 80 * scale, cy - 15 * scale);
+        ctx.lineTo(cx + 80 * scale, cy + 15 * scale);
+        ctx.lineTo(cx - 60 * scale, cy + 25 * scale);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+    } else {
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, 40 * scale, 12 * scale, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+    }
+}
+
+function drawReed(cx, cy, scale, displacement) {
+    const isSingle = reedType === 'clarinet';
+    const reedColor = '#DDA15E';
+    const reedShadow = '#BC6C25';
+
+    if (isSingle) {
+        const tipDisp = displacement * 8 * scale;
+        ctx.strokeStyle = reedColor;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(cx - 60 * scale, cy - 20 * scale);
+        const cp1x = cx - 10 * scale;
+        const cp1y = cy - 18 * scale + tipDisp * 0.3;
+        const cp2x = cx + 40 * scale;
+        const cp2y = cy - 14 * scale + tipDisp * 0.7;
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, cx + 80 * scale, cy - 12 * scale + tipDisp);
+        ctx.stroke();
+
+        // Reed thickness
+        ctx.strokeStyle = reedShadow;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(cx - 60 * scale, cy - 18 * scale);
+        ctx.bezierCurveTo(cp1x, cp1y + 3 * scale, cp2x, cp2y + 2 * scale, cx + 80 * scale, cy - 10 * scale + tipDisp);
+        ctx.stroke();
+
+        // Tip label
+        ctx.fillStyle = '#DDA15E';
+        ctx.font = `${11 * scale}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.fillText('tip', cx + 85 * scale, cy - 12 * scale + tipDisp - 8 * scale);
+        ctx.fillText('heel', cx - 65 * scale, cy - 25 * scale - 5 * scale);
+    } else {
+        // Double reed
+        const tipDisp = displacement * 6 * scale;
+        ctx.strokeStyle = reedColor;
+        ctx.lineWidth = 2.5;
+
+        // Top blade
+        ctx.beginPath();
+        ctx.moveTo(cx - 30 * scale, cy);
+        ctx.bezierCurveTo(cx, cy - 8 * scale - tipDisp, cx + 20 * scale, cy - 6 * scale - tipDisp, cx + 40 * scale, cy - 3 * scale - tipDisp);
+        ctx.stroke();
+
+        // Bottom blade
+        ctx.beginPath();
+        ctx.moveTo(cx - 30 * scale, cy);
+        ctx.bezierCurveTo(cx, cy + 8 * scale + tipDisp, cx + 20 * scale, cy + 6 * scale + tipDisp, cx + 40 * scale, cy + 3 * scale + tipDisp);
+        ctx.stroke();
+
+        // Staple/tube
+        ctx.strokeStyle = '#8A9A5B';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(cx - 30 * scale, cy);
+        ctx.lineTo(cx - 55 * scale, cy);
+        ctx.stroke();
+    }
+}
+
+function drawAirflow(cx, cy, scale, pressure, opening) {
+    const numParticles = 30;
+    const baseSpeed = pressure / 100;
+    ctx.fillStyle = 'rgba(138,154,91,0.4)';
+
+    for (let i = 0; i < numParticles; i++) {
+        const t = ((time * 0.003 * baseSpeed + i / numParticles) % 1);
+        const x = cx - 80 * scale + t * 180 * scale;
+        const spread = opening * (1 - t) * 10 * scale;
+        const y = cy + Math.sin(t * Math.PI * 4 + i * 0.5) * spread;
+        const alpha = (1 - t) * 0.6 * baseSpeed;
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.globalAlpha = 1.0;
+}
+
+function drawWaveform(x, y, w, h, data) {
+    ctx.strokeStyle = '#8A9A5B';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < data.length; i++) {
+        const px = x + (i / data.length) * w;
+        const py = y + h / 2 - data[i] * h / 2;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Border
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = '11px system-ui';
+    ctx.textAlign = 'left';
+    ctx.fillText('Waveform', x + 5, y - 5);
+}
+
+let waveformData = new Float32Array(200);
+let waveIdx = 0;
+
+function draw() {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+
+    const p = getReedParams();
+    const omega0 = p.naturalFreq * 2 * Math.PI * (stiffness / 50);
+    const gamma = p.damping * (100 - lipForce) / 50;
+    const blowP = (pressure / 100) * 3000;
+
+    // Simulate reed physics
+    const pForce = blowP * (1 - reedPos) * 0.001;
+    const springForce = -omega0 * omega0 * reedPos * dt * dt;
+    const dampForce = -gamma * omega0 * reedVel * dt;
+
+    reedVel += (springForce + dampForce + pForce * dt / p.mass);
+    reedVel *= 0.998;
+    reedPos += reedVel * dt;
+    reedPos = Math.max(-0.5, Math.min(1.2, reedPos));
+
+    const opening = Math.max(0, 1 - reedPos);
+
+    // Record waveform
+    waveformData[waveIdx] = reedPos * 0.5;
+    waveIdx = (waveIdx + 1) % waveformData.length;
+
+    const scale = Math.min(W, H) / 600;
+    const cx = W * 0.45;
+    const cy = H * 0.4;
+
+    // Title
+    ctx.font = `bold ${16 * scale}px system-ui`;
+    ctx.fillStyle = '#FEFAE0';
+    ctx.textAlign = 'center';
+    const titles = { clarinet: 'Clarinet Single Reed', oboe: 'Oboe Double Reed', bassoon: 'Bassoon Double Reed' };
+    ctx.fillText(titles[reedType], W / 2, 40 * scale);
+
+    // Draw airflow
+    drawAirflow(cx, cy, scale, pressure, opening);
+
+    // Draw mouthpiece
+    drawMouthpiece(cx, cy, scale);
+
+    // Draw reed with physics displacement
+    drawReed(cx, cy, scale, reedPos);
+
+    // Lip indicator
+    ctx.fillStyle = 'rgba(188,108,37,0.3)';
+    ctx.beginPath();
+    ctx.ellipse(cx + 60 * scale, cy + 18 * scale, 20 * scale, (lipForce / 100) * 15 * scale, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#BC6C25';
+    ctx.font = `${10 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Lip', cx + 60 * scale, cy + 35 * scale);
+
+    // Pressure arrows
+    const arrowLen = (pressure / 100) * 50 * scale;
+    ctx.strokeStyle = '#8A9A5B';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+        const ax = cx - 100 * scale;
+        const ay = cy - 10 * scale + i * 10 * scale;
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(ax + arrowLen, ay);
+        ctx.lineTo(ax + arrowLen - 5, ay - 4);
+        ctx.moveTo(ax + arrowLen, ay);
+        ctx.lineTo(ax + arrowLen - 5, ay + 4);
+        ctx.stroke();
+    }
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = `${10 * scale}px system-ui`;
+    ctx.fillText('Blowing', cx - 105 * scale, cy - 20 * scale);
+    ctx.fillText('Pressure', cx - 105 * scale, cy - 10 * scale);
+
+    // Opening indicator
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = `${12 * scale}px system-ui`;
+    ctx.textAlign = 'left';
+    ctx.fillText(`Opening: ${(opening * 100).toFixed(0)}%`, W * 0.05, H * 0.7);
+    ctx.fillText(`Reed displacement: ${reedPos.toFixed(3)}`, W * 0.05, H * 0.7 + 20 * scale);
+    ctx.fillText(`Oscillation freq: ${(omega0 / (2 * Math.PI) * (stiffness / 50)).toFixed(0)} Hz`, W * 0.05, H * 0.7 + 40 * scale);
+
+    // Waveform display
+    const orderedData = new Float32Array(waveformData.length);
+    for (let i = 0; i < waveformData.length; i++) {
+        orderedData[i] = waveformData[(waveIdx + i) % waveformData.length];
+    }
+    drawWaveform(W * 0.55, H * 0.65, W * 0.38, H * 0.25, orderedData);
+
+    // Physics explanation
+    ctx.fillStyle = 'rgba(138,154,91,0.5)';
+    ctx.font = `${10 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Reed modeled as damped harmonic oscillator: m\u00B7x\u0308 + \u03B3\u00B7x\u0307 + \u03C9\u00B2\u00B7x = F(p)', W / 2, H - 20 * scale);
+}
+
+function animate(ts) {
+    time = ts || 0;
+    draw();
+    animId = requestAnimationFrame(animate);
+}
+
+animate();
+
+window.reset = function() {
+    pressure = 50;
+    stiffness = 50;
+    lipForce = 50;
+    reedType = 'clarinet';
+    reedPos = 0;
+    reedVel = 0;
+    waveformData.fill(0);
+    waveIdx = 0;
+    pressureEl.value = 50;
+    stiffnessEl.value = 50;
+    lipForceEl.value = 50;
+    reedTypeEl.value = 'clarinet';
+    document.getElementById('pressureVal').textContent = '50%';
+    document.getElementById('stiffVal').textContent = '50%';
+    document.getElementById('lipVal').textContent = '50%';
+    stopSound();
+};
+</script>
+</body>
+</html>

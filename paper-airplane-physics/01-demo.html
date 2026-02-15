@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lift & Drag Explorer - Paper Airplane Physics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px; border-radius: 12px; width: 260px;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 10px; font-size: 0.95rem; }
+        .control-group { margin-bottom: 10px; }
+        .control-group label { display: block; color: #8A9A5B; font-size: 0.8rem; margin-bottom: 3px; }
+        .control-group input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+        .val { color: #DDA15E; font-size: 0.8rem; float: right; }
+        #info {
+            position: fixed; bottom: 10px; left: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 12px 16px; border-radius: 12px; font-size: 0.85rem;
+            border: 1px solid rgba(138,154,91,0.3); max-width: 380px;
+        }
+        #info p { margin-bottom: 4px; }
+        .highlight { color: #DDA15E; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Lift & Drag Explorer</h3>
+        <div class="control-group">
+            <label>Angle of Attack: <span class="val" id="aoaVal">5</span>&deg;</label>
+            <input type="range" id="aoa" min="-10" max="30" value="5" step="0.5">
+        </div>
+        <div class="control-group">
+            <label>Airspeed: <span class="val" id="speedVal">10</span> m/s</label>
+            <input type="range" id="speed" min="2" max="25" value="10" step="0.5">
+        </div>
+        <div class="control-group">
+            <label>Wing Camber: <span class="val" id="camberVal">0.04</span></label>
+            <input type="range" id="camber" min="0" max="0.1" value="0.04" step="0.005">
+        </div>
+    </div>
+    <div id="info">
+        <p>C<sub>L</sub> = <span class="highlight" id="clDisp">0.00</span> &nbsp; C<sub>D</sub> = <span class="highlight" id="cdDisp">0.00</span></p>
+        <p>L/D Ratio: <span class="highlight" id="ldDisp">0.00</span> &nbsp; Lift: <span class="highlight" id="liftDisp">0.00</span> N</p>
+        <p style="color:#8A9A5B; font-size:0.75rem; margin-top:6px;">Adjust angle of attack to find the sweet spot. Paper airplanes stall around 12-15 degrees.</p>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let animId;
+        let time = 0;
+        let running = true;
+
+        const aoaSlider = document.getElementById('aoa');
+        const speedSlider = document.getElementById('speed');
+        const camberSlider = document.getElementById('camber');
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        function getAoA() { return parseFloat(aoaSlider.value); }
+        function getSpeed() { return parseFloat(speedSlider.value); }
+        function getCamber() { return parseFloat(camberSlider.value); }
+
+        // Thin airfoil theory + empirical corrections for paper airplane
+        function calcCoefficients(aoaDeg, camber) {
+            const aoaRad = aoaDeg * Math.PI / 180;
+            const aoaZeroLift = -2 * camber * 180 / Math.PI; // zero-lift angle
+            const effectiveAoA = aoaDeg - aoaZeroLift;
+
+            // CL from thin airfoil theory: 2*pi*alpha (radians), with stall model
+            let CL;
+            const stallAngle = 14;
+            if (effectiveAoA < stallAngle) {
+                CL = 2 * Math.PI * (effectiveAoA * Math.PI / 180);
+            } else {
+                const clMax = 2 * Math.PI * (stallAngle * Math.PI / 180);
+                const postStall = (effectiveAoA - stallAngle) / 20;
+                CL = clMax * (1 - postStall * postStall);
+                if (CL < 0) CL = 0;
+            }
+
+            // CD: parasitic + induced drag
+            const cd0 = 0.02 + 0.005 * camber * 100; // parasitic
+            const AR = 5; // aspect ratio of paper airplane
+            const e = 0.7; // Oswald efficiency
+            const cdi = (CL * CL) / (Math.PI * AR * e); // induced drag
+            const CD = cd0 + cdi;
+
+            return { CL, CD };
+        }
+
+        // Draw streamlines around airfoil
+        function drawStreamlines(cx, cy, chordLen, aoaDeg, speed) {
+            const aoaRad = aoaDeg * Math.PI / 180;
+            const numLines = 18;
+            ctx.lineWidth = 1.2;
+
+            for (let i = 0; i < numLines; i++) {
+                const yStart = cy - chordLen * 1.5 + (i / (numLines - 1)) * chordLen * 3;
+                ctx.beginPath();
+                ctx.moveTo(cx - chordLen * 2, yStart);
+
+                let px = cx - chordLen * 2;
+                let py = yStart;
+
+                for (let s = 0; s < 200; s++) {
+                    const dx = px - cx;
+                    const dy = py - cy;
+
+                    // Rotate to airfoil frame
+                    const rx = dx * Math.cos(aoaRad) + dy * Math.sin(aoaRad);
+                    const ry = -dx * Math.sin(aoaRad) + dy * Math.cos(aoaRad);
+
+                    const dist = Math.sqrt(rx * rx + ry * ry);
+                    const influence = Math.max(0, 1 - dist / (chordLen * 2));
+
+                    // Deflection based on position relative to airfoil
+                    let vx = speed * 2;
+                    let vy = 0;
+
+                    if (influence > 0) {
+                        const deflection = -aoaRad * influence * 1.5;
+                        if (ry < 0) {
+                            vy += deflection * speed * 2 * influence;
+                            vx *= (1 + influence * 0.3); // speed up over top
+                        } else {
+                            vy -= deflection * speed * 0.5 * influence;
+                            vx *= (1 - influence * 0.2); // slow down under
+                        }
+
+                        // Wake effect behind airfoil
+                        if (rx > chordLen * 0.3) {
+                            vy += Math.sin(time * 3 + i) * influence * 0.3;
+                        }
+                    }
+
+                    const mag = Math.sqrt(vx * vx + vy * vy);
+                    px += (vx / mag) * 3;
+                    py += (vy / mag) * 3;
+
+                    if (px > cx + chordLen * 2.5) break;
+                    ctx.lineTo(px, py);
+                }
+
+                // Color by position: blue above, red below
+                const relY = (yStart - cy) / (chordLen * 1.5);
+                if (relY < -0.1) {
+                    ctx.strokeStyle = `rgba(100,180,255,${0.3 + Math.abs(relY) * 0.3})`;
+                } else if (relY > 0.1) {
+                    ctx.strokeStyle = `rgba(255,150,100,${0.3 + Math.abs(relY) * 0.3})`;
+                } else {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+                }
+                ctx.stroke();
+            }
+        }
+
+        // Draw airfoil shape
+        function drawAirfoil(cx, cy, chordLen, aoaDeg, camber) {
+            const aoaRad = aoaDeg * Math.PI / 180;
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(-aoaRad);
+
+            // Upper surface
+            ctx.beginPath();
+            for (let i = 0; i <= 40; i++) {
+                const t = i / 40;
+                const x = (t - 0.5) * chordLen;
+                const thickness = 0.06 * chordLen * (1 - t) * Math.sqrt(t) * 4;
+                const camberY = camber * chordLen * 4 * t * (1 - t);
+                const y = -(thickness + camberY);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            // Lower surface
+            for (let i = 40; i >= 0; i--) {
+                const t = i / 40;
+                const x = (t - 0.5) * chordLen;
+                const thickness = 0.03 * chordLen * (1 - t) * Math.sqrt(t) * 4;
+                const camberY = camber * chordLen * 4 * t * (1 - t);
+                const y = thickness - camberY;
+                ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+
+            const grad = ctx.createLinearGradient(0, -chordLen * 0.1, 0, chordLen * 0.05);
+            grad.addColorStop(0, '#8A9A5B');
+            grad.addColorStop(1, '#606C38');
+            ctx.fillStyle = grad;
+            ctx.fill();
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        // Draw force vectors
+        function drawForces(cx, cy, aoaDeg, CL, CD, speed) {
+            const aoaRad = aoaDeg * Math.PI / 180;
+            const scale = 80;
+
+            // Lift (perpendicular to flow)
+            const liftMag = CL * scale;
+            const liftX = Math.sin(aoaRad) * liftMag;
+            const liftY = -Math.cos(aoaRad) * Math.abs(liftMag);
+
+            // Drag (along flow)
+            const dragMag = CD * scale;
+            const dragX = Math.cos(aoaRad) * dragMag;
+            const dragY = Math.sin(aoaRad) * dragMag;
+
+            // Lift arrow
+            drawArrow(cx, cy, cx + liftX, cy + liftY, '#4CAF50', 'Lift');
+            // Drag arrow
+            drawArrow(cx, cy, cx + dragX, cy + dragY, '#f44336', 'Drag');
+            // Resultant
+            drawArrow(cx, cy, cx + liftX + dragX, cy + liftY + dragY, '#DDA15E', 'Net');
+        }
+
+        function drawArrow(x1, y1, x2, y2, color, label) {
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len < 3) return;
+
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // Arrowhead
+            const angle = Math.atan2(dy, dx);
+            const headLen = 10;
+            ctx.beginPath();
+            ctx.moveTo(x2, y2);
+            ctx.lineTo(x2 - headLen * Math.cos(angle - 0.4), y2 - headLen * Math.sin(angle - 0.4));
+            ctx.lineTo(x2 - headLen * Math.cos(angle + 0.4), y2 - headLen * Math.sin(angle + 0.4));
+            ctx.closePath();
+            ctx.fillStyle = color;
+            ctx.fill();
+
+            // Label
+            ctx.fillStyle = color;
+            ctx.font = 'bold 12px Segoe UI, sans-serif';
+            ctx.fillText(label, x2 + 8, y2 - 5);
+        }
+
+        // Draw CL/CD curve chart
+        function drawChart(x, y, w, h, currentAoA) {
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, 8);
+            ctx.fill();
+            ctx.stroke();
+
+            const camber = getCamber();
+            const padX = 40, padY = 25;
+            const chartX = x + padX;
+            const chartY = y + padY;
+            const chartW = w - padX - 15;
+            const chartH = h - padY - 30;
+
+            // Axes
+            ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(chartX, chartY);
+            ctx.lineTo(chartX, chartY + chartH);
+            ctx.lineTo(chartX + chartW, chartY + chartH);
+            ctx.stroke();
+
+            // Labels
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '10px Segoe UI, sans-serif';
+            ctx.fillText('AoA (\u00b0)', chartX + chartW / 2 - 15, chartY + chartH + 18);
+            ctx.save();
+            ctx.translate(x + 12, chartY + chartH / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText('Coefficient', -20, 0);
+            ctx.restore();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '11px Segoe UI, sans-serif';
+            ctx.fillText('CL & CD vs Angle of Attack', x + 10, y + 15);
+
+            // Plot CL and CD curves
+            const aoaMin = -10, aoaMax = 30;
+            let maxCL = 0;
+
+            // Find max CL for scaling
+            for (let a = aoaMin; a <= aoaMax; a += 0.5) {
+                const c = calcCoefficients(a, camber);
+                if (c.CL > maxCL) maxCL = c.CL;
+            }
+            const scaleY = chartH / (maxCL * 1.3);
+
+            // CL curve
+            ctx.beginPath();
+            ctx.strokeStyle = '#4CAF50';
+            ctx.lineWidth = 2;
+            for (let a = aoaMin; a <= aoaMax; a += 0.5) {
+                const c = calcCoefficients(a, camber);
+                const px = chartX + ((a - aoaMin) / (aoaMax - aoaMin)) * chartW;
+                const py = chartY + chartH - c.CL * scaleY;
+                if (a === aoaMin) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // CD curve (scaled up for visibility)
+            ctx.beginPath();
+            ctx.strokeStyle = '#f44336';
+            ctx.lineWidth = 2;
+            for (let a = aoaMin; a <= aoaMax; a += 0.5) {
+                const c = calcCoefficients(a, camber);
+                const px = chartX + ((a - aoaMin) / (aoaMax - aoaMin)) * chartW;
+                const py = chartY + chartH - c.CD * scaleY * 5;
+                if (a === aoaMin) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+            }
+            ctx.stroke();
+
+            // Current position marker
+            const currX = chartX + ((currentAoA - aoaMin) / (aoaMax - aoaMin)) * chartW;
+            ctx.beginPath();
+            ctx.setLineDash([4, 4]);
+            ctx.strokeStyle = '#DDA15E';
+            ctx.moveTo(currX, chartY);
+            ctx.lineTo(currX, chartY + chartH);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Legend
+            ctx.fillStyle = '#4CAF50';
+            ctx.fillRect(chartX + chartW - 60, chartY + 5, 10, 3);
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = '9px Segoe UI, sans-serif';
+            ctx.fillText('CL', chartX + chartW - 46, chartY + 10);
+
+            ctx.fillStyle = '#f44336';
+            ctx.fillRect(chartX + chartW - 60, chartY + 18, 10, 3);
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fillText('CD x5', chartX + chartW - 46, chartY + 23);
+
+            // Tick marks
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.font = '9px Segoe UI, sans-serif';
+            for (let a = -10; a <= 30; a += 10) {
+                const px = chartX + ((a - aoaMin) / (aoaMax - aoaMin)) * chartW;
+                ctx.fillText(a + '\u00b0', px - 8, chartY + chartH + 12);
+            }
+        }
+
+        // Particles for wind visualization
+        const particles = [];
+        for (let i = 0; i < 120; i++) {
+            particles.push({
+                x: Math.random() * 2000,
+                y: Math.random() * 1200,
+                speed: 0.5 + Math.random() * 1.5
+            });
+        }
+
+        function drawParticles(speed) {
+            ctx.fillStyle = 'rgba(254,250,224,0.15)';
+            for (const p of particles) {
+                p.x += p.speed * speed * 0.3;
+                if (p.x > W + 10) {
+                    p.x = -10;
+                    p.y = Math.random() * H;
+                }
+                ctx.fillRect(p.x, p.y, 2 + p.speed, 1);
+            }
+        }
+
+        function animate() {
+            if (!running) { animId = requestAnimationFrame(animate); return; }
+            time += 0.016;
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const aoaDeg = getAoA();
+            const speed = getSpeed();
+            const camber = getCamber();
+
+            document.getElementById('aoaVal').textContent = aoaDeg.toFixed(1);
+            document.getElementById('speedVal').textContent = speed.toFixed(1);
+            document.getElementById('camberVal').textContent = camber.toFixed(3);
+
+            const { CL, CD } = calcCoefficients(aoaDeg, camber);
+            const LD = CD > 0.001 ? CL / CD : 0;
+
+            // Physical lift force: L = 0.5 * rho * V^2 * S * CL
+            const rho = 1.225; // kg/m^3
+            const S = 0.06; // wing area m^2 (typical paper airplane)
+            const lift = 0.5 * rho * speed * speed * S * CL;
+
+            document.getElementById('clDisp').textContent = CL.toFixed(3);
+            document.getElementById('cdDisp').textContent = CD.toFixed(3);
+            document.getElementById('ldDisp').textContent = LD.toFixed(2);
+            document.getElementById('liftDisp').textContent = lift.toFixed(3);
+
+            // Wind particles
+            drawParticles(speed);
+
+            // Airfoil and flow
+            const cx = W * 0.4;
+            const cy = H * 0.45;
+            const chord = Math.min(W, H) * 0.2;
+
+            drawStreamlines(cx, cy, chord, aoaDeg, speed);
+            drawAirfoil(cx, cy, chord, aoaDeg, camber);
+            drawForces(cx, cy, aoaDeg, CL, CD, speed);
+
+            // Chart
+            const chartW = Math.min(320, W * 0.3);
+            const chartH = 180;
+            drawChart(W - chartW - 20, H - chartH - 60, chartW, chartH, aoaDeg);
+
+            // Stall warning
+            if (aoaDeg > 13) {
+                ctx.fillStyle = `rgba(244,67,54,${0.5 + Math.sin(time * 5) * 0.3})`;
+                ctx.font = 'bold 18px Segoe UI, sans-serif';
+                ctx.fillText('STALL WARNING', cx - 60, cy - chord * 0.8);
+            }
+
+            animId = requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            aoaSlider.value = 5;
+            speedSlider.value = 10;
+            camberSlider.value = 0.04;
+            time = 0;
+        };
+
+        animate();
+    })();
+    </script>
+</body>
+</html>

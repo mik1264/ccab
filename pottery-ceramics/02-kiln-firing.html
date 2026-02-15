@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kiln Firing Controller - Temperature Schedule Simulator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a1a; color: #FEFAE0; font-family: Georgia, serif; overflow: hidden; }
+        canvas { display: block; }
+        a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 12px; align-items: center; z-index: 100;
+            background: rgba(30,30,30,0.85); backdrop-filter: blur(10px);
+            padding: 12px 20px; border-radius: 12px; border: 1px solid #8A9A5B33;
+        }
+        .controls select, .controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 8px 14px;
+            border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-family: Georgia;
+        }
+        .controls select { background: #333; border: 1px solid #606C38; }
+        .controls button:hover { background: #8A9A5B; }
+        .controls label { font-size: 0.8rem; }
+        .controls input[type="range"] { width: 80px; accent-color: #DDA15E; }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Schedule:</label>
+        <select id="scheduleSelect">
+            <option value="bisque">Bisque (Cone 06)</option>
+            <option value="midfire">Mid-Fire (Cone 6)</option>
+            <option value="highfire">High-Fire (Cone 10)</option>
+            <option value="raku">Raku (Cone 06 fast)</option>
+        </select>
+        <label>Speed:</label>
+        <input type="range" id="speedSlider" min="1" max="50" value="10">
+        <button id="startBtn">Start Firing</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let W, H;
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Firing schedules: segments of [rateF/hr, targetF, holdMin]
+        const schedules = {
+            bisque: {
+                name: 'Bisque Fire (Cone 06)',
+                maxTemp: 1830,
+                segments: [
+                    { rate: 100, target: 250, hold: 0, label: 'Candle / Water Smoking' },
+                    { rate: 200, target: 1000, hold: 0, label: 'Quartz Inversion Zone' },
+                    { rate: 300, target: 1100, hold: 0, label: 'Organic Burnout' },
+                    { rate: 250, target: 1650, hold: 0, label: 'Ceramic Change' },
+                    { rate: 108, target: 1830, hold: 10, label: 'Cone 06 Soak' },
+                    { rate: -200, target: 1100, hold: 0, label: 'Cooling' },
+                    { rate: -100, target: 70, hold: 0, label: 'Final Cool' }
+                ]
+            },
+            midfire: {
+                name: 'Mid-Fire Glaze (Cone 6)',
+                maxTemp: 2232,
+                segments: [
+                    { rate: 150, target: 250, hold: 30, label: 'Candle' },
+                    { rate: 250, target: 1000, hold: 0, label: 'Water Release' },
+                    { rate: 350, target: 1700, hold: 0, label: 'Body Maturation' },
+                    { rate: 150, target: 2050, hold: 0, label: 'Glaze Softening' },
+                    { rate: 108, target: 2232, hold: 15, label: 'Cone 6 Soak' },
+                    { rate: -100, target: 1900, hold: 30, label: 'Crystal Growth Cool' },
+                    { rate: -200, target: 1100, hold: 0, label: 'Cooling' },
+                    { rate: -50, target: 70, hold: 0, label: 'Kiln Crack Cool' }
+                ]
+            },
+            highfire: {
+                name: 'High-Fire Stoneware (Cone 10)',
+                maxTemp: 2381,
+                segments: [
+                    { rate: 100, target: 250, hold: 60, label: 'Extended Candle' },
+                    { rate: 200, target: 1000, hold: 0, label: 'Quartz Inversion' },
+                    { rate: 300, target: 1800, hold: 0, label: 'Sintering' },
+                    { rate: 150, target: 2100, hold: 0, label: 'Vitrification' },
+                    { rate: 108, target: 2381, hold: 20, label: 'Cone 10 Soak' },
+                    { rate: -150, target: 1800, hold: 0, label: 'Cooling' },
+                    { rate: -50, target: 70, hold: 0, label: 'Slow Cool' }
+                ]
+            },
+            raku: {
+                name: 'Raku Fire (Cone 06 fast)',
+                maxTemp: 1830,
+                segments: [
+                    { rate: 500, target: 1000, hold: 0, label: 'Rapid Heat' },
+                    { rate: 400, target: 1830, hold: 5, label: 'Glaze Melt' },
+                    { rate: -1500, target: 800, hold: 0, label: 'Reduction Pull' },
+                    { rate: -500, target: 70, hold: 0, label: 'Quench' }
+                ]
+            }
+        };
+
+        let currentSchedule = 'bisque';
+        let firing = false;
+        let currentTemp = 70; // Room temp F
+        let elapsedMinutes = 0;
+        let currentSegIdx = 0;
+        let holdRemaining = 0;
+        let tempHistory = [];
+        let animId;
+
+        // Pyrometric cone positions (temp in F)
+        const cones = [
+            { name: '022', temp: 1087 }, { name: '018', temp: 1319 },
+            { name: '06', temp: 1830 }, { name: '04', temp: 1945 },
+            { name: '1', temp: 2079 }, { name: '6', temp: 2232 },
+            { name: '8', temp: 2305 }, { name: '10', temp: 2381 }
+        ];
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            if (!firing) {
+                firing = true;
+                document.getElementById('startBtn').textContent = 'Pause';
+            } else {
+                firing = false;
+                document.getElementById('startBtn').textContent = 'Resume';
+            }
+        });
+
+        document.getElementById('scheduleSelect').addEventListener('change', (e) => {
+            currentSchedule = e.target.value;
+            resetFiring();
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', resetFiring);
+
+        function resetFiring() {
+            firing = false;
+            currentTemp = 70;
+            elapsedMinutes = 0;
+            currentSegIdx = 0;
+            holdRemaining = 0;
+            tempHistory = [{ time: 0, temp: 70 }];
+            document.getElementById('startBtn').textContent = 'Start Firing';
+        }
+        resetFiring();
+
+        function getKilnColor(tempF) {
+            if (tempF < 900) return '#1a1a1a';
+            if (tempF < 1100) return '#3a0000';
+            if (tempF < 1300) return '#6a0000';
+            if (tempF < 1500) return '#a02000';
+            if (tempF < 1700) return '#d04010';
+            if (tempF < 1900) return '#e07020';
+            if (tempF < 2100) return '#f0a040';
+            if (tempF < 2300) return '#ffcc60';
+            return '#ffe890';
+        }
+
+        function drawKiln(cx, cy) {
+            const kW = 180, kH = 220;
+            const x = cx - kW / 2;
+            const y = cy - kH / 2;
+
+            // Outer kiln shell
+            ctx.fillStyle = '#555';
+            ctx.fillRect(x - 10, y - 10, kW + 20, kH + 20);
+            ctx.strokeStyle = '#777';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x - 10, y - 10, kW + 20, kH + 20);
+
+            // Interior glow
+            const kilnColor = getKilnColor(currentTemp);
+            ctx.fillStyle = kilnColor;
+            ctx.fillRect(x, y, kW, kH);
+
+            // Glow effect
+            if (currentTemp > 900) {
+                const grad = ctx.createRadialGradient(cx, cy, 10, cx, cy, kW * 0.8);
+                const intensity = Math.min(1, (currentTemp - 900) / 1500);
+                grad.addColorStop(0, `rgba(255,200,100,${intensity * 0.5})`);
+                grad.addColorStop(1, 'rgba(255,100,0,0)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(x - 50, y - 50, kW + 100, kH + 100);
+            }
+
+            // Kiln shelves
+            for (let i = 1; i <= 3; i++) {
+                const sy = y + (kH / 4) * i;
+                ctx.fillStyle = '#888';
+                ctx.fillRect(x + 10, sy - 2, kW - 20, 4);
+            }
+
+            // Peephole
+            ctx.beginPath();
+            ctx.arc(x + kW + 10, cy, 6, 0, Math.PI * 2);
+            ctx.fillStyle = currentTemp > 900 ? kilnColor : '#333';
+            ctx.fill();
+            ctx.strokeStyle = '#666';
+            ctx.stroke();
+
+            // Pyrometric cones (inside kiln)
+            const schedule = schedules[currentSchedule];
+            cones.forEach((cone, i) => {
+                if (cone.temp > schedule.maxTemp + 200) return;
+                const coneX = x + 20 + (i % 4) * 40;
+                const coneY = y + kH - 30 - Math.floor(i / 4) * 50;
+                const bent = currentTemp >= cone.temp;
+                const bending = currentTemp >= cone.temp - 50 && currentTemp < cone.temp;
+
+                ctx.save();
+                ctx.translate(coneX, coneY);
+                if (bent) ctx.rotate(Math.PI / 3);
+                else if (bending) ctx.rotate((currentTemp - (cone.temp - 50)) / 50 * Math.PI / 3);
+
+                ctx.beginPath();
+                ctx.moveTo(-3, 0);
+                ctx.lineTo(0, -20);
+                ctx.lineTo(3, 0);
+                ctx.closePath();
+                ctx.fillStyle = bent ? '#DDA15E' : '#ccc';
+                ctx.fill();
+                ctx.restore();
+
+                ctx.fillStyle = '#8A9A5B';
+                ctx.font = '9px Georgia';
+                ctx.textAlign = 'center';
+                ctx.fillText(cone.name, coneX, coneY + 12);
+            });
+
+            // Temperature display on kiln
+            ctx.fillStyle = currentTemp > 1500 ? '#1a1a1a' : '#FEFAE0';
+            ctx.font = 'bold 28px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${Math.round(currentTemp)}°F`, cx, cy - 30);
+            ctx.font = '14px Georgia';
+            ctx.fillText(`${Math.round((currentTemp - 32) * 5 / 9)}°C`, cx, cy - 10);
+        }
+
+        function drawChart(x, y, w, h) {
+            const schedule = schedules[currentSchedule];
+            const maxT = schedule.maxTemp + 200;
+            const maxTime = tempHistory.length > 1 ? Math.max(tempHistory[tempHistory.length - 1].time, 120) : 600;
+
+            // Background
+            ctx.fillStyle = 'rgba(30,30,30,0.7)';
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeStyle = '#8A9A5B33';
+            ctx.strokeRect(x, y, w, h);
+
+            // Grid lines
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 0.5;
+            for (let t = 500; t < maxT; t += 500) {
+                const ty = y + h - (t / maxT) * h;
+                ctx.beginPath();
+                ctx.moveTo(x, ty);
+                ctx.lineTo(x + w, ty);
+                ctx.stroke();
+                ctx.fillStyle = '#666';
+                ctx.font = '10px Georgia';
+                ctx.textAlign = 'right';
+                ctx.fillText(`${t}°F`, x - 4, ty + 4);
+            }
+
+            // Draw ideal schedule line
+            ctx.beginPath();
+            ctx.strokeStyle = 'rgba(138,154,91,0.4)';
+            ctx.lineWidth = 1;
+            let idealTemp = 70;
+            let idealTime = 0;
+            ctx.moveTo(x, y + h - (70 / maxT) * h);
+            schedule.segments.forEach(seg => {
+                const dt = Math.abs(seg.target - idealTemp) / Math.abs(seg.rate) * 60;
+                idealTime += dt;
+                idealTemp = seg.target;
+                const px = x + (idealTime / maxTime) * w;
+                const py = y + h - (idealTemp / maxT) * h;
+                ctx.lineTo(px, py);
+                if (seg.hold > 0) {
+                    idealTime += seg.hold;
+                    ctx.lineTo(x + (idealTime / maxTime) * w, py);
+                }
+            });
+            ctx.stroke();
+
+            // Draw actual temp history
+            if (tempHistory.length > 1) {
+                ctx.beginPath();
+                ctx.strokeStyle = '#DDA15E';
+                ctx.lineWidth = 2;
+                tempHistory.forEach((pt, i) => {
+                    const px = x + (pt.time / maxTime) * w;
+                    const py = y + h - (pt.temp / maxT) * h;
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                });
+                ctx.stroke();
+            }
+
+            // Labels
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '12px Georgia';
+            ctx.textAlign = 'left';
+            ctx.fillText('Temperature vs Time', x + 10, y + 18);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fillText(`Elapsed: ${Math.round(elapsedMinutes)} min`, x + 10, y + 34);
+
+            // Current segment label
+            if (currentSegIdx < schedule.segments.length) {
+                ctx.fillStyle = '#FEFAE0';
+                ctx.fillText(`Stage: ${schedule.segments[currentSegIdx].label}`, x + 10, y + 50);
+            }
+        }
+
+        function updateFiring() {
+            if (!firing) return;
+            const schedule = schedules[currentSchedule];
+            const speed = parseFloat(document.getElementById('speedSlider').value);
+
+            if (currentSegIdx >= schedule.segments.length) {
+                firing = false;
+                document.getElementById('startBtn').textContent = 'Done';
+                return;
+            }
+
+            const seg = schedule.segments[currentSegIdx];
+
+            if (holdRemaining > 0) {
+                holdRemaining -= speed * 0.1;
+                elapsedMinutes += speed * 0.1;
+                if (holdRemaining <= 0) {
+                    currentSegIdx++;
+                }
+            } else {
+                const ratePerMin = seg.rate / 60;
+                currentTemp += ratePerMin * speed * 0.1;
+                elapsedMinutes += speed * 0.1;
+
+                if ((seg.rate > 0 && currentTemp >= seg.target) || (seg.rate < 0 && currentTemp <= seg.target)) {
+                    currentTemp = seg.target;
+                    if (seg.hold > 0) {
+                        holdRemaining = seg.hold;
+                    } else {
+                        currentSegIdx++;
+                    }
+                }
+            }
+
+            currentTemp = Math.max(70, currentTemp);
+            tempHistory.push({ time: elapsedMinutes, temp: currentTemp });
+            if (tempHistory.length > 2000) tempHistory = tempHistory.filter((_, i) => i % 2 === 0);
+        }
+
+        function animate() {
+            animId = requestAnimationFrame(animate);
+            updateFiring();
+
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, W, H);
+
+            // Title
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '24px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Kiln Firing Controller', W / 2, 40);
+            ctx.font = '14px Georgia';
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fillText(schedules[currentSchedule].name, W / 2, 62);
+
+            // Draw kiln on right side
+            drawKiln(W * 0.7, H * 0.45);
+
+            // Draw chart on left side
+            const chartX = 60;
+            const chartY = 80;
+            const chartW = W * 0.42;
+            const chartH = H - 160;
+            drawChart(chartX, chartY, chartW, chartH);
+        }
+
+        animate();
+
+        window.reset = function() {
+            resetFiring();
+        };
+    </script>
+</body>
+</html>

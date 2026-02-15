@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Embouchure &amp; Bernoulli Effect - Wind Instrument Physics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+canvas { display: block; }
+a.back-link { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+a.back-link:hover { color: #DDA15E; }
+
+.controls {
+    position: fixed; top: 10px; right: 10px; z-index: 1000;
+    background: rgba(26,26,46,0.92); backdrop-filter: blur(10px);
+    border-radius: 14px; padding: 16px; min-width: 230px;
+    border: 1px solid rgba(138,154,91,0.3);
+}
+.controls h3 { font-size: 13px; color: #DDA15E; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+.controls label { display: block; font-size: 12px; color: #8A9A5B; margin-top: 8px; }
+.controls input[type=range] { width: 100%; margin: 4px 0; accent-color: #8A9A5B; }
+.controls select { width: 100%; background: #2a2a4e; color: #FEFAE0; border: 1px solid #606C38; border-radius: 6px; padding: 4px; margin: 4px 0; }
+.controls .value { font-size: 11px; color: #8A9A5B; text-align: right; }
+.btn {
+    display: inline-block; margin: 4px 2px; padding: 6px 12px; border: none; border-radius: 8px;
+    background: #606C38; color: #FEFAE0; font-size: 12px; cursor: pointer; transition: background 0.2s;
+}
+.btn:hover { background: #8A9A5B; }
+.btn.active { background: #DDA15E; color: #1a1a2e; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&larr; Back</a>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+    <h3>Embouchure Physics</h3>
+    <label>Instrument</label>
+    <select id="instrument">
+        <option value="trumpet">Trumpet</option>
+        <option value="trombone">Trombone</option>
+        <option value="horn">French Horn</option>
+        <option value="tuba">Tuba</option>
+    </select>
+    <label>Lip Tension: <span id="tensionVal" class="value">50%</span></label>
+    <input type="range" id="tension" min="10" max="95" value="50">
+    <label>Air Pressure: <span id="pressVal" class="value">2000 Pa</span></label>
+    <input type="range" id="pressure" min="500" max="5000" value="2000" step="50">
+    <label>Aperture Width: <span id="aperVal" class="value">3.0 mm</span></label>
+    <input type="range" id="aperture" min="0.5" max="6.0" value="3.0" step="0.1">
+    <div style="margin-top:10px;">
+        <button class="btn" id="playBtn">Buzz Lips</button>
+    </div>
+</div>
+
+<script src="../assets/js/enhance.js" defer></script>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+let instrument = 'trumpet';
+let tension = 50;
+let pressure = 2000;
+let aperture = 3.0;
+let time = 0;
+let audioCtx = null;
+let oscillator = null;
+let gainNode = null;
+let isPlaying = false;
+let lipPhase = 0;
+let animId;
+
+const tensionEl = document.getElementById('tension');
+const pressureEl = document.getElementById('pressure');
+const apertureEl = document.getElementById('aperture');
+const instEl = document.getElementById('instrument');
+const playBtn = document.getElementById('playBtn');
+
+tensionEl.addEventListener('input', e => { tension = +e.target.value; document.getElementById('tensionVal').textContent = tension + '%'; updateSound(); });
+pressureEl.addEventListener('input', e => { pressure = +e.target.value; document.getElementById('pressVal').textContent = pressure + ' Pa'; updateSound(); });
+apertureEl.addEventListener('input', e => { aperture = +e.target.value; document.getElementById('aperVal').textContent = aperture.toFixed(1) + ' mm'; updateSound(); });
+instEl.addEventListener('change', e => { instrument = e.target.value; updateSound(); });
+
+playBtn.addEventListener('click', () => { if (isPlaying) stopSound(); else startSound(); });
+
+const instParams = {
+    trumpet: { mouthpieceD: 16, baseFreq: 233, cupDepth: 'medium' },
+    trombone: { mouthpieceD: 25, baseFreq: 117, cupDepth: 'deep' },
+    horn: { mouthpieceD: 17, baseFreq: 175, cupDepth: 'conical' },
+    tuba: { mouthpieceD: 32, baseFreq: 58, cupDepth: 'very deep' }
+};
+
+function getBuzzFreq() {
+    const base = instParams[instrument].baseFreq;
+    const tensionFactor = 0.5 + tension / 100;
+    return base * tensionFactor;
+}
+
+function getJetVelocity() {
+    return Math.sqrt(2 * pressure / 1.2);
+}
+
+function startSound() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    stopSound();
+
+    const freq = getBuzzFreq();
+    oscillator = audioCtx.createOscillator();
+    gainNode = audioCtx.createGain();
+
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = freq * 4;
+    filter.Q.value = 2;
+
+    oscillator.type = 'sawtooth';
+    oscillator.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    const vol = Math.min(0.1, (pressure / 5000) * 0.1);
+    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+    gainNode.gain.linearRampToValueAtTime(vol, audioCtx.currentTime + 0.05);
+    oscillator.connect(filter);
+    filter.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    oscillator.start();
+    isPlaying = true;
+    playBtn.textContent = 'Stop';
+    playBtn.classList.add('active');
+}
+
+function stopSound() {
+    if (oscillator) {
+        if (gainNode) gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.05);
+        oscillator.stop(audioCtx.currentTime + 0.06);
+        oscillator = null;
+    }
+    isPlaying = false;
+    playBtn.textContent = 'Buzz Lips';
+    playBtn.classList.remove('active');
+}
+
+function updateSound() {
+    if (isPlaying && oscillator) {
+        oscillator.frequency.setValueAtTime(getBuzzFreq(), audioCtx.currentTime);
+    }
+}
+
+function drawLips(cx, cy, scale) {
+    const freq = getBuzzFreq();
+    lipPhase += freq * 0.0003;
+    const lipOpen = (Math.sin(lipPhase) * 0.5 + 0.5) * aperture * scale;
+
+    // Upper lip
+    ctx.fillStyle = '#c47a5a';
+    ctx.beginPath();
+    ctx.moveTo(cx - 40 * scale, cy - lipOpen - 5 * scale);
+    ctx.quadraticCurveTo(cx - 20 * scale, cy - lipOpen - 15 * scale, cx, cy - lipOpen - 8 * scale);
+    ctx.quadraticCurveTo(cx + 20 * scale, cy - lipOpen - 15 * scale, cx + 40 * scale, cy - lipOpen - 5 * scale);
+    ctx.lineTo(cx + 40 * scale, cy - lipOpen);
+    ctx.quadraticCurveTo(cx, cy - lipOpen + 3 * scale, cx - 40 * scale, cy - lipOpen);
+    ctx.closePath();
+    ctx.fill();
+
+    // Lower lip
+    ctx.beginPath();
+    ctx.moveTo(cx - 40 * scale, cy + lipOpen + 5 * scale);
+    ctx.quadraticCurveTo(cx - 20 * scale, cy + lipOpen + 12 * scale, cx, cy + lipOpen + 6 * scale);
+    ctx.quadraticCurveTo(cx + 20 * scale, cy + lipOpen + 12 * scale, cx + 40 * scale, cy + lipOpen + 5 * scale);
+    ctx.lineTo(cx + 40 * scale, cy + lipOpen);
+    ctx.quadraticCurveTo(cx, cy + lipOpen - 3 * scale, cx - 40 * scale, cy + lipOpen);
+    ctx.closePath();
+    ctx.fill();
+
+    // Aperture
+    if (lipOpen > 0.5) {
+        ctx.fillStyle = '#0a0a1e';
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, 15 * scale, lipOpen, 0, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // Lip tension arrows
+    if (tension > 30) {
+        ctx.strokeStyle = `rgba(221,161,94,${tension / 100})`;
+        ctx.lineWidth = 1.5;
+        const arrowLen = (tension / 100) * 25 * scale;
+        // Top lip tension
+        ctx.beginPath();
+        ctx.moveTo(cx - 50 * scale, cy - lipOpen - 10 * scale);
+        ctx.lineTo(cx - 50 * scale + arrowLen, cy - lipOpen - 10 * scale);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(cx + 50 * scale, cy - lipOpen - 10 * scale);
+        ctx.lineTo(cx + 50 * scale - arrowLen, cy - lipOpen - 10 * scale);
+        ctx.stroke();
+    }
+
+    // Air flow particles through aperture
+    if (pressure > 500) {
+        const jetV = getJetVelocity();
+        const numP = Math.floor(pressure / 300);
+        for (let i = 0; i < numP; i++) {
+            const t = ((time * 0.005 * jetV / 50 + i / numP) % 1);
+            const px = cx + 50 * scale + t * 80 * scale;
+            const spread = lipOpen * (0.5 + t * 2);
+            const py = cy + Math.sin(t * Math.PI * 6 + i) * spread;
+            const alpha = (1 - t) * 0.5;
+            ctx.fillStyle = `rgba(138,154,91,${alpha})`;
+            ctx.beginPath();
+            ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    return lipOpen;
+}
+
+function drawMouthpiece(cx, cy, scale) {
+    const inst = instParams[instrument];
+    const mpD = inst.mouthpieceD * scale * 0.8;
+
+    // Mouthpiece cup
+    ctx.strokeStyle = '#8a8a9a';
+    ctx.lineWidth = 2;
+    ctx.fillStyle = 'rgba(100,100,120,0.15)';
+
+    ctx.beginPath();
+    ctx.moveTo(cx + 50 * scale, cy - mpD / 2);
+    ctx.quadraticCurveTo(cx + 70 * scale, cy - mpD / 2, cx + 80 * scale, cy - mpD * 0.3);
+    ctx.lineTo(cx + 100 * scale, cy - 5 * scale);
+    ctx.lineTo(cx + 100 * scale, cy + 5 * scale);
+    ctx.lineTo(cx + 80 * scale, cy + mpD * 0.3);
+    ctx.quadraticCurveTo(cx + 70 * scale, cy + mpD / 2, cx + 50 * scale, cy + mpD / 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Rim
+    ctx.strokeStyle = '#b0b0c0';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(cx + 50 * scale, cy, mpD / 2, -Math.PI / 2, Math.PI / 2);
+    ctx.stroke();
+
+    // Throat
+    ctx.strokeStyle = '#8a8a9a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx + 100 * scale, cy - 5 * scale);
+    ctx.lineTo(cx + 130 * scale, cy - 4 * scale);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx + 100 * scale, cy + 5 * scale);
+    ctx.lineTo(cx + 130 * scale, cy + 4 * scale);
+    ctx.stroke();
+
+    // Labels
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = `${9 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Cup', cx + 75 * scale, cy + mpD / 2 + 15 * scale);
+    ctx.fillText('Throat', cx + 115 * scale, cy + 15 * scale);
+    ctx.fillText('Rim', cx + 50 * scale, cy - mpD / 2 - 8 * scale);
+    ctx.fillText(`\u00D8 ${inst.mouthpieceD}mm`, cx + 50 * scale, cy + mpD / 2 + 28 * scale);
+}
+
+function drawBernoulliDiagram(x, y, w, h, scale) {
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = `bold ${13 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Bernoulli Effect at the Aperture', x + w / 2, y);
+
+    // Tube with constriction
+    const tubeY = y + h * 0.3;
+    const tubeH = h * 0.4;
+    const constriction = 1 - aperture / 6;
+
+    ctx.fillStyle = 'rgba(138,154,91,0.1)';
+    ctx.strokeStyle = '#8A9A5B';
+    ctx.lineWidth = 1.5;
+
+    ctx.beginPath();
+    ctx.moveTo(x, tubeY);
+    ctx.lineTo(x + w * 0.3, tubeY);
+    ctx.quadraticCurveTo(x + w * 0.4, tubeY + tubeH * constriction * 0.4, x + w * 0.5, tubeY + tubeH * constriction * 0.4);
+    ctx.quadraticCurveTo(x + w * 0.6, tubeY + tubeH * constriction * 0.4, x + w * 0.7, tubeY);
+    ctx.lineTo(x + w, tubeY);
+    ctx.lineTo(x + w, tubeY + tubeH);
+    ctx.lineTo(x + w * 0.7, tubeY + tubeH);
+    ctx.quadraticCurveTo(x + w * 0.6, tubeY + tubeH - tubeH * constriction * 0.4, x + w * 0.5, tubeY + tubeH - tubeH * constriction * 0.4);
+    ctx.quadraticCurveTo(x + w * 0.4, tubeY + tubeH - tubeH * constriction * 0.4, x + w * 0.3, tubeY + tubeH);
+    ctx.lineTo(x, tubeY + tubeH);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Velocity arrows (faster at constriction)
+    const jetV = getJetVelocity();
+    for (let i = 0; i < 5; i++) {
+        const frac = (i + 0.5) / 5;
+        const arrowX = x + frac * w;
+        const arrowY = tubeY + tubeH / 2;
+        const distToCenter = Math.abs(frac - 0.5) / 0.5;
+        const speed = 1 + (1 - distToCenter) * constriction * 2;
+        const arrowLen = speed * 15 * scale;
+
+        ctx.strokeStyle = `rgba(221,161,94,${0.3 + speed * 0.2})`;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(arrowX, arrowY);
+        ctx.lineTo(arrowX + arrowLen, arrowY);
+        ctx.lineTo(arrowX + arrowLen - 4, arrowY - 3);
+        ctx.moveTo(arrowX + arrowLen, arrowY);
+        ctx.lineTo(arrowX + arrowLen - 4, arrowY + 3);
+        ctx.stroke();
+    }
+
+    // Pressure graph below
+    const graphY = tubeY + tubeH + 15 * scale;
+    const graphH = h * 0.25;
+
+    ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, graphY + graphH / 2);
+    ctx.lineTo(x + w, graphY + graphH / 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#DDA15E';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i <= 100; i++) {
+        const frac = i / 100;
+        const px = x + frac * w;
+        const distToCenter = Math.abs(frac - 0.5) / 0.5;
+        const pDrop = (1 - distToCenter) * constriction;
+        const py = graphY + graphH / 2 + pDrop * graphH * 0.4;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = `${9 * scale}px system-ui`;
+    ctx.textAlign = 'left';
+    ctx.fillText('High P', x, graphY + graphH / 2 - 5);
+    ctx.fillText('Low P', x + w * 0.45, graphY + graphH - 5);
+    ctx.fillText('Pressure drops where velocity increases', x, graphY + graphH + 15 * scale);
+}
+
+function draw() {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+
+    const scale = Math.min(W, H) / 700;
+    const inst = instParams[instrument];
+
+    // Title
+    ctx.fillStyle = '#FEFAE0';
+    ctx.font = `bold ${16 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText(`Embouchure & Bernoulli Effect (${instrument.charAt(0).toUpperCase() + instrument.slice(1)})`, W / 2, 30 * scale);
+
+    // Draw lips and mouthpiece
+    const lipCX = W * 0.25;
+    const lipCY = H * 0.35;
+    const lipOpen = drawLips(lipCX, lipCY, scale);
+    drawMouthpiece(lipCX, lipCY, scale);
+
+    // Info
+    const freq = getBuzzFreq();
+    const jetV = getJetVelocity();
+    ctx.fillStyle = '#DDA15E';
+    ctx.font = `bold ${13 * scale}px system-ui`;
+    ctx.textAlign = 'left';
+    ctx.fillText(`Buzz frequency: ${freq.toFixed(1)} Hz`, W * 0.05, H * 0.55);
+    ctx.fillStyle = '#8A9A5B';
+    ctx.font = `${11 * scale}px system-ui`;
+    ctx.fillText(`Air jet velocity: ${jetV.toFixed(1)} m/s (Bernoulli: v = \u221A(2P/\u03C1))`, W * 0.05, H * 0.55 + 20 * scale);
+    ctx.fillText(`Aperture area: ${(Math.PI * Math.pow(aperture / 2, 2)).toFixed(1)} mm\u00B2`, W * 0.05, H * 0.55 + 38 * scale);
+    ctx.fillText(`Cup depth: ${inst.cupDepth}`, W * 0.05, H * 0.55 + 56 * scale);
+    ctx.fillText(`Higher tension \u2192 faster vibration \u2192 higher pitch`, W * 0.05, H * 0.55 + 76 * scale);
+
+    // Bernoulli diagram
+    drawBernoulliDiagram(W * 0.52, H * 0.48, W * 0.42, H * 0.42, scale);
+
+    // Bottom note
+    ctx.fillStyle = 'rgba(138,154,91,0.5)';
+    ctx.font = `${10 * scale}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillText('Lip vibration creates periodic air pulses. Bernoulli effect sucks lips closed; lung pressure pushes them open again.', W / 2, H - 12);
+}
+
+function animate(ts) {
+    time = ts || 0;
+    draw();
+    animId = requestAnimationFrame(animate);
+}
+
+animate();
+
+window.reset = function() {
+    instrument = 'trumpet';
+    tension = 50;
+    pressure = 2000;
+    aperture = 3.0;
+    instEl.value = 'trumpet';
+    tensionEl.value = 50;
+    pressureEl.value = 2000;
+    apertureEl.value = 3.0;
+    document.getElementById('tensionVal').textContent = '50%';
+    document.getElementById('pressVal').textContent = '2000 Pa';
+    document.getElementById('aperVal').textContent = '3.0 mm';
+    lipPhase = 0;
+    stopSound();
+};
+</script>
+</body>
+</html>

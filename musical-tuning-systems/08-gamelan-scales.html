@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gamelan Scales - Musical Tuning Systems</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        a.back:hover { color: #DDA15E; }
+        .info-panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(26,26,46,0.85);
+            backdrop-filter: blur(10px); border: 1px solid #8A9A5B; border-radius: 12px;
+            padding: 15px; max-width: 310px; z-index: 1000; font-size: 0.82rem; line-height: 1.4;
+        }
+        .info-panel h2 { color: #DDA15E; margin-bottom: 8px; font-size: 1rem; }
+        .info-panel p { color: #FEFAE0; opacity: 0.8; margin-bottom: 6px; }
+        .controls {
+            position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 8px; z-index: 1000; flex-wrap: wrap; justify-content: center;
+        }
+        .controls button {
+            background: rgba(96,108,56,0.7); border: 1px solid #8A9A5B; color: #FEFAE0;
+            padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.82rem;
+            transition: all 0.2s;
+        }
+        .controls button:hover { background: rgba(138,154,91,0.8); }
+        .controls button.active { background: #DDA15E; color: #1a1a2e; }
+        .note-display {
+            position: fixed; bottom: 65px; left: 50%; transform: translateX(-50%);
+            color: #DDA15E; font-size: 0.9rem; z-index: 1000; text-align: center;
+            background: rgba(26,26,46,0.7); padding: 6px 16px; border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info-panel">
+        <h2>Gamelan Scales: Pelog &amp; Slendro</h2>
+        <p><strong>Slendro</strong>: 5 roughly-equal steps per octave (~240 cents each). No Western equivalent.</p>
+        <p><strong>Pelog</strong>: 7 unequal steps with large and small intervals. Haunting, shimmering quality.</p>
+        <p>Every gamelan ensemble is tuned slightly differently -- there's no single standard. Click the metallophones to play.</p>
+    </div>
+    <div class="note-display" id="noteDisplay">Click the bars to play gamelan tones</div>
+    <div class="controls">
+        <button id="btnSlendro" class="active">Slendro (5-tone)</button>
+        <button id="btnPelog">Pelog (7-tone)</button>
+        <button id="btnWestern">Western Major</button>
+        <button id="btnPlayScale">Play Scale</button>
+        <button id="btnPlayPattern">Play Interlocking</button>
+        <button id="btnStop">Stop</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const noteDisplay = document.getElementById('noteDisplay');
+        let W, H;
+        let audioCtx = null;
+        let activeOscs = [];
+        let animTime = 0;
+        let currentScale = 'slendro';
+        let hoveredBar = -1;
+        let hitBars = []; // recently struck bars for animation
+
+        const baseFreq = 293.66; // D4 (common gamelan starting pitch)
+
+        // Approximate gamelan tunings in cents
+        const scales = {
+            slendro: {
+                name: 'Slendro',
+                // 5 roughly equal steps, but with characteristic variation
+                cents: [0, 240, 480, 720, 960, 1200],
+                noteNames: ['1 (ji)', '2 (ro)', '3 (lu)', '5 (mo)', '6 (nem)', '1 (ji)\''],
+                color: '#DDA15E',
+                desc: 'Pentatonic, ~equal spacing, meditative'
+            },
+            pelog: {
+                name: 'Pelog',
+                // 7 unequal steps with characteristic large and small intervals
+                cents: [0, 120, 270, 540, 680, 800, 950, 1200],
+                noteNames: ['1 (ji)', '2 (ro)', '3 (lu)', '4 (pat)', '5 (mo)', '6 (nem)', '7 (pi)', '1 (ji)\''],
+                color: '#8A9A5B',
+                desc: 'Heptatonic, unequal intervals, mystical'
+            },
+            western: {
+                name: 'Western Major',
+                cents: [0, 200, 400, 500, 700, 900, 1100, 1200],
+                noteNames: ['C', 'D', 'E', 'F', 'G', 'A', 'B', 'C\''],
+                color: '#606C38',
+                desc: 'Equal tempered major scale for comparison'
+            }
+        };
+
+        function getFreqs() {
+            const s = scales[currentScale];
+            return s.cents.map(c => baseFreq * Math.pow(2, c / 1200));
+        }
+
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        function stopAll() {
+            activeOscs.forEach(o => { try { o.gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.1); o.osc.stop(audioCtx.currentTime + 0.15); } catch(e){} });
+            activeOscs = [];
+        }
+
+        function playMetallophone(freq, delay, duration) {
+            initAudio();
+            // Metallic timbre: fundamental + slight inharmonic partials
+            const t = audioCtx.currentTime + (delay || 0);
+            const dur = duration || 2;
+
+            [1, 2.76, 5.4, 8.93].forEach((partial, i) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sine';
+                osc.frequency.value = freq * partial;
+                const vol = 0.15 / (i + 1);
+                gain.gain.value = 0;
+                gain.gain.linearRampToValueAtTime(vol, t + 0.005);
+                // Metallic decay: quick attack, medium-long decay
+                gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start(t);
+                osc.stop(t + dur);
+                activeOscs.push({ osc, gain });
+            });
+        }
+
+        function playBar(idx) {
+            const freqs = getFreqs();
+            if (idx < 0 || idx >= freqs.length) return;
+            playMetallophone(freqs[idx]);
+            hitBars.push({ idx, time: animTime });
+            const s = scales[currentScale];
+            noteDisplay.textContent = `${s.noteNames[idx]}: ${freqs[idx].toFixed(1)} Hz (${s.cents[idx]} cents)`;
+        }
+
+        function playScale() {
+            initAudio();
+            stopAll();
+            const freqs = getFreqs();
+            freqs.forEach((f, i) => {
+                playMetallophone(f, i * 0.4, 1.5);
+                setTimeout(() => hitBars.push({ idx: i, time: animTime }), i * 400);
+            });
+            noteDisplay.textContent = `Playing ${scales[currentScale].name} scale...`;
+        }
+
+        function playInterlocking() {
+            // Kotekan-style interlocking pattern
+            initAudio();
+            stopAll();
+            const freqs = getFreqs();
+            const n = freqs.length - 1; // exclude octave repeat
+            // Two parts that interlock
+            const pattern1 = [0, -1, 2, -1, 4 % n, -1, 2, -1]; // polos
+            const pattern2 = [-1, 1, -1, 3 % n, -1, 1, -1, 3 % n]; // sangsih
+            const tempo = 0.2;
+
+            for (let rep = 0; rep < 3; rep++) {
+                for (let i = 0; i < 8; i++) {
+                    const t = (rep * 8 + i) * tempo;
+                    if (pattern1[i] >= 0) {
+                        playMetallophone(freqs[pattern1[i]], t, 0.8);
+                        setTimeout(() => hitBars.push({ idx: pattern1[i], time: animTime }), t * 1000);
+                    }
+                    if (pattern2[i] >= 0) {
+                        playMetallophone(freqs[pattern2[i]], t, 0.8);
+                        setTimeout(() => hitBars.push({ idx: pattern2[i], time: animTime }), t * 1000);
+                    }
+                }
+            }
+            noteDisplay.textContent = 'Interlocking pattern (kotekan style)...';
+        }
+
+        function setScale(s) {
+            currentScale = s;
+            document.getElementById('btnSlendro').classList.toggle('active', s === 'slendro');
+            document.getElementById('btnPelog').classList.toggle('active', s === 'pelog');
+            document.getElementById('btnWestern').classList.toggle('active', s === 'western');
+            hoveredBar = -1;
+            hitBars = [];
+        }
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            const s = scales[currentScale];
+            const freqs = getFreqs();
+            const n = freqs.length;
+            const marginX = W * 0.15;
+            const barAreaW = W * 0.7;
+            const barW = Math.min(barAreaW / n - 10, 80);
+            const baseBarH = H * 0.4;
+            const barY = H * 0.45;
+
+            // Title
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = 'bold 18px "Segoe UI", sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`GAMELAN SCALES: ${s.name.toUpperCase()}`, W / 2, 40);
+
+            // Cents distribution arc at top
+            const arcCX = W / 2;
+            const arcCY = 120;
+            const arcR = W * 0.25;
+
+            ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(arcCX, arcCY, arcR, Math.PI * 0.1, Math.PI * 0.9);
+            ctx.stroke();
+
+            // Plot scale degrees on the arc
+            for (let i = 0; i < n; i++) {
+                const angle = Math.PI * 0.1 + (s.cents[i] / 1200) * Math.PI * 0.8;
+                const x = arcCX + Math.cos(angle) * arcR;
+                const y = arcCY + Math.sin(angle) * arcR;
+                const isHit = hitBars.some(h => h.idx === i && animTime - h.time < 0.5);
+
+                ctx.beginPath();
+                ctx.arc(x, y, isHit ? 8 : 5, 0, Math.PI * 2);
+                ctx.fillStyle = isHit ? '#DDA15E' : s.color;
+                ctx.fill();
+
+                ctx.fillStyle = '#FEFAE0';
+                ctx.font = '10px "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                const lx = arcCX + Math.cos(angle) * (arcR + 18);
+                const ly = arcCY + Math.sin(angle) * (arcR + 18);
+                ctx.fillText(`${s.cents[i]}c`, lx, ly);
+
+                // Interval labels between notes
+                if (i < n - 1) {
+                    const nextAngle = Math.PI * 0.1 + (s.cents[i + 1] / 1200) * Math.PI * 0.8;
+                    const midAngle = (angle + nextAngle) / 2;
+                    const mx = arcCX + Math.cos(midAngle) * (arcR - 18);
+                    const my = arcCY + Math.sin(midAngle) * (arcR - 18);
+                    const interval = s.cents[i + 1] - s.cents[i];
+                    ctx.fillStyle = 'rgba(221,161,94,0.6)';
+                    ctx.font = '9px "Segoe UI", sans-serif';
+                    ctx.fillText(`${interval}`, mx, my);
+                }
+            }
+
+            // Draw metallophone bars
+            const totalW = n * (barW + 10);
+            const startX = (W - totalW) / 2;
+
+            for (let i = 0; i < n; i++) {
+                const x = startX + i * (barW + 10);
+                // Bars get shorter for higher pitches (like a real metallophone)
+                const heightRatio = 1 - (i / (n - 1)) * 0.4;
+                const bH = baseBarH * heightRatio;
+                const y = barY + (baseBarH - bH) / 2;
+
+                const isHov = hoveredBar === i;
+                const isHit = hitBars.some(h => h.idx === i && animTime - h.time < 0.5);
+                const hitAge = isHit ? Math.min(...hitBars.filter(h => h.idx === i).map(h => animTime - h.time)) : 1;
+                const vibrate = isHit ? Math.sin(animTime * 40) * 2 * Math.max(0, 1 - hitAge * 2) : 0;
+
+                // Bar shadow
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.fillRect(x + 3, y + 3, barW, bH);
+
+                // Bar body - metallic gradient
+                const grad = ctx.createLinearGradient(x, y, x, y + bH);
+                if (isHit) {
+                    grad.addColorStop(0, '#DDA15E');
+                    grad.addColorStop(0.5, '#BC6C25');
+                    grad.addColorStop(1, '#8A6B30');
+                } else {
+                    grad.addColorStop(0, isHov ? '#c8a060' : '#a08040');
+                    grad.addColorStop(0.3, isHov ? '#b89050' : '#907030');
+                    grad.addColorStop(1, '#605020');
+                }
+                ctx.fillStyle = grad;
+                ctx.fillRect(x + vibrate, y, barW, bH);
+
+                // Bar edge highlight
+                ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x + vibrate, y, barW, bH);
+
+                // Note name below
+                ctx.fillStyle = isHit ? '#DDA15E' : '#FEFAE0';
+                ctx.font = `${isHit ? 'bold ' : ''}12px 'Segoe UI', sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.fillText(s.noteNames[i], x + barW / 2, barY + baseBarH + 20);
+
+                // Frequency
+                ctx.fillStyle = 'rgba(254,250,224,0.4)';
+                ctx.font = '10px "Segoe UI", sans-serif';
+                ctx.fillText(`${freqs[i].toFixed(0)} Hz`, x + barW / 2, barY + baseBarH + 35);
+            }
+
+            // Clean up old hit animations
+            hitBars = hitBars.filter(h => animTime - h.time < 2);
+        }
+
+        function getBarAt(mx, my) {
+            const s = scales[currentScale];
+            const n = s.cents.length;
+            const barW = Math.min(W * 0.7 / n - 10, 80);
+            const totalW = n * (barW + 10);
+            const startX = (W - totalW) / 2;
+            const baseBarH = H * 0.4;
+            const barY = H * 0.45;
+
+            for (let i = 0; i < n; i++) {
+                const x = startX + i * (barW + 10);
+                const heightRatio = 1 - (i / (n - 1)) * 0.4;
+                const bH = baseBarH * heightRatio;
+                const y = barY + (baseBarH - bH) / 2;
+                if (mx >= x && mx <= x + barW && my >= y && my <= y + bH) return i;
+            }
+            return -1;
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            hoveredBar = getBarAt(e.clientX, e.clientY);
+            canvas.style.cursor = hoveredBar >= 0 ? 'pointer' : 'default';
+        });
+
+        canvas.addEventListener('click', () => {
+            if (hoveredBar >= 0) playBar(hoveredBar);
+        });
+
+        document.getElementById('btnSlendro').addEventListener('click', () => setScale('slendro'));
+        document.getElementById('btnPelog').addEventListener('click', () => setScale('pelog'));
+        document.getElementById('btnWestern').addEventListener('click', () => setScale('western'));
+        document.getElementById('btnPlayScale').addEventListener('click', playScale);
+        document.getElementById('btnPlayPattern').addEventListener('click', playInterlocking);
+        document.getElementById('btnStop').addEventListener('click', () => { stopAll(); noteDisplay.textContent = 'Click the bars to play gamelan tones'; });
+
+        function animate() {
+            animTime += 0.016;
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+        animate();
+
+        window.reset = function() {
+            stopAll();
+            currentScale = 'slendro';
+            hoveredBar = -1;
+            hitBars = [];
+            animTime = 0;
+            setScale('slendro');
+            noteDisplay.textContent = 'Click the bars to play gamelan tones';
+        };
+    })();
+    </script>
+</body>
+</html>

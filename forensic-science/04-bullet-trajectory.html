@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bullet Trajectory Reconstruction - Forensic Science Lab</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a1a; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a[href="index.html"] { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #info-panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(30,30,30,0.92);
+            backdrop-filter: blur(10px); padding: 15px 20px; border-radius: 12px;
+            border: 1px solid rgba(138,154,91,0.3); z-index: 100; max-width: 320px;
+            font-size: 0.85rem; line-height: 1.5;
+        }
+        #info-panel h3 { color: #DDA15E; margin-bottom: 8px; }
+        .label { color: #8A9A5B; }
+        .value { color: #FEFAE0; font-weight: bold; }
+        #controls {
+            position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 10px; z-index: 100; flex-wrap: wrap; justify-content: center;
+            align-items: center;
+        }
+        #controls button {
+            background: rgba(96,108,56,0.8); color: #FEFAE0; border: 1px solid #8A9A5B;
+            padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 0.85rem;
+        }
+        #controls button:hover { background: rgba(138,154,91,0.9); }
+        #controls button.active { background: rgba(221,161,94,0.8); border-color: #DDA15E; }
+        #instructions {
+            position: fixed; bottom: 50px; left: 50%; transform: translateX(-50%);
+            color: rgba(254,250,224,0.5); font-size: 0.8rem; text-align: center; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <div id="info-panel">
+        <h3>Bullet Trajectory Reconstruction</h3>
+        <p><span class="label">Mode:</span> <span class="value" id="mode-label">Place Entry Hole</span></p>
+        <p><span class="label">Holes:</span> <span class="value" id="hole-count">0</span></p>
+        <p><span class="label">Trajectory Angle:</span> <span class="value" id="traj-angle">--</span></p>
+        <p><span class="label">Distance:</span> <span class="value" id="traj-dist">--</span></p>
+        <p style="margin-top:8px;color:rgba(254,250,224,0.5);font-size:0.75rem;">
+            Place bullet holes on surfaces (walls/floor). Two holes on the same surface define a trajectory. The probing method extends a line through both defects to trace the bullet path.
+        </p>
+    </div>
+    <div id="instructions">Click on surfaces to place bullet holes. Two holes define a trajectory.</div>
+    <div id="controls">
+        <button id="btn-entry" class="active" onclick="setMode('entry')">Entry Hole</button>
+        <button id="btn-exit" onclick="setMode('exit')">Exit Hole</button>
+        <button onclick="addTrajectory()">Connect Last Two</button>
+        <button onclick="clearAll()">Clear All</button>
+        <button onclick="addPresetScene()">Preset Scene</button>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    let holes = [];
+    let trajectories = [];
+    let mode = 'entry';
+    let animTime = 0;
+
+    // Room geometry (2.5D view)
+    const room = {
+        floorY: 0.75,
+        backWallTop: 0.15,
+        leftWallX: 0.1,
+        rightWallX: 0.9,
+        vanishX: 0.5,
+        vanishY: 0.3
+    };
+
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    function getSurface(x, y) {
+        const nx = x / W;
+        const ny = y / H;
+
+        // Back wall
+        if (nx > room.leftWallX + 0.05 && nx < room.rightWallX - 0.05 &&
+            ny > room.backWallTop && ny < room.floorY - 0.05) {
+            return 'back';
+        }
+        // Floor
+        if (ny > room.floorY - 0.02 && ny < 0.95) {
+            return 'floor';
+        }
+        // Left wall (perspective)
+        if (nx < room.leftWallX + 0.15 && ny > room.backWallTop && ny < room.floorY + 0.1) {
+            return 'left';
+        }
+        // Right wall
+        if (nx > room.rightWallX - 0.15 && ny > room.backWallTop && ny < room.floorY + 0.1) {
+            return 'right';
+        }
+        return null;
+    }
+
+    function drawRoom() {
+        const flY = room.floorY * H;
+        const bwT = room.backWallTop * H;
+        const lwX = room.leftWallX * W;
+        const rwX = room.rightWallX * W;
+        const vx = room.vanishX * W;
+        const vy = room.vanishY * H;
+
+        // Floor
+        ctx.fillStyle = '#2a2520';
+        ctx.beginPath();
+        ctx.moveTo(0, H);
+        ctx.lineTo(lwX, flY);
+        ctx.lineTo(rwX, flY);
+        ctx.lineTo(W, H);
+        ctx.closePath();
+        ctx.fill();
+
+        // Floor grid
+        ctx.strokeStyle = 'rgba(138,154,91,0.1)';
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 10; i++) {
+            const t = i / 10;
+            const x1 = lwX + (rwX - lwX) * t;
+            const x2 = t * W;
+            ctx.beginPath();
+            ctx.moveTo(x1, flY);
+            ctx.lineTo(x2, H);
+            ctx.stroke();
+        }
+        for (let i = 0; i <= 5; i++) {
+            const t = i / 5;
+            const y = flY + (H - flY) * t;
+            const spread = t * 0.5;
+            ctx.beginPath();
+            ctx.moveTo(lwX - spread * W * 0.5, y);
+            ctx.lineTo(rwX + spread * W * 0.5, y);
+            ctx.stroke();
+        }
+
+        // Back wall
+        ctx.fillStyle = '#3a3530';
+        ctx.fillRect(lwX, bwT, rwX - lwX, flY - bwT);
+
+        // Wall grid
+        for (let i = 0; i <= 8; i++) {
+            const x = lwX + (rwX - lwX) * (i / 8);
+            ctx.beginPath();
+            ctx.moveTo(x, bwT);
+            ctx.lineTo(x, flY);
+            ctx.stroke();
+        }
+        for (let i = 0; i <= 5; i++) {
+            const y = bwT + (flY - bwT) * (i / 5);
+            ctx.beginPath();
+            ctx.moveTo(lwX, y);
+            ctx.lineTo(rwX, y);
+            ctx.stroke();
+        }
+
+        // Left wall
+        ctx.fillStyle = '#322e28';
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(lwX, bwT);
+        ctx.lineTo(lwX, flY);
+        ctx.lineTo(0, H);
+        ctx.closePath();
+        ctx.fill();
+
+        // Right wall
+        ctx.fillStyle = '#322e28';
+        ctx.beginPath();
+        ctx.moveTo(W, 0);
+        ctx.lineTo(rwX, bwT);
+        ctx.lineTo(rwX, flY);
+        ctx.lineTo(W, H);
+        ctx.closePath();
+        ctx.fill();
+
+        // Wall borders
+        ctx.strokeStyle = 'rgba(138,154,91,0.3)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(lwX, bwT);
+        ctx.lineTo(rwX, bwT);
+        ctx.lineTo(rwX, flY);
+        ctx.lineTo(lwX, flY);
+        ctx.closePath();
+        ctx.stroke();
+    }
+
+    function drawHole(hole) {
+        const { x, y, type, surface } = hole;
+
+        // Bullet hole
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.fillStyle = '#111';
+        ctx.fill();
+
+        // Crater ring
+        ctx.beginPath();
+        ctx.arc(x, y, 8, 0, Math.PI * 2);
+        ctx.strokeStyle = type === 'entry' ? '#8A9A5B' : '#DDA15E';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Radial fracture lines around hole
+        for (let i = 0; i < 6; i++) {
+            const angle = (i / 6) * Math.PI * 2 + Math.random() * 0.3;
+            const len = 8 + Math.random() * 12;
+            ctx.beginPath();
+            ctx.moveTo(x + Math.cos(angle) * 8, y + Math.sin(angle) * 8);
+            ctx.lineTo(x + Math.cos(angle) * (8 + len), y + Math.sin(angle) * (8 + len));
+            ctx.strokeStyle = 'rgba(200,200,200,0.3)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+
+        // Label
+        ctx.fillStyle = type === 'entry' ? '#8A9A5B' : '#DDA15E';
+        ctx.font = '10px monospace';
+        ctx.fillText(type === 'entry' ? 'ENTRY' : 'EXIT', x + 12, y - 8);
+        ctx.fillText(surface, x + 12, y + 4);
+        ctx.restore();
+    }
+
+    function drawTrajectory(traj) {
+        const { h1, h2 } = traj;
+
+        // Trajectory line
+        ctx.save();
+        const dx = h2.x - h1.x;
+        const dy = h2.y - h1.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        const ux = dx / len;
+        const uy = dy / len;
+
+        // Extended line (probing method)
+        const ext = 300;
+        ctx.beginPath();
+        ctx.moveTo(h1.x - ux * ext, h1.y - uy * ext);
+        ctx.lineTo(h2.x + ux * ext, h2.y + uy * ext);
+        ctx.strokeStyle = 'rgba(221,161,94,0.4)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([6, 4]);
+        ctx.stroke();
+
+        // Solid line between holes
+        ctx.beginPath();
+        ctx.moveTo(h1.x, h1.y);
+        ctx.lineTo(h2.x, h2.y);
+        ctx.strokeStyle = '#DDA15E';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+        ctx.stroke();
+
+        // Animated dot along trajectory
+        const t = (Math.sin(animTime * 2) + 1) / 2;
+        const ax = h1.x + dx * t;
+        const ay = h1.y + dy * t;
+        ctx.beginPath();
+        ctx.arc(ax, ay, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#DDA15E';
+        ctx.fill();
+
+        // Angle measurement
+        const angle = Math.atan2(-dy, dx) * 180 / Math.PI;
+        const midX = (h1.x + h2.x) / 2;
+        const midY = (h1.y + h2.y) / 2;
+
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = '11px monospace';
+        ctx.fillText(`${angle.toFixed(1)}°`, midX + 15, midY - 10);
+        ctx.fillText(`${len.toFixed(0)}px`, midX + 15, midY + 5);
+
+        // Shooter position indicator (extended back)
+        const shooterX = h1.x - ux * ext;
+        const shooterY = h1.y - uy * ext;
+        if (shooterX > 0 && shooterX < W && shooterY > 0 && shooterY < H) {
+            ctx.strokeStyle = 'rgba(138,154,91,0.5)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(shooterX, shooterY, 15, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '10px monospace';
+            ctx.fillText('Shooter Position', shooterX + 18, shooterY);
+        }
+
+        ctx.restore();
+    }
+
+    function draw() {
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillRect(0, 0, W, H);
+
+        animTime += 0.016;
+        drawRoom();
+        trajectories.forEach(t => drawTrajectory(t));
+        holes.forEach(h => drawHole(h));
+
+        requestAnimationFrame(draw);
+    }
+
+    canvas.addEventListener('click', e => {
+        const surface = getSurface(e.clientX, e.clientY);
+        if (!surface) return;
+
+        holes.push({
+            x: e.clientX, y: e.clientY,
+            type: mode, surface
+        });
+        document.getElementById('hole-count').textContent = holes.length;
+    });
+
+    canvas.addEventListener('touchstart', e => {
+        e.preventDefault();
+        const t = e.touches[0];
+        canvas.dispatchEvent(new MouseEvent('click', { clientX: t.clientX, clientY: t.clientY }));
+    });
+
+    function setMode(m) {
+        mode = m;
+        document.getElementById('mode-label').textContent = m === 'entry' ? 'Place Entry Hole' : 'Place Exit Hole';
+        document.getElementById('btn-entry').classList.toggle('active', m === 'entry');
+        document.getElementById('btn-exit').classList.toggle('active', m === 'exit');
+    }
+
+    function addTrajectory() {
+        if (holes.length < 2) return;
+        const h2 = holes[holes.length - 1];
+        const h1 = holes[holes.length - 2];
+        const dx = h2.x - h1.x;
+        const dy = h2.y - h1.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const angle = Math.atan2(-dy, dx) * 180 / Math.PI;
+
+        trajectories.push({ h1, h2 });
+        document.getElementById('traj-angle').textContent = angle.toFixed(1) + '°';
+        document.getElementById('traj-dist').textContent = dist.toFixed(0) + 'px';
+    }
+
+    function clearAll() {
+        holes = [];
+        trajectories = [];
+        document.getElementById('hole-count').textContent = '0';
+        document.getElementById('traj-angle').textContent = '--';
+        document.getElementById('traj-dist').textContent = '--';
+    }
+
+    function addPresetScene() {
+        clearAll();
+        const flY = room.floorY * H;
+        const bwT = room.backWallTop * H;
+        const lwX = room.leftWallX * W;
+        const rwX = room.rightWallX * W;
+
+        // Two bullet holes on back wall
+        const h1 = { x: lwX + (rwX - lwX) * 0.35, y: bwT + (flY - bwT) * 0.4, type: 'entry', surface: 'back' };
+        const h2 = { x: lwX + (rwX - lwX) * 0.6, y: bwT + (flY - bwT) * 0.6, type: 'exit', surface: 'back' };
+        const h3 = { x: lwX + (rwX - lwX) * 0.5, y: bwT + (flY - bwT) * 0.3, type: 'entry', surface: 'back' };
+        const h4 = { x: lwX + (rwX - lwX) * 0.5, y: flY + (H - flY) * 0.3, type: 'exit', surface: 'floor' };
+
+        holes.push(h1, h2, h3, h4);
+        trajectories.push({ h1, h2 });
+        trajectories.push({ h1: h3, h2: h4 });
+        document.getElementById('hole-count').textContent = '4';
+    }
+
+    window.reset = function() { clearAll(); };
+
+    draw();
+    </script>
+</body>
+</html>

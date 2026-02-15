@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wheel Throwing Profile - Vessel Cross-Section Editor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a1a; color: #FEFAE0; font-family: Georgia, serif; overflow: hidden; }
+        canvas { display: block; cursor: crosshair; }
+        a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 12px; align-items: center; z-index: 100;
+            background: rgba(30,30,30,0.85); backdrop-filter: blur(10px);
+            padding: 12px 20px; border-radius: 12px; border: 1px solid #8A9A5B33;
+        }
+        .controls label { font-size: 0.8rem; }
+        .controls input[type="range"] { width: 100px; accent-color: #DDA15E; }
+        .controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 8px 14px;
+            border-radius: 6px; cursor: pointer; font-size: 0.8rem;
+        }
+        .controls button:hover { background: #8A9A5B; }
+        .controls select {
+            background: #333; color: #FEFAE0; border: 1px solid #606C38;
+            padding: 6px 10px; border-radius: 6px; font-size: 0.8rem; font-family: Georgia;
+        }
+        .info {
+            position: fixed; top: 10px; right: 10px;
+            background: rgba(30,30,30,0.85); backdrop-filter: blur(10px);
+            padding: 10px 14px; border-radius: 8px; font-size: 0.8rem; color: #8A9A5B; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <div class="info">
+        Drag control points to shape<br>
+        Height: <span id="heightDisp">0</span> cm<br>
+        Max width: <span id="widthDisp">0</span> cm<br>
+        Min wall: <span id="wallDisp">0</span> mm
+    </div>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <label>Preset:</label>
+        <select id="presetSelect">
+            <option value="cylinder">Cylinder</option>
+            <option value="bowl">Bowl</option>
+            <option value="vase">Vase</option>
+            <option value="bottle">Bottle</option>
+            <option value="plate">Plate</option>
+        </select>
+        <label>Wall Thickness</label>
+        <input type="range" id="wallSlider" min="3" max="15" value="6">
+        <label>Spin Speed</label>
+        <input type="range" id="spinSlider" min="0" max="100" value="30">
+        <button id="resetBtn">Reset</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let W, H;
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Profile control points (outer surface)
+        let controlPoints = [];
+        let dragIdx = -1;
+        let mouseX = 0, mouseY = 0;
+        let spinAngle = 0;
+        let animId;
+
+        // Profile space: centerX, baseY at bottom
+        let profileCX, profileBaseY;
+
+        const presets = {
+            cylinder: [
+                { r: 50, y: 0 }, { r: 52, y: -30 }, { r: 52, y: -60 },
+                { r: 52, y: -90 }, { r: 52, y: -120 }, { r: 52, y: -150 },
+                { r: 50, y: -180 }, { r: 48, y: -200 }
+            ],
+            bowl: [
+                { r: 70, y: 0 }, { r: 85, y: -15 }, { r: 90, y: -30 },
+                { r: 88, y: -45 }, { r: 80, y: -55 }, { r: 65, y: -65 },
+                { r: 50, y: -75 }, { r: 45, y: -80 }
+            ],
+            vase: [
+                { r: 40, y: 0 }, { r: 55, y: -30 }, { r: 70, y: -60 },
+                { r: 65, y: -100 }, { r: 45, y: -140 }, { r: 30, y: -170 },
+                { r: 35, y: -190 }, { r: 40, y: -210 }
+            ],
+            bottle: [
+                { r: 50, y: 0 }, { r: 65, y: -30 }, { r: 70, y: -70 },
+                { r: 60, y: -110 }, { r: 30, y: -140 }, { r: 20, y: -170 },
+                { r: 18, y: -200 }, { r: 22, y: -230 }
+            ],
+            plate: [
+                { r: 100, y: 0 }, { r: 110, y: -5 }, { r: 115, y: -12 },
+                { r: 112, y: -18 }, { r: 105, y: -25 }, { r: 95, y: -30 },
+                { r: 90, y: -33 }, { r: 88, y: -35 }
+            ]
+        };
+
+        function loadPreset(name) {
+            controlPoints = presets[name].map(p => ({ ...p }));
+        }
+        loadPreset('cylinder');
+
+        document.getElementById('presetSelect').addEventListener('change', (e) => {
+            loadPreset(e.target.value);
+        });
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            loadPreset(document.getElementById('presetSelect').value);
+        });
+
+        canvas.addEventListener('mousedown', (e) => {
+            mouseX = e.clientX; mouseY = e.clientY;
+            dragIdx = findNearestPoint(mouseX, mouseY);
+        });
+        canvas.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX; mouseY = e.clientY;
+            if (dragIdx >= 0) {
+                const pt = controlPoints[dragIdx];
+                pt.r = Math.max(10, Math.abs(mouseX - profileCX));
+                if (dragIdx > 0 && dragIdx < controlPoints.length - 1) {
+                    pt.y = mouseY - profileBaseY;
+                }
+            }
+        });
+        canvas.addEventListener('mouseup', () => { dragIdx = -1; });
+
+        canvas.addEventListener('touchstart', (e) => {
+            const t = e.touches[0]; mouseX = t.clientX; mouseY = t.clientY;
+            dragIdx = findNearestPoint(mouseX, mouseY);
+            e.preventDefault();
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            const t = e.touches[0]; mouseX = t.clientX; mouseY = t.clientY;
+            if (dragIdx >= 0) {
+                controlPoints[dragIdx].r = Math.max(10, Math.abs(mouseX - profileCX));
+                if (dragIdx > 0 && dragIdx < controlPoints.length - 1) {
+                    controlPoints[dragIdx].y = mouseY - profileBaseY;
+                }
+            }
+            e.preventDefault();
+        });
+        canvas.addEventListener('touchend', () => { dragIdx = -1; });
+
+        function findNearestPoint(mx, my) {
+            let best = -1, bestDist = 20;
+            controlPoints.forEach((pt, i) => {
+                const px = profileCX + pt.r;
+                const py = profileBaseY + pt.y;
+                const d = Math.sqrt((mx - px) ** 2 + (my - py) ** 2);
+                if (d < bestDist) { bestDist = d; best = i; }
+                // Also check left side
+                const px2 = profileCX - pt.r;
+                const d2 = Math.sqrt((mx - px2) ** 2 + (my - py) ** 2);
+                if (d2 < bestDist) { bestDist = d2; best = i; }
+            });
+            return best;
+        }
+
+        function drawProfile() {
+            profileCX = W * 0.3;
+            profileBaseY = H * 0.7;
+            const wallThick = parseFloat(document.getElementById('wallSlider').value);
+
+            // Center line
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(profileCX, profileBaseY + 20);
+            ctx.lineTo(profileCX, profileBaseY - 300);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Draw outer profile (both sides)
+            // Right side
+            ctx.beginPath();
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            controlPoints.forEach((pt, i) => {
+                const x = profileCX + pt.r;
+                const y = profileBaseY + pt.y;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Left side (mirror)
+            ctx.beginPath();
+            ctx.strokeStyle = '#DDA15E';
+            controlPoints.forEach((pt, i) => {
+                const x = profileCX - pt.r;
+                const y = profileBaseY + pt.y;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Inner profile (wall thickness inset)
+            ctx.beginPath();
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 1.5;
+            controlPoints.forEach((pt, i) => {
+                const innerR = Math.max(5, pt.r - wallThick);
+                const x = profileCX + innerR;
+                const y = profileBaseY + pt.y;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            ctx.beginPath();
+            controlPoints.forEach((pt, i) => {
+                const innerR = Math.max(5, pt.r - wallThick);
+                const x = profileCX - innerR;
+                const y = profileBaseY + pt.y;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Fill clay body between inner and outer
+            ctx.beginPath();
+            controlPoints.forEach((pt, i) => {
+                const x = profileCX + pt.r;
+                const y = profileBaseY + pt.y;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            for (let i = controlPoints.length - 1; i >= 0; i--) {
+                const innerR = Math.max(5, controlPoints[i].r - wallThick);
+                ctx.lineTo(profileCX + innerR, profileBaseY + controlPoints[i].y);
+            }
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(160,110,70,0.3)';
+            ctx.fill();
+
+            // Mirror fill
+            ctx.beginPath();
+            controlPoints.forEach((pt, i) => {
+                const x = profileCX - pt.r;
+                const y = profileBaseY + pt.y;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            for (let i = controlPoints.length - 1; i >= 0; i--) {
+                const innerR = Math.max(5, controlPoints[i].r - wallThick);
+                ctx.lineTo(profileCX - innerR, profileBaseY + controlPoints[i].y);
+            }
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(160,110,70,0.3)';
+            ctx.fill();
+
+            // Base thickness
+            ctx.fillStyle = 'rgba(160,110,70,0.4)';
+            const baseR = controlPoints[0].r;
+            ctx.fillRect(profileCX - baseR, profileBaseY, baseR * 2, wallThick);
+
+            // Control points
+            controlPoints.forEach((pt, i) => {
+                const x = profileCX + pt.r;
+                const y = profileBaseY + pt.y;
+                ctx.beginPath();
+                ctx.arc(x, y, 6, 0, Math.PI * 2);
+                ctx.fillStyle = i === dragIdx ? '#DDA15E' : '#606C38';
+                ctx.fill();
+                ctx.strokeStyle = '#FEFAE0';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+
+                // Mirror point
+                ctx.beginPath();
+                ctx.arc(profileCX - pt.r, y, 6, 0, Math.PI * 2);
+                ctx.fillStyle = i === dragIdx ? '#DDA15E' : '#606C38';
+                ctx.fill();
+                ctx.stroke();
+            });
+
+            // Wall thickness annotations
+            const midIdx = Math.floor(controlPoints.length / 2);
+            const midPt = controlPoints[midIdx];
+            const midY = profileBaseY + midPt.y;
+            ctx.strokeStyle = '#888';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(profileCX + midPt.r, midY);
+            ctx.lineTo(profileCX + midPt.r - wallThick, midY);
+            ctx.stroke();
+            ctx.fillStyle = '#888';
+            ctx.font = '10px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText(`${wallThick}mm`, profileCX + midPt.r - wallThick / 2, midY - 6);
+
+            // Labels
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '12px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Cross-Section Profile', profileCX, profileBaseY + 40);
+        }
+
+        function draw3DView() {
+            const cx = W * 0.7;
+            const cy = H * 0.45;
+            const perspective = 0.3;
+            const speed = parseFloat(document.getElementById('spinSlider').value);
+            spinAngle += speed * 0.001;
+
+            const wallThick = parseFloat(document.getElementById('wallSlider').value);
+
+            // Draw from bottom to top
+            for (let i = controlPoints.length - 1; i >= 0; i--) {
+                const pt = controlPoints[i];
+                const y = cy + pt.y * 0.8;
+                const r = pt.r * 1.2;
+
+                // Outer ellipse
+                ctx.beginPath();
+                ctx.ellipse(cx, y, r, r * perspective, 0, 0, Math.PI * 2);
+
+                const t = i / controlPoints.length;
+                const shade = Math.floor(120 + t * 40);
+                const rCol = shade + 20;
+                const gCol = shade - 10;
+                const bCol = shade - 30;
+
+                // Spinning highlight
+                const highlightAngle = spinAngle;
+                const hx = Math.cos(highlightAngle) * r * 0.3;
+
+                const grad = ctx.createRadialGradient(cx + hx, y, 0, cx, y, r);
+                grad.addColorStop(0, `rgb(${rCol + 40},${gCol + 30},${bCol + 20})`);
+                grad.addColorStop(0.6, `rgb(${rCol},${gCol},${bCol})`);
+                grad.addColorStop(1, `rgb(${rCol - 40},${gCol - 30},${bCol - 20})`);
+
+                ctx.fillStyle = grad;
+                ctx.fill();
+
+                // Subtle ring line
+                ctx.strokeStyle = `rgba(100,70,40,0.3)`;
+                ctx.lineWidth = 0.5;
+                ctx.stroke();
+
+                // Body between this and next coil
+                if (i < controlPoints.length - 1) {
+                    const nextPt = controlPoints[i + 1];
+                    const nextY = cy + nextPt.y * 0.8;
+                    const nextR = nextPt.r * 1.2;
+
+                    ctx.beginPath();
+                    ctx.moveTo(cx - r, y);
+                    ctx.lineTo(cx - nextR, nextY);
+                    ctx.lineTo(cx + nextR, nextY);
+                    ctx.lineTo(cx + r, y);
+                    ctx.closePath();
+                    ctx.fillStyle = `rgb(${rCol - 10},${gCol - 15},${bCol - 20})`;
+                    ctx.fill();
+                }
+            }
+
+            // Top rim
+            const top = controlPoints[controlPoints.length - 1];
+            const topY = cy + top.y * 0.8;
+            const topR = top.r * 1.2;
+            const innerR = Math.max(5, top.r - wallThick) * 1.2;
+
+            ctx.beginPath();
+            ctx.ellipse(cx, topY, topR, topR * perspective, 0, 0, Math.PI * 2);
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Inner opening
+            ctx.beginPath();
+            ctx.ellipse(cx, topY, innerR, innerR * perspective, 0, 0, Math.PI * 2);
+            ctx.fillStyle = '#151510';
+            ctx.fill();
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Spinning indicator dots on wheel
+            const baseY = cy + controlPoints[0].y * 0.8 + 15;
+            for (let i = 0; i < 8; i++) {
+                const a = spinAngle + (i / 8) * Math.PI * 2;
+                const dx = Math.cos(a) * 80;
+                const dy = Math.sin(a) * 80 * perspective;
+                ctx.beginPath();
+                ctx.arc(cx + dx, baseY + dy, 2, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(138,154,91,0.3)';
+                ctx.fill();
+            }
+
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '12px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('3D Preview', cx, cy + 120);
+        }
+
+        function animate() {
+            animId = requestAnimationFrame(animate);
+
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, W, H);
+
+            // Title
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '24px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Wheel Throwing Profile', W / 2, 40);
+            ctx.font = '14px Georgia';
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fillText('Drag control points to design vessel shape. See the 3D preview spin.', W / 2, 62);
+
+            drawProfile();
+            draw3DView();
+
+            // Update info
+            const maxR = Math.max(...controlPoints.map(p => p.r));
+            const minY = Math.min(...controlPoints.map(p => p.y));
+            const wallThick = parseFloat(document.getElementById('wallSlider').value);
+            const minWall = Math.min(...controlPoints.map(p => p.r)) < wallThick ? wallThick : wallThick;
+            document.getElementById('heightDisp').textContent = (Math.abs(minY) / 10).toFixed(1);
+            document.getElementById('widthDisp').textContent = (maxR * 2 / 10).toFixed(1);
+            document.getElementById('wallDisp').textContent = wallThick;
+        }
+
+        animate();
+
+        window.reset = function() {
+            loadPreset(document.getElementById('presetSelect').value);
+            document.getElementById('wallSlider').value = 6;
+            document.getElementById('spinSlider').value = 30;
+        };
+    </script>
+</body>
+</html>

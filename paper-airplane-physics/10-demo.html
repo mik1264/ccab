@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>World Record Challenge - Paper Airplane Physics</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #FEFAE0; font-family: 'Segoe UI', sans-serif; overflow: hidden; }
+        canvas { display: block; }
+        a.back { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        #controls {
+            position: fixed; top: 10px; right: 10px; z-index: 1000;
+            background: rgba(0,0,0,0.7); backdrop-filter: blur(10px);
+            padding: 15px; border-radius: 12px; width: 260px;
+            border: 1px solid rgba(138,154,91,0.3);
+        }
+        #controls h3 { color: #DDA15E; margin-bottom: 6px; font-size: 0.95rem; }
+        #controls p { color: #8A9A5B; font-size: 0.75rem; margin-bottom: 8px; line-height: 1.4; }
+        .control-group { margin-bottom: 8px; }
+        .control-group label { display: block; color: #8A9A5B; font-size: 0.8rem; margin-bottom: 2px; }
+        .control-group input[type="range"] { width: 100%; accent-color: #8A9A5B; }
+        .val { color: #DDA15E; font-size: 0.8rem; float: right; }
+        button {
+            width: 100%; padding: 10px; border: none; border-radius: 8px;
+            background: linear-gradient(135deg, #BC6C25, #DDA15E); color: #1a1a2e;
+            font-size: 0.95rem; cursor: pointer; font-weight: bold; margin-top: 5px;
+        }
+        button:hover { opacity: 0.9; }
+        #scoreboard {
+            position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 1000;
+            background: rgba(0,0,0,0.8); backdrop-filter: blur(10px);
+            padding: 12px 24px; border-radius: 12px; font-size: 0.9rem;
+            border: 1px solid rgba(221,161,94,0.4); text-align: center;
+        }
+        .record-line { color: #DDA15E; font-weight: bold; font-size: 1.1rem; }
+        .your-line { color: #4CAF50; font-weight: bold; font-size: 1.1rem; }
+        .attempt { color: #8A9A5B; font-size: 0.8rem; }
+        #message {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            z-index: 2000; font-size: 2rem; font-weight: bold; pointer-events: none;
+            text-shadow: 0 0 20px rgba(0,0,0,0.8); opacity: 0; transition: opacity 0.5s;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>World Record Challenge</h3>
+        <p>The record: 226 ft 10 in (69.14 m) by John Collins' "Suzanne" design, thrown by Joe Ayoob at McClellan Air Force Base on Feb 26, 2012. Can you beat it?</p>
+        <div class="control-group">
+            <label>Throw Power: <span class="val" id="v_power">22</span> m/s</label>
+            <input type="range" id="power" min="10" max="30" value="22" step="0.5">
+        </div>
+        <div class="control-group">
+            <label>Throw Angle: <span class="val" id="v_angle">40</span>&deg;</label>
+            <input type="range" id="angle" min="5" max="80" value="40" step="1">
+        </div>
+        <div class="control-group">
+            <label>Nose Weight (folds): <span class="val" id="v_nose">4</span></label>
+            <input type="range" id="nose" min="1" max="6" value="4" step="1">
+        </div>
+        <div class="control-group">
+            <label>Wing Trim: <span class="val" id="v_trim">2</span>&deg;</label>
+            <input type="range" id="trim" min="-4" max="8" value="2" step="0.5">
+        </div>
+        <button id="throwBtn">THROW!</button>
+    </div>
+    <div id="scoreboard">
+        <div class="record-line">Record: 69.14 m (226 ft 10 in)</div>
+        <div class="your-line">Your Best: <span id="bestDist">0.0</span> m (<span id="bestFt">0</span> ft)</div>
+        <div class="attempt">Attempt #<span id="attemptNum">0</span> | Last: <span id="lastDist">--</span></div>
+    </div>
+    <div id="message"></div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+    (function() {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        let time = 0;
+
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const RECORD = 69.14; // meters
+        let bestDistance = 0;
+        let attemptCount = 0;
+        let plane = null;
+        let trail = [];
+        let simulating = false;
+        let allTrails = [];
+        let messageTimer = 0;
+
+        const groundFrac = 0.82;
+
+        const sliders = ['power', 'angle', 'nose', 'trim'];
+        sliders.forEach(id => {
+            document.getElementById(id).addEventListener('input', function() {
+                document.getElementById('v_' + id).textContent = this.value;
+            });
+        });
+
+        // Suzanne-like aerodynamic model
+        function createPlane() {
+            const power = parseFloat(document.getElementById('power').value);
+            const angleDeg = parseFloat(document.getElementById('angle').value);
+            const noseFolds = parseFloat(document.getElementById('nose').value);
+            const trimDeg = parseFloat(document.getElementById('trim').value);
+
+            const angleRad = angleDeg * Math.PI / 180;
+
+            // Suzanne-inspired properties
+            const mass = 0.004 + noseFolds * 0.0006;
+            const wingArea = 0.04; // m^2
+            const AR = 5.2;
+
+            return {
+                x: 0, y: 0,
+                vx: power * Math.cos(angleRad),
+                vy: -power * Math.sin(angleRad),
+                theta: -angleRad,
+                time: 0,
+                mass, wingArea, AR,
+                noseFolds, trimDeg,
+                phase: 'ascent' // ascent -> transition -> glide
+            };
+        }
+
+        function simulateStep(p, dt) {
+            if (!p) return false;
+
+            const V = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+            if (V < 0.3 && p.time > 1) return false;
+
+            const flightAngle = Math.atan2(-p.vy, p.vx);
+            const rho = 1.225;
+            const g = 9.81;
+
+            // Suzanne's key innovation: changing airspeed enhances performance
+            // During ascent: fly like a javelin (low AoA, minimal drag)
+            // During transition: nose drops, speed converts to altitude
+            // During glide: optimal L/D angle
+
+            let targetAoA;
+            if (p.vy < -2) {
+                // Ascending: keep streamlined
+                p.phase = 'ascent';
+                targetAoA = 0.02 + p.trimDeg * 0.002;
+            } else if (p.vy < 1) {
+                // Transition: adjusting
+                p.phase = 'transition';
+                targetAoA = 0.05 + p.trimDeg * 0.005;
+            } else {
+                // Glide: optimal angle
+                p.phase = 'glide';
+                targetAoA = 0.08 + p.trimDeg * 0.008;
+            }
+
+            const targetTheta = flightAngle + targetAoA;
+            const pitchRate = p.phase === 'transition' ? 2 : 4;
+            p.theta += (targetTheta - p.theta) * pitchRate * dt;
+
+            const aoa = p.theta - flightAngle;
+
+            // CL
+            const stallAngle = 0.25;
+            let CL;
+            if (Math.abs(aoa) < stallAngle) {
+                CL = 2 * Math.PI * aoa;
+            } else {
+                CL = 2 * Math.PI * stallAngle * Math.sign(aoa) * Math.max(0, 1 - (Math.abs(aoa) - stallAngle) / 0.4);
+            }
+
+            // CD - Suzanne has excellent L/D
+            const cd0 = 0.012 + p.noseFolds * 0.001;
+            const e = 0.72;
+            const cdi = (CL * CL) / (Math.PI * p.AR * e);
+            const CD = cd0 + cdi;
+
+            const q = 0.5 * rho * V * V;
+            const L = q * p.wingArea * CL;
+            const D = q * p.wingArea * CD;
+
+            const ax = (-L * Math.sin(flightAngle) - D * (p.vx / V)) / p.mass;
+            const ay = g + (-L * Math.cos(flightAngle) - D * (p.vy / V)) / p.mass;
+
+            p.vx += ax * dt;
+            p.vy += ay * dt;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.time += dt;
+
+            return p.y < 0.1 || p.time < 0.5;
+        }
+
+        document.getElementById('throwBtn').addEventListener('click', function() {
+            plane = createPlane();
+            trail = [];
+            simulating = true;
+            attemptCount++;
+            document.getElementById('attemptNum').textContent = attemptCount;
+        });
+
+        function showMessage(text, color) {
+            const el = document.getElementById('message');
+            el.textContent = text;
+            el.style.color = color;
+            el.style.opacity = 1;
+            messageTimer = 3;
+        }
+
+        function worldToScreen(wx, wy) {
+            const groundY = H * groundFrac;
+            const scaleX = (W - 100) / 80;
+            const scaleY = (groundY - 50) / 30;
+            return {
+                x: 60 + wx * scaleX,
+                y: groundY + wy * scaleY
+            };
+        }
+
+        function drawScene() {
+            // Sky gradient
+            const skyGrad = ctx.createLinearGradient(0, 0, 0, H * groundFrac);
+            skyGrad.addColorStop(0, '#0a0a2e');
+            skyGrad.addColorStop(0.5, '#1a1a3e');
+            skyGrad.addColorStop(1, '#252545');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, W, H * groundFrac);
+
+            // Ground - airfield
+            const gy = H * groundFrac;
+            ctx.fillStyle = '#2a3a1e';
+            ctx.fillRect(0, gy, W, H - gy);
+
+            // Runway markings
+            ctx.fillStyle = 'rgba(254,250,224,0.1)';
+            ctx.fillRect(60, gy, W - 120, 3);
+
+            // Distance markers
+            ctx.fillStyle = 'rgba(254,250,224,0.4)';
+            ctx.font = '10px Segoe UI, sans-serif';
+            ctx.textAlign = 'center';
+            for (let d = 10; d <= 80; d += 10) {
+                const p = worldToScreen(d, 0);
+                if (p.x < W - 30) {
+                    ctx.fillText(d + 'm', p.x, gy + 18);
+                    ctx.beginPath();
+                    ctx.moveTo(p.x, gy);
+                    ctx.lineTo(p.x, gy + 6);
+                    ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            }
+
+            // Record line
+            const recordPos = worldToScreen(RECORD, 0);
+            if (recordPos.x < W - 10) {
+                ctx.beginPath();
+                ctx.moveTo(recordPos.x, 50);
+                ctx.lineTo(recordPos.x, gy);
+                ctx.strokeStyle = 'rgba(244,67,54,0.4)';
+                ctx.lineWidth = 2;
+                ctx.setLineDash([8, 8]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                ctx.fillStyle = '#f44336';
+                ctx.font = 'bold 11px Segoe UI, sans-serif';
+                ctx.fillText('WORLD RECORD', recordPos.x, 45);
+                ctx.fillText('69.14m', recordPos.x, 60);
+            }
+
+            // Best distance line
+            if (bestDistance > 1) {
+                const bestPos = worldToScreen(bestDistance, 0);
+                if (bestPos.x < W - 10) {
+                    ctx.beginPath();
+                    ctx.moveTo(bestPos.x, 80);
+                    ctx.lineTo(bestPos.x, gy);
+                    ctx.strokeStyle = 'rgba(76,175,80,0.3)';
+                    ctx.lineWidth = 2;
+                    ctx.setLineDash([6, 6]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+
+                    ctx.fillStyle = '#4CAF50';
+                    ctx.font = '10px Segoe UI, sans-serif';
+                    ctx.fillText('Your Best', bestPos.x, 78);
+                }
+            }
+
+            ctx.textAlign = 'left';
+
+            // Height markers
+            ctx.fillStyle = 'rgba(254,250,224,0.2)';
+            ctx.font = '9px Segoe UI, sans-serif';
+            for (let h = 5; h <= 25; h += 5) {
+                const p = worldToScreen(0, -h);
+                ctx.fillText(h + 'm', 30, p.y + 3);
+                ctx.beginPath();
+                ctx.moveTo(55, p.y);
+                ctx.lineTo(W - 30, p.y);
+                ctx.strokeStyle = 'rgba(254,250,224,0.04)';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+
+            // Launch position
+            const launchPos = worldToScreen(0, 0);
+            ctx.beginPath();
+            ctx.arc(launchPos.x, launchPos.y, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+
+            // Thrower silhouette
+            ctx.fillStyle = 'rgba(254,250,224,0.15)';
+            ctx.beginPath();
+            ctx.ellipse(launchPos.x - 8, launchPos.y - 20, 5, 15, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(launchPos.x - 8, launchPos.y - 40, 6, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function drawOldTrails() {
+            for (const t of allTrails) {
+                if (t.length < 2) continue;
+                ctx.beginPath();
+                const p0 = worldToScreen(t[0].x, t[0].y);
+                ctx.moveTo(p0.x, p0.y);
+                for (let i = 1; i < t.length; i++) {
+                    const p = worldToScreen(t[i].x, t[i].y);
+                    ctx.lineTo(p.x, p.y);
+                }
+                ctx.strokeStyle = 'rgba(138,154,91,0.12)';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+        }
+
+        function drawCurrentTrail() {
+            if (trail.length < 2) return;
+            ctx.beginPath();
+            const p0 = worldToScreen(trail[0].x, trail[0].y);
+            ctx.moveTo(p0.x, p0.y);
+            for (let i = 1; i < trail.length; i++) {
+                const p = worldToScreen(trail[i].x, trail[i].y);
+                ctx.lineTo(p.x, p.y);
+            }
+
+            // Color based on phase
+            const phaseColor = plane && plane.phase === 'ascent' ? '#f44336' :
+                              plane && plane.phase === 'transition' ? '#FFC107' : '#4CAF50';
+            ctx.strokeStyle = phaseColor + 'aa';
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+        }
+
+        function drawPlane() {
+            if (!plane || !simulating) return;
+            const pos = worldToScreen(plane.x, plane.y);
+
+            ctx.save();
+            ctx.translate(pos.x, pos.y);
+            ctx.rotate(-plane.theta);
+
+            // Suzanne-shaped plane
+            ctx.beginPath();
+            ctx.moveTo(20, 0);
+            ctx.lineTo(-12, -8);
+            ctx.lineTo(-8, 0);
+            ctx.lineTo(-12, 8);
+            ctx.closePath();
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.moveTo(4, 0);
+            ctx.lineTo(-6, -14);
+            ctx.lineTo(-10, 0);
+            ctx.lineTo(-6, 14);
+            ctx.closePath();
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.fill();
+            ctx.strokeStyle = '#DDA15E';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.restore();
+
+            // Phase indicator
+            const phaseLabel = plane.phase === 'ascent' ? 'Ascending' :
+                              plane.phase === 'transition' ? 'Transitioning' : 'Gliding';
+            const phaseColor = plane.phase === 'ascent' ? '#f44336' :
+                              plane.phase === 'transition' ? '#FFC107' : '#4CAF50';
+            ctx.fillStyle = phaseColor;
+            ctx.font = '10px Segoe UI, sans-serif';
+            ctx.fillText(phaseLabel, pos.x + 15, pos.y - 10);
+
+            // Speed
+            const V = Math.sqrt(plane.vx * plane.vx + plane.vy * plane.vy);
+            ctx.fillStyle = 'rgba(254,250,224,0.5)';
+            ctx.fillText(V.toFixed(1) + ' m/s', pos.x + 15, pos.y + 5);
+        }
+
+        // Phase legend
+        function drawPhaseLegend() {
+            const lx = 10, ly = H * 0.1;
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.beginPath();
+            ctx.roundRect(lx, ly, 150, 75, 8);
+            ctx.fill();
+
+            ctx.fillStyle = '#FEFAE0';
+            ctx.font = 'bold 10px Segoe UI, sans-serif';
+            ctx.fillText('Flight Phases', lx + 10, ly + 16);
+
+            ctx.font = '10px Segoe UI, sans-serif';
+            const phases = [
+                { color: '#f44336', label: 'Ascent (javelin)' },
+                { color: '#FFC107', label: 'Transition (apex)' },
+                { color: '#4CAF50', label: 'Glide (optimal L/D)' }
+            ];
+            phases.forEach((p, i) => {
+                ctx.fillStyle = p.color;
+                ctx.fillRect(lx + 10, ly + 24 + i * 16, 10, 10);
+                ctx.fillStyle = '#FEFAE0';
+                ctx.fillText(p.label, lx + 26, ly + 33 + i * 16);
+            });
+        }
+
+        function animate() {
+            time += 0.016;
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, W, H);
+
+            // Message fade
+            if (messageTimer > 0) {
+                messageTimer -= 0.016;
+                if (messageTimer <= 0) {
+                    document.getElementById('message').style.opacity = 0;
+                }
+            }
+
+            drawScene();
+            drawOldTrails();
+
+            if (simulating && plane) {
+                for (let i = 0; i < 6; i++) {
+                    const alive = simulateStep(plane, 0.004);
+                    trail.push({ x: plane.x, y: plane.y });
+
+                    if (!alive) {
+                        simulating = false;
+                        const dist = plane.x;
+                        const distFt = dist * 3.28084;
+
+                        document.getElementById('lastDist').textContent = dist.toFixed(1) + 'm (' + Math.round(distFt) + ' ft)';
+
+                        if (dist > bestDistance) {
+                            bestDistance = dist;
+                            document.getElementById('bestDist').textContent = dist.toFixed(1);
+                            document.getElementById('bestFt').textContent = Math.round(distFt);
+                        }
+
+                        // Messages
+                        if (dist >= RECORD) {
+                            showMessage('NEW WORLD RECORD!', '#FFD700');
+                        } else if (dist >= RECORD * 0.9) {
+                            showMessage('So close! ' + dist.toFixed(1) + 'm', '#FFC107');
+                        } else if (dist >= RECORD * 0.7) {
+                            showMessage('Great throw! ' + dist.toFixed(1) + 'm', '#4CAF50');
+                        } else if (dist >= RECORD * 0.5) {
+                            showMessage('Good effort! ' + dist.toFixed(1) + 'm', '#8A9A5B');
+                        } else {
+                            showMessage(dist.toFixed(1) + 'm - Keep trying!', '#8A9A5B');
+                        }
+
+                        allTrails.push([...trail]);
+                        if (allTrails.length > 10) allTrails.shift();
+                        break;
+                    }
+                }
+            }
+
+            drawCurrentTrail();
+            drawPlane();
+            drawPhaseLegend();
+
+            requestAnimationFrame(animate);
+        }
+
+        window.reset = function() {
+            plane = null;
+            trail = [];
+            allTrails = [];
+            simulating = false;
+            bestDistance = 0;
+            attemptCount = 0;
+            document.getElementById('power').value = 22;
+            document.getElementById('angle').value = 40;
+            document.getElementById('nose').value = 4;
+            document.getElementById('trim').value = 2;
+            sliders.forEach(id => {
+                document.getElementById('v_' + id).textContent = document.getElementById(id).value;
+            });
+            document.getElementById('bestDist').textContent = '0.0';
+            document.getElementById('bestFt').textContent = '0';
+            document.getElementById('attemptNum').textContent = '0';
+            document.getElementById('lastDist').textContent = '--';
+        };
+
+        animate();
+    })();
+    </script>
+</body>
+</html>

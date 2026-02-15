@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Euler Column Buckling</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        .panel {
+            position: fixed; top: 10px; right: 10px; background: rgba(254,250,224,0.92);
+            backdrop-filter: blur(10px); border-radius: 12px; padding: 16px; z-index: 100;
+            color: #283618; min-width: 230px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        .panel h2 { font-size: 1rem; color: #606C38; margin-bottom: 8px; }
+        .panel label { font-size: 0.78rem; display: block; margin: 5px 0 2px; }
+        .panel input[type=range] { width: 100%; }
+        .panel .val { font-weight: bold; color: #606C38; }
+        .panel p { font-size: 0.75rem; line-height: 1.3; }
+        .btn {
+            background: #606C38; color: #FEFAE0; border: none; padding: 5px 10px;
+            border-radius: 6px; cursor: pointer; font-size: 0.75rem; margin: 2px;
+        }
+        .btn:hover { background: #8A9A5B; }
+        .btn.active { background: #DDA15E; }
+        .status { font-weight: bold; margin-top: 8px; padding: 6px; border-radius: 6px; text-align: center; font-size: 0.8rem; }
+        .info { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+            background: rgba(254,250,224,0.88); backdrop-filter: blur(10px); border-radius: 10px;
+            padding: 10px 18px; color: #283618; font-size: 0.8rem; z-index: 100; text-align: center;
+            max-width: 650px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" style="position:fixed;top:10px;left:10px;color:#8A9A5B;text-decoration:none;z-index:1000;font-size:1.2rem;">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="panel">
+        <h2>Euler Column Buckling</h2>
+        <p style="font-size:0.75rem; margin-bottom:6px;">End Conditions:</p>
+        <div>
+            <button class="btn active" id="ppBtn">Pin-Pin</button>
+            <button class="btn" id="pfBtn">Pin-Fixed</button>
+            <button class="btn" id="ffBtn">Fixed-Fixed</button>
+            <button class="btn" id="cfBtn">Cantilever</button>
+        </div>
+        <label>Applied Load: <span class="val" id="loadVal">50</span>% of P<sub>cr</sub></label>
+        <input type="range" id="loadSlider" min="0" max="150" value="50">
+        <label>Slenderness (L/r): <span class="val" id="slendVal">100</span></label>
+        <input type="range" id="slendSlider" min="20" max="200" value="100">
+        <label>Initial Imperfection: <span class="val" id="impVal">1</span>%</label>
+        <input type="range" id="impSlider" min="0" max="10" value="1">
+        <div class="status" id="statusBox" style="background:rgba(138,154,91,0.2); color:#8A9A5B;">
+            Stable: P &lt; P<sub>cr</sub>
+        </div>
+    </div>
+    <div class="info">
+        <strong>Euler's formula:</strong> P<sub>cr</sub> = &pi;&sup2;EI / (KL)&sup2; &mdash;
+        The critical load depends on end conditions (K factor), length, and stiffness.
+        At P<sub>cr</sub>, the column buckles laterally.
+    </div>
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    resize();
+    window.addEventListener('resize', resize);
+
+    const loadSlider = document.getElementById('loadSlider');
+    const slendSlider = document.getElementById('slendSlider');
+    const impSlider = document.getElementById('impSlider');
+    const loadVal = document.getElementById('loadVal');
+    const slendVal = document.getElementById('slendVal');
+    const impVal = document.getElementById('impVal');
+    const statusBox = document.getElementById('statusBox');
+
+    loadSlider.addEventListener('input', () => { loadVal.textContent = loadSlider.value; });
+    slendSlider.addEventListener('input', () => { slendVal.textContent = slendSlider.value; });
+    impSlider.addEventListener('input', () => { impVal.textContent = impSlider.value; });
+
+    let endCondition = 'pp';
+    const kFactors = { pp: 1.0, pf: 0.7, ff: 0.5, cf: 2.0 };
+    const kLabels = { pp: 'Pin-Pin (K=1.0)', pf: 'Pin-Fixed (K=0.7)', ff: 'Fixed-Fixed (K=0.5)', cf: 'Cantilever (K=2.0)' };
+    const eBtns = { pp: document.getElementById('ppBtn'), pf: document.getElementById('pfBtn'), ff: document.getElementById('ffBtn'), cf: document.getElementById('cfBtn') };
+    Object.keys(eBtns).forEach(k => eBtns[k].addEventListener('click', () => {
+        endCondition = k;
+        Object.values(eBtns).forEach(b => b.classList.remove('active'));
+        eBtns[k].classList.add('active');
+    }));
+
+    let time = 0;
+    let buckleAmount = 0;
+
+    function draw() {
+        time += 0.016;
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, W, H);
+
+        const loadRatio = parseFloat(loadSlider.value) / 100;
+        const slenderness = parseFloat(slendSlider.value);
+        const imperfection = parseFloat(impSlider.value) / 100;
+        const K = kFactors[endCondition];
+
+        const isBuckling = loadRatio > 1.0;
+        const targetBuckle = isBuckling ? Math.min((loadRatio - 1) * 2 + imperfection, 1) : imperfection * loadRatio;
+        buckleAmount += (targetBuckle - buckleAmount) * 0.05;
+
+        // Status
+        if (loadRatio >= 1.0) {
+            statusBox.style.background = 'rgba(217,74,74,0.2)';
+            statusBox.style.color = '#d94a4a';
+            statusBox.innerHTML = 'BUCKLING! P > P<sub>cr</sub> (' + (loadRatio * 100).toFixed(0) + '%)';
+        } else if (loadRatio > 0.8) {
+            statusBox.style.background = 'rgba(221,161,94,0.2)';
+            statusBox.style.color = '#DDA15E';
+            statusBox.innerHTML = 'Warning: P near P<sub>cr</sub> (' + (loadRatio * 100).toFixed(0) + '%)';
+        } else {
+            statusBox.style.background = 'rgba(138,154,91,0.2)';
+            statusBox.style.color = '#8A9A5B';
+            statusBox.innerHTML = 'Stable: P = ' + (loadRatio * 100).toFixed(0) + '% of P<sub>cr</sub>';
+        }
+
+        // Column visualization
+        const colX = W * 0.3;
+        const colTop = H * 0.15;
+        const colBot = H * 0.75;
+        const colLen = colBot - colTop;
+        const maxDefl = colLen * 0.2;
+
+        // Buckled shape depends on end conditions
+        const segments = 100;
+        const colWidth = 16;
+
+        function buckleShape(t) {
+            // t: 0=top, 1=bottom
+            const amp = buckleAmount * maxDefl;
+            if (endCondition === 'pp') return amp * Math.sin(Math.PI * t);
+            if (endCondition === 'pf') return amp * (Math.sin(Math.PI * t * 0.7) * 1.2 * t);
+            if (endCondition === 'ff') return amp * (1 - Math.cos(2 * Math.PI * t)) * 0.5;
+            // cantilever
+            return amp * (1 - Math.cos(Math.PI * t / 2));
+        }
+
+        // Draw original position (dashed)
+        ctx.strokeStyle = 'rgba(254,250,224,0.1)';
+        ctx.lineWidth = colWidth;
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.moveTo(colX, colTop);
+        ctx.lineTo(colX, colBot);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Draw buckled column
+        const stressColor = isBuckling ? '#d94a4a' : (loadRatio > 0.8 ? '#DDA15E' : '#8A9A5B');
+        ctx.strokeStyle = stressColor;
+        ctx.lineWidth = colWidth;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        for (let i = 0; i <= segments; i++) {
+            const t = i / segments;
+            const x = colX + buckleShape(t);
+            const y = colTop + t * colLen;
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Column core line
+        ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let i = 0; i <= segments; i++) {
+            const t = i / segments;
+            const x = colX + buckleShape(t);
+            const y = colTop + t * colLen;
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // End conditions visualization
+        if (endCondition === 'pp' || endCondition === 'pf') {
+            // Pin at top
+            ctx.beginPath();
+            ctx.arc(colX + buckleShape(0), colTop, 8, 0, Math.PI * 2);
+            ctx.strokeStyle = '#8A9A5B'; ctx.lineWidth = 2; ctx.stroke();
+        }
+        if (endCondition === 'ff' || endCondition === 'pf') {
+            // Fixed at bottom
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillRect(colX - 25, colBot, 50, 8);
+            for (let i = 0; i < 5; i++) {
+                ctx.beginPath();
+                ctx.moveTo(colX - 20 + i * 10, colBot + 8);
+                ctx.lineTo(colX - 25 + i * 10, colBot + 15);
+                ctx.strokeStyle = '#8A9A5B'; ctx.lineWidth = 1.5; ctx.stroke();
+            }
+        }
+        if (endCondition === 'pp') {
+            // Pin at bottom
+            ctx.beginPath();
+            ctx.arc(colX, colBot, 8, 0, Math.PI * 2);
+            ctx.strokeStyle = '#8A9A5B'; ctx.lineWidth = 2; ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(colX - 15, colBot + 15);
+            ctx.lineTo(colX + 15, colBot + 15);
+            ctx.lineTo(colX, colBot + 3);
+            ctx.closePath(); ctx.fillStyle = '#8A9A5B'; ctx.fill();
+        }
+        if (endCondition === 'ff') {
+            // Fixed at top
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillRect(colX - 25, colTop - 8, 50, 8);
+        }
+        if (endCondition === 'cf') {
+            // Fixed at bottom
+            ctx.fillStyle = '#8A9A5B';
+            ctx.fillRect(colX - 25, colBot, 50, 8);
+            for (let i = 0; i < 5; i++) {
+                ctx.beginPath();
+                ctx.moveTo(colX - 20 + i * 10, colBot + 8);
+                ctx.lineTo(colX - 25 + i * 10, colBot + 15);
+                ctx.strokeStyle = '#8A9A5B'; ctx.lineWidth = 1.5; ctx.stroke();
+            }
+            // Free at top - load arrow
+        }
+
+        // Applied load arrow
+        const pulse = 0.7 + 0.3 * Math.sin(time * 3);
+        const arrowLen = 30 + loadRatio * 40;
+        ctx.strokeStyle = `rgba(221,161,94,${pulse})`;
+        ctx.lineWidth = 3 + loadRatio * 2;
+        const topX = colX + buckleShape(0);
+        ctx.beginPath();
+        ctx.moveTo(topX, colTop - arrowLen - 10);
+        ctx.lineTo(topX, colTop - 3);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(topX - 8, colTop - 12);
+        ctx.lineTo(topX, colTop - 3);
+        ctx.lineTo(topX + 8, colTop - 12);
+        ctx.stroke();
+        ctx.fillStyle = '#DDA15E';
+        ctx.font = 'bold 12px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('P = ' + (loadRatio * 100).toFixed(0) + '% Pcr', topX, colTop - arrowLen - 18);
+
+        // Effective length diagram (right side)
+        const diagX = W * 0.6;
+        const diagW = W * 0.3;
+        const diagTop = H * 0.12;
+        const diagBot = H * 0.82;
+
+        // Draw all 4 buckling modes comparison
+        const modes = [
+            { key: 'pp', k: 1.0, label: 'Pin-Pin\nK=1.0', color: endCondition === 'pp' ? '#DDA15E' : 'rgba(138,154,91,0.4)' },
+            { key: 'pf', k: 0.7, label: 'Pin-Fixed\nK=0.7', color: endCondition === 'pf' ? '#DDA15E' : 'rgba(138,154,91,0.4)' },
+            { key: 'ff', k: 0.5, label: 'Fixed-Fixed\nK=0.5', color: endCondition === 'ff' ? '#DDA15E' : 'rgba(138,154,91,0.4)' },
+            { key: 'cf', k: 2.0, label: 'Cantilever\nK=2.0', color: endCondition === 'cf' ? '#DDA15E' : 'rgba(138,154,91,0.4)' }
+        ];
+
+        const modeSpacing = diagW / 4;
+        modes.forEach((mode, mi) => {
+            const mx = diagX + mi * modeSpacing + modeSpacing / 2;
+            const mH = (diagBot - diagTop) * 0.6;
+            const mTop = diagTop + 40;
+
+            // Column
+            ctx.strokeStyle = mode.color;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            const amp = 20;
+            for (let j = 0; j <= 50; j++) {
+                const t = j / 50;
+                let dx = 0;
+                if (mode.key === 'pp') dx = amp * Math.sin(Math.PI * t);
+                else if (mode.key === 'pf') dx = amp * Math.sin(Math.PI * t * 0.7) * 1.2 * t;
+                else if (mode.key === 'ff') dx = amp * (1 - Math.cos(2 * Math.PI * t)) * 0.5;
+                else dx = amp * (1 - Math.cos(Math.PI * t / 2));
+                const x = mx + dx;
+                const y = mTop + t * mH;
+                j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+
+            // Effective length bracket
+            const effLen = mH * mode.k;
+            ctx.strokeStyle = mode.color;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(mx - 20, mTop + mH - effLen);
+            ctx.lineTo(mx - 20, mTop + mH);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Pcr relative (1/K^2)
+            const pcrRel = 1 / (mode.k * mode.k);
+
+            // Labels
+            ctx.fillStyle = mode.color;
+            ctx.font = '10px "Segoe UI"';
+            ctx.textAlign = 'center';
+            const lines = mode.label.split('\n');
+            lines.forEach((line, li) => {
+                ctx.fillText(line, mx, mTop + mH + 20 + li * 14);
+            });
+            ctx.font = '9px monospace';
+            ctx.fillText('Pcr \u221D ' + pcrRel.toFixed(1), mx, mTop + mH + 52);
+        });
+
+        ctx.fillStyle = 'rgba(254,250,224,0.6)';
+        ctx.font = '13px "Segoe UI"';
+        ctx.textAlign = 'center';
+        ctx.fillText('Buckling Mode Shapes & Effective Length Factors', diagX + diagW / 2, diagTop + 20);
+
+        // Euler curve (bottom)
+        const curveX = W * 0.6, curveY = H * 0.72, curveW = diagW * 0.8, curveH = H * 0.2;
+        ctx.strokeStyle = 'rgba(254,250,224,0.2)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(curveX, curveY, curveW, curveH);
+
+        // Euler hyperbola
+        ctx.strokeStyle = stressColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 1; i <= 100; i++) {
+            const sr = 20 + (i / 100) * 180; // slenderness ratio
+            const stress = Math.PI * Math.PI / ((K * sr / 100) ** 2); // normalized
+            const x = curveX + (i / 100) * curveW;
+            const y = curveY + curveH - stress * curveH * 0.8;
+            i === 1 ? ctx.moveTo(x, Math.max(y, curveY)) : ctx.lineTo(x, Math.max(y, curveY));
+        }
+        ctx.stroke();
+
+        // Current point
+        const currStress = Math.PI * Math.PI / ((K * slenderness / 100) ** 2);
+        const dotX = curveX + ((slenderness - 20) / 180) * curveW;
+        const dotY = curveY + curveH - currStress * curveH * 0.8;
+        if (dotY >= curveY) {
+            ctx.beginPath();
+            ctx.arc(dotX, dotY, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+        }
+
+        ctx.fillStyle = 'rgba(254,250,224,0.4)';
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('Slenderness Ratio (L/r)', curveX + curveW / 2, curveY + curveH + 14);
+        ctx.save();
+        ctx.translate(curveX - 8, curveY + curveH / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillText('Pcr / A', 0, 0);
+        ctx.restore();
+
+        // Title
+        ctx.fillStyle = '#FEFAE0';
+        ctx.font = 'bold 18px "Segoe UI"';
+        ctx.textAlign = 'center';
+        ctx.fillText('Euler Column Buckling — ' + kLabels[endCondition], W / 2, 30);
+
+        requestAnimationFrame(draw);
+    }
+
+    window.reset = function() {
+        endCondition = 'pp';
+        Object.values(eBtns).forEach(b => b.classList.remove('active'));
+        eBtns.pp.classList.add('active');
+        loadSlider.value = 50; loadVal.textContent = '50';
+        slendSlider.value = 100; slendVal.textContent = '100';
+        impSlider.value = 1; impVal.textContent = '1';
+        buckleAmount = 0;
+    };
+
+    draw();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

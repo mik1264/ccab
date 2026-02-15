@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ceramic Phase Diagram - Silica-Alumina System</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a1a; color: #FEFAE0; font-family: Georgia, serif; overflow: hidden; }
+        canvas { display: block; cursor: crosshair; }
+        a { position: fixed; top: 10px; left: 10px; color: #8A9A5B; text-decoration: none; z-index: 1000; font-size: 1.2rem; }
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 12px; align-items: center; z-index: 100;
+            background: rgba(30,30,30,0.85); backdrop-filter: blur(10px);
+            padding: 12px 20px; border-radius: 12px; border: 1px solid #8A9A5B33;
+        }
+        .controls label { font-size: 0.8rem; }
+        .controls input[type="range"] { width: 120px; accent-color: #DDA15E; }
+        .controls button {
+            background: #606C38; color: #FEFAE0; border: none; padding: 8px 14px;
+            border-radius: 6px; cursor: pointer; font-size: 0.8rem;
+        }
+        .controls button:hover { background: #8A9A5B; }
+        .info-panel {
+            position: fixed; right: 20px; top: 60px; width: 260px;
+            background: rgba(30,30,30,0.9); backdrop-filter: blur(10px);
+            padding: 14px; border-radius: 10px; border: 1px solid #8A9A5B33;
+            z-index: 100; font-size: 0.8rem;
+        }
+        .info-panel h3 { color: #8A9A5B; font-size: 0.9rem; margin-bottom: 8px; }
+        .info-panel .phase-name { color: #DDA15E; font-size: 1rem; margin: 6px 0; }
+        .info-panel p { color: #aaa; line-height: 1.4; margin: 4px 0; }
+    </style>
+</head>
+<body>
+    <a href="index.html">&larr; Back</a>
+    <canvas id="canvas"></canvas>
+    <div class="info-panel" id="infoPanel">
+        <h3>Phase Information</h3>
+        <div class="phase-name" id="phaseName">Hover over diagram</div>
+        <p id="phaseDesc">Move cursor over the phase diagram to explore different regions of the silica-alumina binary system.</p>
+        <p style="margin-top: 10px; color: #666;" id="compInfo">--</p>
+    </div>
+    <div class="controls">
+        <label>Composition (% Al₂O₃)</label>
+        <input type="range" id="compSlider" min="0" max="100" value="50">
+        <label>Temperature (°C)</label>
+        <input type="range" id="tempSlider" min="1000" max="2100" value="1500">
+        <button id="resetBtn">Reset View</button>
+    </div>
+    <script src="../assets/js/enhance.js" defer></script>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        let W, H;
+        function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let mouseX = 0, mouseY = 0;
+        let animId;
+
+        // Phase diagram coordinates
+        const DIAGRAM = {
+            x: 60, y: 80,
+            get w() { return Math.min(W * 0.6, W - 340); },
+            get h() { return H - 200; },
+            minT: 1000, maxT: 2100,
+            // Composition: 0% = pure SiO2, 100% = pure Al2O3
+        };
+
+        // Key temperatures and boundaries
+        const EUTECTIC_TEMP = 1595; // SiO2-Mullite eutectic
+        const EUTECTIC_COMP = 5.5; // % Al2O3 at eutectic
+        const MULLITE_COMP_MIN = 71.8; // 3Al2O3.2SiO2 ~71.8% Al2O3
+        const MULLITE_COMP_MAX = 74;
+        const MULLITE_DECOMP = 1828; // Incongruent melting
+        const SILICA_MELT = 1726; // Cristobalite melting
+        const ALUMINA_MELT = 2072; // Alumina melting
+
+        // Liquidus curve points (approx)
+        const liquidusSiO2Side = [
+            { comp: 0, temp: SILICA_MELT },
+            { comp: 2, temp: 1700 },
+            { comp: 5.5, temp: EUTECTIC_TEMP },
+        ];
+
+        const liquidusMulliteSide = [
+            { comp: 5.5, temp: EUTECTIC_TEMP },
+            { comp: 15, temp: 1650 },
+            { comp: 30, temp: 1700 },
+            { comp: 50, temp: 1750 },
+            { comp: 60, temp: 1780 },
+            { comp: 71.8, temp: MULLITE_DECOMP },
+        ];
+
+        const liquidusAluminaSide = [
+            { comp: 71.8, temp: MULLITE_DECOMP },
+            { comp: 80, temp: 1860 },
+            { comp: 90, temp: 1950 },
+            { comp: 100, temp: ALUMINA_MELT },
+        ];
+
+        function compToX(comp) {
+            return DIAGRAM.x + (comp / 100) * DIAGRAM.w;
+        }
+
+        function tempToY(temp) {
+            return DIAGRAM.y + DIAGRAM.h - ((temp - DIAGRAM.minT) / (DIAGRAM.maxT - DIAGRAM.minT)) * DIAGRAM.h;
+        }
+
+        function xToComp(x) {
+            return ((x - DIAGRAM.x) / DIAGRAM.w) * 100;
+        }
+
+        function yToTemp(y) {
+            return DIAGRAM.minT + ((DIAGRAM.y + DIAGRAM.h - y) / DIAGRAM.h) * (DIAGRAM.maxT - DIAGRAM.minT);
+        }
+
+        function getLiquidusTemp(comp) {
+            let curves;
+            if (comp <= 5.5) curves = liquidusSiO2Side;
+            else if (comp <= 71.8) curves = liquidusMulliteSide;
+            else curves = liquidusAluminaSide;
+
+            for (let i = 0; i < curves.length - 1; i++) {
+                if (comp >= curves[i].comp && comp <= curves[i + 1].comp) {
+                    const t = (comp - curves[i].comp) / (curves[i + 1].comp - curves[i].comp);
+                    return curves[i].temp + t * (curves[i + 1].temp - curves[i].temp);
+                }
+            }
+            return curves[curves.length - 1].temp;
+        }
+
+        function getPhaseAtPoint(comp, temp) {
+            const liquidusT = getLiquidusTemp(comp);
+
+            if (temp >= liquidusT) return { name: 'Liquid', color: '#cc4444', desc: 'Fully molten ceramic melt. All crystalline phases dissolved.' };
+
+            if (temp >= EUTECTIC_TEMP && comp <= 5.5) {
+                return { name: 'Cristobalite + Liquid', color: '#cc8844', desc: 'Cristobalite crystals floating in silica-rich melt.' };
+            }
+
+            if (temp >= EUTECTIC_TEMP && comp > 5.5 && comp <= MULLITE_COMP_MIN) {
+                if (temp >= getLiquidusTemp(comp)) return { name: 'Liquid', color: '#cc4444', desc: 'Fully molten.' };
+                return { name: 'Mullite + Liquid', color: '#aa8844', desc: 'Mullite needles growing in silicate melt. This is where pottery vitrifies.' };
+            }
+
+            if (comp >= MULLITE_COMP_MIN && comp <= MULLITE_COMP_MAX && temp < MULLITE_DECOMP) {
+                return { name: 'Mullite (3Al₂O₃·2SiO₂)', color: '#8A9A5B', desc: 'Pure mullite phase. Needle-shaped crystals that give fired ceramics their strength.' };
+            }
+
+            if (comp > MULLITE_COMP_MAX && temp < liquidusT) {
+                if (temp > MULLITE_DECOMP - 100) return { name: 'Corundum + Liquid', color: '#8866aa', desc: 'Alpha-alumina (corundum) with residual melt.' };
+                return { name: 'Corundum + Mullite', color: '#6666aa', desc: 'High-alumina refractories. Extremely heat resistant.' };
+            }
+
+            if (temp < EUTECTIC_TEMP) {
+                if (comp < 5) return { name: 'Cristobalite + Mullite', color: '#886644', desc: 'Silica-rich stoneware. Common in earthenware and basic ceramics.' };
+                if (comp < MULLITE_COMP_MIN) return { name: 'Mullite + Cristobalite', color: '#777755', desc: 'Classic stoneware/porcelain composition. Mullite needles in glassy silica matrix.' };
+                return { name: 'Mullite + Corundum', color: '#667788', desc: 'High-alumina refractory. Used in kiln furniture and industrial ceramics.' };
+            }
+
+            return { name: 'Solid Solution', color: '#555', desc: 'Complex multi-phase region.' };
+        }
+
+        canvas.addEventListener('mousemove', (e) => { mouseX = e.clientX; mouseY = e.clientY; });
+
+        function drawPhaseDiagram() {
+            const D = DIAGRAM;
+
+            // Fill phase regions with subtle colors
+            for (let px = 0; px < D.w; px += 3) {
+                for (let py = 0; py < D.h; py += 3) {
+                    const comp = (px / D.w) * 100;
+                    const temp = D.minT + ((D.h - py) / D.h) * (D.maxT - D.minT);
+                    const phase = getPhaseAtPoint(comp, temp);
+                    ctx.fillStyle = phase.color + '25';
+                    ctx.fillRect(D.x + px, D.y + py, 3, 3);
+                }
+            }
+
+            // Draw liquidus curves
+            ctx.lineWidth = 2.5;
+
+            // SiO2 side liquidus
+            ctx.beginPath();
+            ctx.strokeStyle = '#DDA15E';
+            liquidusSiO2Side.forEach((pt, i) => {
+                const x = compToX(pt.comp);
+                const y = tempToY(pt.temp);
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Mullite side liquidus
+            ctx.beginPath();
+            ctx.strokeStyle = '#DDA15E';
+            liquidusMulliteSide.forEach((pt, i) => {
+                const x = compToX(pt.comp);
+                const y = tempToY(pt.temp);
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Alumina side liquidus
+            ctx.beginPath();
+            ctx.strokeStyle = '#DDA15E';
+            liquidusAluminaSide.forEach((pt, i) => {
+                const x = compToX(pt.comp);
+                const y = tempToY(pt.temp);
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Eutectic line
+            ctx.beginPath();
+            ctx.strokeStyle = '#8A9A5B';
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([5, 5]);
+            ctx.moveTo(compToX(0), tempToY(EUTECTIC_TEMP));
+            ctx.lineTo(compToX(MULLITE_COMP_MIN), tempToY(EUTECTIC_TEMP));
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Mullite vertical boundaries
+            ctx.beginPath();
+            ctx.strokeStyle = '#8A9A5B88';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.moveTo(compToX(MULLITE_COMP_MIN), tempToY(D.minT));
+            ctx.lineTo(compToX(MULLITE_COMP_MIN), tempToY(MULLITE_DECOMP));
+            ctx.moveTo(compToX(MULLITE_COMP_MAX), tempToY(D.minT));
+            ctx.lineTo(compToX(MULLITE_COMP_MAX), tempToY(MULLITE_DECOMP));
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Axes
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(D.x, D.y);
+            ctx.lineTo(D.x, D.y + D.h);
+            ctx.lineTo(D.x + D.w, D.y + D.h);
+            ctx.stroke();
+
+            // Temperature axis labels
+            ctx.fillStyle = '#888';
+            ctx.font = '10px Georgia';
+            ctx.textAlign = 'right';
+            for (let t = 1000; t <= 2100; t += 200) {
+                const y = tempToY(t);
+                ctx.fillText(`${t}°C`, D.x - 6, y + 4);
+                ctx.beginPath();
+                ctx.moveTo(D.x, y);
+                ctx.lineTo(D.x + D.w, y);
+                ctx.strokeStyle = '#ffffff08';
+                ctx.stroke();
+            }
+
+            // Composition axis labels
+            ctx.textAlign = 'center';
+            for (let c = 0; c <= 100; c += 10) {
+                const x = compToX(c);
+                ctx.fillStyle = '#888';
+                ctx.fillText(`${c}%`, x, D.y + D.h + 16);
+            }
+
+            // Axis titles
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '12px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('% Al₂O₃ (weight)', D.x + D.w / 2, D.y + D.h + 32);
+            ctx.save();
+            ctx.translate(D.x - 40, D.y + D.h / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText('Temperature (°C)', 0, 0);
+            ctx.restore();
+
+            // End labels
+            ctx.font = '11px Georgia';
+            ctx.fillStyle = '#DDA15E';
+            ctx.textAlign = 'center';
+            ctx.fillText('SiO₂', D.x, D.y + D.h + 46);
+            ctx.fillText('Al₂O₃', D.x + D.w, D.y + D.h + 46);
+
+            // Key point labels
+            ctx.font = '9px Georgia';
+            ctx.fillStyle = '#FEFAE0';
+
+            // Eutectic point
+            ctx.beginPath();
+            ctx.arc(compToX(EUTECTIC_COMP), tempToY(EUTECTIC_TEMP), 4, 0, Math.PI * 2);
+            ctx.fillStyle = '#DDA15E';
+            ctx.fill();
+            ctx.fillStyle = '#FEFAE0';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Eutectic ${EUTECTIC_TEMP}°C`, compToX(EUTECTIC_COMP) + 8, tempToY(EUTECTIC_TEMP) - 4);
+
+            // Mullite label
+            ctx.fillStyle = '#8A9A5B';
+            ctx.textAlign = 'center';
+            ctx.font = 'bold 10px Georgia';
+            ctx.fillText('Mullite', compToX(72.5), tempToY(1400));
+
+            // Mouse crosshair
+            if (mouseX > D.x && mouseX < D.x + D.w && mouseY > D.y && mouseY < D.y + D.h) {
+                ctx.strokeStyle = 'rgba(254,250,224,0.3)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([2, 4]);
+                ctx.beginPath();
+                ctx.moveTo(mouseX, D.y);
+                ctx.lineTo(mouseX, D.y + D.h);
+                ctx.moveTo(D.x, mouseY);
+                ctx.lineTo(D.x + D.w, mouseY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                const comp = xToComp(mouseX);
+                const temp = yToTemp(mouseY);
+                const phase = getPhaseAtPoint(comp, temp);
+
+                document.getElementById('phaseName').textContent = phase.name;
+                document.getElementById('phaseDesc').textContent = phase.desc;
+                document.getElementById('compInfo').textContent = `${comp.toFixed(1)}% Al₂O₃ | ${temp.toFixed(0)}°C`;
+
+                // Highlight point
+                ctx.beginPath();
+                ctx.arc(mouseX, mouseY, 5, 0, Math.PI * 2);
+                ctx.fillStyle = '#DDA15E';
+                ctx.fill();
+            }
+
+            // Slider crosshair
+            const sliderComp = parseFloat(document.getElementById('compSlider').value);
+            const sliderTemp = parseFloat(document.getElementById('tempSlider').value);
+            const sx = compToX(sliderComp);
+            const sy = tempToY(sliderTemp);
+
+            ctx.beginPath();
+            ctx.arc(sx, sy, 7, 0, Math.PI * 2);
+            ctx.strokeStyle = '#FEFAE0';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fill();
+        }
+
+        function animate() {
+            animId = requestAnimationFrame(animate);
+
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, W, H);
+
+            // Title
+            ctx.fillStyle = '#8A9A5B';
+            ctx.font = '24px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillText('Ceramic Phase Diagram', W / 2, 40);
+            ctx.font = '14px Georgia';
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fillText('SiO₂ - Al₂O₃ binary system with mullite and eutectic', W / 2, 62);
+
+            drawPhaseDiagram();
+        }
+
+        animate();
+
+        window.reset = function() {
+            document.getElementById('compSlider').value = 50;
+            document.getElementById('tempSlider').value = 1500;
+        };
+    </script>
+</body>
+</html>
