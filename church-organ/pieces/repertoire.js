@@ -35,7 +35,15 @@ window.Repertoire = (function() {
         'PIECE_PASSACAGLIA', 'PIECE_SHEEP_SAFELY', 'PIECE_PRELUDE_A_MINOR', 'PIECE_NUN_KOMM',
         'PIECE_WEDDING_MARCH', 'PIECE_BRIDAL_CHORUS', 'PIECE_QUEEN_OF_SHEBA', 'PIECE_PURCELL_TRUMPET',
         'PIECE_WIDOR_TOCCATA', 'PIECE_POMP_CIRCUMSTANCE', 'PIECE_ALBINONI_ADAGIO', 'PIECE_BOELLMANN_TOCCATA',
-        'PIECE_HORNPIPE', 'PIECE_WESTMINSTER', 'PIECE_ORGAN_SYMPHONY', 'PIECE_BUXTEHUDE'
+        'PIECE_HORNPIPE', 'PIECE_WESTMINSTER', 'PIECE_ORGAN_SYMPHONY', 'PIECE_BUXTEHUDE',
+        'PIECE_BACH_FANTASY_G', 'PIECE_BACH_TOCCATA_C', 'PIECE_BACH_ST_ANNE',
+        'PIECE_BACH_DULCI_JUBILO', 'PIECE_BACH_KOMM_SUSSER',
+        'PIECE_FRANCK_CHORAL3', 'PIECE_FRANCK_HEROIQUE', 'PIECE_VIERNE_FINAL',
+        'PIECE_DUPRE_PRELUDE_B', 'PIECE_WIDOR_ALLEGRO6',
+        'PIECE_MENDELSSOHN_SONATA1', 'PIECE_LISZT_BACH',
+        'PIECE_REGER_PASSACAGLIA', 'PIECE_RHEINBERGER_SONATA4',
+        'PIECE_HANDEL_CUCKOO', 'PIECE_SWEELINCK_JUNGES',
+        'PIECE_MESSIAEN_APPARITION', 'PIECE_GUILMANT_MARCH'
     ];
 
     const FULL_FILES = [
@@ -48,7 +56,9 @@ window.Repertoire = (function() {
         'pieces/bach-toccata.js', 'pieces/bach-chorales.js',
         'pieces/bach-keyboard.js', 'pieces/pachelbel-clarke.js',
         'pieces/bach-organ-2.js', 'pieces/wedding-ceremonial.js',
-        'pieces/romantic-works.js', 'pieces/baroque-diverse.js'
+        'pieces/romantic-works.js', 'pieces/baroque-diverse.js',
+        'pieces/bach-major-works.js', 'pieces/french-romantic.js',
+        'pieces/german-romantic.js', 'pieces/early-and-modern.js'
     ];
 
     // --- CSS ---
