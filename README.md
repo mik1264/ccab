@@ -1,12 +1,12 @@
 # CCAB - Claude Code and Algorithmic Beauty
 
-> **3,000+ Interactive Web Visualizations** across 160 galleries showcasing the creative possibilities of modern web technologies
+> **3,713 Interactive Web Visualizations** across 228 galleries showcasing the creative possibilities of modern web technologies
 
 A comprehensive collection of creative coding demonstrations spanning vanilla JavaScript, advanced graphics frameworks, scientific simulations, and cutting-edge web APIs. All demos are self-contained HTML files requiring no build process—just open and explore.
 
 ## New Features (December 2025)
 
-- **Gallery Search** - Search across all 1,530+ demos by title, technology, or category
+- **Gallery Search** - Search indexed demos by title, technology, or category
 - **Offline Support** - Service worker caches visited demos for offline viewing
 - **PWA Ready** - Install as a Progressive Web App on mobile/desktop
 - **Accessibility** - Reduced motion support, seizure warnings, keyboard navigation
@@ -14,11 +14,11 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 
 ## 📖 Complete Documentation
 
-**[→ View the Master Catalog](documentation/MASTER_CATALOG.md)** - Comprehensive listing of all 1,000+ demos with descriptions
+**[→ View the Master Catalog](documentation/MASTER_CATALOG.md)** - Comprehensive listing of all 3,713 demos across 228 galleries
 
 ## 🎨 What's Inside
 
-### 52 Gallery Categories • 1001 Visualizations
+### 228 Galleries • 3,713 Visualizations
 
 **Core Graphics & 3D (11 galleries, 200+ demos)**
 - 🎭 **Three.js** - 3D models, particles, advanced shader effects (36 demos)
@@ -90,10 +90,10 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 
 ```
 ccab/
-├── index.html                          # Main gallery (47 categories)
+├── index.html                          # Main gallery
 │
 ├── documentation/                      # Comprehensive documentation
-│   ├── MASTER_CATALOG.md              # Complete catalog of all 1,000+ demos
+│   ├── MASTER_CATALOG.md              # Complete catalog of all 3,713 demos
 │   └── galleries/                     # Detailed gallery documentation
 │       ├── threejs.md                 # Three.js demos documentation
 │       ├── webgl-shaders.md           # WebGL demos documentation
@@ -158,10 +158,10 @@ Explore cutting-edge techniques:
 
 ## 📊 Statistics
 
-- **Total Visualizations**: 3,000+
-- **Gallery Categories**: 160
+- **Total Visualizations**: 3,713
+- **Galleries**: 228
 - **Technologies**: 10+ frameworks/APIs
-- **Largest Gallery**: NetLogo Simulations III (1,056 demos)
+- **Largest Gallery**: Surprising Paradoxes (514 demos)
 - **Lines of Code**: 200,000+
 - **Browser Compatibility**: Modern evergreen browsers
 - **Performance Target**: 60 FPS
@@ -192,7 +192,7 @@ Explore cutting-edge techniques:
 ## 📚 Documentation
 
 ### Gallery Documentation
-- **[MASTER_CATALOG.md](documentation/MASTER_CATALOG.md)** - Complete catalog of all 1,000+ demos
+- **[MASTER_CATALOG.md](documentation/MASTER_CATALOG.md)** - Complete catalog of all 3,713 demos across 228 galleries
 - **[threejs.md](documentation/galleries/threejs.md)** - Three.js 3D visualizations (36 demos)
 - **[webgl-shaders.md](documentation/galleries/webgl-shaders.md)** - WebGL shader programming (29 demos)
 - **[d3js.md](documentation/galleries/d3js.md)** - D3.js data visualizations (18 demos)
@@ -302,4 +302,4 @@ Built with:
 
 **Explore. Learn. Create.** 🚀
 
-*3,000+ interactive visualizations across 160 galleries demonstrating the creative possibilities of web technologies*
+*3,713 interactive visualizations across 228 galleries demonstrating the creative possibilities of web technologies*

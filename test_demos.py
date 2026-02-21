@@ -29,16 +29,16 @@ TEST_DEMOS = [
 
     # Three.js
     {"path": "threejs/01-rotating-cube.html", "name": "Three.js Rotating Cube", "category": "threejs"},
-    {"path": "threejs/05-particle-system.html", "name": "Three.js Particles", "category": "threejs"},
+    {"path": "threejs/05-sphere-wireframe.html", "name": "Three.js Wireframe Sphere", "category": "threejs"},
 
     # WebGL Shaders
-    {"path": "webgl-shaders/basic/01-rainbow-gradient.html", "name": "WebGL Rainbow", "category": "webgl-shaders"},
+    {"path": "webgl-shaders/29-plasma-effect.html", "name": "WebGL Plasma Effect", "category": "webgl-shaders"},
 
     # P5.js
-    {"path": "p5-generative-art/01-perlin-flow-field.html", "name": "P5 Flow Field", "category": "p5-generative-art"},
+    {"path": "p5-generative-art/01-flow-field.html", "name": "P5 Flow Field", "category": "p5-generative-art"},
 
     # D3.js
-    {"path": "d3js/force-directed/01-basic-force-directed.html", "name": "D3 Force Directed", "category": "d3js"},
+    {"path": "d3js/force-directed/01-basic-network.html", "name": "D3 Force Directed", "category": "d3js"},
 
     # Algorithmic Art
     {"path": "algorithmic-art/index.html", "name": "Algorithmic Art Gallery", "category": "algorithmic-art"},
@@ -47,10 +47,10 @@ TEST_DEMOS = [
     {"path": "altruism-evolution/01-classic-grid.html", "name": "Altruism Classic", "category": "altruism-evolution"},
 
     # Wolfram CA
-    {"path": "wolfram-ca/rule-30.html", "name": "Wolfram Rule 30", "category": "wolfram-ca"},
+    {"path": "wolfram-ca/index.html", "name": "Wolfram CA Gallery", "category": "wolfram-ca"},
 
     # WebGPU
-    {"path": "webgpu/01-compute-mandelbrot.html", "name": "WebGPU Mandelbrot", "category": "webgpu"},
+    {"path": "webgpu/01-nbody-gpu.html", "name": "WebGPU N-Body", "category": "webgpu"},
 ]
 
 def test_demo(page, demo):
