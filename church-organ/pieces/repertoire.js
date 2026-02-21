@@ -43,7 +43,22 @@ window.Repertoire = (function() {
         'PIECE_MENDELSSOHN_SONATA1', 'PIECE_LISZT_BACH',
         'PIECE_REGER_PASSACAGLIA', 'PIECE_RHEINBERGER_SONATA4',
         'PIECE_HANDEL_CUCKOO', 'PIECE_SWEELINCK_JUNGES',
-        'PIECE_MESSIAEN_APPARITION', 'PIECE_GUILMANT_MARCH'
+        'PIECE_MESSIAEN_APPARITION', 'PIECE_GUILMANT_MARCH',
+        'PIECE_BACH_PRELUDE_D', 'PIECE_BACH_WEDGE', 'PIECE_BACH_TOCCATA_F',
+        'PIECE_BACH_DORIAN', 'PIECE_BACH_PIECE_ORGUE', 'PIECE_BACH_ICH_RUF',
+        'PIECE_FRESCOBALDI_ELEVAZIONE', 'PIECE_COUPERIN_OFFERTOIRE',
+        'PIECE_GRIGNY_TIERCE', 'PIECE_BRUHNS_E_MINOR',
+        'PIECE_BOHM_VATER', 'PIECE_PACHELBEL_CHACONNE',
+        'PIECE_FRANCK_CHORAL1', 'PIECE_FRANCK_CHORAL2', 'PIECE_FRANCK_PRELUDE',
+        'PIECE_VIERNE_FINAL2', 'PIECE_WIDOR_MARCH', 'PIECE_VIERNE_NAIADES',
+        'PIECE_ALAIN_LITANIES', 'PIECE_DURUFLE_TOCCATA', 'PIECE_DURUFLE_ALAIN',
+        'PIECE_MESSIAEN_DIEU', 'PIECE_LANGLAIS_TE_DEUM', 'PIECE_DUPRE_FUGUE_G',
+        'PIECE_BRAHMS_ROSE', 'PIECE_BRAHMS_WELT', 'PIECE_MENDELSSOHN_SONATA3',
+        'PIECE_REGER_TOCCATA', 'PIECE_REGER_BENEDICTUS', 'PIECE_KARG_ELERT_MARCHE',
+        'PIECE_ELGAR_SONATA', 'PIECE_PARRY_EVENTIDE', 'PIECE_WHITLOCK_FOLK',
+        'PIECE_HOWELLS_PSALM', 'PIECE_WALTON_CROWN', 'PIECE_STANFORD_FANTASIA',
+        'PIECE_BACH_VIVALDI', 'PIECE_BARBER_ADAGIO', 'PIECE_HANDEL_LARGO',
+        'PIECE_GIGOUT_TOCCATA', 'PIECE_LEFEBURE_SORTIE', 'PIECE_MULET_CARILLON'
     ];
 
     const FULL_FILES = [
@@ -58,7 +73,11 @@ window.Repertoire = (function() {
         'pieces/bach-organ-2.js', 'pieces/wedding-ceremonial.js',
         'pieces/romantic-works.js', 'pieces/baroque-diverse.js',
         'pieces/bach-major-works.js', 'pieces/french-romantic.js',
-        'pieces/german-romantic.js', 'pieces/early-and-modern.js'
+        'pieces/german-romantic.js', 'pieces/early-and-modern.js',
+        'pieces/bach-organ-3.js', 'pieces/early-baroque.js',
+        'pieces/french-symphonic-1.js', 'pieces/french-symphonic-2.js',
+        'pieces/german-late-romantic.js', 'pieces/english-organ.js',
+        'pieces/transcriptions-concert.js'
     ];
 
     // --- CSS ---
