@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Volumetric God Rays | Three.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; overflow: hidden; }
+        canvas { display: block; }
+
+        .back-link {
+            position: fixed;
+            top: 14px;
+            left: 14px;
+            color: #fff;
+            text-decoration: none;
+            z-index: 1000;
+            font-size: 0.95rem;
+            font-family: 'Nunito', 'Segoe UI', sans-serif;
+            background: rgba(0, 0, 0, 0.35);
+            padding: 6px 16px;
+            border-radius: 20px;
+            backdrop-filter: blur(6px);
+            transition: background 0.2s ease;
+            letter-spacing: 0.02em;
+        }
+        .back-link:hover { background: rgba(0, 0, 0, 0.6); }
+
+        .info-panel {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.75);
+            font-family: 'Nunito', 'Segoe UI', sans-serif;
+            font-size: 0.85rem;
+            background: rgba(0, 0, 0, 0.35);
+            padding: 8px 20px;
+            border-radius: 20px;
+            backdrop-filter: blur(6px);
+            white-space: nowrap;
+            pointer-events: none;
+            letter-spacing: 0.03em;
+        }
+
+        .time-label {
+            position: fixed;
+            top: 14px;
+            right: 14px;
+            color: rgba(255, 255, 255, 0.85);
+            font-family: 'Nunito', 'Segoe UI', sans-serif;
+            font-size: 0.85rem;
+            background: rgba(0, 0, 0, 0.35);
+            padding: 8px 16px;
+            border-radius: 14px;
+            backdrop-filter: blur(6px);
+            z-index: 1000;
+            pointer-events: none;
+            letter-spacing: 0.04em;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&#8592; Three.js VFX</a>
+    <div class="time-label" id="timeLabel">Dawn</div>
+    <div class="info-panel">Volumetric God Rays &mdash; Drag to orbit &bull; Scroll to zoom</div>
+
+    <!-- GSAP must load before the module script -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.175.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.175.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls }   from 'three/addons/controls/OrbitControls.js';
+    import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+    import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+    import { ShaderPass }      from 'three/addons/postprocessing/ShaderPass.js';
+    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+    import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
+
+    // =========================================================================
+    // God Ray radial-blur post-processing shader
+    // =========================================================================
+    const GodRayShader = {
+        uniforms: {
+            tDiffuse:    { value: null },
+            sunPosition: { value: new THREE.Vector2(0.5, 0.5) },
+            exposure:    { value: 0.55 },
+            decay:       { value: 0.94 },
+            density:     { value: 0.97 },
+            weight:      { value: 0.38 },
+            samples:     { value: 100 },
+            rayStrength:  { value: 1.0 }  // driven by sun elevation
+        },
+        vertexShader: /* glsl */`
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: /* glsl */`
+            uniform sampler2D tDiffuse;
+            uniform vec2  sunPosition;
+            uniform float exposure;
+            uniform float decay;
+            uniform float density;
+            uniform float weight;
+            uniform int   samples;
+            uniform float rayStrength;
+            varying vec2 vUv;
+
+            void main() {
+                vec2 texCoord = vUv;
+                vec2 delta    = (texCoord - sunPosition) * (1.0 / float(100) * density);
+                float illum   = 1.0;
+                vec4  rays    = vec4(0.0);
+
+                for (int i = 0; i < 100; i++) {
+                    if (i >= samples) break;
+                    texCoord -= delta;
+                    vec4 samp  = texture2D(tDiffuse, clamp(texCoord, 0.0, 1.0));
+                    samp      *= illum * weight;
+                    rays      += samp;
+                    illum     *= decay;
+                }
+
+                vec4 base = texture2D(tDiffuse, vUv);
+                gl_FragColor = base + rays * exposure * rayStrength;
+            }
+        `
+    };
+
+    // =========================================================================
+    // Renderer
+    // =========================================================================
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+    renderer.toneMapping       = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    document.body.appendChild(renderer.domElement);
+
+    // =========================================================================
+    // Scene
+    // =========================================================================
+    const scene = new THREE.Scene();
+
+    // Atmospheric haze — color is updated dynamically each frame
+    scene.fog = new THREE.FogExp2(0x000000, 0.028);
+
+    // =========================================================================
+    // Camera
+    // =========================================================================
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 600);
+    camera.position.set(0, 6, 22);
+    camera.lookAt(0, 3, 0);
+
+    // =========================================================================
+    // Controls
+    // =========================================================================
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping  = true;
+    controls.dampingFactor  = 0.06;
+    controls.minDistance    = 5;
+    controls.maxDistance    = 60;
+    controls.maxPolarAngle  = Math.PI * 0.49;
+    controls.target.set(0, 3, 0);
+
+    // =========================================================================
+    // Post-processing composer
+    // =========================================================================
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+
+    // Bloom for the sun disc glow
+    const bloomPass = new UnrealBloomPass(
+        new THREE.Vector2(window.innerWidth, window.innerHeight),
+        1.8,   // strength
+        0.5,   // radius
+        0.15   // threshold
+    );
+    composer.addPass(bloomPass);
+
+    // God ray radial blur
+    const godRayPass = new ShaderPass(GodRayShader);
+    composer.addPass(godRayPass);
+
+    // Tone-map + gamma correct
+    composer.addPass(new OutputPass());
+
+    // =========================================================================
+    // Sky dome (gradient — updated each frame via uniforms)
+    // =========================================================================
+    const skyGeo = new THREE.SphereGeometry(280, 32, 16);
+    const skyMat = new THREE.ShaderMaterial({
+        side: THREE.BackSide,
+        depthWrite: false,
+        fog: false,
+        uniforms: {
+            uHorizon: { value: new THREE.Color(0xff6b1a) },
+            uZenith:  { value: new THREE.Color(0x0b0020) },
+        },
+        vertexShader: /* glsl */`
+            varying vec3 vPos;
+            void main() {
+                vPos = position;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: /* glsl */`
+            uniform vec3 uHorizon;
+            uniform vec3 uZenith;
+            varying vec3 vPos;
+            void main() {
+                float t = clamp(vPos.y / 280.0, 0.0, 1.0);
+                vec3  sky = mix(uHorizon, uZenith, pow(t, 0.7));
+                gl_FragColor = vec4(sky, 1.0);
+            }
+        `
+    });
+    const skyDome = new THREE.Mesh(skyGeo, skyMat);
+    scene.add(skyDome);
+
+    // =========================================================================
+    // Star field (visible at night/dawn only — toggled via opacity)
+    // =========================================================================
+    const STAR_COUNT = 3000;
+    const starPositions = new Float32Array(STAR_COUNT * 3);
+    for (let i = 0; i < STAR_COUNT; i++) {
+        const phi   = Math.acos(2 * Math.random() - 1);
+        const theta = 2 * Math.PI * Math.random();
+        const r     = 270;
+        starPositions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
+        starPositions[i * 3 + 1] = Math.abs(r * Math.cos(phi));   // upper hemisphere
+        starPositions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+    }
+    const starGeo = new THREE.BufferGeometry();
+    starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.7, sizeAttenuation: true, transparent: true, opacity: 1.0, fog: false });
+    const stars   = new THREE.Points(starGeo, starMat);
+    scene.add(stars);
+
+    // =========================================================================
+    // Sun sphere (bright emissive — becomes the source of god rays)
+    // =========================================================================
+    const sunGeo = new THREE.SphereGeometry(0.55, 32, 32);
+    const sunMat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false });
+    const sunSphere = new THREE.Mesh(sunGeo, sunMat);
+    scene.add(sunSphere);
+
+    // Sun halo flare (additive blended disc, slightly larger)
+    const haloGeo = new THREE.SphereGeometry(1.3, 32, 32);
+    const haloMat = new THREE.MeshBasicMaterial({
+        color: 0xffe8a0,
+        transparent: true,
+        opacity: 0.25,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        fog: false
+    });
+    const sunHalo = new THREE.Mesh(haloGeo, haloMat);
+    sunSphere.add(sunHalo);
+
+    // =========================================================================
+    // Sun directional light (follows the sphere)
+    // =========================================================================
+    const sunLight = new THREE.DirectionalLight(0xfff4e0, 3.0);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.set(2048, 2048);
+    sunLight.shadow.camera.near = 1;
+    sunLight.shadow.camera.far  = 120;
+    sunLight.shadow.camera.left = sunLight.shadow.camera.bottom = -30;
+    sunLight.shadow.camera.right = sunLight.shadow.camera.top  =  30;
+    sunLight.shadow.bias = -0.001;
+    scene.add(sunLight);
+    scene.add(sunLight.target);
+
+    // Ambient — warmed slightly
+    const ambient = new THREE.AmbientLight(0x8080a0, 0.25);
+    scene.add(ambient);
+
+    // =========================================================================
+    // Ground (grass)
+    // =========================================================================
+    const groundGeo = new THREE.PlaneGeometry(80, 80, 1, 1);
+    const groundMat = new THREE.MeshLambertMaterial({ color: 0x1a3a0e });
+    const ground    = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // =========================================================================
+    // Cloud blocks — dark occluders that cast god-ray shafts
+    // =========================================================================
+    const cloudMat = new THREE.MeshLambertMaterial({ color: 0x111118 });
+
+    function makeCloud(x, y, z, w, h, d) {
+        const geo  = new THREE.BoxGeometry(w, h, d);
+        const mesh = new THREE.Mesh(geo, cloudMat);
+        mesh.position.set(x, y, z);
+        mesh.castShadow    = true;
+        mesh.receiveShadow = false;
+        scene.add(mesh);
+        return mesh;
+    }
+
+    const clouds = [
+        // centre cluster
+        makeCloud( 0,  18, -30,  14,  4,  6),
+        makeCloud(-8,  22, -35,  10,  3,  5),
+        makeCloud( 9,  20, -28,  12,  3,  7),
+        makeCloud( 3,  25, -40,  16,  5,  8),
+        // left bank
+        makeCloud(-18, 16, -25,  10,  3,  5),
+        makeCloud(-22, 19, -32,   8,  4,  4),
+        makeCloud(-14, 21, -38,  12,  3,  6),
+        // right bank
+        makeCloud( 18, 15, -22,  10,  3,  5),
+        makeCloud( 24, 18, -30,   9,  4,  4),
+        makeCloud( 16, 22, -36,  13,  3,  6),
+        // high / wispy
+        makeCloud(-5,  30, -50,  18,  2,  5),
+        makeCloud( 8,  28, -45,  14,  2,  4),
+        makeCloud(-12, 26, -42,  11,  2,  4),
+        makeCloud( 20, 24, -48,  12,  2,  5),
+        makeCloud( -2, 32, -55,  20,  3,  6),
+    ];
+
+    // =========================================================================
+    // Silhouette scene: trees (cylinders + cones), distant hills
+    // =========================================================================
+    const trunkMat = new THREE.MeshLambertMaterial({ color: 0x1a0e05 });
+    const foliageMat = new THREE.MeshLambertMaterial({ color: 0x0c1a08 });
+
+    function makeTree(x, z, scale = 1) {
+        const group = new THREE.Group();
+
+        const trunkGeo = new THREE.CylinderGeometry(0.18 * scale, 0.28 * scale, 1.8 * scale, 6);
+        const trunk     = new THREE.Mesh(trunkGeo, trunkMat);
+        trunk.position.y = 0.9 * scale;
+        trunk.castShadow = true;
+        group.add(trunk);
+
+        // Three tiered cones for a pine silhouette
+        for (let i = 0; i < 3; i++) {
+            const radius = (1.5 - i * 0.3) * scale;
+            const height = (1.8 - i * 0.1) * scale;
+            const cGeo   = new THREE.ConeGeometry(radius, height, 7);
+            const cone   = new THREE.Mesh(cGeo, foliageMat);
+            cone.position.y = (1.8 + i * 1.1) * scale;
+            cone.castShadow  = true;
+            group.add(cone);
+        }
+
+        group.position.set(x, 0, z);
+        scene.add(group);
+    }
+
+    // Tree lines along the sides and back
+    const treePositions = [
+        [-14, -4], [-11, -5], [-8, -3], [-5, -4],  // left foreground
+        [ 5, -4],  [  8, -3], [11, -5], [14, -4],  // right foreground
+        [-20, -8], [-17, -9], [-13, -8],             // left mid
+        [ 13, -8], [ 17, -9], [20, -8],             // right mid
+        [-25,-12], [-22,-13], [-18,-11], [-15,-12], // left back
+        [ 15,-12], [ 18,-11], [22,-13], [25,-12],   // right back
+        [ -3,-14], [  0,-15], [  3,-14],            // centre back tree line
+    ];
+    treePositions.forEach(([x, z]) => makeTree(x, z, 0.7 + Math.random() * 0.6));
+
+    // Distant rolling hills (dark silhouette boxes)
+    const hillMat = new THREE.MeshLambertMaterial({ color: 0x0a1205 });
+    function makeHill(x, z, w, h, d) {
+        const g   = new THREE.BoxGeometry(w, h, d);
+        const m   = new THREE.Mesh(g, hillMat);
+        m.position.set(x, h / 2 - 0.5, z);
+        m.castShadow = true;
+        scene.add(m);
+    }
+    makeHill(-22, -40, 28, 9, 14);
+    makeHill(  4, -44, 32, 7, 12);
+    makeHill( 26, -38, 26, 8, 13);
+    makeHill(-10, -48, 36, 5, 10);
+
+    // =========================================================================
+    // Day-cycle state — driven by GSAP
+    // =========================================================================
+    // sunAngle: angle along arc where 0=dawn(east), PI=dusk(west)
+    // The sun travels on a half-ellipse arc in the XY plane (behind the clouds)
+    const dayState = {
+        angle:      0.05,   // starts just past horizon
+        arcRadius:  55,     // horizontal reach
+        arcHeight:  48,     // zenith height
+        arcZ:       -35     // depth behind scene
+    };
+
+    // Current sky + fog colors (lerped each frame)
+    const skyColors = {
+        horizon: new THREE.Color(),
+        zenith:  new THREE.Color(),
+        fog:     new THREE.Color(),
+        ambient: new THREE.Color()
+    };
+
+    // Time-of-day colour palette
+    const TOD = [
+        // angle 0    ..   PI
+        // Pre-dawn
+        { t: 0.00, horizon: 0x0b0520, zenith: 0x030208, fog: 0x060318, sunColor: 0xdd6040, ambient: 0x100820, sunIntensity: 0.3, bloomStrength: 2.4, rayStrength: 0.4, starOpacity: 1.0 },
+        // Sunrise
+        { t: 0.08, horizon: 0xff6010, zenith: 0x1a0a40, fog: 0x4a1808, sunColor: 0xffd080, ambient: 0x301020, sunIntensity: 2.0, bloomStrength: 2.2, rayStrength: 1.2, starOpacity: 0.4 },
+        // Golden morning
+        { t: 0.18, horizon: 0xffaa40, zenith: 0x2050c0, fog: 0x703820, sunColor: 0xffe8a0, ambient: 0x507090, sunIntensity: 3.0, bloomStrength: 1.6, rayStrength: 0.9, starOpacity: 0.0 },
+        // Mid morning
+        { t: 0.30, horizon: 0x80b8f0, zenith: 0x1840b0, fog: 0x6090c0, sunColor: 0xfff8e8, ambient: 0x70a0c8, sunIntensity: 3.8, bloomStrength: 1.2, rayStrength: 0.7, starOpacity: 0.0 },
+        // Midday
+        { t: 0.50, horizon: 0x90c4f8, zenith: 0x0e2899, fog: 0x70a8e0, sunColor: 0xfffaee, ambient: 0x80acd0, sunIntensity: 4.5, bloomStrength: 1.0, rayStrength: 0.5, starOpacity: 0.0 },
+        // Afternoon
+        { t: 0.70, horizon: 0x80b8f0, zenith: 0x1840b0, fog: 0x6090c0, sunColor: 0xffe8a0, ambient: 0x70a0c8, sunIntensity: 3.5, bloomStrength: 1.2, rayStrength: 0.7, starOpacity: 0.0 },
+        // Golden evening
+        { t: 0.82, horizon: 0xff9030, zenith: 0x1a1060, fog: 0x602010, sunColor: 0xffcc60, ambient: 0x604030, sunIntensity: 2.5, bloomStrength: 1.8, rayStrength: 1.0, starOpacity: 0.0 },
+        // Sunset
+        { t: 0.92, horizon: 0xff3a10, zenith: 0x1a0a30, fog: 0x3a0e08, sunColor: 0xff9040, ambient: 0x302010, sunIntensity: 1.8, bloomStrength: 2.2, rayStrength: 1.3, starOpacity: 0.3 },
+        // Post-sunset / night
+        { t: 1.00, horizon: 0x0b0520, zenith: 0x030208, fog: 0x060318, sunColor: 0xdd6040, ambient: 0x100820, sunIntensity: 0.3, bloomStrength: 2.4, rayStrength: 0.4, starOpacity: 1.0 },
+    ];
+
+    function sampleTOD(angle) {
+        // Map angle [0..PI] to t [0..1]
+        const t = angle / Math.PI;
+        let lo = TOD[0], hi = TOD[TOD.length - 1];
+        for (let i = 0; i < TOD.length - 1; i++) {
+            if (t >= TOD[i].t && t <= TOD[i + 1].t) { lo = TOD[i]; hi = TOD[i + 1]; break; }
+        }
+        const f = lo.t === hi.t ? 0 : (t - lo.t) / (hi.t - lo.t);
+
+        skyColors.horizon.set(lo.horizon).lerp(new THREE.Color(hi.horizon), f);
+        skyColors.zenith.set(lo.zenith).lerp(new THREE.Color(hi.zenith), f);
+        skyColors.fog.set(lo.fog).lerp(new THREE.Color(hi.fog), f);
+        skyColors.ambient.set(lo.ambient).lerp(new THREE.Color(hi.ambient), f);
+
+        return {
+            sunColor:      new THREE.Color(lo.sunColor).lerp(new THREE.Color(hi.sunColor), f),
+            sunIntensity:  lo.sunIntensity  + (hi.sunIntensity  - lo.sunIntensity)  * f,
+            bloomStrength: lo.bloomStrength + (hi.bloomStrength - lo.bloomStrength) * f,
+            rayStrength:   lo.rayStrength   + (hi.rayStrength   - lo.rayStrength)   * f,
+            starOpacity:   lo.starOpacity   + (hi.starOpacity   - lo.starOpacity)   * f,
+        };
+    }
+
+    // Time-of-day labels
+    const timeLabels = [
+        { t: 0.00, label: 'Pre-Dawn' },
+        { t: 0.08, label: 'Sunrise'  },
+        { t: 0.18, label: 'Morning'  },
+        { t: 0.35, label: 'Midday'   },
+        { t: 0.65, label: 'Afternoon'},
+        { t: 0.82, label: 'Sunset'   },
+        { t: 0.92, label: 'Dusk'     },
+        { t: 1.00, label: 'Night'    },
+    ];
+    const timeLabelEl = document.getElementById('timeLabel');
+
+    function getTimeLabel(t) {
+        let label = timeLabels[0].label;
+        for (const entry of timeLabels) {
+            if (t >= entry.t) label = entry.label;
+        }
+        return label;
+    }
+
+    // =========================================================================
+    // GSAP: Animate the sun along its arc, looping every 20 s
+    // =========================================================================
+    gsap.to(dayState, {
+        angle: Math.PI,
+        duration: 20,
+        ease: 'none',
+        repeat: -1,
+        onRepeat: () => { dayState.angle = 0.02; }
+    });
+
+    // Subtle cloud drift animation using GSAP
+    clouds.forEach((cloud, i) => {
+        gsap.to(cloud.position, {
+            x: cloud.position.x + (Math.random() - 0.5) * 8,
+            y: cloud.position.y + (Math.random() - 0.5) * 2,
+            duration: 12 + i * 1.7,
+            ease: 'sine.inOut',
+            yoyo: true,
+            repeat: -1
+        });
+    });
+
+    // =========================================================================
+    // Resize handler
+    // =========================================================================
+    function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        composer.setSize(window.innerWidth, window.innerHeight);
+        bloomPass.resolution.set(window.innerWidth, window.innerHeight);
+    }
+    window.addEventListener('resize', onResize);
+
+    // =========================================================================
+    // Animation loop
+    // =========================================================================
+    const _sunScreenVec = new THREE.Vector3();
+
+    renderer.setAnimationLoop(() => {
+
+        // --- Compute sun world position from angle -------------------------
+        const a = dayState.angle;
+        const sx = -Math.cos(a) * dayState.arcRadius;   // east -> west
+        const sy =  Math.sin(a) * dayState.arcHeight;
+        const sz = dayState.arcZ;
+        sunSphere.position.set(sx, sy, sz);
+
+        // --- Light follows sun --------------------------------------------
+        sunLight.position.copy(sunSphere.position);
+        sunLight.target.position.set(0, 0, 0);
+
+        // --- Sample day/night palette ------------------------------------
+        const tod = sampleTOD(a);
+
+        sunLight.color.copy(tod.sunColor);
+        sunLight.intensity = tod.sunIntensity;
+        sunMat.color.copy(tod.sunColor);
+        ambient.color.copy(skyColors.ambient);
+        ambient.intensity = 0.5;
+
+        // Sky dome gradient
+        skyMat.uniforms.uHorizon.value.copy(skyColors.horizon);
+        skyMat.uniforms.uZenith.value.copy(skyColors.zenith);
+
+        // Fog
+        scene.fog.color.copy(skyColors.fog);
+        scene.fog.density = 0.018 + (1 - Math.sin(a)) * 0.012;
+
+        // Bloom
+        bloomPass.strength = tod.bloomStrength;
+
+        // Stars fade out during day
+        starMat.opacity = tod.starOpacity;
+
+        // Halo opacity tracks sun elevation
+        const elevation = Math.sin(a);
+        haloMat.opacity = 0.15 + elevation * 0.25;
+
+        // God ray strength & exposure driven by time of day
+        godRayPass.uniforms.rayStrength.value  = tod.rayStrength;
+        godRayPass.uniforms.exposure.value     = 0.3 + elevation * 0.35;
+
+        // Project sun into screen space for god ray shader origin
+        _sunScreenVec.copy(sunSphere.position).project(camera);
+        godRayPass.uniforms.sunPosition.value.set(
+            (_sunScreenVec.x + 1) / 2,
+            (_sunScreenVec.y + 1) / 2
+        );
+
+        // If sun is below the horizon or very far off screen, reduce god rays
+        const offScreen = _sunScreenVec.z > 1 ||
+                          _sunScreenVec.x < -1.5 || _sunScreenVec.x > 2.5 ||
+                          _sunScreenVec.y < -1.5 || _sunScreenVec.y > 2.5;
+        if (offScreen) {
+            godRayPass.uniforms.rayStrength.value = 0;
+        }
+
+        // Time label
+        timeLabelEl.textContent = getTimeLabel(a / Math.PI);
+
+        // Update controls + render via composer
+        controls.update();
+        composer.render();
+    });
+    </script>
+</body>
+</html>
