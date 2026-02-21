@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Barnsley Fern IFS</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; }
+canvas { display:block; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#fps { position:fixed; top:12px; right:12px; color:#4f8; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#info { position:fixed; bottom:12px; left:12px; color:#8c8; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.7); padding:8px 12px; border-radius:6px; line-height:1.7; z-index:999; pointer-events:none; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">FPS: --</div>
+<div id="info">Barnsley Fern IFS<br>4 affine transforms, 600K+ points<br>Breathing animation active<br>Click to reset</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+new p5(function(p) {
+  let fpsArr = [], lastTime = 0;
+
+  // IFS transforms: [a, b, c, d, e, f, prob]
+  // f1: stem, f2: small leaflet, f3: left, f4: right
+  const BASE = [
+    [  0,      0,     0,     0.16, 0, 0,    0.01 ],  // stem
+    [  0.85,   0.04, -0.04,  0.85, 0, 1.60, 0.85 ],  // right leaflet
+    [  0.20,  -0.26,  0.23,  0.22, 0, 1.60, 0.07 ],  // left leaflet
+    [ -0.15,   0.28,  0.26,  0.24, 0, 0.44, 0.07 ],  // stem side
+  ];
+
+  let pts; // pixel buffer
+  let nPoints = 0;
+  let batchSize = 8000;
+  let maxPoints;
+  let x = 0, y = 0;
+
+  let breathPhase = 0;
+
+  function getTransforms() {
+    let b = Math.sin(breathPhase) * 0.04; // gentle breath
+    return [
+      [  0,      0,     0,     0.16 + b*0.3, 0, 0,    0.01 ],
+      [  0.85 + b*0.05, 0.04, -0.04,  0.85 - b*0.05, 0, 1.60, 0.85 ],
+      [  0.20,  -0.26 + b*0.1,  0.23,  0.22, 0, 1.60 + b*0.2, 0.07 ],
+      [ -0.15,   0.28 - b*0.1,  0.26,  0.24, 0, 0.44, 0.07 ],
+    ];
+  }
+
+  // Color by transform index and y position
+  function getColor(transform, yNorm) {
+    // yNorm 0..1 from base to tip
+    // stem: dark green, right: mid green, left: lime, side: yellow-green
+    const baseHues = [120, 130, 100, 110];
+    let hue = baseHues[transform];
+    let sat, bri;
+    if (transform === 0) {
+      sat = 70; bri = 30 + yNorm * 30;
+    } else {
+      sat = 80 - yNorm * 20;
+      bri = 25 + yNorm * 65;
+      hue += yNorm * 50; // shift toward yellow at tips
+    }
+    return hsbToRgb(hue, sat, bri);
+  }
+
+  function hsbToRgb(h, s, b) {
+    h = ((h % 360) + 360) % 360;
+    s /= 100; b /= 100;
+    let c = b * s, x2 = c * (1 - Math.abs((h / 60) % 2 - 1)), m = b - c;
+    let r, g, bv;
+    let hi = Math.floor(h / 60);
+    if (hi === 0) { r=c; g=x2; bv=0; }
+    else if (hi === 1) { r=x2; g=c; bv=0; }
+    else if (hi === 2) { r=0; g=c; bv=x2; }
+    else if (hi === 3) { r=0; g=x2; bv=c; }
+    else if (hi === 4) { r=x2; g=0; bv=c; }
+    else { r=c; g=0; bv=x2; }
+    return [(r+m)*255, (g+m)*255, (bv+m)*255];
+  }
+
+  function resetPoints() {
+    maxPoints = p.width * p.height;
+    pts = new Uint8ClampedArray(p.width * p.height * 4);
+    for (let i = 0; i < pts.length; i += 4) {
+      pts[i] = 2; pts[i+1] = 8; pts[i+2] = 2; pts[i+3] = 255;
+    }
+    nPoints = 0;
+    x = 0; y = 0;
+  }
+
+  p.setup = function() {
+    p.createCanvas(p.windowWidth, p.windowHeight);
+    p.pixelDensity(1);
+    p.background(2, 8, 2);
+    resetPoints();
+  };
+
+  function iterate(transforms) {
+    let pw = p.width, ph = p.height;
+    // Fern bounding box: x in [-2.2, 2.7], y in [0, 10]
+    let scaleX = pw * 0.18;
+    let scaleY = ph * 0.09;
+    let offX = pw / 2;
+    let offY = ph * 0.97;
+
+    p.loadPixels();
+    let dirty = false;
+
+    for (let it = 0; it < batchSize; it++) {
+      let rand = Math.random();
+      let cumul = 0;
+      let ti = 0;
+      for (let t = 0; t < transforms.length; t++) {
+        cumul += transforms[t][6];
+        if (rand < cumul) { ti = t; break; }
+      }
+      let tr = transforms[ti];
+      let nx = tr[0]*x + tr[1]*y + tr[4];
+      let ny = tr[2]*x + tr[3]*y + tr[5];
+      x = nx; y = ny;
+
+      let px = Math.floor(x * scaleX + offX);
+      let py = Math.floor(-y * scaleY + offY);
+      if (px >= 0 && px < pw && py >= 0 && py < ph) {
+        let yNorm = y / 10;
+        let [r, g, b] = getColor(ti, yNorm);
+        let idx = 4 * (py * pw + px);
+        // Additive blend for density effect
+        pts[idx]   = Math.min(255, pts[idx]   + r * 0.15 + 2);
+        pts[idx+1] = Math.min(255, pts[idx+1] + g * 0.15 + 4);
+        pts[idx+2] = Math.min(255, pts[idx+2] + b * 0.05);
+        pts[idx+3] = 255;
+        dirty = true;
+        nPoints++;
+      }
+    }
+
+    if (dirty) {
+      // Copy pts to pixels
+      for (let i = 0; i < p.pixels.length; i++) p.pixels[i] = pts[i];
+      p.updatePixels();
+    }
+  }
+
+  p.draw = function() {
+    let now = performance.now();
+    let dt = now - lastTime; lastTime = now;
+    if (dt > 0) {
+      fpsArr.push(1000 / dt);
+      if (fpsArr.length > 30) fpsArr.shift();
+      document.getElementById('fps').textContent = 'FPS: ' + (fpsArr.reduce((a,b)=>a+b,0)/fpsArr.length).toFixed(1);
+    }
+
+    breathPhase += 0.008;
+    let transforms = getTransforms();
+    iterate(transforms);
+
+    // Very slow fade for breath effect - just redraw occasionally
+    if (p.frameCount % 300 === 0) {
+      resetPoints();
+    }
+
+    document.getElementById('info').innerHTML =
+      'Barnsley Fern IFS<br>' +
+      'Points: ' + nPoints.toLocaleString() + '<br>' +
+      'Breathing: ' + (Math.sin(breathPhase) * 100).toFixed(1) + '%<br>' +
+      'Click to reset';
+  };
+
+  p.mouseClicked = function() {
+    resetPoints();
+  };
+
+  p.windowResized = function() {
+    p.resizeCanvas(p.windowWidth, p.windowHeight);
+    resetPoints();
+  };
+});
+</script>
+</body>
+</html>

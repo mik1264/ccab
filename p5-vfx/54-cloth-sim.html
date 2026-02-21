@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cloth Simulation</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#fps { position:fixed; top:12px; left:50%; transform:translateX(-50%); color:#0f0; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:4px 10px; border-radius:5px; z-index:999; }
+#hint { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); color:#888; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:6px 14px; border-radius:6px; z-index:999; }
+#stats { position:fixed; top:12px; right:12px; color:#999; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">FPS: --</div>
+<div id="stats">Links: 0</div>
+<div id="hint">Drag to grab cloth · Click rapidly to tear</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+new p5(function(p) {
+  const COLS = 40, ROWS = 38;
+  const GRAVITY = 0.42;
+  const WIND_BASE = 0.18;
+  const TEAR_DIST_MULT = 1.6;
+  const CONSTRAINT_ITER = 5;
+  const DAMPING = 0.98;
+  const TIME_STEP = 1;
+
+  let pts = [];
+  let links = [];
+  let restLen;
+  let dragPt = null;
+  let windTime = 0;
+  let fpsDiv = document.getElementById('fps');
+  let statsDiv = document.getElementById('stats');
+
+  p.setup = function() {
+    let cnv = p.createCanvas(p.windowWidth, p.windowHeight);
+    cnv.parent(document.body);
+    p.colorMode(p.HSB, 360, 100, 100, 100);
+    initCloth();
+  };
+
+  function initCloth() {
+    pts = [];
+    links = [];
+    let startX = p.width * 0.15;
+    let startY = p.height * 0.08;
+    let clothW = p.width * 0.7;
+    let clothH = p.height * 0.75;
+    restLen = clothW / (COLS - 1);
+
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        let x = startX + c * clothW / (COLS-1);
+        let y = startY + r * clothH / (ROWS-1);
+        pts.push({
+          x, y, px: x, py: y,
+          pinned: (r === 0),
+          vx: 0, vy: 0
+        });
+      }
+    }
+
+    // structural links
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (c + 1 < COLS) addLink(r*COLS+c, r*COLS+c+1, restLen);
+        if (r + 1 < ROWS) addLink(r*COLS+c, (r+1)*COLS+c, restLen);
+        // shear
+        if (c + 1 < COLS && r + 1 < ROWS) addLink(r*COLS+c, (r+1)*COLS+c+1, restLen*Math.SQRT2);
+        if (c > 0 && r + 1 < ROWS) addLink(r*COLS+c, (r+1)*COLS+c-1, restLen*Math.SQRT2);
+        // bend
+        if (c + 2 < COLS) addLink(r*COLS+c, r*COLS+c+2, restLen*2);
+        if (r + 2 < ROWS) addLink(r*COLS+c, (r+2)*COLS+c, restLen*2);
+      }
+    }
+  }
+
+  function addLink(a, b, len) {
+    links.push({ a, b, len, broken: false });
+  }
+
+  function verletUpdate() {
+    let wind = WIND_BASE * (Math.sin(windTime * 0.012) + 0.5 * Math.sin(windTime * 0.031 + 1.4));
+    windTime++;
+
+    for (let pt of pts) {
+      if (pt.pinned) continue;
+      let vx = (pt.x - pt.px) * DAMPING;
+      let vy = (pt.y - pt.py) * DAMPING;
+      pt.px = pt.x;
+      pt.py = pt.y;
+      pt.x += vx + wind * (0.5 + p.noise(pt.x*0.01, pt.y*0.01, windTime*0.01));
+      pt.y += vy + GRAVITY;
+    }
+  }
+
+  function satisfyConstraints() {
+    let tearDist = restLen * TEAR_DIST_MULT;
+    for (let iter = 0; iter < CONSTRAINT_ITER; iter++) {
+      for (let lk of links) {
+        if (lk.broken) continue;
+        let pa = pts[lk.a], pb = pts[lk.b];
+        let dx = pb.x - pa.x, dy = pb.y - pa.y;
+        let dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist > tearDist && lk.len <= restLen * 1.05) {
+          lk.broken = true;
+          continue;
+        }
+        let diff = (dist - lk.len) / (dist + 0.0001) * 0.5;
+        if (!pa.pinned) { pa.x += dx * diff; pa.y += dy * diff; }
+        if (!pb.pinned) { pb.x -= dx * diff; pb.y -= dy * diff; }
+      }
+    }
+  }
+
+  p.mousePressed = function() { findDrag(); };
+  p.mouseMoved = function() { if (dragPt) moveDrag(); };
+  p.mouseDragged = function() {
+    if (!dragPt) findDrag();
+    moveDrag();
+  };
+  p.mouseReleased = function() { dragPt = null; };
+
+  function findDrag() {
+    let minD = 25;
+    dragPt = null;
+    for (let pt of pts) {
+      let d = p.dist(p.mouseX, p.mouseY, pt.x, pt.y);
+      if (d < minD) { minD = d; dragPt = pt; }
+    }
+  }
+
+  function moveDrag() {
+    if (!dragPt) return;
+    dragPt.px = dragPt.x;
+    dragPt.py = dragPt.y;
+    dragPt.x = p.mouseX;
+    dragPt.y = p.mouseY;
+  }
+
+  // precompute face normals for shading
+  function getShading(r, c) {
+    if (r >= ROWS-1 || c >= COLS-1) return 0.5;
+    let i00 = pts[r*COLS+c];
+    let i10 = pts[(r+1)*COLS+c];
+    let i01 = pts[r*COLS+c+1];
+    let ax = i10.x-i00.x, ay = i10.y-i00.y;
+    let bx = i01.x-i00.x, by = i01.y-i00.y;
+    // 2D cross product gives z-normal magnitude
+    let nz = ax*by - ay*bx;
+    return p.constrain(nz * 0.0006 + 0.55, 0.05, 1.0);
+  }
+
+  p.draw = function() {
+    p.background(0, 0, 5);
+
+    verletUpdate();
+    satisfyConstraints();
+
+    // Draw cloth as triangles (quads) with lighting
+    p.noStroke();
+    for (let r = 0; r < ROWS-1; r++) {
+      for (let c = 0; c < COLS-1; c++) {
+        let i00 = pts[r*COLS+c];
+        let i10 = pts[(r+1)*COLS+c];
+        let i01 = pts[r*COLS+c+1];
+        let i11 = pts[(r+1)*COLS+c+1];
+        let shade = getShading(r, c);
+        let hue = p.map(c / COLS, 0, 1, 200, 280);
+        let sat = 70;
+        let bri = shade * 85 + 10;
+        p.fill(hue, sat, bri, 92);
+        p.beginShape();
+        p.vertex(i00.x, i00.y);
+        p.vertex(i10.x, i10.y);
+        p.vertex(i11.x, i11.y);
+        p.vertex(i01.x, i01.y);
+        p.endShape(p.CLOSE);
+      }
+    }
+
+    // Draw intact links (only structural)
+    p.strokeWeight(0.5);
+    p.noFill();
+    for (let lk of links) {
+      if (lk.broken || lk.len > restLen * 1.5) continue;
+      let pa = pts[lk.a], pb = pts[lk.b];
+      let dx = pb.x - pa.x, dy = pb.y - pa.y;
+      let dist = Math.sqrt(dx*dx + dy*dy);
+      let stretch = (dist - lk.len) / lk.len;
+      if (stretch > 0.4) {
+        p.stroke(0, 90, 90, 50);
+        p.line(pa.x, pa.y, pb.x, pb.y);
+      }
+    }
+
+    // Pin indicators
+    p.noStroke();
+    p.fill(60, 100, 100, 80);
+    for (let c = 0; c < COLS; c += 3) {
+      let pt = pts[c];
+      p.circle(pt.x, pt.y, 5);
+    }
+
+    // Drag highlight
+    if (dragPt) {
+      p.fill(50, 100, 100, 90);
+      p.circle(dragPt.x, dragPt.y, 12);
+    }
+
+    let activeLinks = links.filter(l => !l.broken).length;
+
+    if (p.frameCount % 20 === 0) {
+      fpsDiv.textContent = 'FPS: ' + Math.round(p.frameRate());
+      statsDiv.textContent = 'Links: ' + activeLinks;
+    }
+  };
+
+  p.windowResized = function() {
+    p.resizeCanvas(p.windowWidth, p.windowHeight);
+    initCloth();
+  };
+});
+</script>
+</body>
+</html>

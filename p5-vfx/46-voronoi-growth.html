@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voronoi Cell Growth — P5.js VFX</title>
+<style>
+body { margin:0; overflow:hidden; background:#000; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#fps { position:fixed; top:12px; right:12px; color:#aaa; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#info { position:fixed; bottom:12px; left:12px; color:#aaa; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">60 fps</div>
+<div id="info">Cells: 40 | Growing... | Click to add seed</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+const GW = 400, GH = 300;
+const INITIAL_SEEDS = 40;
+const EXPAND_PER_FRAME = 1200; // pixels to claim per frame
+const SPAWN_INTERVAL = 8000;   // ms between new seed spawns
+
+let owner;  // Int16Array: which seed owns each pixel (-1=unclaimed)
+let seeds;  // array of {x, y, hue, r, g, b}
+let frontier; // array of [idx] to expand
+let nextFrontier;
+let pg;
+let done = false;
+
+let fpsEl, infoEl;
+let lastFpsTime = 0, frameCount2 = 0;
+let lastSpawnTime = 0;
+
+function hsbToRgb(h, s, b) {
+  s /= 100; b /= 100;
+  let c = b * s, x = c * (1 - abs((h/60)%2 - 1)), m = b - c;
+  let r,g,bl;
+  if      (h<60)  {r=c;g=x;bl=0;}
+  else if (h<120) {r=x;g=c;bl=0;}
+  else if (h<180) {r=0;g=c;bl=x;}
+  else if (h<240) {r=0;g=x;bl=c;}
+  else if (h<300) {r=x;g=0;bl=c;}
+  else            {r=c;g=0;bl=x;}
+  return [floor((r+m)*255), floor((g+m)*255), floor((bl+m)*255)];
+}
+
+function addSeed(x, y) {
+  let h = random(360);
+  let s = random(60, 90), bv = random(50, 85);
+  let [r, g, b] = hsbToRgb(h, s, bv);
+  let idx = floor(y) * GW + floor(x);
+  let sid = seeds.length;
+  seeds.push({ x: floor(x), y: floor(y), hue: h, r, g, b });
+  if (idx >= 0 && idx < GW * GH && owner[idx] === -1) {
+    owner[idx] = sid;
+    frontier.push(idx);
+    pg.loadPixels();
+    pg.pixels[idx*4]   = r;
+    pg.pixels[idx*4+1] = g;
+    pg.pixels[idx*4+2] = b;
+    pg.pixels[idx*4+3] = 255;
+    pg.updatePixels();
+  }
+  done = false;
+}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  pixelDensity(1);
+  imageMode(CORNER);
+  noSmooth();
+  fpsEl = document.getElementById('fps');
+  infoEl = document.getElementById('info');
+  lastFpsTime = millis();
+  initGrowth();
+}
+
+function initGrowth() {
+  owner = new Int16Array(GW * GH).fill(-1);
+  seeds = [];
+  frontier = [];
+  nextFrontier = [];
+  pg = createGraphics(GW, GH);
+  pg.pixelDensity(1);
+  pg.background(0);
+  pg.loadPixels();
+
+  // Spawn seeds clustered toward center
+  for (let i = 0; i < INITIAL_SEEDS; i++) {
+    let angle = random(TWO_PI);
+    let r = random(min(GW, GH) * 0.45);
+    let x = GW/2 + cos(angle) * r;
+    let y = GH/2 + sin(angle) * r;
+    x = constrain(floor(x), 1, GW-2);
+    y = constrain(floor(y), 1, GH-2);
+    let h = (i / INITIAL_SEEDS) * 360;
+    let s = random(55, 85), bv = random(45, 80);
+    let [rr, gg, bb] = hsbToRgb(h, s, bv);
+    let sid = seeds.length;
+    seeds.push({ x, y, hue: h, r: rr, g: gg, b: bb });
+    let idx = y * GW + x;
+    if (owner[idx] === -1) {
+      owner[idx] = sid;
+      frontier.push(idx);
+      pg.pixels[idx*4]   = rr;
+      pg.pixels[idx*4+1] = gg;
+      pg.pixels[idx*4+2] = bb;
+      pg.pixels[idx*4+3] = 255;
+    }
+  }
+  pg.updatePixels();
+  done = false;
+  lastSpawnTime = millis();
+}
+
+const DIRS4 = [[-1,0],[1,0],[0,-1],[0,1]];
+
+function expandFrontier() {
+  if (frontier.length === 0) { done = true; return; }
+  let count = 0;
+  let newFront = [];
+  // Shuffle frontier slightly for organic look
+  for (let i = frontier.length - 1; i > 0; i--) {
+    let j = floor(random(i+1));
+    let tmp = frontier[i]; frontier[i] = frontier[j]; frontier[j] = tmp;
+  }
+
+  pg.loadPixels();
+  for (let fi = 0; fi < frontier.length && count < EXPAND_PER_FRAME; fi++) {
+    let idx = frontier[fi];
+    let sid = owner[idx];
+    let x = idx % GW, y = floor(idx / GW);
+    let seed = seeds[sid];
+    let expanded = false;
+    for (let d of DIRS4) {
+      let nx = x + d[0], ny = y + d[1];
+      if (nx < 0 || nx >= GW || ny < 0 || ny >= GH) continue;
+      let nidx = ny * GW + nx;
+      if (owner[nidx] === -1) {
+        owner[nidx] = sid;
+        newFront.push(nidx);
+        // Paint neighbor pixel
+        pg.pixels[nidx*4]   = seed.r;
+        pg.pixels[nidx*4+1] = seed.g;
+        pg.pixels[nidx*4+2] = seed.b;
+        pg.pixels[nidx*4+3] = 255;
+        count++;
+        expanded = true;
+      }
+    }
+    if (expanded) newFront.push(idx); // keep in frontier if still expanding
+  }
+  // Draw boundaries: check for different-owner neighbors and darken
+  for (let nidx of newFront) {
+    let sid = owner[nidx];
+    let nx2 = nidx % GW, ny2 = floor(nidx / GW);
+    for (let d of DIRS4) {
+      let nnx = nx2 + d[0], nny = ny2 + d[1];
+      if (nnx < 0 || nnx >= GW || nny < 0 || nny >= GH) continue;
+      let nnidx = nny * GW + nnx;
+      if (owner[nnidx] !== -1 && owner[nnidx] !== sid) {
+        // boundary: darken
+        pg.pixels[nidx*4]   = floor(pg.pixels[nidx*4]   * 0.25);
+        pg.pixels[nidx*4+1] = floor(pg.pixels[nidx*4+1] * 0.25);
+        pg.pixels[nidx*4+2] = floor(pg.pixels[nidx*4+2] * 0.25);
+      }
+    }
+  }
+  pg.updatePixels();
+
+  // Deduplicate and keep valid frontier entries
+  let unique = new Set(newFront);
+  frontier = Array.from(unique).filter(idx => {
+    let x = idx % GW, y = floor(idx / GW);
+    for (let d of DIRS4) {
+      let nx = x+d[0], ny = y+d[1];
+      if (nx>=0&&nx<GW&&ny>=0&&ny<GH&&owner[ny*GW+nx]===-1) return true;
+    }
+    return false;
+  });
+  if (frontier.length === 0) done = true;
+}
+
+function draw() {
+  expandFrontier();
+
+  image(pg, 0, 0, width, height);
+
+  // Draw seed centers
+  noStroke();
+  for (let i = 0; i < seeds.length; i++) {
+    let s = seeds[i];
+    let sx = map(s.x, 0, GW, 0, width);
+    let sy = map(s.y, 0, GH, 0, height);
+    fill(s.hue, 20, 100, 80);
+    ellipse(sx, sy, 6, 6);
+  }
+
+  // Periodic new seed
+  let now = millis();
+  if (done && now - lastSpawnTime > SPAWN_INTERVAL) {
+    let nx = random(GW), ny = random(GH);
+    addSeed(nx, ny);
+    lastSpawnTime = now;
+  }
+
+  frameCount2++;
+  if (now - lastFpsTime > 500) {
+    fpsEl.textContent = (frameCount2 / ((now - lastFpsTime) / 1000)).toFixed(1) + ' fps';
+    frameCount2 = 0; lastFpsTime = now;
+    infoEl.textContent = `Cells: ${seeds.length} | ${done ? 'Complete — new seed soon' : 'Growing...'} | Click to add seed`;
+  }
+}
+
+function mousePressed() {
+  let gx = map(mouseX, 0, width, 0, GW);
+  let gy = map(mouseY, 0, height, 0, GH);
+  addSeed(gx, gy);
+  lastSpawnTime = millis();
+}
+
+function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+</script>
+</body></html>

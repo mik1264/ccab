@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Three-Body Problem — Chaos/Attractors</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #020204; overflow: hidden; }
+canvas { display: block; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#fps { position:fixed; top:12px; right:12px; color:#aaa; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#energy { position:fixed; top:44px; right:12px; color:#666; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#info { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); color:#555; font-family:monospace; font-size:12px; text-align:center; pointer-events:none; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">FPS: --</div>
+<div id="energy">Energy: --</div>
+<div id="info">Three-Body Problem · Figure-8 orbit · Click to perturb · Watch chaos unfold</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+new p5(function(p) {
+  // Figure-8 orbit initial conditions (Chenciner & Montgomery 2000)
+  // Units: G=1, m=1, scaled
+  const TRAIL_LEN = 400;
+  const SUBSTEPS = 8;
+  const dt = 0.001;
+  const G = 1, M = 1;
+  const SOFTENING = 0.001;
+
+  let bodies = [];
+  let fpsEl, energyEl;
+  let fpsTime = 0, fpsFrames = 0;
+  let scale, cx, cy;
+  let E0 = null; // initial energy for comparison
+
+  function initFigure8() {
+    // Known figure-8 initial conditions (from literature, period T≈6.3259)
+    const p1x =  0.97000436, p1y = -0.24308753;
+    const p2x = -0.97000436, p2y =  0.24308753;
+    const p3x =  0,          p3y =  0;
+    const v3x  = -0.93240737/2, v3y = -0.86473146/2;
+    // NOTE: v3 = -(v1+v2), v1=v2 by symmetry
+    const v1x = 0.93240737/2, v1y = 0.86473146/2;
+    const v2x = v1x, v2y = v1y;
+
+    bodies = [
+      { x: p1x, y: p1y, vx: v1x, vy: v1y, m: M, hue: 0,   trail: [] },
+      { x: p2x, y: p2y, vx: v2x, vy: v2y, m: M, hue: 120, trail: [] },
+      { x: p3x, y: p3y, vx: -v1x*2, vy: -v1y*2, m: M, hue: 240, trail: [] }
+    ];
+  }
+
+  function computeEnergy() {
+    let KE = 0, PE = 0;
+    for (const b of bodies) KE += 0.5 * b.m * (b.vx*b.vx + b.vy*b.vy);
+    for (let i = 0; i < 3; i++) {
+      for (let j = i+1; j < 3; j++) {
+        const dx = bodies[j].x - bodies[i].x;
+        const dy = bodies[j].y - bodies[i].y;
+        const r = Math.sqrt(dx*dx + dy*dy + SOFTENING);
+        PE -= G * bodies[i].m * bodies[j].m / r;
+      }
+    }
+    return KE + PE;
+  }
+
+  function accelerations() {
+    const ax = [0, 0, 0], ay = [0, 0, 0];
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        if (i === j) continue;
+        const dx = bodies[j].x - bodies[i].x;
+        const dy = bodies[j].y - bodies[i].y;
+        const r2 = dx*dx + dy*dy + SOFTENING;
+        const r3 = r2 * Math.sqrt(r2);
+        ax[i] += G * bodies[j].m * dx / r3;
+        ay[i] += G * bodies[j].m * dy / r3;
+      }
+    }
+    return [ax, ay];
+  }
+
+  // RK4 for 3 bodies
+  function rk4() {
+    const state = bodies.map(b => [b.x, b.y, b.vx, b.vy]);
+
+    function f(s) {
+      // s is array of [x,y,vx,vy] for each body
+      const accX = [0,0,0], accY = [0,0,0];
+      for (let i = 0; i < 3; i++) {
+        for (let j = 0; j < 3; j++) {
+          if (i===j) continue;
+          const dx = s[j][0] - s[i][0], dy = s[j][1] - s[i][1];
+          const r2 = dx*dx+dy*dy+SOFTENING;
+          const r3 = r2*Math.sqrt(r2);
+          accX[i] += G*M*dx/r3; accY[i] += G*M*dy/r3;
+        }
+      }
+      return s.map((b, i) => [b[2], b[3], accX[i], accY[i]]);
+    }
+
+    function addScaled(s, ds, h) {
+      return s.map((b,i) => [b[0]+h*ds[i][0], b[1]+h*ds[i][1], b[2]+h*ds[i][2], b[3]+h*ds[i][3]]);
+    }
+
+    const k1 = f(state);
+    const k2 = f(addScaled(state, k1, dt/2));
+    const k3 = f(addScaled(state, k2, dt/2));
+    const k4 = f(addScaled(state, k3, dt));
+
+    for (let i = 0; i < 3; i++) {
+      bodies[i].x  += dt/6*(k1[i][0]+2*k2[i][0]+2*k3[i][0]+k4[i][0]);
+      bodies[i].y  += dt/6*(k1[i][1]+2*k2[i][1]+2*k3[i][1]+k4[i][1]);
+      bodies[i].vx += dt/6*(k1[i][2]+2*k2[i][2]+2*k3[i][2]+k4[i][2]);
+      bodies[i].vy += dt/6*(k1[i][3]+2*k2[i][3]+2*k3[i][3]+k4[i][3]);
+    }
+  }
+
+  p.setup = function() {
+    p.createCanvas(window.innerWidth, window.innerHeight);
+    p.colorMode(p.HSB, 360, 100, 100, 100);
+    fpsEl = document.getElementById('fps');
+    energyEl = document.getElementById('energy');
+    cx = p.width / 2; cy = p.height / 2;
+    scale = Math.min(p.width, p.height) * 0.28;
+    initFigure8();
+    E0 = computeEnergy();
+  };
+
+  function screenX(wx) { return cx + wx * scale; }
+  function screenY(wy) { return cy + wy * scale; }
+
+  p.draw = function() {
+    p.background(0, 0, 2, 18);
+
+    fpsFrames++;
+    const now = performance.now();
+    if (now - fpsTime > 500) {
+      fpsEl.textContent = 'FPS: ' + Math.round(fpsFrames * 1000 / (now - fpsTime));
+      fpsFrames = 0; fpsTime = now;
+    }
+
+    // Integrate
+    for (let s = 0; s < SUBSTEPS; s++) rk4();
+
+    // Update trails
+    for (const b of bodies) {
+      b.trail.push({ x: b.x, y: b.y });
+      if (b.trail.length > TRAIL_LEN) b.trail.shift();
+    }
+
+    // Draw trails
+    for (const b of bodies) {
+      p.noFill();
+      p.beginShape();
+      for (let j = 0; j < b.trail.length; j++) {
+        const age = j / b.trail.length;
+        const al = age * age * 85;
+        const bright = p.map(age, 0, 1, 15, 95);
+        p.stroke(b.hue, 80, bright, al);
+        p.vertex(screenX(b.trail[j].x), screenY(b.trail[j].y));
+      }
+      p.endShape();
+    }
+
+    // Draw bodies with glow
+    for (const b of bodies) {
+      const sx = screenX(b.x), sy = screenY(b.y);
+      // Outer glow
+      p.noStroke();
+      for (let r = 28; r > 4; r -= 4) {
+        p.fill(b.hue, 70, 90, p.map(r, 4, 28, 60, 0));
+        p.circle(sx, sy, r);
+      }
+      // Core
+      p.fill(b.hue, 40, 100, 100);
+      p.circle(sx, sy, 10);
+    }
+
+    // Energy display
+    const E = computeEnergy();
+    const dE = E0 !== null ? (E - E0) / Math.abs(E0) * 100 : 0;
+    energyEl.textContent = 'E: ' + E.toFixed(4) + '  ΔE: ' + dE.toFixed(3) + '%';
+  };
+
+  p.mousePressed = function() {
+    // Perturb body 0
+    const pertAmp = 0.05;
+    bodies[0].vx += (Math.random() - 0.5) * pertAmp;
+    bodies[0].vy += (Math.random() - 0.5) * pertAmp;
+  };
+
+  p.windowResized = function() {
+    p.resizeCanvas(window.innerWidth, window.innerHeight);
+    cx = p.width / 2; cy = p.height / 2;
+    scale = Math.min(p.width, p.height) * 0.28;
+  };
+});
+</script>
+</body>
+</html>

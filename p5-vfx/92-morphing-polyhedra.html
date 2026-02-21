@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Morphing Polyhedra 3D — p5-vfx</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; }
+  .back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+  .back-link:hover { color:#fff; }
+  #fps { position:fixed; top:12px; right:12px; color:#aaa; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+  #info { position:fixed; bottom:12px; left:12px; color:#888; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; line-height:1.6; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">FPS: --</div>
+<div id="info">Morphing Polyhedra<br>Drag to orbit</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+new p5(function(p) {
+  // All 5 Platonic solids — vertices normalized to unit sphere
+  const phi = (1 + Math.sqrt(5)) / 2;
+
+  function norm3(verts) {
+    return verts.map(v => {
+      const len = Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+      return [v[0]/len, v[1]/len, v[2]/len];
+    });
+  }
+
+  // We'll morph by matching vertex count — resample all to the same N
+  function resample(verts, n) {
+    // Nearest-neighbour repeat to reach length n
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      out.push(verts[Math.round(i * (verts.length - 1) / (n - 1))]);
+    }
+    return out;
+  }
+
+  const SOLIDS = [
+    {
+      name: 'Tetrahedron',
+      raw: norm3([
+        [ 1, 1, 1],[-1,-1, 1],[-1, 1,-1],[ 1,-1,-1]
+      ]),
+      faces: [[0,1,2],[0,2,3],[0,3,1],[1,3,2]]
+    },
+    {
+      name: 'Cube',
+      raw: norm3([
+        [-1,-1,-1],[ 1,-1,-1],[ 1, 1,-1],[-1, 1,-1],
+        [-1,-1, 1],[ 1,-1, 1],[ 1, 1, 1],[-1, 1, 1]
+      ]),
+      faces: [
+        [0,1,2,3],[4,5,6,7],[0,1,5,4],
+        [2,3,7,6],[0,3,7,4],[1,2,6,5]
+      ]
+    },
+    {
+      name: 'Octahedron',
+      raw: norm3([
+        [ 1,0,0],[-1,0,0],[0, 1,0],[0,-1,0],[0,0, 1],[0,0,-1]
+      ]),
+      faces: [
+        [0,2,4],[0,4,3],[0,3,5],[0,5,2],
+        [1,4,2],[1,2,5],[1,5,3],[1,3,4]
+      ]
+    },
+    {
+      name: 'Dodecahedron',
+      raw: norm3([
+        // 20 vertices
+        [ 1, 1, 1],[ 1, 1,-1],[ 1,-1, 1],[ 1,-1,-1],
+        [-1, 1, 1],[-1, 1,-1],[-1,-1, 1],[-1,-1,-1],
+        [0, 1/phi, phi],[0, 1/phi,-phi],[0,-1/phi, phi],[0,-1/phi,-phi],
+        [1/phi, phi, 0],[1/phi,-phi, 0],[-1/phi, phi, 0],[-1/phi,-phi, 0],
+        [phi, 0, 1/phi],[phi, 0,-1/phi],[-phi, 0, 1/phi],[-phi, 0,-1/phi]
+      ]),
+      faces: [
+        [0,16,2,10,8],[0,8,4,14,12],[0,12,1,17,16],
+        [1,12,14,5,9],[1,9,11,3,17],[2,16,17,3,13],
+        [3,11,15,13,2],[4,8,10,6,18],[4,18,19,5,14],
+        [5,19,7,11,9],[6,10,2,13,15],[6,15,7,19,18]
+      ]
+    },
+    {
+      name: 'Icosahedron',
+      raw: norm3([
+        [0, 1, phi],[0,-1, phi],[0, 1,-phi],[0,-1,-phi],
+        [ 1, phi,0],[-1, phi,0],[ 1,-phi,0],[-1,-phi,0],
+        [ phi,0, 1],[ phi,0,-1],[-phi,0, 1],[-phi,0,-1]
+      ]),
+      faces: [
+        [0,1,8],[0,8,4],[0,4,5],[0,5,10],[0,10,1],
+        [3,2,11],[3,11,7],[3,7,6],[3,6,9],[3,9,2],
+        [1,6,8],[8,6,9],[8,9,4],[4,9,2],[4,2,5],
+        [5,2,11],[5,11,10],[10,11,7],[10,7,1],[1,7,6]
+      ]
+    }
+  ];
+
+  // Triangulate all faces to a flat triangle list
+  function triangulate(solid) {
+    let tris = [];
+    for (const face of solid.faces) {
+      for (let i = 1; i < face.length - 1; i++) {
+        tris.push([face[0], face[i], face[i+1]]);
+      }
+    }
+    return tris;
+  }
+
+  // Build target vertex count = max triangles * 3
+  const maxTris = Math.max(...SOLIDS.map(s => triangulate(s).length));
+
+  // Precompute per-solid list of triangle positions
+  function solidToFlatVerts(solid) {
+    const tris = triangulate(solid);
+    const verts = [];
+    for (const [a,b,c] of tris) {
+      verts.push(solid.raw[a], solid.raw[b], solid.raw[c]);
+    }
+    // Pad / resample to maxTris*3 verts
+    while (verts.length < maxTris * 3) verts.push(verts[verts.length-1]);
+    return verts.slice(0, maxTris * 3);
+  }
+
+  const flatVerts = SOLIDS.map(solidToFlatVerts);
+  const triNormals = SOLIDS.map(solid => {
+    const tris = triangulate(solid);
+    return tris.map(([a,b,c]) => {
+      const v0 = solid.raw[a], v1 = solid.raw[b], v2 = solid.raw[c];
+      const u = [v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]];
+      const w = [v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2]];
+      const n = [
+        u[1]*w[2]-u[2]*w[1],
+        u[2]*w[0]-u[0]*w[2],
+        u[0]*w[1]-u[1]*w[0]
+      ];
+      const len = Math.sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]) || 1;
+      return [n[0]/len, n[1]/len, n[2]/len];
+    });
+  });
+
+  let currentIdx = 0;
+  let nextIdx = 1;
+  let morphT = 0;
+  let phase = 'hold'; // 'hold' | 'morph'
+  let holdTimer = 0;
+  const HOLD_FRAMES = 180;
+  const MORPH_SPEED = 0.012;
+  let rotX = 0, rotY = 0;
+  let fpsArr = [], lastTime = 0;
+
+  p.setup = function() {
+    p.createCanvas(p.windowWidth, p.windowHeight, p.WEBGL);
+    p.colorMode(p.HSB, 360, 100, 100, 100);
+  };
+
+  p.draw = function() {
+    p.background(0, 0, 4);
+    p.orbitControl(3, 3, 0.05);
+    p.ambientLight(25);
+    p.directionalLight(255, 255, 255, 0.3, -1, -0.5);
+    p.directionalLight(200, 150, 255, -1,  0.5,  0.3);
+    p.pointLight(255, 200, 150, 200, -150, 200);
+
+    rotX += 0.004;
+    rotY += 0.007;
+    p.rotateX(rotX);
+    p.rotateY(rotY);
+    p.scale(190);
+
+    // State machine
+    if (phase === 'hold') {
+      holdTimer++;
+      if (holdTimer > HOLD_FRAMES) { phase = 'morph'; holdTimer = 0; morphT = 0; }
+    } else {
+      morphT = Math.min(1, morphT + MORPH_SPEED);
+      if (morphT >= 1) { currentIdx = nextIdx; nextIdx = (nextIdx + 1) % SOLIDS.length; phase = 'hold'; morphT = 0; }
+    }
+
+    const ease = morphT < 0.5 ? 4*morphT*morphT*morphT : 1-Math.pow(-2*morphT+2,3)/2;
+    const srcV = flatVerts[currentIdx];
+    const dstV = flatVerts[nextIdx];
+    const srcN = triNormals[currentIdx];
+
+    p.noStroke();
+    for (let tri = 0; tri < maxTris; tri++) {
+      const base = tri * 3;
+      const nx = srcN[tri] ? srcN[tri][0] : 0;
+      const ny = srcN[tri] ? srcN[tri][1] : 0;
+      const nz = srcN[tri] ? srcN[tri][2] : 0;
+
+      const hue = (((Math.atan2(ny, nx) / Math.PI) + 1) * 180 + p.frameCount * 0.3) % 360;
+      const sat = 60 + 40 * Math.abs(nz);
+      const bri = 55 + 35 * (0.5 + 0.5 * nz);
+      p.fill(hue, sat, bri, 95);
+
+      p.beginShape(p.TRIANGLES);
+      for (let k = 0; k < 3; k++) {
+        const s = srcV[base + k], d = dstV[base + k];
+        p.vertex(
+          s[0] + (d[0]-s[0])*ease,
+          s[1] + (d[1]-s[1])*ease,
+          s[2] + (d[2]-s[2])*ease
+        );
+      }
+      p.endShape();
+
+      // Wireframe overlay
+      p.stroke(hue, 30, 100, 40);
+      p.strokeWeight(0.003);
+      p.noFill();
+      p.beginShape(p.TRIANGLES);
+      for (let k = 0; k < 3; k++) {
+        const s = srcV[base + k], d = dstV[base + k];
+        p.vertex(
+          (s[0]+(d[0]-s[0])*ease)*1.002,
+          (s[1]+(d[1]-s[1])*ease)*1.002,
+          (s[2]+(d[2]-s[2])*ease)*1.002
+        );
+      }
+      p.endShape(p.CLOSE);
+      p.noStroke();
+    }
+
+    // FPS
+    const now = p.millis();
+    const dt = now - lastTime; lastTime = now;
+    fpsArr.push(1000/dt);
+    if (fpsArr.length > 30) fpsArr.shift();
+    const fps = Math.round(fpsArr.reduce((a,b)=>a+b,0)/fpsArr.length);
+    document.getElementById('fps').textContent = `FPS: ${fps}`;
+    document.getElementById('info').innerHTML =
+      `Morphing Polyhedra<br>${SOLIDS[currentIdx].name} → ${SOLIDS[nextIdx].name}<br>Drag to orbit`;
+  };
+
+  p.windowResized = function() { p.resizeCanvas(p.windowWidth, p.windowHeight); };
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ink Diffusion — P5.js VFX</title>
+<style>
+body { margin:0; overflow:hidden; background:#000; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#fps { position:fixed; top:12px; right:12px; color:#aaa; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#hint { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); color:#555; font-family:monospace; font-size:12px; pointer-events:none; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">60 fps</div>
+<div id="hint">Click to drop ink — different colors each time</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+const GW = 256;
+const GH = 256;
+const DIFFUSE = 0.22;
+const ADVECT_STR = 0.3;
+const DECAY = 0.9985;
+
+let R, G, B, RN, GN, BN;
+let noiseOff = 0;
+let fpsEl, fpsTimer = 0, fpsFrames = 0;
+let colorIdx = 0;
+let inkColors = [
+  [0.0, 0.6, 1.0],  // cyan
+  [0.9, 0.1, 0.5],  // magenta
+  [0.2, 0.9, 0.1],  // green
+  [1.0, 0.6, 0.0],  // orange
+  [0.5, 0.1, 1.0],  // violet
+];
+let scaleX, scaleY;
+let pg; // offscreen graphics
+
+function idx(x, y) { return y * GW + x; }
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);
+  noSmooth();
+  fpsEl = document.getElementById('fps');
+
+  scaleX = width / GW;
+  scaleY = height / GH;
+
+  let sz = GW * GH;
+  R = new Float32Array(sz);
+  G = new Float32Array(sz);
+  B = new Float32Array(sz);
+  RN = new Float32Array(sz);
+  GN = new Float32Array(sz);
+  BN = new Float32Array(sz);
+
+  pg = createGraphics(GW, GH);
+  pg.pixelDensity(1);
+  pg.noSmooth();
+}
+
+function dropInk(gx, gy, r, g, b) {
+  let radius = 10;
+  let sigma = radius * 0.5;
+  for (let dy = -radius * 2; dy <= radius * 2; dy++) {
+    for (let dx = -radius * 2; dx <= radius * 2; dx++) {
+      let nx = gx + dx;
+      let ny = gy + dy;
+      if (nx < 1 || nx >= GW - 1 || ny < 1 || ny >= GH - 1) continue;
+      let d2 = dx * dx + dy * dy;
+      let gauss = exp(-d2 / (2 * sigma * sigma));
+      let i = idx(nx, ny);
+      R[i] = min(1, R[i] + r * gauss);
+      G[i] = min(1, G[i] + g * gauss);
+      B[i] = min(1, B[i] + b * gauss);
+    }
+  }
+}
+
+function diffuseStep() {
+  let a = DIFFUSE;
+  let inv = 1 / (1 + 4 * a);
+  for (let y = 1; y < GH - 1; y++) {
+    for (let x = 1; x < GW - 1; x++) {
+      let i = idx(x, y);
+      RN[i] = (R[i] + a * (R[idx(x+1,y)] + R[idx(x-1,y)] + R[idx(x,y+1)] + R[idx(x,y-1)])) * inv;
+      GN[i] = (G[i] + a * (G[idx(x+1,y)] + G[idx(x-1,y)] + G[idx(x,y+1)] + G[idx(x,y-1)])) * inv;
+      BN[i] = (B[i] + a * (B[idx(x+1,y)] + B[idx(x-1,y)] + B[idx(x,y+1)] + B[idx(x,y-1)])) * inv;
+    }
+  }
+  // Swap
+  let tmp = R; R = RN; RN = tmp;
+  tmp = G; G = GN; GN = tmp;
+  tmp = B; B = BN; BN = tmp;
+}
+
+function advectStep() {
+  let ns = noiseOff;
+  for (let y = 1; y < GH - 1; y++) {
+    for (let x = 1; x < GW - 1; x++) {
+      // Perlin noise velocity
+      let nx = noise(x * 0.012, y * 0.012, ns) - 0.5;
+      let ny = noise(x * 0.012 + 50, y * 0.012 + 50, ns) - 0.5;
+      let px = x - nx * ADVECT_STR * 2;
+      let py = y - ny * ADVECT_STR * 2;
+      px = constrain(px, 1, GW - 2);
+      py = constrain(py, 1, GH - 2);
+      let x0 = floor(px), x1 = x0 + 1;
+      let y0 = floor(py), y1 = y0 + 1;
+      let s1 = px - x0, s0 = 1 - s1;
+      let t1 = py - y0, t0 = 1 - t1;
+      let i = idx(x, y);
+      RN[i] = s0*(t0*R[idx(x0,y0)] + t1*R[idx(x0,y1)]) + s1*(t0*R[idx(x1,y0)] + t1*R[idx(x1,y1)]);
+      GN[i] = s0*(t0*G[idx(x0,y0)] + t1*G[idx(x0,y1)]) + s1*(t0*G[idx(x1,y0)] + t1*G[idx(x1,y1)]);
+      BN[i] = s0*(t0*B[idx(x0,y0)] + t1*B[idx(x0,y1)]) + s1*(t0*B[idx(x1,y0)] + t1*B[idx(x1,y1)]);
+    }
+  }
+  let tmp = R; R = RN; RN = tmp;
+  tmp = G; G = GN; GN = tmp;
+  tmp = B; B = BN; BN = tmp;
+}
+
+function draw() {
+  fpsFrames++;
+  let now = millis();
+  if (now - fpsTimer > 500) {
+    fpsEl.textContent = round(fpsFrames / ((now - fpsTimer) / 1000)) + ' fps';
+    fpsFrames = 0; fpsTimer = now;
+  }
+
+  noiseOff += 0.003;
+
+  diffuseStep();
+  advectStep();
+
+  // Decay
+  for (let i = 0; i < R.length; i++) {
+    R[i] *= DECAY; G[i] *= DECAY; B[i] *= DECAY;
+  }
+
+  // Render to offscreen
+  pg.loadPixels();
+  for (let y = 0; y < GH; y++) {
+    for (let x = 0; x < GW; x++) {
+      let i = idx(x, y);
+      let r = R[i], g = G[i], b = B[i];
+      // Low conc: dark blue tint, high: vivid
+      let mag = max(r, g, b);
+      let base = mag * 20;
+      let pr = min(255, r * 400);
+      let pg2 = min(255, g * 400);
+      let pb = min(255, b * 400 + base * 0.5);
+      let pidx = (y * GW + x) * 4;
+      pg.pixels[pidx]   = pr;
+      pg.pixels[pidx+1] = pg2;
+      pg.pixels[pidx+2] = pb;
+      pg.pixels[pidx+3] = 255;
+    }
+  }
+  pg.updatePixels();
+
+  // Draw stretched to canvas
+  background(0);
+  image(pg, 0, 0, width, height);
+}
+
+function mousePressed() {
+  let gx = floor(mouseX / scaleX);
+  let gy = floor(mouseY / scaleY);
+  let c = inkColors[colorIdx % inkColors.length];
+  colorIdx++;
+  dropInk(gx, gy, c[0], c[1], c[2]);
+}
+
+function mouseDragged() {
+  let gx = floor(mouseX / scaleX);
+  let gy = floor(mouseY / scaleY);
+  let c = inkColors[colorIdx % inkColors.length];
+  dropInk(gx, gy, c[0] * 0.3, c[1] * 0.3, c[2] * 0.3);
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  scaleX = width / GW;
+  scaleY = height / GH;
+}
+</script>
+</body></html>

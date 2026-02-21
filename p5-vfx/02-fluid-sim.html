@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interactive Fluid Simulation — P5.js VFX</title>
+<style>
+body { margin:0; overflow:hidden; background:#000; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#fps { position:fixed; top:12px; right:12px; color:#aaa; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#hint { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); color:#666; font-family:monospace; font-size:12px; pointer-events:none; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">60 fps</div>
+<div id="hint">Drag mouse to paint fluid</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+const N = 128;
+const ITER = 6;
+const DT = 0.15;
+const DIFF = 0.00001;
+const VISC = 0.000001;
+
+let vx, vy, vx0, vy0;
+let dR, dG, dB, dR0, dG0, dB0;
+let scale;
+let fpsEl, fpsTimer = 0, fpsFrames = 0;
+let pmx = 0, pmy = 0;
+let hueOffset = 0;
+
+function IX(x, y) { return x + y * (N + 2); }
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  pixelDensity(1);
+  scale = min(width, height) / N;
+
+  let sz = (N + 2) * (N + 2);
+  vx = new Float32Array(sz); vy = new Float32Array(sz);
+  vx0 = new Float32Array(sz); vy0 = new Float32Array(sz);
+  dR = new Float32Array(sz); dG = new Float32Array(sz); dB = new Float32Array(sz);
+  dR0 = new Float32Array(sz); dG0 = new Float32Array(sz); dB0 = new Float32Array(sz);
+  fpsEl = document.getElementById('fps');
+}
+
+function set_bnd(b, x) {
+  for (let i = 1; i <= N; i++) {
+    x[IX(0, i)] = b === 1 ? -x[IX(1, i)] : x[IX(1, i)];
+    x[IX(N+1, i)] = b === 1 ? -x[IX(N, i)] : x[IX(N, i)];
+    x[IX(i, 0)] = b === 2 ? -x[IX(i, 1)] : x[IX(i, 1)];
+    x[IX(i, N+1)] = b === 2 ? -x[IX(i, N)] : x[IX(i, N)];
+  }
+  x[IX(0,0)] = 0.5 * (x[IX(1,0)] + x[IX(0,1)]);
+  x[IX(0,N+1)] = 0.5 * (x[IX(1,N+1)] + x[IX(0,N)]);
+  x[IX(N+1,0)] = 0.5 * (x[IX(N,0)] + x[IX(N+1,1)]);
+  x[IX(N+1,N+1)] = 0.5 * (x[IX(N,N+1)] + x[IX(N+1,N)]);
+}
+
+function lin_solve(b, x, x0, a, c) {
+  let cRecip = 1.0 / c;
+  for (let k = 0; k < ITER; k++) {
+    for (let j = 1; j <= N; j++) {
+      for (let i = 1; i <= N; i++) {
+        x[IX(i,j)] = (x0[IX(i,j)] + a * (x[IX(i+1,j)] + x[IX(i-1,j)] + x[IX(i,j+1)] + x[IX(i,j-1)])) * cRecip;
+      }
+    }
+    set_bnd(b, x);
+  }
+}
+
+function diffuse(b, x, x0, diff) {
+  let a = DT * diff * N * N;
+  lin_solve(b, x, x0, a, 1 + 4 * a);
+}
+
+function advect(b, d, d0, u, v) {
+  let dt0 = DT * N;
+  for (let j = 1; j <= N; j++) {
+    for (let i = 1; i <= N; i++) {
+      let px = i - dt0 * u[IX(i,j)];
+      let py = j - dt0 * v[IX(i,j)];
+      px = constrain(px, 0.5, N + 0.5);
+      py = constrain(py, 0.5, N + 0.5);
+      let i0 = floor(px), i1 = i0 + 1;
+      let j0 = floor(py), j1 = j0 + 1;
+      let s1 = px - i0, s0 = 1 - s1;
+      let t1 = py - j0, t0 = 1 - t1;
+      d[IX(i,j)] = s0*(t0*d0[IX(i0,j0)] + t1*d0[IX(i0,j1)]) +
+                   s1*(t0*d0[IX(i1,j0)] + t1*d0[IX(i1,j1)]);
+    }
+  }
+  set_bnd(b, d);
+}
+
+function project(u, v, p, div) {
+  let h = 1.0 / N;
+  for (let j = 1; j <= N; j++) {
+    for (let i = 1; i <= N; i++) {
+      div[IX(i,j)] = -0.5 * h * (u[IX(i+1,j)] - u[IX(i-1,j)] + v[IX(i,j+1)] - v[IX(i,j-1)]);
+      p[IX(i,j)] = 0;
+    }
+  }
+  set_bnd(0, div); set_bnd(0, p);
+  lin_solve(0, p, div, 1, 4);
+  for (let j = 1; j <= N; j++) {
+    for (let i = 1; i <= N; i++) {
+      u[IX(i,j)] -= 0.5 * N * (p[IX(i+1,j)] - p[IX(i-1,j)]);
+      v[IX(i,j)] -= 0.5 * N * (p[IX(i,j+1)] - p[IX(i,j-1)]);
+    }
+  }
+  set_bnd(1, u); set_bnd(2, v);
+}
+
+function stepFluid() {
+  // Velocity step
+  for (let i = 0; i < vx.length; i++) { vx0[i] = vx[i]; vy0[i] = vy[i]; }
+  diffuse(1, vx, vx0, VISC);
+  diffuse(2, vy, vy0, VISC);
+  project(vx, vy, vx0, vy0);
+  for (let i = 0; i < vx.length; i++) { vx0[i] = vx[i]; vy0[i] = vy[i]; }
+  advect(1, vx, vx0, vx0, vy0);
+  advect(2, vy, vy0, vx0, vy0);
+  project(vx, vy, vx0, vy0);
+
+  // Density step
+  for (let i = 0; i < dR.length; i++) { dR0[i] = dR[i]; dG0[i] = dG[i]; dB0[i] = dB[i]; }
+  diffuse(0, dR, dR0, DIFF);
+  diffuse(0, dG, dG0, DIFF);
+  diffuse(0, dB, dB0, DIFF);
+  advect(0, dR, dR0, vx, vy);
+  advect(0, dG, dG0, vx, vy);
+  advect(0, dB, dB0, vx, vy);
+
+  // Decay
+  for (let i = 0; i < dR.length; i++) {
+    dR[i] *= 0.994;
+    dG[i] *= 0.994;
+    dB[i] *= 0.994;
+  }
+}
+
+function addSource(cx, cy, dvx, dvy) {
+  let gx = floor(cx / scale);
+  let gy = floor(cy / scale);
+  let radius = 3;
+  for (let i = -radius; i <= radius; i++) {
+    for (let j = -radius; j <= radius; j++) {
+      let nx = gx + i, ny = gy + j;
+      if (nx < 1 || nx > N || ny < 1 || ny > N) continue;
+      let d = sqrt(i*i + j*j);
+      let fac = exp(-d * d / (2 * radius * radius));
+      vx[IX(nx,ny)] += dvx * 8 * fac;
+      vy[IX(nx,ny)] += dvy * 8 * fac;
+
+      let angle = atan2(dvy, dvx);
+      let speed = sqrt(dvx*dvx + dvy*dvy);
+      let h = (degrees(angle) + 360 + hueOffset) % 360;
+      let sv = min(1, speed / 30);
+      dR[IX(nx,ny)] += fac * sv * 1.2;
+      dG[IX(nx,ny)] += fac * sv * 0.4;
+      dB[IX(nx,ny)] += fac * sv * 1.0;
+    }
+  }
+}
+
+function draw() {
+  fpsFrames++;
+  let now = millis();
+  if (now - fpsTimer > 500) {
+    fpsEl.textContent = round(fpsFrames / ((now - fpsTimer) / 1000)) + ' fps';
+    fpsFrames = 0; fpsTimer = now;
+  }
+  hueOffset += 0.3;
+
+  if (mouseIsPressed) {
+    let dvx = mouseX - pmx;
+    let dvy = mouseY - pmy;
+    addSource(mouseX, mouseY, dvx, dvy);
+  }
+  pmx = mouseX; pmy = mouseY;
+
+  stepFluid();
+
+  // Render fluid via pixel array
+  loadPixels();
+  let offX = floor((width - N * scale) / 2);
+  let offY = floor((height - N * scale) / 2);
+
+  for (let j = 1; j <= N; j++) {
+    for (let i = 1; i <= N; i++) {
+      let r = min(255, dR[IX(i,j)] * 600);
+      let g = min(255, dG[IX(i,j)] * 600);
+      let b2 = min(255, dB[IX(i,j)] * 600);
+
+      let px0 = floor(offX + (i-1) * scale);
+      let py0 = floor(offY + (j-1) * scale);
+      let px1 = floor(offX + i * scale);
+      let py1 = floor(offY + j * scale);
+
+      for (let py = py0; py < py1; py++) {
+        for (let px = px0; px < px1; px++) {
+          if (px < 0 || px >= width || py < 0 || py >= height) continue;
+          let idx = (py * width + px) * 4;
+          pixels[idx]   = min(255, r + pixels[idx] * 0.15);
+          pixels[idx+1] = min(255, g + pixels[idx+1] * 0.15);
+          pixels[idx+2] = min(255, b2 + pixels[idx+2] * 0.15);
+          pixels[idx+3] = 255;
+        }
+      }
+    }
+  }
+  updatePixels();
+
+  // Draw velocity arrows at key points
+  let arrowStep = 12;
+  noFill();
+  stroke(200, 30, 90, 40);
+  strokeWeight(0.7);
+  for (let j = 2; j <= N; j += arrowStep) {
+    for (let i = 2; i <= N; i += arrowStep) {
+      let wx = offX + (i - 0.5) * scale;
+      let wy = offY + (j - 0.5) * scale;
+      let avx = vx[IX(i,j)] * 8;
+      let avy = vy[IX(i,j)] * 8;
+      let len = sqrt(avx*avx + avy*avy);
+      if (len > 0.5) {
+        let ex = wx + avx;
+        let ey = wy + avy;
+        line(wx, wy, ex, ey);
+        // Arrowhead
+        let ang = atan2(avy, avx);
+        let asize = min(len * 0.4, 4);
+        line(ex, ey, ex - asize*cos(ang-0.5), ey - asize*sin(ang-0.5));
+        line(ex, ey, ex - asize*cos(ang+0.5), ey - asize*sin(ang+0.5));
+      }
+    }
+  }
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  scale = min(width, height) / N;
+}
+</script>
+</body></html>

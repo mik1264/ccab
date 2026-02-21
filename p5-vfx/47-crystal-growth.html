@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crystal Snowflake Growth — P5.js VFX</title>
+<style>
+body { margin:0; overflow:hidden; background:#000; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#fps { position:fixed; top:12px; right:12px; color:#aaa; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#info { position:fixed; bottom:12px; left:12px; color:#aaa; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">60 fps</div>
+<div id="info">Growing crystals...</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+// 3 crystals side by side, each on its own hexagonal grid
+const GS = 160;      // grid half-size (crystal spans -GS..GS in hex)
+const CRYSTALS = 3;
+const STEPS_PER_FRAME = 3;
+
+// Hexagonal grid directions (axial coordinates)
+// We use offset pixel rendering
+const HEX_DIRS = [[1,0],[-1,0],[0,1],[0,-1],[1,-1],[-1,1]]; // axial neighbors
+
+// Each crystal: grid of cells (frozen, vapor density)
+class SnowflakeCrystal {
+  constructor(seed) {
+    this.N = GS;
+    this.size = 2 * GS + 1;
+    this.frozen = new Uint8Array(this.size * this.size);
+    this.age    = new Float32Array(this.size * this.size);
+    this.vapor  = new Float32Array(this.size * this.size);
+    this.newFrozen = [];
+    this.done = false;
+    this.seed = seed;
+
+    // Initialize vapor
+    let bg = 0.35 + seed * 0.08;
+    this.vapor.fill(bg);
+
+    // Freeze center
+    this.setFrozen(0, 0, 0);
+
+    // Unique growth params per crystal
+    this.growThresh = 0.50 + seed * 0.04;
+    this.diffRate = 0.4 + seed * 0.05;
+  }
+
+  idx(q, r) { return (r + this.N) * this.size + (q + this.N); }
+
+  inBounds(q, r) { return abs(q) <= this.N && abs(r) <= this.N && abs(q+r) <= this.N * 1.2; }
+
+  setFrozen(q, r, t) {
+    if (!this.inBounds(q, r)) return;
+    let i = this.idx(q, r);
+    if (!this.frozen[i]) {
+      this.frozen[i] = 1;
+      this.age[i] = t;
+      this.vapor[i] = 0;
+      this.newFrozen.push([q, r]);
+      // Apply 6-fold symmetry
+      this.applySymmetry(q, r, t);
+    }
+  }
+
+  applySymmetry(q, r, t) {
+    // Hexagonal 6-fold: rotate by 60°: (q,r) → (-r, q+r) → ...
+    let syms = this.hexSymmetry(q, r);
+    for (let [sq, sr] of syms) {
+      if (!this.inBounds(sq, sr)) continue;
+      let i = this.idx(sq, sr);
+      if (!this.frozen[i]) {
+        this.frozen[i] = 1;
+        this.age[i] = t;
+        this.vapor[i] = 0;
+      }
+    }
+  }
+
+  hexSymmetry(q, r) {
+    // All 6 rotations + 6 reflections of hexagonal symmetry
+    let results = [];
+    let pts = [[q,r],[-r,q+r],[-q-r,q],[-q,-r],[r,-q-r],[q+r,-q]];
+    // Also mirror
+    for (let [a,b] of [[q,r],[-r,q+r],[-q-r,q],[-q,-r],[r,-q-r],[q+r,-q]]) {
+      results.push([a,b]);
+      results.push([b,a]); // mirror across q=r
+    }
+    return results;
+  }
+
+  step(t) {
+    if (this.done) return;
+
+    // Diffuse vapor
+    let newVapor = new Float32Array(this.vapor);
+    for (let r = -this.N; r <= this.N; r++) {
+      for (let q = -this.N; q <= this.N; q++) {
+        if (!this.inBounds(q, r)) continue;
+        let i = this.idx(q, r);
+        if (this.frozen[i]) continue;
+        let sum = 0, cnt = 0;
+        for (let d of HEX_DIRS) {
+          let nq = q+d[0], nr = r+d[1];
+          if (!this.inBounds(nq, nr)) continue;
+          sum += this.vapor[this.idx(nq, nr)];
+          cnt++;
+        }
+        if (cnt > 0) newVapor[i] = this.vapor[i] * (1-this.diffRate) + (sum/cnt) * this.diffRate;
+      }
+    }
+    this.vapor = newVapor;
+
+    // Growth: check boundary cells (frozen neighbors)
+    let grew = false;
+    for (let r = -this.N; r <= this.N; r++) {
+      for (let q = -this.N; q <= this.N; q++) {
+        if (!this.inBounds(q, r)) continue;
+        let i = this.idx(q, r);
+        if (this.frozen[i]) continue;
+        // Count frozen neighbors
+        let fn = 0;
+        for (let d of HEX_DIRS) {
+          let nq = q+d[0], nr = r+d[1];
+          if (this.inBounds(nq, nr) && this.frozen[this.idx(nq, nr)]) fn++;
+        }
+        if (fn > 0 && fn <= 2) {
+          // Boundary cell: freeze if vapor high enough
+          let growP = this.vapor[i] > this.growThresh ? 1.0 : this.vapor[i] / this.growThresh;
+          if (random() < growP * 0.15) {
+            this.setFrozen(q, r, t);
+            grew = true;
+          }
+        }
+      }
+    }
+    if (!grew && t > 50) {
+      // Nudge vapor
+      this.vapor[this.idx(0,0)] = min(this.vapor[this.idx(0,0)] + 0.1, 1.0);
+    }
+    if (t > 800) this.done = true;
+  }
+
+  render(pg, offsetX, offsetY, scale, t) {
+    let cellW = scale * 1.1;
+    for (let r = -this.N; r <= this.N; r++) {
+      for (let q = -this.N; q <= this.N; q++) {
+        if (!this.inBounds(q, r)) continue;
+        let i = this.idx(q, r);
+        if (!this.frozen[i]) continue;
+        // Hex to pixel
+        let px = offsetX + (q + r * 0.5) * scale;
+        let py = offsetY + r * scale * 0.866;
+        let ageNorm = min(this.age[i] / 400, 1);
+        // New ice: bright white, old: blue-white
+        let h = lerp(210, 200, ageNorm);
+        let s = lerp(5, 40, ageNorm);
+        let b = lerp(100, 75, ageNorm);
+        pg.fill(h, s, b, 90);
+        pg.noStroke();
+        pg.rect(px - cellW/2, py - cellW/2, cellW, cellW);
+      }
+    }
+  }
+}
+
+let crystals = [];
+let pg;
+let t = 0;
+let fpsEl, infoEl;
+let lastFpsTime = 0, frameCount2 = 0;
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  pixelDensity(min(pixelDensity(), 2));
+  fpsEl = document.getElementById('fps');
+  infoEl = document.getElementById('info');
+  lastFpsTime = millis();
+  initCrystals();
+}
+
+function initCrystals() {
+  crystals = [];
+  t = 0;
+  pg = createGraphics(width, height);
+  pg.pixelDensity(1);
+  pg.colorMode(HSB, 360, 100, 100, 100);
+  pg.background(0, 0, 5);
+  for (let i = 0; i < CRYSTALS; i++) crystals.push(new SnowflakeCrystal(i));
+}
+
+function draw() {
+  // Clear pg each frame (crystals draw cumulatively with fade)
+  pg.background(0, 0, 5, 20);
+
+  let scale = min(width, height) / (GS * 2.5 * CRYSTALS);
+  let spacing = width / (CRYSTALS + 1);
+
+  for (let i = 0; i < CRYSTALS; i++) {
+    let cx = spacing * (i + 1);
+    let cy = height / 2;
+    crystals[i].render(pg, cx, cy, scale, t);
+  }
+
+  image(pg, 0, 0);
+
+  // Step
+  for (let s = 0; s < STEPS_PER_FRAME; s++) {
+    for (let c of crystals) c.step(t);
+    t++;
+  }
+
+  // Reset if all done
+  if (crystals.every(c => c.done)) {
+    setTimeout(initCrystals, 3000);
+    crystals.forEach(c => c.done = false); // prevent re-trigger
+  }
+
+  frameCount2++;
+  let now = millis();
+  if (now - lastFpsTime > 500) {
+    fpsEl.textContent = (frameCount2 / ((now - lastFpsTime) / 1000)).toFixed(1) + ' fps';
+    frameCount2 = 0; lastFpsTime = now;
+    infoEl.textContent = `Step: ${t} | 3 crystals growing simultaneously | Click to reset`;
+  }
+}
+
+function mousePressed() { initCrystals(); }
+function windowResized() { resizeCanvas(windowWidth, windowHeight); initCrystals(); }
+</script>
+</body></html>

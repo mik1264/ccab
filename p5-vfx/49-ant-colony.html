@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ant Colony Pheromones — P5.js VFX</title>
+<style>
+body { margin:0; overflow:hidden; background:#000; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#fps { position:fixed; top:12px; right:12px; color:#aaa; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#info { position:fixed; bottom:12px; left:12px; color:#aaa; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">60 fps</div>
+<div id="info">Ants: 0 searching | 0 returning | Efficiency: —</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+const NUM_ANTS = 200;
+const ANT_SPEED = 2.0;
+const TURN_RAND = 0.45;   // random turn per step
+const SENSE_DIST = 8;
+const SENSE_ANGLE = 0.6;  // radians
+const PHEROMONE_DECAY = 0.9952;
+const PHEROMONE_DIFFUSE = 0.18;
+const DEPOSIT_SEARCH = 0.4;
+const DEPOSIT_RETURN = 1.2;
+const FOOD_RADIUS = 20;
+const NEST_RADIUS = 22;
+
+// Pheromone grid (lower resolution for performance)
+const PW = 200, PH = 150;
+let pheromone;
+let diffusedPheromone;
+let pg;    // pheromone render
+let pgAnt; // ant render
+
+let ants = [];
+let nestX, nestY, foodX, foodY;
+let foodCount = 0, returnCount = 0;
+let totalDelivered = 0;
+let startTime;
+
+let fpsEl, infoEl;
+let lastFpsTime = 0, frameCount2 = 0;
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  pixelDensity(1);
+
+  nestX = width * 0.2;
+  nestY = height * 0.5;
+  foodX = width * 0.78;
+  foodY = height * 0.5;
+
+  pheromone = new Float32Array(PW * PH);
+  diffusedPheromone = new Float32Array(PW * PH);
+  pg = createGraphics(PW, PH);
+  pg.pixelDensity(1);
+  pgAnt = createGraphics(width, height);
+  pgAnt.pixelDensity(1);
+
+  fpsEl = document.getElementById('fps');
+  infoEl = document.getElementById('info');
+  lastFpsTime = millis();
+  startTime = millis();
+
+  for (let i = 0; i < NUM_ANTS; i++) {
+    ants.push(spawnAnt());
+  }
+
+  imageMode(CORNER);
+  noSmooth();
+}
+
+function spawnAnt() {
+  return {
+    x: nestX + random(-8, 8),
+    y: nestY + random(-8, 8),
+    angle: random(TWO_PI),
+    state: 'search',  // 'search' or 'return'
+    wanderTimer: 0
+  };
+}
+
+function toPheromoneIdx(x, y) {
+  let px = floor(map(x, 0, width,  0, PW));
+  let py = floor(map(y, 0, height, 0, PH));
+  px = constrain(px, 0, PW-1);
+  py = constrain(py, 0, PH-1);
+  return py * PW + px;
+}
+
+function senseAt(x, y, angle) {
+  let sx = x + cos(angle) * SENSE_DIST;
+  let sy = y + sin(angle) * SENSE_DIST;
+  if (sx < 0 || sx > width || sy < 0 || sy > height) return 0;
+  return pheromone[toPheromoneIdx(sx, sy)];
+}
+
+function stepAnts() {
+  for (let ant of ants) {
+    // Sense
+    let fwd = senseAt(ant.x, ant.y, ant.angle);
+    let lft = senseAt(ant.x, ant.y, ant.angle - SENSE_ANGLE);
+    let rgt = senseAt(ant.x, ant.y, ant.angle + SENSE_ANGLE);
+
+    if (fwd + lft + rgt > 0.01) {
+      if (fwd >= lft && fwd >= rgt) {
+        // Go forward
+      } else if (lft > rgt) {
+        ant.angle -= random(0.1, 0.4);
+      } else {
+        ant.angle += random(0.1, 0.4);
+      }
+    } else {
+      ant.angle += random(-TURN_RAND, TURN_RAND);
+    }
+
+    // State-specific behavior
+    if (ant.state === 'search') {
+      // Wander toward food area loosely
+      let toFood = atan2(foodY - ant.y, foodX - ant.x);
+      let diff = toFood - ant.angle;
+      while (diff > PI) diff -= TWO_PI;
+      while (diff < -PI) diff += TWO_PI;
+      ant.angle += diff * 0.01;
+    } else {
+      // Return to nest
+      let toNest = atan2(nestY - ant.y, nestX - ant.x);
+      let diff = toNest - ant.angle;
+      while (diff > PI) diff -= TWO_PI;
+      while (diff < -PI) diff += TWO_PI;
+      ant.angle += diff * 0.12;
+    }
+
+    // Move
+    ant.x += cos(ant.angle) * ANT_SPEED;
+    ant.y += sin(ant.angle) * ANT_SPEED;
+
+    // Bounce
+    if (ant.x < 0) { ant.x = 0; ant.angle = PI - ant.angle; }
+    if (ant.x > width) { ant.x = width; ant.angle = PI - ant.angle; }
+    if (ant.y < 0) { ant.y = 0; ant.angle = -ant.angle; }
+    if (ant.y > height) { ant.y = height; ant.angle = -ant.angle; }
+
+    // Deposit pheromone
+    let pidx = toPheromoneIdx(ant.x, ant.y);
+    if (ant.state === 'return') {
+      pheromone[pidx] = min(pheromone[pidx] + DEPOSIT_RETURN, 10.0);
+    } else {
+      pheromone[pidx] = min(pheromone[pidx] + DEPOSIT_SEARCH * 0.2, 10.0);
+    }
+
+    // State transitions
+    if (ant.state === 'search') {
+      let dx = ant.x - foodX, dy = ant.y - foodY;
+      if (dx*dx + dy*dy < FOOD_RADIUS * FOOD_RADIUS) {
+        ant.state = 'return';
+        ant.angle += PI; // turn around
+        totalDelivered++;
+      }
+    } else {
+      let dx = ant.x - nestX, dy = ant.y - nestY;
+      if (dx*dx + dy*dy < NEST_RADIUS * NEST_RADIUS) {
+        ant.state = 'search';
+        ant.angle = random(TWO_PI);
+      }
+    }
+  }
+}
+
+function diffusePheromone() {
+  for (let y = 1; y < PH-1; y++) {
+    for (let x = 1; x < PW-1; x++) {
+      let idx = y*PW+x;
+      let avg = (
+        pheromone[idx] +
+        pheromone[idx-1] + pheromone[idx+1] +
+        pheromone[(y-1)*PW+x] + pheromone[(y+1)*PW+x]
+      ) / 5.0;
+      diffusedPheromone[idx] = (pheromone[idx]*(1-PHEROMONE_DIFFUSE) + avg*PHEROMONE_DIFFUSE) * PHEROMONE_DECAY;
+    }
+  }
+  let tmp = pheromone; pheromone = diffusedPheromone; diffusedPheromone = tmp;
+}
+
+function renderPheromone() {
+  pg.loadPixels();
+  let pd = pg.pixels;
+  for (let i = 0; i < PW*PH; i++) {
+    let t = constrain(pheromone[i] / 8.0, 0, 1);
+    let pi = i*4;
+    if (t < 0.01) {
+      pd[pi]=0; pd[pi+1]=2; pd[pi+2]=0; pd[pi+3]=255;
+    } else if (t < 0.3) {
+      let v = t/0.3;
+      pd[pi]=0; pd[pi+1]=floor(v*130); pd[pi+2]=floor(v*60); pd[pi+3]=255;
+    } else if (t < 0.7) {
+      let v = (t-0.3)/0.4;
+      pd[pi]=floor(v*60); pd[pi+1]=floor(130+v*125); pd[pi+2]=floor(60+v*100); pd[pi+3]=255;
+    } else {
+      let v = (t-0.7)/0.3;
+      pd[pi]=floor(60+v*195); pd[pi+1]=255; pd[pi+2]=floor(160+v*95); pd[pi+3]=255;
+    }
+  }
+  pg.updatePixels();
+}
+
+function draw() {
+  stepAnts();
+  diffusePheromone();
+  renderPheromone();
+
+  // Draw pheromone
+  image(pg, 0, 0, width, height);
+
+  // Draw nest
+  noStroke();
+  fill(40, 80, 90, 70);
+  ellipse(nestX, nestY, NEST_RADIUS*2, NEST_RADIUS*2);
+  fill(40, 60, 100, 90);
+  ellipse(nestX, nestY, NEST_RADIUS, NEST_RADIUS);
+  fill(0, 0, 100, 80);
+
+  // Draw food
+  fill(120, 80, 80, 70);
+  ellipse(foodX, foodY, FOOD_RADIUS*2, FOOD_RADIUS*2);
+  fill(120, 60, 100, 90);
+  ellipse(foodX, foodY, FOOD_RADIUS, FOOD_RADIUS);
+
+  // Labels
+  textSize(11);
+  textAlign(CENTER);
+  fill(0, 0, 80, 80);
+  noStroke();
+  text('NEST', nestX, nestY - NEST_RADIUS - 6);
+  text('FOOD', foodX, foodY - FOOD_RADIUS - 6);
+
+  // Draw ants
+  let searching = 0, returning = 0;
+  for (let ant of ants) {
+    let sz = 5;
+    push();
+    translate(ant.x, ant.y);
+    rotate(ant.angle);
+    if (ant.state === 'return') {
+      fill(0, 85, 100, 95);    // red: returning with food
+      returning++;
+    } else {
+      fill(0, 0, 90, 75);      // white: searching
+      searching++;
+    }
+    noStroke();
+    ellipse(0, 0, sz, sz * 1.7);
+    // Head
+    fill(0, 0, 100, 60);
+    ellipse(sz * 0.6, 0, sz * 0.6, sz * 0.6);
+    pop();
+  }
+
+  // FPS + info
+  frameCount2++;
+  let now = millis();
+  if (now - lastFpsTime > 500) {
+    fpsEl.textContent = (frameCount2 / ((now - lastFpsTime) / 1000)).toFixed(1) + ' fps';
+    frameCount2 = 0; lastFpsTime = now;
+    let elapsed = (now - startTime) / 1000;
+    let rate = elapsed > 2 ? (totalDelivered / elapsed).toFixed(2) : '—';
+    infoEl.textContent = `Searching: ${searching} | Returning: ${returning} | Delivered: ${totalDelivered} | Rate: ${rate}/s`;
+  }
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  nestX = width * 0.2; nestY = height * 0.5;
+  foodX = width * 0.78; foodY = height * 0.5;
+}
+</script>
+</body></html>

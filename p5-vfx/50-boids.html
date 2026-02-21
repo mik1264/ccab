@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boids Flocking with Predator — P5.js VFX</title>
+<style>
+body { margin:0; overflow:hidden; background:#000; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#fps { position:fixed; top:12px; right:12px; color:#aaa; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+#info { position:fixed; bottom:12px; left:12px; color:#aaa; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back</a>
+<div id="fps">60 fps</div>
+<div id="info">Boids: 2000 | Flocks: — | Avg speed: —</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+const NUM_BOIDS = 2000;
+const MAX_SPEED = 3.2;
+const MAX_FORCE = 0.08;
+
+// Neighbor radii
+const SEP_RADIUS = 22;
+const ALI_RADIUS = 50;
+const COH_RADIUS = 50;
+const PRED_FLEE_RADIUS = 100;
+
+// Rule weights
+const SEP_WEIGHT = 1.8;
+const ALI_WEIGHT = 1.0;
+const COH_WEIGHT = 0.9;
+const FLEE_WEIGHT = 4.0;
+
+// Spatial grid for acceleration
+const CELL = 55;
+let gridW, gridH;
+let spatialGrid;
+
+let boids = [];
+let predator;
+let boidColors = [];  // hue per boid (colored by speed)
+
+let kmTimer = 0;
+const KM_INTERVAL = 5000;
+
+let fpsEl, infoEl;
+let lastFpsTime = 0, frameCount2 = 0;
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  pixelDensity(min(pixelDensity(), 2));
+  gridW = ceil(width / CELL);
+  gridH = ceil(height / CELL);
+  spatialGrid = new Array(gridW * gridH);
+  fpsEl = document.getElementById('fps');
+  infoEl = document.getElementById('info');
+  lastFpsTime = millis();
+
+  for (let i = 0; i < NUM_BOIDS; i++) {
+    boids.push({
+      x: random(width), y: random(height),
+      vx: random(-2,2), vy: random(-2,2),
+      speed: 0
+    });
+    boidColors.push(random(360));
+  }
+
+  predator = {
+    x: width/2, y: height/2,
+    vx: random(-1,1), vy: random(-1,1),
+    angle: 0
+  };
+}
+
+function buildSpatialGrid() {
+  for (let i = 0; i < gridW * gridH; i++) spatialGrid[i] = [];
+  for (let i = 0; i < boids.length; i++) {
+    let b = boids[i];
+    let gx = floor(b.x / CELL), gy = floor(b.y / CELL);
+    gx = constrain(gx, 0, gridW-1);
+    gy = constrain(gy, 0, gridH-1);
+    spatialGrid[gy * gridW + gx].push(i);
+  }
+}
+
+function getNeighbors(b, radius) {
+  let result = [];
+  let cx = floor(b.x / CELL), cy = floor(b.y / CELL);
+  let cr = ceil(radius / CELL);
+  for (let gy = cy - cr; gy <= cy + cr; gy++) {
+    if (gy < 0 || gy >= gridH) continue;
+    for (let gx = cx - cr; gx <= cx + cr; gx++) {
+      if (gx < 0 || gx >= gridW) continue;
+      let cell = spatialGrid[gy * gridW + gx];
+      for (let idx of cell) result.push(idx);
+    }
+  }
+  return result;
+}
+
+function limit(vx, vy, max) {
+  let m = sqrt(vx*vx + vy*vy);
+  if (m > max) { return [vx/m*max, vy/m*max]; }
+  return [vx, vy];
+}
+
+function steer(vx, vy, dx, dy, maxF) {
+  let m = sqrt(dx*dx + dy*dy);
+  if (m < 0.001) return [0,0];
+  let tx = dx/m * MAX_SPEED - vx;
+  let ty = dy/m * MAX_SPEED - vy;
+  return limit(tx, ty, maxF);
+}
+
+function updateBoids() {
+  buildSpatialGrid();
+
+  for (let i = 0; i < boids.length; i++) {
+    let b = boids[i];
+
+    let sepX=0,sepY=0,sepN=0;
+    let aliX=0,aliY=0,aliN=0;
+    let cohX=0,cohY=0,cohN=0;
+
+    let neighbors = getNeighbors(b, COH_RADIUS);
+    for (let j of neighbors) {
+      if (j === i) continue;
+      let o = boids[j];
+      let dx = b.x - o.x, dy = b.y - o.y;
+      let d2 = dx*dx + dy*dy;
+
+      if (d2 < SEP_RADIUS * SEP_RADIUS && d2 > 0) {
+        let d = sqrt(d2);
+        sepX += dx/d; sepY += dy/d; sepN++;
+      }
+      if (d2 < ALI_RADIUS * ALI_RADIUS) {
+        aliX += o.vx; aliY += o.vy; aliN++;
+      }
+      if (d2 < COH_RADIUS * COH_RADIUS) {
+        cohX += o.x; cohY += o.y; cohN++;
+      }
+    }
+
+    let fx=0, fy=0;
+
+    if (sepN > 0) {
+      let [sx,sy] = steer(b.vx, b.vy, sepX/sepN, sepY/sepN, MAX_FORCE * SEP_WEIGHT);
+      fx += sx * SEP_WEIGHT; fy += sy * SEP_WEIGHT;
+    }
+    if (aliN > 0) {
+      let [ax,ay] = steer(b.vx, b.vy, aliX/aliN, aliY/aliN, MAX_FORCE);
+      fx += ax * ALI_WEIGHT; fy += ay * ALI_WEIGHT;
+    }
+    if (cohN > 0) {
+      let [cx,cy] = steer(b.vx, b.vy, cohX/cohN - b.x, cohY/cohN - b.y, MAX_FORCE);
+      fx += cx * COH_WEIGHT; fy += cy * COH_WEIGHT;
+    }
+
+    // Flee predator
+    let pdx = b.x - predator.x, pdy = b.y - predator.y;
+    let pd2 = pdx*pdx + pdy*pdy;
+    if (pd2 < PRED_FLEE_RADIUS * PRED_FLEE_RADIUS && pd2 > 0) {
+      let pd = sqrt(pd2);
+      let fStr = (1 - pd/PRED_FLEE_RADIUS) * FLEE_WEIGHT;
+      fx += (pdx/pd) * fStr;
+      fy += (pdy/pd) * fStr;
+    }
+
+    b.vx += fx; b.vy += fy;
+    [b.vx, b.vy] = limit(b.vx, b.vy, MAX_SPEED);
+
+    b.x += b.vx; b.y += b.vy;
+    b.speed = sqrt(b.vx*b.vx + b.vy*b.vy);
+
+    // Wrap
+    if (b.x < 0) b.x += width;
+    if (b.x > width) b.x -= width;
+    if (b.y < 0) b.y += height;
+    if (b.y > height) b.y -= height;
+  }
+}
+
+function updatePredator() {
+  // Predator hunts nearest boid cluster
+  let tx = 0, ty = 0, cnt = 0;
+  for (let b of boids) {
+    let dx = b.x - predator.x, dy = b.y - predator.y;
+    if (dx*dx + dy*dy < 200*200) { tx += b.x; ty += b.y; cnt++; }
+  }
+  if (cnt > 0) {
+    tx /= cnt; ty /= cnt;
+    let dx = tx - predator.x, dy = ty - predator.y;
+    let d = sqrt(dx*dx + dy*dy);
+    if (d > 0) {
+      predator.vx += dx/d * 0.15;
+      predator.vy += dy/d * 0.15;
+    }
+  }
+  [predator.vx, predator.vy] = limit(predator.vx, predator.vy, MAX_SPEED * 1.4);
+  predator.x += predator.vx; predator.y += predator.vy;
+  if (predator.x < 0) predator.x += width;
+  if (predator.x > width) predator.x -= width;
+  if (predator.y < 0) predator.y += height;
+  if (predator.y > height) predator.y -= height;
+  predator.angle = atan2(predator.vy, predator.vx);
+}
+
+function draw() {
+  // Trail / motion blur
+  noStroke();
+  fill(0, 0, 0, 25);
+  rect(0, 0, width, height);
+
+  updateBoids();
+  updatePredator();
+
+  // Draw boids
+  for (let i = 0; i < boids.length; i++) {
+    let b = boids[i];
+    let speedNorm = b.speed / MAX_SPEED;
+    // Color by speed: slow=blue, fast=orange-yellow
+    let h = lerp(210, 45, speedNorm);
+    let s = lerp(60, 90, speedNorm);
+    let bv = lerp(70, 100, speedNorm);
+    let alpha = 85;
+
+    // Check proximity to predator for extra highlighting
+    let pdx = b.x - predator.x, pdy = b.y - predator.y;
+    if (pdx*pdx + pdy*pdy < PRED_FLEE_RADIUS * PRED_FLEE_RADIUS) {
+      h = lerp(h, 0, 0.5); s = 90; bv = 100;
+    }
+
+    let angle = atan2(b.vy, b.vx);
+    push();
+    translate(b.x, b.y);
+    rotate(angle);
+    fill(h, s, bv, alpha);
+    noStroke();
+    // Arrow shape
+    beginShape();
+    vertex(5, 0);
+    vertex(-3, 2);
+    vertex(-2, 0);
+    vertex(-3, -2);
+    endShape(CLOSE);
+    pop();
+  }
+
+  // Draw predator
+  push();
+  translate(predator.x, predator.y);
+  rotate(predator.angle);
+  // Glow
+  noStroke();
+  fill(0, 80, 100, 15);
+  ellipse(0, 0, 40, 40);
+  fill(0, 80, 100, 30);
+  ellipse(0, 0, 24, 24);
+  fill(0, 90, 100, 90);
+  beginShape();
+  vertex(14, 0);
+  vertex(-8, 6);
+  vertex(-5, 0);
+  vertex(-8, -6);
+  endShape(CLOSE);
+  // Eye
+  fill(0, 0, 0, 90);
+  ellipse(8, -2, 3, 3);
+  pop();
+
+  frameCount2++;
+  let now = millis();
+  if (now - lastFpsTime > 500) {
+    fpsEl.textContent = (frameCount2 / ((now - lastFpsTime) / 1000)).toFixed(1) + ' fps';
+    frameCount2 = 0; lastFpsTime = now;
+    let totalSpeed = boids.reduce((s, b) => s + b.speed, 0);
+    let avgSpeed = (totalSpeed / boids.length).toFixed(2);
+    infoEl.textContent = `Boids: ${boids.length} | Predator hunting | Avg speed: ${avgSpeed} | Color = speed (blue→orange)`;
+  }
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  gridW = ceil(width/CELL); gridH = ceil(height/CELL);
+  spatialGrid = new Array(gridW*gridH);
+}
+</script>
+</body></html>
