@@ -56,6 +56,7 @@
         import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
         import { RenderPass }     from 'three/addons/postprocessing/RenderPass.js';
         import { UnrealBloomPass }from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { ShaderPass }     from 'three/addons/postprocessing/ShaderPass.js';
         import { OutputPass }     from 'three/addons/postprocessing/OutputPass.js';
 
         // ── Renderer ──────────────────────────────────────────────────────────────
@@ -80,9 +81,7 @@
         controls.minDistance    = 3.5;
         controls.maxDistance    = 18;
 
-        // ── Procedural env map from PMREMGenerator ────────────────────────────────
-        // Build a tiny scene of colored lights that will bake into a cube env texture.
-        // The PMREM generator handles importance sampling for realistic reflections.
+        // ── Procedural env map from PMREMGenerator ─────────────────────────────────
         const pmrem = new THREE.PMREMGenerator(renderer);
         pmrem.compileEquirectangularShader();
 
@@ -90,7 +89,6 @@
             const s = new THREE.Scene();
             s.background = new THREE.Color(0x000000);
 
-            // Large soft "studio" lights at various angles
             const lights = [
                 { color: 0xffffff, intensity: 4.0, pos: [ 8,  8,  8] },
                 { color: 0x88aaff, intensity: 2.5, pos: [-8,  4,  6] },
@@ -105,7 +103,6 @@
                 s.add(pl);
             });
 
-            // Hemisphere fills: warm sky / cool ground
             s.add(new THREE.HemisphereLight(0xfff4e0, 0x223366, 0.8));
             return s;
         }
@@ -113,7 +110,7 @@
         const envTexture = pmrem.fromScene(buildEnvScene(), 0, 0.1, 100).texture;
         scene.environment = envTexture;
 
-        // ── Vertex shader (simplex noise displacement) ─────────────────────────────
+        // ── Vertex shader — 5-octave simplex noise displacement ───────────────────
         const vertexShader = /* glsl */`
             uniform float uTime;
 
@@ -172,27 +169,35 @@
                 return 42.0 * dot(m*m, vec4(
                     dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
             }
-            // -----------------------------------------------------------------------
 
-            // Compute displaced normal numerically (finite differences)
+            // 5-octave FBM displacement
+            float fbmDisplace(vec3 pos, float t) {
+                float d = snoise(pos * 1.5 + t * 0.50) * 0.30;   // oct 1
+                d      += snoise(pos * 3.0 + t * 0.35) * 0.12;   // oct 2
+                d      += snoise(pos * 6.0 + t * 0.20) * 0.05;   // oct 3
+                d      += snoise(pos * 11.0 + t * 0.14) * 0.025; // oct 4 — finer
+                d      += snoise(pos * 21.0 + t * 0.10) * 0.012; // oct 5 — finest
+                return d;
+            }
+
+            // Secondary high-frequency ripple (mercury surface shimmer)
+            float rippleDisplace(vec3 pos, float t) {
+                float r = snoise(pos * 18.0 + t * 2.5) * 0.018;   // fast high-freq
+                r      += snoise(pos * 32.0 + t * 3.1) * 0.009;
+                return r;
+            }
+
+            // Numeric normal on displaced surface
             vec3 displacedNormal(vec3 pos, float t, float eps) {
-                float n  = snoise(pos * 1.5 + t * 0.5) * 0.30
-                         + snoise(pos * 3.0 + t * 0.35) * 0.12
-                         + snoise(pos * 6.0 + t * 0.20) * 0.04;
+                float n  = fbmDisplace(pos, t) + rippleDisplace(pos, t);
 
-                vec3 px = normalize(pos + vec3(eps, 0.0, 0.0));
-                vec3 nx_d = px + px * (
-                    snoise(px*1.5+t*0.5)*0.30 +
-                    snoise(px*3.0+t*0.35)*0.12 +
-                    snoise(px*6.0+t*0.20)*0.04);
+                vec3 px   = normalize(pos + vec3(eps, 0.0, 0.0));
+                vec3 nx_d = px + px * (fbmDisplace(px, t) + rippleDisplace(px, t));
 
-                vec3 pz = normalize(pos + vec3(0.0, 0.0, eps));
-                vec3 nz_d = pz + pz * (
-                    snoise(pz*1.5+t*0.5)*0.30 +
-                    snoise(pz*3.0+t*0.35)*0.12 +
-                    snoise(pz*6.0+t*0.20)*0.04);
+                vec3 pz   = normalize(pos + vec3(0.0, 0.0, eps));
+                vec3 nz_d = pz + pz * (fbmDisplace(pz, t) + rippleDisplace(pz, t));
 
-                vec3 origin = pos + pos * n;
+                vec3 origin   = pos + pos * n;
                 vec3 tangent  = nz_d - origin;
                 vec3 bitangent= nx_d - origin;
                 return normalize(cross(tangent, bitangent));
@@ -201,15 +206,10 @@
             void main() {
                 float t = uTime;
 
-                // Multi-octave displacement along the sphere's own normal
-                float d = snoise(position * 1.5 + t * 0.50) * 0.30
-                        + snoise(position * 3.0 + t * 0.35) * 0.12
-                        + snoise(position * 6.0 + t * 0.20) * 0.04;
-
+                float d  = fbmDisplace(position, t) + rippleDisplace(position, t);
                 vec3 displaced = position + normal * d;
 
-                // Numeric normal on the displaced surface
-                vec3 dispNorm = displacedNormal(position, t, 0.03);
+                vec3 dispNorm = displacedNormal(position, t, 0.025);
                 vWorldNormal  = normalize(mat3(modelMatrix) * dispNorm);
                 vWorldPos     = (modelMatrix * vec4(displaced, 1.0)).xyz;
 
@@ -217,7 +217,7 @@
             }
         `;
 
-        // ── Fragment shader (chrome / liquid metal) ────────────────────────────────
+        // ── Fragment shader — full rainbow iridescence ────────────────────────────
         const fragmentShader = /* glsl */`
             uniform float uTime;
             uniform vec3  uCameraPos;
@@ -230,46 +230,57 @@
                 vec3 N = normalize(vWorldNormal);
                 vec3 V = normalize(uCameraPos - vWorldPos);
 
-                // --- reflection ---------------------------------------------------
                 vec3 R = reflect(-V, N);
                 vec3 envColor = textureCube(uEnvMap, R).rgb;
 
                 // --- Fresnel (Schlick) -------------------------------------------
-                // Chrome base reflectance F0 ~ 0.95 (near-perfect mirror)
                 float F0 = 0.95;
                 float cosTheta = clamp(dot(N, V), 0.0, 1.0);
                 float fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
 
-                // --- Chrome base tint: silver-blue --------------------------------
+                // --- Chrome base tint -------------------------------------------
                 vec3 baseMetal = vec3(0.82, 0.87, 0.92);
 
-                // --- Very subtle iridescent rainbow at glancing angles ------------
-                float edge = pow(1.0 - cosTheta, 3.0);
+                // --- Full rainbow iridescent halo at glancing angles ─────────────
+                // Cycle through all hues instead of a limited range
+                float edge = pow(1.0 - cosTheta, 2.5);
+                float hueShift = uTime * 0.25;
                 vec3 iridescence = vec3(
-                    0.5 + 0.5 * sin(edge * 6.2832 + uTime * 0.6 + 0.0),
-                    0.5 + 0.5 * sin(edge * 6.2832 + uTime * 0.6 + 2.094),
-                    0.5 + 0.5 * sin(edge * 6.2832 + uTime * 0.6 + 4.189)
+                    0.5 + 0.5 * sin(edge * 12.566 + hueShift + 0.0),
+                    0.5 + 0.5 * sin(edge * 12.566 + hueShift + 2.094),
+                    0.5 + 0.5 * sin(edge * 12.566 + hueShift + 4.189)
                 );
+                // Add second harmonic for richer color banding
+                vec3 iridescence2 = vec3(
+                    0.5 + 0.5 * sin(edge * 25.0 + hueShift * 1.3 + 1.0),
+                    0.5 + 0.5 * sin(edge * 25.0 + hueShift * 1.3 + 3.094),
+                    0.5 + 0.5 * sin(edge * 25.0 + hueShift * 1.3 + 5.189)
+                );
+                vec3 finalIrid = mix(iridescence, iridescence2, 0.35);
 
-                // --- Combine: env reflection tinted by metal albedo --------------
+                // --- Combine reflection ------------------------------------------
                 vec3 reflected = envColor * baseMetal;
 
-                // --- Key specular highlight (sun / studio key) -------------------
+                // --- Key specular highlight (sun) --------------------------------
                 vec3 keyDir = normalize(vec3(0.6, 0.8, 0.5));
                 float spec  = pow(max(dot(R, keyDir), 0.0), 256.0);
                 vec3 specular = vec3(1.0) * spec;
 
                 // --- Fill specular (secondary light) ----------------------------
-                vec3 fillDir = normalize(vec3(-0.7, -0.3, 0.6));
+                vec3 fillDir  = normalize(vec3(-0.7, -0.3, 0.6));
                 float fillSpec = pow(max(dot(R, fillDir), 0.0), 64.0) * 0.35;
                 specular += vec3(0.6, 0.75, 1.0) * fillSpec;
+
+                // Third specular for extra brilliance
+                vec3 fill2Dir  = normalize(vec3(0.2, -0.8, -0.5));
+                float fill2Spec = pow(max(dot(R, fill2Dir), 0.0), 96.0) * 0.2;
+                specular += vec3(1.0, 0.8, 0.5) * fill2Spec;
 
                 // --- Final assembly ---------------------------------------------
                 vec3 color = reflected * fresnel
                            + specular
-                           + iridescence * edge * 0.08;
+                           + finalIrid * edge * 0.22;   // stronger rainbow ring
 
-                // Gamma is handled by ACESFilmic tone mapping + OutputPass
                 gl_FragColor = vec4(color, 1.0);
             }
         `;
@@ -282,35 +293,56 @@
             uniforms: {
                 uTime:      { value: 0.0 },
                 uCameraPos: { value: new THREE.Vector3() },
-                uEnvMap:    { value: null },   // set below after PMREMGenerator builds it
+                uEnvMap:    { value: null },
             },
         });
         const sphere = new THREE.Mesh(sphereGeo, sphereMat);
         scene.add(sphere);
 
-        // Wire the pre-generated env map into the shader uniform
-        // (Using the raw cube texture from the PMREM target)
-        // PMREMGenerator.fromScene returns an RenderTarget; .texture is the pmrem result.
-        // We also expose the raw cube so the shader can use textureCube().
-        // Build a second, unfiltered cube render target for the raw cube reflection.
+        // CubeCamera for live reflections
         const cubeRenderTarget = new THREE.WebGLCubeRenderTarget(512, {
             generateMipmaps: true,
             minFilter: THREE.LinearMipmapLinearFilter,
         });
         const cubeCamera = new THREE.CubeCamera(0.1, 100, cubeRenderTarget);
-        // The cubeCamera does not need to be in the scene; we set its position manually.
         cubeCamera.position.set(0, 0, 0);
         scene.add(cubeCamera);
 
-        // The CubeCamera will be updated once after the lights are set up.
-        // We deliberately keep the sphere invisible during the bake.
         sphere.visible = false;
         cubeCamera.update(renderer, scene);
         sphere.visible = true;
 
         sphereMat.uniforms.uEnvMap.value = cubeRenderTarget.texture;
 
-        // ── Floating mercury droplets ─────────────────────────────────────────────
+        // ── 5 Orbiting chrome spheres ─────────────────────────────────────────────
+        const orbitSpheres = [];
+        const ORBIT_COUNT = 5;
+        const orbitMat = new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader,
+            uniforms: {
+                uTime:      { value: 0.0 },
+                uCameraPos: { value: new THREE.Vector3() },
+                uEnvMap:    { value: cubeRenderTarget.texture },
+            },
+        });
+
+        for (let i = 0; i < ORBIT_COUNT; i++) {
+            const r   = 0.28 + Math.random() * 0.18;
+            const geo = new THREE.SphereGeometry(r, 64, 64);
+            const mesh = new THREE.Mesh(geo, orbitMat);
+
+            const orbitRadius = 3.0 + Math.random() * 1.2;
+            const orbitTilt   = (Math.random() - 0.5) * Math.PI * 0.6;
+            const orbitPhase  = (i / ORBIT_COUNT) * Math.PI * 2;
+            const orbitSpeed  = 0.18 + Math.random() * 0.14;
+
+            mesh.userData = { orbitRadius, orbitTilt, orbitPhase, orbitSpeed };
+            scene.add(mesh);
+            orbitSpheres.push(mesh);
+        }
+
+        // ── Floating mercury droplets (original 18) ───────────────────────────────
         const droplets = [];
         const dropletCount = 18;
         const dropletMat = new THREE.ShaderMaterial({
@@ -351,7 +383,7 @@
             droplets.push(mesh);
         }
 
-        // ── Scene lights (real lights for Three.js, complement shader lights) ────
+        // ── Scene lights ──────────────────────────────────────────────────────────
         const ambientLight = new THREE.AmbientLight(0x112233, 0.4);
         scene.add(ambientLight);
 
@@ -365,7 +397,7 @@
         lights[2].position.set( 4, -7, -6);
         lights.forEach(l => scene.add(l));
 
-        // ── Particle drip system (small dots streaming around) ─────────────────────
+        // ── Surface drip particles ─────────────────────────────────────────────────
         const particleCount = 800;
         const particlePositions = new Float32Array(particleCount * 3);
         const particleSpeeds   = new Float32Array(particleCount);
@@ -391,17 +423,54 @@
         }));
         scene.add(particleMesh);
 
-        // ── Post-processing ────────────────────────────────────────────────────────
+        // ── Post-processing: bloom + chromatic aberration ─────────────────────────
         const composer = new EffectComposer(renderer);
         composer.addPass(new RenderPass(scene, camera));
 
         const bloom = new UnrealBloomPass(
             new THREE.Vector2(innerWidth, innerHeight),
-            0.5,   // strength  – subtle chrome gleam
-            0.4,   // radius
-            0.75   // threshold – only the brightest highlights bloom
+            0.8,   // stronger bloom (was 0.5)
+            0.5,   // wider radius
+            0.60   // lower threshold — more highlights bloom
         );
         composer.addPass(bloom);
+
+        // ── Chromatic aberration ShaderPass ───────────────────────────────────────
+        const chromaticPass = new ShaderPass({
+            uniforms: {
+                tDiffuse:   { value: null },
+                uStrength:  { value: 0.006 },
+                uTime:      { value: 0.0 },
+            },
+            vertexShader: /* glsl */`
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv;
+                    gl_Position = vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: /* glsl */`
+                uniform sampler2D tDiffuse;
+                uniform float uStrength;
+                uniform float uTime;
+                varying vec2 vUv;
+
+                void main() {
+                    vec2 center = vec2(0.5);
+                    vec2 dir = (vUv - center);
+                    float dist = length(dir);
+                    // Pulsing aberration — stronger at edges
+                    float mag = uStrength * dist * (0.85 + 0.15 * sin(uTime * 1.3));
+
+                    float r = texture2D(tDiffuse, vUv + dir * mag * 1.5).r;
+                    float g = texture2D(tDiffuse, vUv).g;
+                    float b = texture2D(tDiffuse, vUv - dir * mag * 1.2).b;
+
+                    gl_FragColor = vec4(r, g, b, 1.0);
+                }
+            `
+        });
+        composer.addPass(chromaticPass);
         composer.addPass(new OutputPass());
 
         // ── Resize handler ─────────────────────────────────────────────────────────
@@ -420,14 +489,31 @@
         renderer.setAnimationLoop(() => {
             const t = clock.getElapsedTime();
 
-            // -- Main sphere uniforms + slow auto-rotation ------------------------
+            // -- Main sphere uniforms + slow auto-rotation -----------------------
             sphereMat.uniforms.uTime.value = t;
             sphereMat.uniforms.uCameraPos.value.copy(camera.position);
 
             sphere.rotation.y = t * 0.08;
             sphere.rotation.x = Math.sin(t * 0.05) * 0.3;
 
-            // -- Droplets ---------------------------------------------------------
+            // -- 5 Orbiting chrome spheres ---------------------------------------
+            orbitMat.uniforms.uTime.value = t;
+            orbitMat.uniforms.uCameraPos.value.copy(camera.position);
+
+            orbitSpheres.forEach((mesh, i) => {
+                const { orbitRadius, orbitTilt, orbitPhase, orbitSpeed } = mesh.userData;
+                const angle = t * orbitSpeed + orbitPhase;
+                // Orbit in a tilted plane
+                mesh.position.set(
+                    orbitRadius * Math.cos(angle),
+                    orbitRadius * Math.sin(angle) * Math.sin(orbitTilt),
+                    orbitRadius * Math.sin(angle) * Math.cos(orbitTilt)
+                );
+                // Self-rotation
+                mesh.rotation.y = t * 0.8 * (i % 2 === 0 ? 1 : -1);
+            });
+
+            // -- Droplets --------------------------------------------------------
             dropletMat.uniforms.uTime.value = t;
             dropletMat.uniforms.uCameraPos.value.copy(camera.position);
 
@@ -436,11 +522,10 @@
                 const angle = t * orbitSpeed + phase;
                 _quat.setFromAxisAngle(orbitAxis, angle);
                 mesh.position.copy(basePos).applyQuaternion(_quat);
-                // Gentle bob along orbit axis
                 mesh.position.addScaledVector(orbitAxis, Math.sin(t * 0.4 + phase) * 0.15);
             });
 
-            // -- Surface drip particles (flow along sphere surface) ---------------
+            // -- Surface drip particles ------------------------------------------
             for (let i = 0; i < particleCount; i++) {
                 particlePhis[i] += particleSpeeds[i] * 0.005;
                 if (particlePhis[i] > Math.PI) particlePhis[i] -= Math.PI * 2;
@@ -455,7 +540,15 @@
             }
             particleGeo.attributes.position.needsUpdate = true;
 
-            // -- Controls & render ------------------------------------------------
+            // -- Chromatic aberration pulse --------------------------------------
+            chromaticPass.uniforms.uTime.value = t;
+            // Subtle breathing of the aberration strength
+            chromaticPass.uniforms.uStrength.value = 0.005 + 0.003 * Math.sin(t * 0.8);
+
+            // Bloom pulse tied to surface motion
+            bloom.strength = 0.8 + 0.25 * Math.sin(t * 0.6);
+
+            // -- Controls & render -----------------------------------------------
             controls.update();
             composer.render();
         });

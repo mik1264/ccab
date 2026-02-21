@@ -92,6 +92,7 @@
         .legend .dot.exterior { background: #2244cc; }
         .legend .dot.interior { background: #cc2244; }
         .legend .dot.wire     { background: rgba(255,255,255,0.5); }
+        .legend .dot.flow     { background: #44ffcc; }
 
         /* FPS counter */
         .fps {
@@ -130,7 +131,8 @@
     <div class="legend">
         <div><span class="dot exterior"></span>EXTERIOR FACE</div>
         <div><span class="dot interior"></span>INTERIOR FACE</div>
-        <div><span class="dot wire"></span>WIREFRAME</div>
+        <div><span class="dot wire"></span>GRID LINES</div>
+        <div><span class="dot flow"></span>SURFACE FLOW</div>
     </div>
     <div class="fps" id="fps">FPS &mdash;</div>
 
@@ -140,7 +142,7 @@
             A Klein bottle has <span>no inside or outside</span> &mdash; a closed surface
             with <em>Euler characteristic 0</em> and <span>one side</span>.
             It cannot be embedded in 3D without self-intersection.
-            Parametrization: <em>Lawson immersion</em>, 80 &times; 80 mesh.
+            Parametrization: <em>Lawson immersion</em>, 160 &times; 160 mesh.
         </div>
     </div>
 
@@ -191,7 +193,6 @@
         controls.autoRotate   = true;
         controls.autoRotateSpeed = 0.7;
 
-        // Hide drag hint after first interaction
         const dragHint = document.getElementById('dragHint');
         renderer.domElement.addEventListener('pointerdown', () => {
             dragHint.classList.add('hidden');
@@ -199,25 +200,19 @@
 
         // ---------------------------------------------------------------
         // Klein Bottle parametric function (Lawson immersion)
-        //   u in [0, π],  v in [0, 2π]
-        // This version uses the "figure-8" immersion embedded in R^3.
         // ---------------------------------------------------------------
         function kleinLawson(u, v) {
-            // Classic figure-8 / Lawson-style Klein bottle in R^3.
-            // Reference: Apéry (1987), immersion via R3 cross-cap closure.
-            const cosU = Math.cos(u);
-            const sinU = Math.sin(u);
-            const cosV = Math.cos(v);
-            const sinV = Math.sin(v);
+            const cosU  = Math.cos(u);
+            const sinU  = Math.sin(u);
+            const cosV  = Math.cos(v);
+            const sinV  = Math.sin(v);
             const cos2V = Math.cos(2 * v);
             const sin2V = Math.sin(2 * v);
             const halfU = u / 2;
             const cosHU = Math.cos(halfU);
             const sinHU = Math.sin(halfU);
 
-            // r1: radial distance in (x,y) plane
             const r1 = 2 + cosHU * sinV - sinHU * sin2V;
-            // r2: z-like offset
             const r2 = sinHU * sinV + cosHU * sin2V;
 
             return new THREE.Vector3(
@@ -228,11 +223,9 @@
         }
 
         // ---------------------------------------------------------------
-        // Build BufferGeometry from parametric equations
+        // Build BufferGeometry — doubled resolution: 160x160
         // ---------------------------------------------------------------
         function buildKleinGeometry(N, M) {
-            // N segments over u in [0, π]
-            // M segments over v in [0, 2π]
             const positions = [];
             const normals   = [];
             const uvs       = [];
@@ -250,7 +243,6 @@
                     positions.push(p.x, p.y, p.z);
                     uvs.push(i / N, j / M);
 
-                    // Finite-difference normals
                     const pu = kleinLawson(u + du, v).sub(kleinLawson(u - du, v)).normalize();
                     const pv = kleinLawson(u, v + dv).sub(kleinLawson(u, v - dv)).normalize();
                     const n  = new THREE.Vector3().crossVectors(pu, pv).normalize();
@@ -277,33 +269,95 @@
             return geo;
         }
 
-        const N = 80, M = 80;
+        // Doubled from 80x80 to 160x160
+        const N = 160, M = 160;
         const kleinGeo = buildKleinGeometry(N, M);
 
         // ---------------------------------------------------------------
-        // Exterior material  (blue, FrontSide)
+        // Iridescent shader materials with Fresnel + position-based color
         // ---------------------------------------------------------------
-        const matExterior = new THREE.MeshStandardMaterial({
-            color:     0x1a3399,
-            emissive:  0x081155,
-            emissiveIntensity: 0.35,
-            metalness: 0.25,
-            roughness: 0.55,
-            side:      THREE.FrontSide,
-        });
+        const iridVertexShader = /* glsl */`
+            uniform float uTime;
+            varying vec3  vNormal;
+            varying vec3  vViewDir;
+            varying vec2  vUv;
+            varying vec3  vWorldPos;
 
-        // ---------------------------------------------------------------
-        // Interior material  (red, BackSide)
-        // Separate mesh with same geometry so Three.js can cull correctly.
-        // ---------------------------------------------------------------
-        const matInterior = new THREE.MeshStandardMaterial({
-            color:     0x991133,
-            emissive:  0x550818,
-            emissiveIntensity: 0.40,
-            metalness: 0.20,
-            roughness: 0.60,
-            side:      THREE.BackSide,
-        });
+            void main() {
+                vUv = uv;
+                vec4 worldPos = modelMatrix * vec4(position, 1.0);
+                vWorldPos = worldPos.xyz;
+                vNormal   = normalize(normalMatrix * normal);
+                vViewDir  = normalize(cameraPosition - worldPos.xyz);
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+
+        function makeIridMaterial(side) {
+            return new THREE.ShaderMaterial({
+                side,
+                transparent: true,
+                depthWrite:  false,
+                uniforms: {
+                    uTime:    { value: 0 },
+                    uBacklit: { value: side === THREE.BackSide ? 1.0 : 0.0 },
+                },
+                vertexShader: iridVertexShader,
+                fragmentShader: /* glsl */`
+                    uniform float uTime;
+                    uniform float uBacklit;
+                    varying vec3  vNormal;
+                    varying vec3  vViewDir;
+                    varying vec2  vUv;
+                    varying vec3  vWorldPos;
+
+                    vec3 hsl2rgb(float h, float s, float l) {
+                        float c = (1.0 - abs(2.0 * l - 1.0)) * s;
+                        float x = c * (1.0 - abs(mod(h * 6.0, 2.0) - 1.0));
+                        float m = l - c * 0.5;
+                        vec3 rgb;
+                        if (h < 1.0/6.0)      rgb = vec3(c, x, 0.0);
+                        else if (h < 2.0/6.0)  rgb = vec3(x, c, 0.0);
+                        else if (h < 3.0/6.0)  rgb = vec3(0.0, c, x);
+                        else if (h < 4.0/6.0)  rgb = vec3(0.0, x, c);
+                        else if (h < 5.0/6.0)  rgb = vec3(x, 0.0, c);
+                        else                   rgb = vec3(c, 0.0, x);
+                        return rgb + m;
+                    }
+
+                    void main() {
+                        vec3  N    = normalize(vNormal);
+                        vec3  V    = normalize(vViewDir);
+                        float NdV  = clamp(dot(N, V), 0.0, 1.0);
+
+                        // Fresnel: strong color shift at grazing angles
+                        float fresnel = pow(1.0 - NdV, 2.5);
+
+                        // Hue: driven by Fresnel AND surface UV position AND time
+                        float hueBase   = vUv.x * 0.6 + vUv.y * 0.25 + uTime * 0.08;
+                        float hueShift  = fresnel * 0.55;
+                        float hue       = mod(hueBase + hueShift, 1.0);
+
+                        float lightness = 0.38 + 0.2 * NdV + 0.08 * fresnel;
+                        float sat       = 0.9 - 0.3 * NdV;
+
+                        vec3 col = hsl2rgb(hue, sat, lightness);
+
+                        // Back-face subsurface approximation: warm tint, slightly brighter
+                        if (uBacklit > 0.5) {
+                            col = mix(col, vec3(1.0, 0.55, 0.25), 0.35);
+                            col *= 1.15;
+                        }
+
+                        float alpha = mix(0.55, 0.85, fresnel);
+                        gl_FragColor = vec4(col, alpha);
+                    }
+                `
+            });
+        }
+
+        const matExterior = makeIridMaterial(THREE.FrontSide);
+        const matInterior = makeIridMaterial(THREE.BackSide);
 
         const meshExterior = new THREE.Mesh(kleinGeo, matExterior);
         const meshInterior = new THREE.Mesh(kleinGeo, matInterior);
@@ -314,25 +368,96 @@
         scene.add(bottleGroup);
 
         // ---------------------------------------------------------------
-        // Wireframe overlay
+        // Grid line overlay using fract(uv*N) approach via ShaderMaterial
         // ---------------------------------------------------------------
-        const edgesGeo = new THREE.EdgesGeometry(kleinGeo, 15);   // threshold 15°
-        const wireMat  = new THREE.LineBasicMaterial({
-            color:       0xffffff,
+        const gridMat = new THREE.ShaderMaterial({
+            side: THREE.DoubleSide,
             transparent: true,
-            opacity:     0.12,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            uniforms: { uTime: { value: 0 } },
+            vertexShader: /* glsl */`
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: /* glsl */`
+                uniform float uTime;
+                varying vec2 vUv;
+
+                void main() {
+                    float N = 20.0;
+                    vec2 f = fract(vUv * N);
+                    // Grid lines at cell edges
+                    float lineWidth = 0.04;
+                    float gx = smoothstep(0.0, lineWidth, f.x) * smoothstep(1.0, 1.0 - lineWidth, f.x);
+                    float gy = smoothstep(0.0, lineWidth, f.y) * smoothstep(1.0, 1.0 - lineWidth, f.y);
+                    float grid = 1.0 - gx * gy;
+
+                    // Pulse brightness along time
+                    float pulse = 0.04 + 0.02 * sin(uTime * 1.5);
+                    gl_FragColor = vec4(0.6, 0.8, 1.0, grid * pulse);
+                }
+            `
         });
-        const wireframe = new THREE.LineSegments(edgesGeo, wireMat);
-        bottleGroup.add(wireframe);
+        const gridMesh = new THREE.Mesh(kleinGeo, gridMat);
+        bottleGroup.add(gridMesh);
+
+        // ---------------------------------------------------------------
+        // Surface flow particles: 2000 particles with UV offset over time
+        // ---------------------------------------------------------------
+        const FLOW_COUNT = 2000;
+        const flowUV   = new Float32Array(FLOW_COUNT * 2);  // current u,v
+        const flowPos  = new Float32Array(FLOW_COUNT * 3);  // world pos
+        const flowSpeeds = new Float32Array(FLOW_COUNT);
+
+        for (let i = 0; i < FLOW_COUNT; i++) {
+            flowUV[i*2]   = Math.random();  // u in [0,1] -> maps to [0,PI]
+            flowUV[i*2+1] = Math.random();  // v in [0,1] -> maps to [0,2PI]
+            flowSpeeds[i] = 0.02 + Math.random() * 0.04;
+        }
+
+        const flowGeo = new THREE.BufferGeometry();
+        flowGeo.setAttribute('position', new THREE.BufferAttribute(flowPos, 3));
+        flowGeo.attributes.position.usage = THREE.DynamicDrawUsage;
+
+        const flowMat = new THREE.PointsMaterial({
+            color:          0x44ffcc,
+            size:           0.07,
+            sizeAttenuation: true,
+            transparent:    true,
+            opacity:        0.75,
+            depthWrite:     false,
+            blending:       THREE.AdditiveBlending,
+        });
+        const flowPoints = new THREE.Points(flowGeo, flowMat);
+        bottleGroup.add(flowPoints);
+
+        function updateFlowParticles(time) {
+            for (let i = 0; i < FLOW_COUNT; i++) {
+                // Advance v (flowing along the tube direction)
+                flowUV[i*2+1] += flowSpeeds[i] * 0.016;
+                if (flowUV[i*2+1] > 1.0) flowUV[i*2+1] -= 1.0;
+
+                const u = flowUV[i*2]   * Math.PI;
+                const v = flowUV[i*2+1] * 2 * Math.PI;
+                const p = kleinLawson(u, v);
+
+                flowPos[i*3]   = p.x;
+                flowPos[i*3+1] = p.y;
+                flowPos[i*3+2] = p.z;
+            }
+            flowGeo.attributes.position.needsUpdate = true;
+        }
 
         // ---------------------------------------------------------------
         // Lighting
         // ---------------------------------------------------------------
-        // Ambient — low, lets emissive dominate
         const ambient = new THREE.AmbientLight(0x8899cc, 0.45);
         scene.add(ambient);
 
-        // Three coloured point lights orbiting the bottle
         const lightData = [
             { color: 0x4466ff, intensity: 12, radius: 8, speed: 0.40, phase: 0.00 },
             { color: 0xff4466, intensity:  9, radius: 6, speed: 0.55, phase: 2.09 },
@@ -344,7 +469,6 @@
             return { light, ...ld };
         });
 
-        // Hemisphere fill
         const hemi = new THREE.HemisphereLight(0x223355, 0x110811, 0.5);
         scene.add(hemi);
 
@@ -356,9 +480,9 @@
 
         const bloomPass = new UnrealBloomPass(
             new THREE.Vector2(window.innerWidth, window.innerHeight),
-            0.55,   // strength
-            0.55,   // radius
-            0.82    // threshold
+            0.65,  // slightly stronger bloom
+            0.55,
+            0.75
         );
         composer.addPass(bloomPass);
         composer.addPass(new OutputPass());
@@ -401,7 +525,12 @@
         // Animation loop
         // ---------------------------------------------------------------
         renderer.setAnimationLoop((time) => {
-            const t = time * 0.001;  // seconds
+            const t = time * 0.001;
+
+            // Update iridescent shader time
+            matExterior.uniforms.uTime.value = t;
+            matInterior.uniforms.uTime.value = t;
+            gridMat.uniforms.uTime.value     = t;
 
             // Orbit the point lights
             lights.forEach(ld => {
@@ -413,7 +542,10 @@
                 );
             });
 
-            // Slow bottle wobble (gentle self-rotation on Y + slow X tilt)
+            // Surface flow particles
+            updateFlowParticles(t);
+
+            // Slow bottle wobble
             bottleGroup.rotation.y = t * 0.05;
             bottleGroup.rotation.x = Math.sin(t * 0.13) * 0.18;
 

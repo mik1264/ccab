@@ -56,7 +56,7 @@
 <body>
     <a href="index.html" class="back-link">&#8592; Back</a>
     <div class="info">Drag to orbit &nbsp;&middot;&nbsp; Scroll to zoom &nbsp;&middot;&nbsp; Right-drag to pan</div>
-    <div class="stats" id="stats">200 buildings &nbsp;|&nbsp; 6 000 rain drops &nbsp;|&nbsp; UnrealBloom &nbsp;|&nbsp; Three.js r175</div>
+    <div class="stats" id="stats">200 buildings &nbsp;|&nbsp; 6 000 rain drops &nbsp;|&nbsp; 20 vehicles &nbsp;|&nbsp; UnrealBloom &nbsp;|&nbsp; Three.js r175</div>
 
     <script type="importmap">
     {
@@ -88,11 +88,11 @@
     // ─── Scene ────────────────────────────────────────────────────────────────
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x020008);
-    scene.fog = new THREE.FogExp2(0x020008, 0.022);
+    // Exponential distance fog with blue-purple gradient (near=blue-purple, far=dark)
+    scene.fog = new THREE.FogExp2(0x050012, 0.018);
 
     // ─── Camera ───────────────────────────────────────────────────────────────
     const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 300);
-    // Street-level, slightly above ground, looking along the city
     camera.position.set(0, 2.2, 22);
     camera.lookAt(0, 3, 0);
 
@@ -102,7 +102,7 @@
     controls.dampingFactor  = 0.06;
     controls.minDistance    = 2;
     controls.maxDistance    = 80;
-    controls.maxPolarAngle  = Math.PI / 2 + 0.05; // let it peek just below horizon
+    controls.maxPolarAngle  = Math.PI / 2 + 0.05;
     controls.target.set(0, 3, 0);
 
     // ─── Post-processing ──────────────────────────────────────────────────────
@@ -137,119 +137,119 @@
     // ─── Ambient / Hemisphere lights ──────────────────────────────────────────
     const hemi = new THREE.HemisphereLight(0x110033, 0x000011, 0.4);
     scene.add(hemi);
-
-    // Subtle ambient so dark building faces aren't pure black
     const ambient = new THREE.AmbientLight(0x080015, 0.6);
     scene.add(ambient);
 
-    // ─── Buildings (InstancedMesh) ─────────────────────────────────────────────
+    // ─── Buildings with window texture shader ─────────────────────────────────
+    // Each building uses a custom ShaderMaterial so the fragment shader can draw
+    // a grid of lit/unlit windows procedurally.
+
+    const windowVertShader = /* glsl */`
+        varying vec2 vUv;
+        varying vec3 vWorldNormal;
+        void main() {
+            vUv = uv;
+            vWorldNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+    `;
+
+    // Simple hash for per-window randomness (no texture needed)
+    const windowFragShader = /* glsl */`
+        varying vec2 vUv;
+        varying vec3 vWorldNormal;
+        uniform vec3  uBuildingColor;
+        uniform vec3  uWindowColor;
+        uniform float uEmissive;
+        uniform float uWindowDensity; // fraction of lit windows [0..1]
+        uniform float uCols;          // window columns
+        uniform float uRows;          // window rows
+
+        float hash21(vec2 p) {
+            p = fract(p * vec2(234.34, 435.345));
+            p += dot(p, p + 34.23);
+            return fract(p.x * p.y);
+        }
+
+        void main() {
+            // Window grid
+            vec2 cell = floor(vUv * vec2(uCols, uRows));
+            vec2 local = fract(vUv * vec2(uCols, uRows));
+
+            // Window border (margin)
+            float border = 0.12;
+            float inWindow = step(border, local.x) * step(border, local.y)
+                           * step(local.x, 1.0 - border) * step(local.y, 1.0 - border);
+
+            float litRand = hash21(cell + vec2(17.3, 41.7));
+            float lit = step(1.0 - uWindowDensity, litRand) * inWindow;
+
+            // Building base color with very subtle normal-based shading
+            float ndotUp = max(0.0, dot(vWorldNormal, vec3(0.0, 1.0, 0.0)));
+            vec3 base = uBuildingColor * (0.8 + 0.2 * ndotUp);
+
+            // Window color (emissive when lit)
+            vec3 winEmit = uWindowColor * uEmissive * lit;
+            vec3 color   = base + winEmit;
+
+            gl_FragColor = vec4(color, 1.0);
+        }
+    `;
+
     const COUNT = 200;
-    const buildingGeo = new THREE.BoxGeometry(1, 1, 1);
-    const buildingMat = new THREE.MeshStandardMaterial({
-        color:     0x0a0a18,
-        roughness: 0.85,
-        metalness: 0.25,
-    });
-
-    const buildings = new THREE.InstancedMesh(buildingGeo, buildingMat, COUNT);
-    buildings.castShadow    = true;
-    buildings.receiveShadow = true;
-    scene.add(buildings);
-
-    // We also want some buildings to have a subtly tinted facade.
-    // InstancedMesh supports per-instance color.
+    const buildingData = [];
     const matrix    = new THREE.Matrix4();
     const tmpColor  = new THREE.Color();
-    const buildingData = []; // store {x, z, height, width, depth} for later use
+
+    // We build individual meshes per building so each gets its own shader instance
+    // (instancing + per-instance shader uniforms isn't trivial; individual meshes
+    // allow easy per-building window colors and densities).
+    // To keep draw calls manageable we use a shared geometry per building.
+    const buildingGeo = new THREE.BoxGeometry(1, 1, 1);
 
     for (let i = 0; i < COUNT; i++) {
-        // Scatter buildings in a ring so the camera centre stays clear
         const angle  = Math.random() * Math.PI * 2;
-        const dist   = 4 + Math.random() * 22;       // 4…26 units from centre
+        const dist   = 4 + Math.random() * 22;
         const x      = Math.cos(angle) * dist;
         const z      = Math.sin(angle) * dist;
         const height = 1.5 + Math.random() * 14;
         const w      = 0.8 + Math.random() * 2.2;
         const d      = 0.8 + Math.random() * 2.2;
 
-        matrix.identity();
-        matrix.makeScale(w, height, d);
-        // translate so building base sits on y=0
-        const t = new THREE.Matrix4().makeTranslation(x, height / 2, z);
-        matrix.premultiply(t);
-        buildings.setMatrixAt(i, matrix);
+        const winColor = new THREE.Color(randNeon());
+        const cols = Math.max(2, Math.round(w * 3));
+        const rows = Math.max(3, Math.round(height * 1.5));
+        const density = 0.3 + Math.random() * 0.55;
 
-        // Slight colour tint – very dark blues / purples
         const tint = Math.random();
-        tmpColor.setRGB(0.03 + tint * 0.02, 0.03 + tint * 0.02, 0.06 + tint * 0.05);
-        buildings.setColorAt(i, tmpColor);
+        const buildColor = new THREE.Color(
+            0.03 + tint * 0.02,
+            0.03 + tint * 0.02,
+            0.06 + tint * 0.05
+        );
 
-        buildingData.push({ x, z, height, w, d });
-    }
-    buildings.instanceMatrix.needsUpdate = true;
-    buildings.instanceColor.needsUpdate  = true;
-
-    // ─── Window emissive quads ─────────────────────────────────────────────────
-    // Place glowing window rectangles on building facades
-    const windowGroup = new THREE.Group();
-    scene.add(windowGroup);
-
-    const windowGeo = new THREE.PlaneGeometry(1, 1);
-
-    buildingData.forEach(({ x, z, height, w, d }) => {
-        const cols  = Math.max(1, Math.floor(w * 2));
-        const rows  = Math.max(2, Math.floor(height * 1.2));
-        const color = randNeon();
-        const winMat = new THREE.MeshStandardMaterial({
-            color,
-            emissive:          new THREE.Color(color),
-            emissiveIntensity: 2.5 + Math.random() * 2,
-            side: THREE.DoubleSide,
+        const mat = new THREE.ShaderMaterial({
+            vertexShader: windowVertShader,
+            fragmentShader: windowFragShader,
+            uniforms: {
+                uBuildingColor:  { value: buildColor },
+                uWindowColor:    { value: winColor },
+                uEmissive:       { value: 2.0 + Math.random() * 2.0 },
+                uWindowDensity:  { value: density },
+                uCols:           { value: cols },
+                uRows:           { value: rows },
+            }
         });
 
-        const winW  = w / (cols + 1) * 0.55;
-        const winH  = height / (rows + 1) * 0.45;
+        const mesh = new THREE.Mesh(buildingGeo, mat);
+        mesh.scale.set(w, height, d);
+        mesh.position.set(x, height / 2, z);
+        mesh.castShadow    = true;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
 
-        // pick a face (front / back / left / right)
-        const faces = [
-            { nx: 0, nz: 1,  ox: x,     oz: z + d / 2 + 0.01, spanW: w, spanH: height, rotY: 0 },
-            { nx: 0, nz: -1, ox: x,     oz: z - d / 2 - 0.01, spanW: w, spanH: height, rotY: Math.PI },
-            { nx: 1, nz: 0,  ox: x + w / 2 + 0.01, oz: z,    spanW: d, spanH: height, rotY: -Math.PI / 2 },
-            { nx: -1, nz: 0, ox: x - w / 2 - 0.01, oz: z,    spanW: d, spanH: height, rotY:  Math.PI / 2 },
-        ];
-
-        // Only put windows on 1–2 faces to keep draw calls reasonable
-        const numFaces = 1 + Math.floor(Math.random() * 2);
-        for (let f = 0; f < numFaces; f++) {
-            const face  = faces[f];
-            const fCols = Math.max(1, Math.floor(face.spanW * 1.8));
-            const fRows = Math.max(2, Math.floor(face.spanH * 0.9));
-            const fWinW = face.spanW / (fCols + 1) * 0.5;
-            const fWinH = face.spanH / (fRows + 1) * 0.4;
-
-            for (let r = 0; r < fRows; r++) {
-                for (let c = 0; c < fCols; c++) {
-                    // randomly skip some windows (dark offices)
-                    if (Math.random() < 0.35) continue;
-
-                    const mesh = new THREE.Mesh(windowGeo, winMat);
-                    mesh.scale.set(fWinW, fWinH, 1);
-
-                    // position within the face
-                    const localX = -face.spanW / 2 + (c + 1) * face.spanW / (fCols + 1);
-                    const localY = (r + 1) * face.spanH / (fRows + 1);  // from ground
-
-                    if (face.rotY === 0 || face.rotY === Math.PI) {
-                        mesh.position.set(face.ox + localX, localY, face.oz);
-                    } else {
-                        mesh.position.set(face.ox, localY, face.oz + localX);
-                    }
-                    mesh.rotation.y = face.rotY;
-                    windowGroup.add(mesh);
-                }
-            }
-        }
-    });
+        buildingData.push({ x, z, height, w, d, mat });
+    }
 
     // ─── Neon signs (large emissive planes) ───────────────────────────────────
     const signGroup = new THREE.Group();
@@ -276,6 +276,14 @@
         );
         sign.rotation.y = Math.random() * Math.PI;
         signGroup.add(sign);
+
+        // Point light near sign for lens-flare style local glow
+        if (Math.random() < 0.4) {
+            const signLight = new THREE.PointLight(color, 20, 10, 2);
+            signLight.position.copy(sign.position);
+            signLight.position.y += 0.3;
+            scene.add(signLight);
+        }
     }
 
     // ─── Neon vertical tubes / pipes ──────────────────────────────────────────
@@ -299,7 +307,6 @@
             tubeLen / 2 + 0.01,
             Math.sin(angle) * dist
         );
-        // some are horizontal, most vertical
         if (Math.random() < 0.3) {
             tube.rotation.z = Math.PI / 2 + (Math.random() - 0.5) * 0.5;
             tube.position.y = 0.5 + Math.random() * 5;
@@ -307,7 +314,7 @@
         tubeGroup.add(tube);
     }
 
-    // ─── Coloured point lights matching neon signs ────────────────────────────
+    // ─── Coloured point lights ────────────────────────────────────────────────
     const lightColors = [0xff0080, 0x00ffff, 0xff6600, 0x9900ff, 0x00ff44, 0xff2200, 0x0088ff];
 
     lightColors.forEach((col, idx) => {
@@ -322,8 +329,6 @@
         scene.add(light);
     });
 
-    // A few additional moving accent lights added during animation
-
     // ─── Reflective wet floor ─────────────────────────────────────────────────
     const floorGeo = new THREE.PlaneGeometry(120, 120, 1, 1);
     const floorMat = new THREE.MeshStandardMaterial({
@@ -337,7 +342,7 @@
     floor.receiveShadow = true;
     scene.add(floor);
 
-    // Puddle-like irregular glossy patches
+    // Puddle-like glossy patches
     for (let i = 0; i < 20; i++) {
         const pR    = 0.5 + Math.random() * 2;
         const pudGeo = new THREE.CircleGeometry(pR, 16);
@@ -359,7 +364,6 @@
     }
 
     // ─── Road markings ────────────────────────────────────────────────────────
-    // Dashed centre line along Z axis
     const dashMat = new THREE.MeshStandardMaterial({
         color:            0xffdd00,
         emissive:         new THREE.Color(0xffdd00),
@@ -374,10 +378,10 @@
         scene.add(dash);
     }
 
-    // ─── Rain particles ───────────────────────────────────────────────────────
+    // ─── Rain particles with longer floor reflection streaks ──────────────────
     const RAIN_COUNT = 6000;
     const rainPositions  = new Float32Array(RAIN_COUNT * 3);
-    const rainVelocities = new Float32Array(RAIN_COUNT); // y-speed per drop
+    const rainVelocities = new Float32Array(RAIN_COUNT);
 
     for (let i = 0; i < RAIN_COUNT; i++) {
         rainPositions[i * 3]     = (Math.random() - 0.5) * 70;
@@ -389,7 +393,6 @@
     const rainGeo = new THREE.BufferGeometry();
     rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPositions, 3));
 
-    // Custom shader material for rain streaks – thin vertical lines
     const rainMat = new THREE.ShaderMaterial({
         uniforms: {
             uColor:   { value: new THREE.Color(0x88ccff) },
@@ -416,23 +419,70 @@
     const rain = new THREE.Points(rainGeo, rainMat);
     scene.add(rain);
 
-    // ─── Thin streaks geometry (line segments, one per drop) ──────────────────
-    // Each drop: two vertices – top and bottom of a short streak
-    const streakPositions = new Float32Array(RAIN_COUNT * 6); // 2 verts * 3
+    // Longer streaks (0.8 units) for more visible rain light reflections
+    const streakPositions = new Float32Array(RAIN_COUNT * 6);
     const streakGeo = new THREE.BufferGeometry();
     streakGeo.setAttribute('position', new THREE.BufferAttribute(streakPositions, 3));
 
     const streakMat = new THREE.LineBasicMaterial({
-        color:       0x99ccff,
+        color:       0xaaddff,
         transparent: true,
-        opacity:     0.22,
+        opacity:     0.38,
         depthWrite:  false,
     });
     const streaks = new THREE.LineSegments(streakGeo, streakMat);
     scene.add(streaks);
 
-    // ─── Moving accent lights (hover above city) ───────────────────────────────
-    // Simulates a couple of slow-moving cop-car style sweeping lights
+    // Floor light splash splats — bright short horizontal segments at y=0
+    // Each raindrop landing creates a brief light streak on the wet floor
+    const SPLASH_COUNT = RAIN_COUNT;
+    const splashPositions = new Float32Array(SPLASH_COUNT * 6);
+    const splashGeo = new THREE.BufferGeometry();
+    splashGeo.setAttribute('position', new THREE.BufferAttribute(splashPositions, 3));
+    const splashMat = new THREE.LineBasicMaterial({
+        color:       0x88bbff,
+        transparent: true,
+        opacity:     0.18,
+        depthWrite:  false,
+    });
+    const splashes = new THREE.LineSegments(splashGeo, splashMat);
+    scene.add(splashes);
+
+    // ─── Flying vehicles (20 small rectangular meshes on orbital paths) ────────
+    const vehicleGroup = new THREE.Group();
+    scene.add(vehicleGroup);
+    const vehicles = [];
+
+    const vehicleGeo = new THREE.BoxGeometry(0.5, 0.12, 0.22);
+
+    for (let i = 0; i < 20; i++) {
+        const color = neonPalette[i % neonPalette.length];
+        const vMat = new THREE.MeshStandardMaterial({
+            color,
+            emissive:          new THREE.Color(color),
+            emissiveIntensity: 3.5,
+        });
+        const vMesh = new THREE.Mesh(vehicleGeo, vMat);
+
+        // Headlight glow
+        const headLight = new THREE.PointLight(color, 8, 6, 2);
+        vMesh.add(headLight);
+        headLight.position.set(0.28, 0, 0);
+
+        scene.add(vMesh);
+
+        // Each vehicle has a random orbital path
+        const orbitRadius = 5 + Math.random() * 18;
+        const orbitHeight = 3 + Math.random() * 12;
+        const orbitSpeed  = (0.2 + Math.random() * 0.4) * (Math.random() < 0.5 ? 1 : -1);
+        const orbitPhase  = Math.random() * Math.PI * 2;
+        const orbitTiltX  = (Math.random() - 0.5) * 0.3;
+        const orbitTiltZ  = (Math.random() - 0.5) * 0.3;
+
+        vehicles.push({ mesh: vMesh, orbitRadius, orbitHeight, orbitSpeed, orbitPhase, orbitTiltX, orbitTiltZ });
+    }
+
+    // ─── Moving accent lights ─────────────────────────────────────────────────
     const accentLights = [];
     [0xff0044, 0x00aaff].forEach((col, i) => {
         const l = new THREE.PointLight(col, 60, 30, 2);
@@ -441,13 +491,12 @@
         accentLights.push({ light: l, phase: i * Math.PI });
     });
 
-    // ─── Stars in the distance ────────────────────────────────────────────────
+    // ─── Stars ────────────────────────────────────────────────────────────────
     const starCount = 800;
     const starPos   = new Float32Array(starCount * 3);
     for (let i = 0; i < starCount; i++) {
-        // place on a large sphere above the city
         const theta = Math.random() * Math.PI * 2;
-        const phi   = Math.random() * Math.PI * 0.45; // upper hemisphere only
+        const phi   = Math.random() * Math.PI * 0.45;
         const r     = 150;
         starPos[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
         starPos[i * 3 + 1] = r * Math.cos(phi) + 10;
@@ -464,23 +513,15 @@
     });
     scene.add(new THREE.Points(starGeo, starMat));
 
-    // ─── Utility: random uniform ───────────────────────────────────────────────
+    // ─── Utility ───────────────────────────────────────────────────────────────
     function rng(min, max) { return min + Math.random() * (max - min); }
-
-    // ─── Window flicker animation data ────────────────────────────────────────
-    // Each window mesh has a base emissiveIntensity; occasionally flicker
-    const windowMeshes = windowGroup.children;
-    const windowFlicker = windowMeshes.map(m => ({
-        base:  m.material.emissiveIntensity,
-        timer: rng(0, 10),
-        interval: rng(2, 12),
-    }));
 
     // ─── Animate ─────────────────────────────────────────────────────────────
     const clock = new THREE.Clock();
     let   frameCount = 0;
     const posAttr     = rainGeo.attributes.position;
     const streakAttr  = streakGeo.attributes.position;
+    const splashAttr  = splashGeo.attributes.position;
 
     renderer.setAnimationLoop(() => {
         const elapsed = clock.getElapsedTime();
@@ -496,20 +537,48 @@
                 posAttr.array[i * 3 + 2]  = (Math.random() - 0.5) * 70;
             }
 
-            // Update streak: top = current pos, bottom = 0.35 units below
             const sy = posAttr.array[i * 3 + 1];
             const sx = posAttr.array[i * 3];
             const sz = posAttr.array[i * 3 + 2];
 
+            // Vertical streak — longer (0.8) for wet-street light reflection
             streakAttr.array[i * 6]     = sx;
             streakAttr.array[i * 6 + 1] = sy;
             streakAttr.array[i * 6 + 2] = sz;
             streakAttr.array[i * 6 + 3] = sx;
-            streakAttr.array[i * 6 + 4] = sy - 0.35;
+            streakAttr.array[i * 6 + 4] = sy - 0.8;
             streakAttr.array[i * 6 + 5] = sz;
+
+            // Floor splash: near-ground drops cast tiny horizontal light streaks
+            if (sy < 1.5) {
+                const splashLen = 0.25 + (1.5 - sy) * 0.15;
+                splashAttr.array[i * 6]     = sx - splashLen;
+                splashAttr.array[i * 6 + 1] = 0.005;
+                splashAttr.array[i * 6 + 2] = sz;
+                splashAttr.array[i * 6 + 3] = sx + splashLen;
+                splashAttr.array[i * 6 + 4] = 0.005;
+                splashAttr.array[i * 6 + 5] = sz;
+            } else {
+                // Hide above-ground entries
+                splashAttr.array[i * 6 + 1] = -999;
+                splashAttr.array[i * 6 + 4] = -999;
+            }
         }
-        posAttr.needsUpdate    = true;
-        streakAttr.needsUpdate = true;
+        posAttr.needsUpdate     = true;
+        streakAttr.needsUpdate  = true;
+        splashAttr.needsUpdate  = true;
+
+        // ── Flying vehicles ───────────────────────────────────────────────────
+        vehicles.forEach(v => {
+            const angle = elapsed * v.orbitSpeed + v.orbitPhase;
+            v.mesh.position.x = Math.cos(angle) * v.orbitRadius;
+            v.mesh.position.y = v.orbitHeight + Math.sin(elapsed * 0.3 + v.orbitPhase) * 0.5;
+            v.mesh.position.z = Math.sin(angle) * v.orbitRadius;
+            // Face direction of travel
+            v.mesh.rotation.y = -angle + (v.orbitSpeed < 0 ? Math.PI : 0);
+            v.mesh.rotation.x = v.orbitTiltX;
+            v.mesh.rotation.z = v.orbitTiltZ;
+        });
 
         // ── Accent lights orbit ───────────────────────────────────────────────
         accentLights.forEach(({ light, phase }) => {
@@ -520,26 +589,6 @@
                 Math.sin(t) * 12
             );
         });
-
-        // ── Window flicker ─────────────────────────────────────────────────────
-        // Only update a small subset per frame to avoid CPU stall
-        const batchSize = 30;
-        const start     = windowMeshes.length > 0 ? (frameCount * batchSize) % windowMeshes.length : 0;
-        for (let i = start; i < Math.min(start + batchSize, windowMeshes.length); i++) {
-            const d = windowFlicker[i];
-            d.timer += 0.016;
-            if (d.timer > d.interval) {
-                d.timer    = 0;
-                d.interval = rng(2, 14);
-                // brief flicker: dim then restore
-                windowMeshes[i].material.emissiveIntensity = d.base * rng(0.1, 0.5);
-                setTimeout(() => {
-                    if (windowMeshes[i]) {
-                        windowMeshes[i].material.emissiveIntensity = d.base;
-                    }
-                }, rng(40, 200));
-            }
-        }
 
         // ── Signs slowly pulse ────────────────────────────────────────────────
         signGroup.children.forEach((sign, idx) => {

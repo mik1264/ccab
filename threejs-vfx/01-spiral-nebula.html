@@ -50,7 +50,7 @@
 <body>
     <a href="index.html" class="back-link">← Back</a>
     <div class="info">Drag to rotate &nbsp;&middot;&nbsp; Scroll to zoom</div>
-    <div class="stats" id="stats">300,000 particles &nbsp;|&nbsp; UnrealBloom &nbsp;|&nbsp; Three.js r175</div>
+    <div class="stats" id="stats">330,500 particles &nbsp;|&nbsp; Gaussian Glow &nbsp;|&nbsp; UnrealBloom &nbsp;|&nbsp; Three.js r175</div>
 
     <!-- GSAP for cinematic intro -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
@@ -72,6 +72,43 @@
     import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
     import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
     import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+    // ─── Shared ShaderMaterial factory ────────────────────────────────────────
+    function makeGaussianMaterial() {
+        return new THREE.ShaderMaterial({
+            uniforms: { uTime: { value: 0 } },
+            vertexShader: `
+                attribute float size;
+                attribute vec3 color;
+                varying vec3 vColor;
+                varying float vAlpha;
+                void main() {
+                    vColor = color;
+                    vAlpha = 1.0;
+                    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                    gl_PointSize = size * (450.0 / -mvPosition.z);
+                    gl_Position = projectionMatrix * mvPosition;
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vColor;
+                varying float vAlpha;
+                void main() {
+                    vec2 uv = gl_PointCoord - 0.5;
+                    float d = length(uv);
+                    if (d > 0.5) discard;
+                    float alpha = exp(-d * d * 6.0) * 0.95;
+                    float core = exp(-d * d * 80.0);
+                    vec3 col = vColor + core * 0.9;
+                    gl_FragColor = vec4(col, alpha * vAlpha);
+                }
+            `,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            transparent: true,
+            vertexColors: false,
+        });
+    }
 
     // ─── Scene ────────────────────────────────────────────────────────────────
     const scene = new THREE.Scene();
@@ -96,7 +133,7 @@
     controls.dampingFactor = 0.05;
     controls.minDistance = 2;
     controls.maxDistance = 80;
-    controls.autoRotate = false; // we handle rotation manually on the mesh
+    controls.autoRotate = false;
 
     // ─── Post-processing ──────────────────────────────────────────────────────
     const composer = new EffectComposer(renderer);
@@ -104,9 +141,9 @@
 
     const bloomPass = new UnrealBloomPass(
         new THREE.Vector2(window.innerWidth, window.innerHeight),
-        1.8,   // strength
-        0.4,   // radius
-        0.1    // threshold
+        2.2,   // strength (boosted)
+        0.5,   // radius (boosted)
+        0.08   // threshold
     );
     composer.addPass(bloomPass);
     composer.addPass(new OutputPass());
@@ -114,10 +151,10 @@
     // ─── Galaxy / Nebula particle system ──────────────────────────────────────
     const PARTICLE_COUNT    = 300000;
     const ARM_COUNT         = 4;
-    const ARM_SPREAD        = 0.35;    // radial scatter around the ideal radius
-    const HEIGHT_SPREAD     = 0.18;    // vertical scatter
-    const SPIRAL_TIGHTNESS  = 3.5;     // how many full turns across the disk
-    const GALAXY_RADIUS     = 10;      // maximum extent in world units
+    const ARM_SPREAD        = 0.35;
+    const HEIGHT_SPREAD     = 0.18;
+    const SPIRAL_TIGHTNESS  = 3.5;
+    const GALAXY_RADIUS     = 10;
 
     const positions  = new Float32Array(PARTICLE_COUNT * 3);
     const colors     = new Float32Array(PARTICLE_COUNT * 3);
@@ -128,24 +165,15 @@
     for (let i = 0; i < PARTICLE_COUNT; i++) {
         const i3 = i * 3;
 
-        // Which arm?
         const arm = (i % ARM_COUNT) * ((Math.PI * 2) / ARM_COUNT);
-
-        // Distribute particles along a power curve so the core is denser
-        const t      = Math.pow(Math.random(), 1.4);          // 0…1, biased toward core
+        const t      = Math.pow(Math.random(), 1.4);
         const radius = t * GALAXY_RADIUS;
-
-        // Logarithmic spiral angle
         const spinAngle = radius * SPIRAL_TIGHTNESS * 0.15;
-
-        // Random scatter around the ideal arm position
         const scatter = (Math.random() - 0.5) * ARM_SPREAD * (radius + 0.5);
         const angle   = arm + spinAngle + scatter / (radius + 1);
 
         const x = Math.cos(angle) * radius + (Math.random() - 0.5) * ARM_SPREAD * (1 - t);
         const z = Math.sin(angle) * radius + (Math.random() - 0.5) * ARM_SPREAD * (1 - t);
-
-        // Vertical height falls off with radius (disk flare)
         const heightSigma = HEIGHT_SPREAD * (1 - t * 0.75);
         const y = (Math.random() - 0.5) * heightSigma * GALAXY_RADIUS * 0.4;
 
@@ -153,11 +181,7 @@
         positions[i3 + 1] = y;
         positions[i3 + 2] = z;
 
-        // Color: electric blue (hue ~0.60) at core → warm gold → deep crimson at rim
-        // Normalized radius 0…1
         const nr = Math.min(radius / GALAXY_RADIUS, 1.0);
-
-        // Hue: 0.62 (blue) → 0.10 (gold) → 0.02 (red)
         const hue        = 0.62 - nr * 0.60;
         const saturation = 0.85 + Math.random() * 0.15;
         const lightness  = 0.55 + nr * 0.12 + Math.random() * 0.12;
@@ -167,8 +191,8 @@
         colors[i3 + 1] = tmpColor.g;
         colors[i3 + 2] = tmpColor.b;
 
-        // Particles near center are slightly larger / more brilliant
-        sizes[i] = Math.random() * 0.5 + 0.05 + (1 - t) * 0.3;
+        // Size: scaled up so gaussian disc is visible (range 0.06–0.25)
+        sizes[i] = 0.06 + Math.random() * 0.10 + (1 - t) * 0.09;
     }
 
     const geometry = new THREE.BufferGeometry();
@@ -176,63 +200,122 @@
     geometry.setAttribute('color',    new THREE.BufferAttribute(colors,    3));
     geometry.setAttribute('size',     new THREE.BufferAttribute(sizes,     1));
 
-    const material = new THREE.PointsMaterial({
-        size:          0.055,
-        vertexColors:  true,
-        depthWrite:    false,
-        blending:      THREE.AdditiveBlending,
-        transparent:   true,
-        opacity:       0.95,
-        sizeAttenuation: true,
-    });
-
+    const material = makeGaussianMaterial();
     const galaxy = new THREE.Points(geometry, material);
     scene.add(galaxy);
 
-    // ─── Central bright cluster (5 000 white/blue-white stars) ────────────────
+    // ─── Central bright cluster ────────────────────────────────────────────────
     const CORE_COUNT   = 5000;
     const corePositions = new Float32Array(CORE_COUNT * 3);
     const coreColors    = new Float32Array(CORE_COUNT * 3);
+    const coreSizes     = new Float32Array(CORE_COUNT);
 
     for (let i = 0; i < CORE_COUNT; i++) {
         const i3 = i * 3;
-        // Gaussian-like distribution by summing randoms
         const r = (Math.random() + Math.random() + Math.random()) / 3 * 1.2;
         const theta = Math.random() * Math.PI * 2;
         const phi   = Math.acos(2 * Math.random() - 1);
 
         corePositions[i3    ] = r * Math.sin(phi) * Math.cos(theta);
-        corePositions[i3 + 1] = r * Math.sin(phi) * Math.sin(theta) * 0.3; // flatten slightly
+        corePositions[i3 + 1] = r * Math.sin(phi) * Math.sin(theta) * 0.3;
         corePositions[i3 + 2] = r * Math.cos(phi);
 
-        // White to pale blue-white
         const t = Math.random();
         tmpColor.setHSL(0.60, 0.2 + t * 0.4, 0.88 + t * 0.12);
         coreColors[i3    ] = tmpColor.r;
         coreColors[i3 + 1] = tmpColor.g;
         coreColors[i3 + 2] = tmpColor.b;
+
+        coreSizes[i] = 0.15 + Math.random() * 0.15;
     }
 
     const coreGeo = new THREE.BufferGeometry();
     coreGeo.setAttribute('position', new THREE.BufferAttribute(corePositions, 3));
     coreGeo.setAttribute('color',    new THREE.BufferAttribute(coreColors,    3));
+    coreGeo.setAttribute('size',     new THREE.BufferAttribute(coreSizes,     1));
 
-    const coreMat = new THREE.PointsMaterial({
-        size:         0.12,
-        vertexColors: true,
-        depthWrite:   false,
-        blending:     THREE.AdditiveBlending,
-        transparent:  true,
-        opacity:      1.0,
-        sizeAttenuation: true,
-    });
-
+    const coreMat = makeGaussianMaterial();
     const core = new THREE.Points(coreGeo, coreMat);
     scene.add(core);
 
-    // ─── Background starfield (distant, tiny, no bloom impact) ────────────────
+    // ─── Dust layer: 30K larger, dimmer particles for nebula depth ────────────
+    const DUST_COUNT = 30000;
+    const dustPositions = new Float32Array(DUST_COUNT * 3);
+    const dustColors    = new Float32Array(DUST_COUNT * 3);
+    const dustSizes     = new Float32Array(DUST_COUNT);
+
+    for (let i = 0; i < DUST_COUNT; i++) {
+        const i3 = i * 3;
+        // Loosely scattered in a large sphere around the galaxy
+        const r     = 2 + Math.random() * 12;
+        const theta = Math.random() * Math.PI * 2;
+        const phi   = Math.acos(2 * Math.random() - 1);
+        dustPositions[i3    ] = r * Math.sin(phi) * Math.cos(theta);
+        dustPositions[i3 + 1] = r * Math.sin(phi) * Math.sin(theta) * 0.25; // flatten
+        dustPositions[i3 + 2] = r * Math.cos(phi);
+
+        // Muted nebula colors: purple, blue, dim orange
+        const hue = 0.62 - Math.random() * 0.25;
+        tmpColor.setHSL(hue, 0.6, 0.08 + Math.random() * 0.08);
+        dustColors[i3    ] = tmpColor.r;
+        dustColors[i3 + 1] = tmpColor.g;
+        dustColors[i3 + 2] = tmpColor.b;
+
+        // Larger particles, but dim — give nebula volume
+        dustSizes[i] = 0.20 + Math.random() * 0.30;
+    }
+
+    const dustGeo = new THREE.BufferGeometry();
+    dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
+    dustGeo.setAttribute('color',    new THREE.BufferAttribute(dustColors,    3));
+    dustGeo.setAttribute('size',     new THREE.BufferAttribute(dustSizes,     1));
+
+    const dustMat = makeGaussianMaterial();
+    const dustCloud = new THREE.Points(dustGeo, dustMat);
+    scene.add(dustCloud);
+
+    // ─── Bright foreground stars (500 particles, size 3x normal) ─────────────
+    const FGSTAR_COUNT = 500;
+    const fgPositions = new Float32Array(FGSTAR_COUNT * 3);
+    const fgColors    = new Float32Array(FGSTAR_COUNT * 3);
+    const fgSizes     = new Float32Array(FGSTAR_COUNT);
+
+    for (let i = 0; i < FGSTAR_COUNT; i++) {
+        const i3 = i * 3;
+        // Scattered within the galaxy volume but closer to viewer
+        const r     = Math.random() * 8;
+        const theta = Math.random() * Math.PI * 2;
+        const phi   = Math.acos(2 * Math.random() - 1);
+        fgPositions[i3    ] = r * Math.sin(phi) * Math.cos(theta);
+        fgPositions[i3 + 1] = r * Math.sin(phi) * Math.sin(theta) * 0.15;
+        fgPositions[i3 + 2] = r * Math.cos(phi);
+
+        // White to pale blue-white bright stars
+        const t = Math.random();
+        tmpColor.setHSL(0.60, 0.15 + t * 0.3, 0.90 + t * 0.10);
+        fgColors[i3    ] = tmpColor.r;
+        fgColors[i3 + 1] = tmpColor.g;
+        fgColors[i3 + 2] = tmpColor.b;
+
+        // 3x normal size — these are foreground bright stars
+        fgSizes[i] = 0.20 + Math.random() * 0.25;
+    }
+
+    const fgGeo = new THREE.BufferGeometry();
+    fgGeo.setAttribute('position', new THREE.BufferAttribute(fgPositions, 3));
+    fgGeo.setAttribute('color',    new THREE.BufferAttribute(fgColors,    3));
+    fgGeo.setAttribute('size',     new THREE.BufferAttribute(fgSizes,     1));
+
+    const fgMat = makeGaussianMaterial();
+    const fgStars = new THREE.Points(fgGeo, fgMat);
+    scene.add(fgStars);
+
+    // ─── Background starfield ─────────────────────────────────────────────────
     const BG_STARS = 8000;
     const bgPositions = new Float32Array(BG_STARS * 3);
+    const bgColors    = new Float32Array(BG_STARS * 3);
+    const bgSizes     = new Float32Array(BG_STARS);
+
     for (let i = 0; i < BG_STARS; i++) {
         const i3 = i * 3;
         const r  = 50 + Math.random() * 200;
@@ -241,22 +324,25 @@
         bgPositions[i3    ] = r * Math.sin(phi) * Math.cos(theta);
         bgPositions[i3 + 1] = r * Math.sin(phi) * Math.sin(theta);
         bgPositions[i3 + 2] = r * Math.cos(phi);
+
+        // Slightly varied color: warm white to cool blue-white
+        tmpColor.setHSL(0.60, 0.1 + Math.random() * 0.2, 0.55 + Math.random() * 0.25);
+        bgColors[i3    ] = tmpColor.r;
+        bgColors[i3 + 1] = tmpColor.g;
+        bgColors[i3 + 2] = tmpColor.b;
+
+        bgSizes[i] = 0.04 + Math.random() * 0.06;
     }
 
     const bgGeo = new THREE.BufferGeometry();
     bgGeo.setAttribute('position', new THREE.BufferAttribute(bgPositions, 3));
-    const bgMat = new THREE.PointsMaterial({
-        color:       0xaaaacc,
-        size:        0.08,
-        depthWrite:  false,
-        blending:    THREE.AdditiveBlending,
-        transparent: true,
-        opacity:     0.6,
-    });
+    bgGeo.setAttribute('color',    new THREE.BufferAttribute(bgColors,    3));
+    bgGeo.setAttribute('size',     new THREE.BufferAttribute(bgSizes,     1));
+
+    const bgMat = makeGaussianMaterial();
     scene.add(new THREE.Points(bgGeo, bgMat));
 
-    // ─── Subtle nebula haze via a large semi-transparent sprite ───────────────
-    // We use a canvas-drawn radial gradient as a sprite texture
+    // ─── Subtle nebula haze via large semi-transparent sprites ────────────────
     function makeHazeTexture(size, innerColor, outerColor) {
         const canvas = document.createElement('canvas');
         canvas.width  = size;
@@ -272,7 +358,6 @@
         return new THREE.CanvasTexture(canvas);
     }
 
-    // Core glow — warm white
     const coreHazeTex = makeHazeTexture(256, 'rgba(200,210,255,0.18)', 'rgba(120,100,200,0.04)');
     const coreHazeMat = new THREE.SpriteMaterial({
         map:         coreHazeTex,
@@ -284,7 +369,6 @@
     coreHaze.scale.set(8, 8, 1);
     scene.add(coreHaze);
 
-    // Outer blue haze
     const outerHazeTex = makeHazeTexture(256, 'rgba(20,40,160,0.09)', 'rgba(5,10,60,0.02)');
     const outerHazeMat = new THREE.SpriteMaterial({
         map:         outerHazeTex,
@@ -297,12 +381,10 @@
     scene.add(outerHaze);
 
     // ─── GSAP cinematic intro ─────────────────────────────────────────────────
-    // Wait for GSAP to be available on window (it is a classic script)
     const startZ = 30;
     const endZ   = 15;
     camera.position.z = startZ;
 
-    // Small tilt for drama
     gsap.to(camera.position, {
         z:        endZ,
         y:        6,
@@ -311,7 +393,6 @@
         onUpdate: () => camera.lookAt(0, 0, 0),
     });
 
-    // Fade info text
     gsap.from('#stats', { opacity: 0, duration: 2, delay: 1 });
 
     // ─── Resize ───────────────────────────────────────────────────────────────
@@ -326,25 +407,21 @@
     });
 
     // ─── Animation loop ───────────────────────────────────────────────────────
-    let frameCount = 0;
     const clock = new THREE.Clock();
 
     function animate() {
         const elapsed = clock.getElapsedTime();
 
-        // Slow auto-rotation of galaxy geometry
         galaxy.rotation.y += 0.0005;
         core.rotation.y   += 0.0005;
-        // Haze sprites don't rotate (they always face camera)
+        dustCloud.rotation.y += 0.0003;
+        fgStars.rotation.y   += 0.0005;
 
-        // Subtle galaxy tilt pulse — makes it feel alive
         galaxy.rotation.x = Math.sin(elapsed * 0.04) * 0.04;
         core.rotation.x   = galaxy.rotation.x;
 
-        // Gently breathe the bloom strength
-        bloomPass.strength = 1.8 + Math.sin(elapsed * 0.3) * 0.15;
-
-        // Bloom threshold pulses slightly at core — subtle effect
+        // Breathe bloom strength
+        bloomPass.strength = 2.2 + Math.sin(elapsed * 0.3) * 0.15;
         bloomPass.threshold = 0.08 + Math.sin(elapsed * 0.5) * 0.02;
 
         controls.update();

@@ -88,18 +88,18 @@
     import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
 
     // =========================================================================
-    // God Ray radial-blur post-processing shader
+    // God Ray radial-blur post-processing shader — 64 samples (up from 32/100)
     // =========================================================================
     const GodRayShader = {
         uniforms: {
             tDiffuse:    { value: null },
             sunPosition: { value: new THREE.Vector2(0.5, 0.5) },
             exposure:    { value: 0.55 },
-            decay:       { value: 0.94 },
+            decay:       { value: 0.95 },
             density:     { value: 0.97 },
-            weight:      { value: 0.38 },
-            samples:     { value: 100 },
-            rayStrength:  { value: 1.0 }  // driven by sun elevation
+            weight:      { value: 0.40 },
+            samples:     { value: 64 },
+            rayStrength:  { value: 1.0 }
         },
         vertexShader: /* glsl */`
             varying vec2 vUv;
@@ -121,11 +121,11 @@
 
             void main() {
                 vec2 texCoord = vUv;
-                vec2 delta    = (texCoord - sunPosition) * (1.0 / float(100) * density);
+                vec2 delta    = (texCoord - sunPosition) * (1.0 / 64.0 * density);
                 float illum   = 1.0;
                 vec4  rays    = vec4(0.0);
 
-                for (int i = 0; i < 100; i++) {
+                for (int i = 0; i < 64; i++) {
                     if (i >= samples) break;
                     texCoord -= delta;
                     vec4 samp  = texture2D(tDiffuse, clamp(texCoord, 0.0, 1.0));
@@ -136,6 +136,39 @@
 
                 vec4 base = texture2D(tDiffuse, vUv);
                 gl_FragColor = base + rays * exposure * rayStrength;
+            }
+        `
+    };
+
+    // =========================================================================
+    // Vignette post-processing pass
+    // =========================================================================
+    const VignetteShader = {
+        uniforms: {
+            tDiffuse:  { value: null },
+            strength:  { value: 0.45 },
+            smoothness: { value: 0.6 },
+        },
+        vertexShader: /* glsl */`
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: /* glsl */`
+            uniform sampler2D tDiffuse;
+            uniform float strength;
+            uniform float smoothness;
+            varying vec2 vUv;
+
+            void main() {
+                vec4 col = texture2D(tDiffuse, vUv);
+                vec2 uv  = vUv - 0.5;
+                float d  = length(uv);
+                float v  = smoothstep(smoothness, smoothness + 0.35, d * strength * 2.0);
+                col.rgb *= 1.0 - v * 0.75;
+                gl_FragColor = col;
             }
         `
     };
@@ -156,8 +189,6 @@
     // Scene
     // =========================================================================
     const scene = new THREE.Scene();
-
-    // Atmospheric haze — color is updated dynamically each frame
     scene.fog = new THREE.FogExp2(0x000000, 0.028);
 
     // =========================================================================
@@ -184,24 +215,25 @@
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
 
-    // Bloom for the sun disc glow
     const bloomPass = new UnrealBloomPass(
         new THREE.Vector2(window.innerWidth, window.innerHeight),
-        1.8,   // strength
-        0.5,   // radius
-        0.15   // threshold
+        1.8,
+        0.5,
+        0.15
     );
     composer.addPass(bloomPass);
 
-    // God ray radial blur
     const godRayPass = new ShaderPass(GodRayShader);
     composer.addPass(godRayPass);
 
-    // Tone-map + gamma correct
+    // Vignette pass before output
+    const vignettePass = new ShaderPass(VignetteShader);
+    composer.addPass(vignettePass);
+
     composer.addPass(new OutputPass());
 
     // =========================================================================
-    // Sky dome (gradient — updated each frame via uniforms)
+    // Sky dome
     // =========================================================================
     const skyGeo = new THREE.SphereGeometry(280, 32, 16);
     const skyMat = new THREE.ShaderMaterial({
@@ -234,7 +266,7 @@
     scene.add(skyDome);
 
     // =========================================================================
-    // Star field (visible at night/dawn only — toggled via opacity)
+    // Star field
     // =========================================================================
     const STAR_COUNT = 3000;
     const starPositions = new Float32Array(STAR_COUNT * 3);
@@ -243,7 +275,7 @@
         const theta = 2 * Math.PI * Math.random();
         const r     = 270;
         starPositions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
-        starPositions[i * 3 + 1] = Math.abs(r * Math.cos(phi));   // upper hemisphere
+        starPositions[i * 3 + 1] = Math.abs(r * Math.cos(phi));
         starPositions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
     }
     const starGeo = new THREE.BufferGeometry();
@@ -253,14 +285,13 @@
     scene.add(stars);
 
     // =========================================================================
-    // Sun sphere (bright emissive — becomes the source of god rays)
+    // Sun sphere
     // =========================================================================
     const sunGeo = new THREE.SphereGeometry(0.55, 32, 32);
     const sunMat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false });
     const sunSphere = new THREE.Mesh(sunGeo, sunMat);
     scene.add(sunSphere);
 
-    // Sun halo flare (additive blended disc, slightly larger)
     const haloGeo = new THREE.SphereGeometry(1.3, 32, 32);
     const haloMat = new THREE.MeshBasicMaterial({
         color: 0xffe8a0,
@@ -274,7 +305,170 @@
     sunSphere.add(sunHalo);
 
     // =========================================================================
-    // Sun directional light (follows the sphere)
+    // Lens flare sprites (concentric rings around the sun)
+    // =========================================================================
+    function makeLensFlareTexture(size, ringCount) {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        const cx  = size / 2;
+        ctx.clearRect(0, 0, size, size);
+        for (let k = 0; k < ringCount; k++) {
+            const r     = (0.08 + k * 0.16) * size;
+            const alpha = 0.5 - k * 0.12;
+            const grad  = ctx.createRadialGradient(cx, cx, r * 0.8, cx, cx, r);
+            grad.addColorStop(0,   `rgba(255,240,180,${alpha})`);
+            grad.addColorStop(0.5, `rgba(255,200,100,${alpha * 0.4})`);
+            grad.addColorStop(1.0, 'rgba(0,0,0,0)');
+            ctx.beginPath();
+            ctx.arc(cx, cx, r, 0, Math.PI * 2);
+            ctx.fillStyle = grad;
+            ctx.fill();
+        }
+        return new THREE.CanvasTexture(canvas);
+    }
+
+    const flareTex  = makeLensFlareTexture(256, 4);
+    const flareSprites = [];
+    const flareScales  = [2.5, 1.8, 3.5, 1.2];
+    const flareOffsets = [0, 0.3, -0.5, 0.7];  // along sun-to-center axis
+
+    for (let i = 0; i < 4; i++) {
+        const mat = new THREE.SpriteMaterial({
+            map:        flareTex,
+            transparent: true,
+            blending:   THREE.AdditiveBlending,
+            depthWrite: false,
+            opacity:    0,
+        });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.set(flareScales[i], flareScales[i], 1);
+        scene.add(sprite);
+        flareSprites.push(sprite);
+    }
+
+    // =========================================================================
+    // Animated cloud silhouettes (noise-based, occluding sun)
+    // =========================================================================
+    // Cloud noise shader — soft animated shapes that modulate the sun visibility
+    const cloudNoiseUniforms = {
+        uTime:  { value: 0 },
+        uScale: { value: new THREE.Vector2(1, 1) },
+        uOpacity: { value: 0.0 },
+    };
+
+    // We'll use a plane in front of the sun to animate cloud coverage
+    const cloudPlaneGeo = new THREE.PlaneGeometry(22, 10);
+    const cloudPlaneMat = new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite:  false,
+        blending:    THREE.NormalBlending,
+        fog:         false,
+        uniforms:    cloudNoiseUniforms,
+        vertexShader: /* glsl */`
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: /* glsl */`
+            uniform float uTime;
+            uniform float uOpacity;
+            varying vec2 vUv;
+
+            float hash2(vec2 p) {
+                return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+            }
+
+            float noise2(vec2 p) {
+                vec2 i = floor(p);
+                vec2 f = fract(p);
+                vec2 u = f * f * (3.0 - 2.0 * f);
+                float a = hash2(i + vec2(0,0));
+                float b = hash2(i + vec2(1,0));
+                float c = hash2(i + vec2(0,1));
+                float d = hash2(i + vec2(1,1));
+                return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+            }
+
+            float fbm(vec2 p) {
+                float v = 0.0, a = 0.5;
+                for (int i = 0; i < 5; i++) {
+                    v += a * noise2(p);
+                    p = p * 2.1 + vec2(1.3, 1.7);
+                    a *= 0.5;
+                }
+                return v;
+            }
+
+            void main() {
+                // Drift UV over time
+                vec2 uv = vUv * vec2(3.0, 2.5) + vec2(uTime * 0.015, uTime * 0.008);
+                float cloud = fbm(uv);
+                // Soft cloud silhouette
+                float alpha = smoothstep(0.48, 0.62, cloud) * uOpacity;
+                // Dark, slightly blue-grey cloud color
+                vec3 color = vec3(0.06, 0.07, 0.09);
+                gl_FragColor = vec4(color, alpha);
+            }
+        `
+    });
+    const cloudPlane = new THREE.Mesh(cloudPlaneGeo, cloudPlaneMat);
+    scene.add(cloudPlane);
+
+    // =========================================================================
+    // Volumetric dust motes: 5000 particles floating in light shafts
+    // =========================================================================
+    const DUST_COUNT = 5000;
+    const dustPos    = new Float32Array(DUST_COUNT * 3);
+    const dustPhase  = new Float32Array(DUST_COUNT);
+    const dustSpeed  = new Float32Array(DUST_COUNT);
+
+    // Concentrate dust in light shaft cone region
+    for (let i = 0; i < DUST_COUNT; i++) {
+        // Random position in a broad column: x in [-12,12], y in [0,28], z in [-20,0]
+        dustPos[i*3]   = (Math.random() - 0.5) * 24;
+        dustPos[i*3+1] = Math.random() * 28;
+        dustPos[i*3+2] = -Math.random() * 20 - 5;
+
+        dustPhase[i]   = Math.random() * Math.PI * 2;
+        dustSpeed[i]   = 0.03 + Math.random() * 0.05;
+    }
+
+    const dustGeo = new THREE.BufferGeometry();
+    dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
+    dustGeo.attributes.position.usage = THREE.DynamicDrawUsage;
+
+    const dustMat = new THREE.PointsMaterial({
+        color:           0xffeebb,
+        size:            0.15,
+        sizeAttenuation: true,
+        transparent:     true,
+        opacity:         0.0,   // set dynamically based on sun elevation + in-shaft test
+        depthWrite:      false,
+        blending:        THREE.AdditiveBlending,
+    });
+    const dustPoints = new THREE.Points(dustGeo, dustMat);
+    scene.add(dustPoints);
+
+    function updateDust(t, sunPos, elevation) {
+        for (let i = 0; i < DUST_COUNT; i++) {
+            // Gentle float upward + horizontal drift
+            dustPos[i*3+1] += dustSpeed[i] * 0.016;
+            dustPos[i*3]   += Math.sin(t * 0.3 + dustPhase[i]) * 0.003;
+            if (dustPos[i*3+1] > 28) {
+                dustPos[i*3+1] = 0;
+                dustPos[i*3]   = (Math.random() - 0.5) * 24;
+            }
+        }
+        dustGeo.attributes.position.needsUpdate = true;
+        // Brightness of dust motes tracks sun elevation
+        dustMat.opacity = Math.max(0, elevation) * 0.35;
+    }
+
+    // =========================================================================
+    // Sun directional light
     // =========================================================================
     const sunLight = new THREE.DirectionalLight(0xfff4e0, 3.0);
     sunLight.castShadow = true;
@@ -287,12 +481,11 @@
     scene.add(sunLight);
     scene.add(sunLight.target);
 
-    // Ambient — warmed slightly
     const ambient = new THREE.AmbientLight(0x8080a0, 0.25);
     scene.add(ambient);
 
     // =========================================================================
-    // Ground (grass)
+    // Ground
     // =========================================================================
     const groundGeo = new THREE.PlaneGeometry(80, 80, 1, 1);
     const groundMat = new THREE.MeshLambertMaterial({ color: 0x1a3a0e });
@@ -302,7 +495,7 @@
     scene.add(ground);
 
     // =========================================================================
-    // Cloud blocks — dark occluders that cast god-ray shafts
+    // Cloud blocks — dark occluders
     // =========================================================================
     const cloudMat = new THREE.MeshLambertMaterial({ color: 0x111118 });
 
@@ -317,20 +510,16 @@
     }
 
     const clouds = [
-        // centre cluster
         makeCloud( 0,  18, -30,  14,  4,  6),
         makeCloud(-8,  22, -35,  10,  3,  5),
         makeCloud( 9,  20, -28,  12,  3,  7),
         makeCloud( 3,  25, -40,  16,  5,  8),
-        // left bank
         makeCloud(-18, 16, -25,  10,  3,  5),
         makeCloud(-22, 19, -32,   8,  4,  4),
         makeCloud(-14, 21, -38,  12,  3,  6),
-        // right bank
         makeCloud( 18, 15, -22,  10,  3,  5),
         makeCloud( 24, 18, -30,   9,  4,  4),
         makeCloud( 16, 22, -36,  13,  3,  6),
-        // high / wispy
         makeCloud(-5,  30, -50,  18,  2,  5),
         makeCloud( 8,  28, -45,  14,  2,  4),
         makeCloud(-12, 26, -42,  11,  2,  4),
@@ -339,21 +528,18 @@
     ];
 
     // =========================================================================
-    // Silhouette scene: trees (cylinders + cones), distant hills
+    // Trees and hills
     // =========================================================================
-    const trunkMat = new THREE.MeshLambertMaterial({ color: 0x1a0e05 });
+    const trunkMat   = new THREE.MeshLambertMaterial({ color: 0x1a0e05 });
     const foliageMat = new THREE.MeshLambertMaterial({ color: 0x0c1a08 });
 
     function makeTree(x, z, scale = 1) {
         const group = new THREE.Group();
-
         const trunkGeo = new THREE.CylinderGeometry(0.18 * scale, 0.28 * scale, 1.8 * scale, 6);
         const trunk     = new THREE.Mesh(trunkGeo, trunkMat);
         trunk.position.y = 0.9 * scale;
         trunk.castShadow = true;
         group.add(trunk);
-
-        // Three tiered cones for a pine silhouette
         for (let i = 0; i < 3; i++) {
             const radius = (1.5 - i * 0.3) * scale;
             const height = (1.8 - i * 0.1) * scale;
@@ -363,28 +549,25 @@
             cone.castShadow  = true;
             group.add(cone);
         }
-
         group.position.set(x, 0, z);
         scene.add(group);
     }
 
-    // Tree lines along the sides and back
     const treePositions = [
-        [-14, -4], [-11, -5], [-8, -3], [-5, -4],  // left foreground
-        [ 5, -4],  [  8, -3], [11, -5], [14, -4],  // right foreground
-        [-20, -8], [-17, -9], [-13, -8],             // left mid
-        [ 13, -8], [ 17, -9], [20, -8],             // right mid
-        [-25,-12], [-22,-13], [-18,-11], [-15,-12], // left back
-        [ 15,-12], [ 18,-11], [22,-13], [25,-12],   // right back
-        [ -3,-14], [  0,-15], [  3,-14],            // centre back tree line
+        [-14, -4], [-11, -5], [-8, -3], [-5, -4],
+        [ 5, -4],  [  8, -3], [11, -5], [14, -4],
+        [-20, -8], [-17, -9], [-13, -8],
+        [ 13, -8], [ 17, -9], [20, -8],
+        [-25,-12], [-22,-13], [-18,-11], [-15,-12],
+        [ 15,-12], [ 18,-11], [22,-13], [25,-12],
+        [ -3,-14], [  0,-15], [  3,-14],
     ];
     treePositions.forEach(([x, z]) => makeTree(x, z, 0.7 + Math.random() * 0.6));
 
-    // Distant rolling hills (dark silhouette boxes)
     const hillMat = new THREE.MeshLambertMaterial({ color: 0x0a1205 });
     function makeHill(x, z, w, h, d) {
-        const g   = new THREE.BoxGeometry(w, h, d);
-        const m   = new THREE.Mesh(g, hillMat);
+        const g = new THREE.BoxGeometry(w, h, d);
+        const m = new THREE.Mesh(g, hillMat);
         m.position.set(x, h / 2 - 0.5, z);
         m.castShadow = true;
         scene.add(m);
@@ -395,18 +578,15 @@
     makeHill(-10, -48, 36, 5, 10);
 
     // =========================================================================
-    // Day-cycle state — driven by GSAP
+    // Day-cycle state
     // =========================================================================
-    // sunAngle: angle along arc where 0=dawn(east), PI=dusk(west)
-    // The sun travels on a half-ellipse arc in the XY plane (behind the clouds)
     const dayState = {
-        angle:      0.05,   // starts just past horizon
-        arcRadius:  55,     // horizontal reach
-        arcHeight:  48,     // zenith height
-        arcZ:       -35     // depth behind scene
+        angle:      0.05,
+        arcRadius:  55,
+        arcHeight:  48,
+        arcZ:       -35
     };
 
-    // Current sky + fog colors (lerped each frame)
     const skyColors = {
         horizon: new THREE.Color(),
         zenith:  new THREE.Color(),
@@ -414,31 +594,19 @@
         ambient: new THREE.Color()
     };
 
-    // Time-of-day colour palette
     const TOD = [
-        // angle 0    ..   PI
-        // Pre-dawn
         { t: 0.00, horizon: 0x0b0520, zenith: 0x030208, fog: 0x060318, sunColor: 0xdd6040, ambient: 0x100820, sunIntensity: 0.3, bloomStrength: 2.4, rayStrength: 0.4, starOpacity: 1.0 },
-        // Sunrise
         { t: 0.08, horizon: 0xff6010, zenith: 0x1a0a40, fog: 0x4a1808, sunColor: 0xffd080, ambient: 0x301020, sunIntensity: 2.0, bloomStrength: 2.2, rayStrength: 1.2, starOpacity: 0.4 },
-        // Golden morning
         { t: 0.18, horizon: 0xffaa40, zenith: 0x2050c0, fog: 0x703820, sunColor: 0xffe8a0, ambient: 0x507090, sunIntensity: 3.0, bloomStrength: 1.6, rayStrength: 0.9, starOpacity: 0.0 },
-        // Mid morning
         { t: 0.30, horizon: 0x80b8f0, zenith: 0x1840b0, fog: 0x6090c0, sunColor: 0xfff8e8, ambient: 0x70a0c8, sunIntensity: 3.8, bloomStrength: 1.2, rayStrength: 0.7, starOpacity: 0.0 },
-        // Midday
         { t: 0.50, horizon: 0x90c4f8, zenith: 0x0e2899, fog: 0x70a8e0, sunColor: 0xfffaee, ambient: 0x80acd0, sunIntensity: 4.5, bloomStrength: 1.0, rayStrength: 0.5, starOpacity: 0.0 },
-        // Afternoon
         { t: 0.70, horizon: 0x80b8f0, zenith: 0x1840b0, fog: 0x6090c0, sunColor: 0xffe8a0, ambient: 0x70a0c8, sunIntensity: 3.5, bloomStrength: 1.2, rayStrength: 0.7, starOpacity: 0.0 },
-        // Golden evening
         { t: 0.82, horizon: 0xff9030, zenith: 0x1a1060, fog: 0x602010, sunColor: 0xffcc60, ambient: 0x604030, sunIntensity: 2.5, bloomStrength: 1.8, rayStrength: 1.0, starOpacity: 0.0 },
-        // Sunset
         { t: 0.92, horizon: 0xff3a10, zenith: 0x1a0a30, fog: 0x3a0e08, sunColor: 0xff9040, ambient: 0x302010, sunIntensity: 1.8, bloomStrength: 2.2, rayStrength: 1.3, starOpacity: 0.3 },
-        // Post-sunset / night
         { t: 1.00, horizon: 0x0b0520, zenith: 0x030208, fog: 0x060318, sunColor: 0xdd6040, ambient: 0x100820, sunIntensity: 0.3, bloomStrength: 2.4, rayStrength: 0.4, starOpacity: 1.0 },
     ];
 
     function sampleTOD(angle) {
-        // Map angle [0..PI] to t [0..1]
         const t = angle / Math.PI;
         let lo = TOD[0], hi = TOD[TOD.length - 1];
         for (let i = 0; i < TOD.length - 1; i++) {
@@ -460,7 +628,6 @@
         };
     }
 
-    // Time-of-day labels
     const timeLabels = [
         { t: 0.00, label: 'Pre-Dawn' },
         { t: 0.08, label: 'Sunrise'  },
@@ -482,7 +649,7 @@
     }
 
     // =========================================================================
-    // GSAP: Animate the sun along its arc, looping every 20 s
+    // GSAP: Animate the sun
     // =========================================================================
     gsap.to(dayState, {
         angle: Math.PI,
@@ -492,7 +659,7 @@
         onRepeat: () => { dayState.angle = 0.02; }
     });
 
-    // Subtle cloud drift animation using GSAP
+    // Cloud drift
     clouds.forEach((cloud, i) => {
         gsap.to(cloud.position, {
             x: cloud.position.x + (Math.random() - 0.5) * 8,
@@ -520,22 +687,25 @@
     // Animation loop
     // =========================================================================
     const _sunScreenVec = new THREE.Vector3();
+    const _sunDir       = new THREE.Vector3();
+    const clock         = new THREE.Clock();
 
     renderer.setAnimationLoop(() => {
+        const dt   = clock.getDelta();
+        const time = clock.elapsedTime;
 
-        // --- Compute sun world position from angle -------------------------
-        const a = dayState.angle;
-        const sx = -Math.cos(a) * dayState.arcRadius;   // east -> west
+        // --- Compute sun world position ------------------------------------
+        const a  = dayState.angle;
+        const sx = -Math.cos(a) * dayState.arcRadius;
         const sy =  Math.sin(a) * dayState.arcHeight;
         const sz = dayState.arcZ;
         sunSphere.position.set(sx, sy, sz);
 
-        // --- Light follows sun --------------------------------------------
         sunLight.position.copy(sunSphere.position);
         sunLight.target.position.set(0, 0, 0);
 
-        // --- Sample day/night palette ------------------------------------
-        const tod = sampleTOD(a);
+        const tod       = sampleTOD(a);
+        const elevation = Math.sin(a);
 
         sunLight.color.copy(tod.sunColor);
         sunLight.intensity = tod.sunIntensity;
@@ -543,36 +713,25 @@
         ambient.color.copy(skyColors.ambient);
         ambient.intensity = 0.5;
 
-        // Sky dome gradient
         skyMat.uniforms.uHorizon.value.copy(skyColors.horizon);
         skyMat.uniforms.uZenith.value.copy(skyColors.zenith);
 
-        // Fog
         scene.fog.color.copy(skyColors.fog);
         scene.fog.density = 0.018 + (1 - Math.sin(a)) * 0.012;
 
-        // Bloom
         bloomPass.strength = tod.bloomStrength;
+        starMat.opacity    = tod.starOpacity;
+        haloMat.opacity    = 0.15 + elevation * 0.25;
 
-        // Stars fade out during day
-        starMat.opacity = tod.starOpacity;
+        godRayPass.uniforms.rayStrength.value = tod.rayStrength;
+        godRayPass.uniforms.exposure.value    = 0.3 + elevation * 0.35;
 
-        // Halo opacity tracks sun elevation
-        const elevation = Math.sin(a);
-        haloMat.opacity = 0.15 + elevation * 0.25;
-
-        // God ray strength & exposure driven by time of day
-        godRayPass.uniforms.rayStrength.value  = tod.rayStrength;
-        godRayPass.uniforms.exposure.value     = 0.3 + elevation * 0.35;
-
-        // Project sun into screen space for god ray shader origin
         _sunScreenVec.copy(sunSphere.position).project(camera);
         godRayPass.uniforms.sunPosition.value.set(
             (_sunScreenVec.x + 1) / 2,
             (_sunScreenVec.y + 1) / 2
         );
 
-        // If sun is below the horizon or very far off screen, reduce god rays
         const offScreen = _sunScreenVec.z > 1 ||
                           _sunScreenVec.x < -1.5 || _sunScreenVec.x > 2.5 ||
                           _sunScreenVec.y < -1.5 || _sunScreenVec.y > 2.5;
@@ -580,10 +739,43 @@
             godRayPass.uniforms.rayStrength.value = 0;
         }
 
-        // Time label
+        // --- Animated cloud silhouette plane --------------------------------
+        // Position the cloud plane in front of the sun, facing camera
+        _sunDir.copy(sunSphere.position).normalize();
+        cloudPlane.position.copy(sunSphere.position).multiplyScalar(0.7);
+        cloudPlane.lookAt(camera.position);
+        cloudNoiseUniforms.uTime.value    = time;
+        cloudNoiseUniforms.uOpacity.value = Math.max(0, 0.5 - Math.abs(elevation - 0.5) * 1.2);
+
+        // --- Lens flare sprites ---------------------------------------------
+        // Position flares along the line from sun through screen center
+        _sunScreenVec.copy(sunSphere.position).project(camera);
+        const sunScreen2D = new THREE.Vector2(
+            (_sunScreenVec.x + 1) / 2,
+            (_sunScreenVec.y + 1) / 2
+        );
+        // Unproject some points along the axis
+        const flareViz = elevation > 0.05 && !offScreen;
+
+        for (let i = 0; i < 4; i++) {
+            flareSprites[i].visible = flareViz;
+            if (!flareViz) continue;
+
+            // Place sprite at the sun position but offset along view ray
+            const lerpT = flareOffsets[i] * 0.5;
+            const wp    = sunSphere.position.clone().lerp(new THREE.Vector3(0, 6, 0), lerpT + 0.5);
+            flareSprites[i].position.copy(wp);
+
+            const flareOpacity = Math.max(0, elevation) * (0.3 - i * 0.06);
+            flareSprites[i].material.opacity = flareOpacity;
+        }
+
+        // --- Dust motes -----------------------------------------------------
+        updateDust(time, sunSphere.position, elevation);
+
+        // --- Time label -----------------------------------------------------
         timeLabelEl.textContent = getTimeLabel(a / Math.PI);
 
-        // Update controls + render via composer
         controls.update();
         composer.render();
     });

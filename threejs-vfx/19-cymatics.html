@@ -193,7 +193,7 @@
         import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
         import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
-        // ── Scene setup ─────────────────────────────────────────────────────────────
+        // ── Scene setup ──────────────────────────────────────────────────────────
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -216,49 +216,47 @@
         controls.target.set(0, 0, 0);
         controls.update();
 
-        // ── Post-processing ──────────────────────────────────────────────────────────
+        // ── Post-processing ─────────────────────────────────────────────────────
         const composer = new EffectComposer(renderer);
         const renderPass = new RenderPass(scene, camera);
         composer.addPass(renderPass);
 
         const bloomPass = new UnrealBloomPass(
             new THREE.Vector2(window.innerWidth, window.innerHeight),
-            2.0,   // strength
-            0.55,  // radius
-            0.30   // threshold
+            2.0,
+            0.55,
+            0.30
         );
         composer.addPass(bloomPass);
+        composer.addPass(new OutputPass());
 
-        const outputPass = new OutputPass();
-        composer.addPass(outputPass);
-
-        // ── Shader material ──────────────────────────────────────────────────────────
+        // ── Main wave surface shader ────────────────────────────────────────────
+        // Mesh resolution 256x256 for detailed Chladni patterns
         const vertexShader = /* glsl */`
             uniform float uTime;
             uniform float uFreqX;
             uniform float uFreqY;
             uniform float uPhase;
             varying float vDisplacement;
-            varying vec2 vUv;
-            varying vec3 vNormal;
+            varying vec2  vUv;
+            varying vec3  vNormal;
+            varying float vDispSign;  // +1 above, -1 below — for warm/cool coloring
 
             const float PI = 3.14159265358979;
 
             void main() {
                 vUv = uv;
 
-                // Primary Chladni standing wave: superposition of two orthogonal modes
                 float wave1 = sin(uFreqX * position.x * PI) * sin(uFreqY * position.z * PI)
                             * cos(uTime * 1.8);
-
-                // Rotated / cross-coupled version for richer pattern
                 float wave2 = sin(uFreqY * position.x * PI) * sin(uFreqX * position.z * PI)
                             * cos(uTime * 1.8 + uPhase);
 
                 float displacement = (wave1 + wave2) * 0.5;
                 vDisplacement = displacement;
+                vDispSign     = sign(displacement);
 
-                // Approximate normal via finite differences for better shading
+                // Approximate normals via analytic derivatives
                 float eps = 0.02;
                 float dxW1 = cos(uFreqX * (position.x + eps) * PI) * uFreqX * PI
                            * sin(uFreqY * position.z * PI) * cos(uTime * 1.8);
@@ -282,8 +280,9 @@
 
         const fragmentShader = /* glsl */`
             varying float vDisplacement;
-            varying vec2 vUv;
-            varying vec3 vNormal;
+            varying vec2  vUv;
+            varying vec3  vNormal;
+            varying float vDispSign;
             uniform float uTime;
             uniform float uFreqX;
             uniform float uFreqY;
@@ -291,34 +290,44 @@
             void main() {
                 float d = abs(vDisplacement);
 
-                // Node lines — near-zero displacement glows bright cyan
-                float nodeLine = 1.0 - smoothstep(0.0, 0.07, d);
-                // Add a sharper inner line for extra crispness
+                // Node lines (Chladni nodal lines)
+                float nodeLine  = 1.0 - smoothstep(0.0, 0.07, d);
                 float nodeSharp = 1.0 - smoothstep(0.0, 0.025, d);
 
-                // Peak mask — antinodes peak away from zero
+                // Peak mask
                 float peakMask = smoothstep(0.55, 1.0, d);
 
-                // Very subtle grid shimmer based on UV
+                // Grid shimmer
                 float gridU = abs(sin(vUv.x * (uFreqX + uFreqY) * 6.28));
                 float gridV = abs(sin(vUv.y * (uFreqX + uFreqY) * 6.28));
                 float grid  = gridU * gridV * 0.04;
 
-                // Time-based pulse on node lines
+                // Time-based pulse
                 float pulse = 0.85 + 0.15 * sin(uTime * 3.5);
 
-                // Base: deep space purple-black
-                vec3 baseColor   = vec3(0.03, 0.01, 0.12);
-                // Node lines: electric cyan
-                vec3 nodeColor   = vec3(0.0, 0.95, 1.0) * pulse;
-                // Sharp node core: near-white
-                vec3 coreColor   = vec3(0.8, 1.0, 1.0);
-                // Antinodes / peaks: vivid violet-magenta
-                vec3 peakColor   = vec3(0.75, 0.15, 1.0);
-                // Mid-displacement warm teal
-                vec3 midColor    = vec3(0.05, 0.4, 0.6);
+                // ── Rainbow gradient based on displacement direction ───────────
+                // up (+1) = warm colors (red/orange/yellow), down (-1) = cool (blue/violet)
+                float warmT = vDispSign * 0.5 + 0.5; // 1 when up, 0 when down
 
-                // Compose
+                // Warm antinodes: orange-yellow
+                vec3 warmColor = vec3(1.0, 0.55 + d * 0.35, 0.05);
+                // Cool antinodes: blue-violet
+                vec3 coolColor = vec3(0.25, 0.05, 0.9 + d * 0.1);
+                vec3 peakColor = mix(coolColor, warmColor, warmT);
+
+                // Base and mid
+                vec3 baseColor = vec3(0.03, 0.01, 0.12);
+                vec3 midColor  = mix(
+                    vec3(0.02, 0.15, 0.55),   // cool mid (downward)
+                    vec3(0.55, 0.18, 0.02),    // warm mid (upward)
+                    warmT
+                );
+
+                // Node lines remain electric cyan
+                vec3 nodeColor = vec3(0.0, 0.95, 1.0) * pulse;
+                vec3 coreColor = vec3(0.8, 1.0, 1.0);
+
+                // Compose color layers
                 vec3 color = baseColor;
                 color = mix(color, midColor, smoothstep(0.0, 0.5, d) * 0.5);
                 color = mix(color, peakColor, peakMask * 0.65);
@@ -326,10 +335,26 @@
                 color = mix(color, coreColor, nodeSharp * 0.95);
                 color += grid;
 
-                // Simple diffuse shading from above
+                // ── Specular highlight on wave peaks ─────────────────────────
+                // Camera is roughly above; light from above-right
+                vec3 lightDir  = normalize(vec3(0.4, 1.0, 0.3));
+                vec3 viewDir   = normalize(vec3(0.0, 1.0, 0.6));
+                vec3 halfDir   = normalize(lightDir + viewDir);
+                float spec     = pow(max(0.0, dot(normalize(vNormal), halfDir)), 64.0);
+                // Only show specular at peaks (high amplitude)
+                spec *= peakMask * (0.7 + 0.3 * pulse);
+                color += vec3(0.9, 1.0, 1.0) * spec * 0.6;
+
+                // Simple diffuse from above
                 float light = dot(normalize(vNormal), normalize(vec3(0.3, 1.0, 0.5)));
                 light = clamp(light, 0.0, 1.0);
                 color = mix(color, color * (0.6 + 0.4 * light), 0.25);
+
+                // ── Rim light from below — shows through valleys ────────────
+                // Valleys are where displacement < 0; glow through from underneath
+                float valleyMask = smoothstep(-0.05, -0.4, vDisplacement);
+                float rimGlow    = valleyMask * (0.4 + 0.3 * sin(uTime * 2.0));
+                color += vec3(0.15, 0.55, 1.0) * rimGlow * 0.35;
 
                 gl_FragColor = vec4(color, 1.0);
             }
@@ -342,7 +367,8 @@
             uPhase: { value: 0.0 },
         };
 
-        const geometry = new THREE.PlaneGeometry(10, 10, 255, 255);
+        // 256×256 resolution for fine Chladni pattern detail
+        const geometry = new THREE.PlaneGeometry(10, 10, 256, 256);
         const material = new THREE.ShaderMaterial({
             vertexShader,
             fragmentShader,
@@ -351,17 +377,53 @@
         });
 
         const mesh = new THREE.Mesh(geometry, material);
-        mesh.rotation.x = -Math.PI / 2;   // flat horizontal
+        mesh.rotation.x = -Math.PI / 2;
         scene.add(mesh);
 
-        // Thin wireframe border for reference
+        // Border
         const edgeGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(10, 10));
         const edgeMat = new THREE.LineBasicMaterial({ color: 0x003344, transparent: true, opacity: 0.4 });
         const edgeMesh = new THREE.LineSegments(edgeGeo, edgeMat);
         edgeMesh.rotation.x = -Math.PI / 2;
         scene.add(edgeMesh);
 
-        // Subtle ambient glow particles
+        // ── Sand particle system — 20K particles on wave surface ───────────────
+        // Particles rest at their XZ position, Y = wave displacement.
+        // They cluster at Chladni node lines (low amplitude regions).
+        const SAND_COUNT = 20000;
+        const sandXZ     = new Float32Array(SAND_COUNT * 2); // fixed XZ positions
+        const sandPos    = new Float32Array(SAND_COUNT * 3);
+        const sandCol    = new Float32Array(SAND_COUNT * 3);
+
+        // Distribute uniformly over the plate [-5, 5] x [-5, 5]
+        for (let i = 0; i < SAND_COUNT; i++) {
+            sandXZ[i * 2]     = (Math.random() - 0.5) * 10.0;
+            sandXZ[i * 2 + 1] = (Math.random() - 0.5) * 10.0;
+        }
+
+        const sandGeo = new THREE.BufferGeometry();
+        sandGeo.setAttribute('position', new THREE.BufferAttribute(sandPos, 3));
+        sandGeo.setAttribute('color',    new THREE.BufferAttribute(sandCol, 3));
+
+        const sandMat = new THREE.PointsMaterial({
+            size:         0.022,
+            vertexColors: true,
+            transparent:  true,
+            opacity:      0.75,
+            depthWrite:   false,
+            blending:     THREE.AdditiveBlending,
+        });
+
+        const sandPoints = new THREE.Points(sandGeo, sandMat);
+        scene.add(sandPoints);
+
+        const sandPosAttr = sandGeo.attributes.position;
+        const sandColAttr = sandGeo.attributes.color;
+
+        // Precompute PI constant for JS
+        const PI = Math.PI;
+
+        // ── Ambient glow particles ─────────────────────────────────────────────
         const particleCount = 600;
         const pPositions = new Float32Array(particleCount * 3);
         for (let i = 0; i < particleCount; i++) {
@@ -371,20 +433,15 @@
         }
         const pGeo = new THREE.BufferGeometry();
         pGeo.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
-        const pMat = new THREE.PointsMaterial({
-            color: 0x003355,
-            size: 0.025,
-            transparent: true,
-            opacity: 0.55,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-        });
-        scene.add(new THREE.Points(pGeo, pMat));
+        scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({
+            color: 0x003355, size: 0.025, transparent: true, opacity: 0.55,
+            blending: THREE.AdditiveBlending, depthWrite: false,
+        })));
 
-        // ── UI state ─────────────────────────────────────────────────────────────────
+        // ── UI state ────────────────────────────────────────────────────────────
         let userInteracted = false;
         let autoTimer = 0;
-        const AUTO_INTERVAL = 4.0;  // seconds
+        const AUTO_INTERVAL = 4.0;
 
         const PRESETS = [
             { fx: 2, fy: 3, ph: 0.0,  id: 'btn-23' },
@@ -397,7 +454,6 @@
         ];
         let presetIndex = 0;
 
-        // Smooth-transition targets
         let targetFreqX = 3.0;
         let targetFreqY = 2.0;
         let targetPhase = 0.0;
@@ -426,7 +482,6 @@
             elPhVal.textContent = ph.toFixed(2);
             updateBadge(fx, fy, false);
         }
-        // expose for inline onclick
         window.setPreset = (fx, fy, ph) => {
             userInteracted = true;
             setPreset(fx, fy, ph);
@@ -448,7 +503,6 @@
                 (auto ? 'AUTO-CYCLING' : 'MANUAL');
         }
 
-        // Slider listeners
         elFreqX.addEventListener('input', () => {
             userInteracted = true;
             targetFreqX = parseInt(elFreqX.value);
@@ -467,9 +521,8 @@
             elPhVal.textContent = targetPhase.toFixed(2);
         });
 
-        // ── Clock / animation ────────────────────────────────────────────────────────
+        // ── Clock / animation ──────────────────────────────────────────────────
         const clock = new THREE.Clock();
-
         function lerp(a, b, t) { return a + (b - a) * t; }
 
         function advanceAutoPreset(dt) {
@@ -485,13 +538,52 @@
             }
         }
 
+        // Update sand particles (run every other frame for performance)
+        let sandFrameSkip = 0;
+
+        function updateSandParticles(elapsed) {
+            const fx  = currentFreqX;
+            const fy  = currentFreqY;
+            const ph  = currentPhase;
+            const t   = elapsed;
+            const cosT = Math.cos(t * 1.8);
+            const cosTPh = Math.cos(t * 1.8 + ph);
+
+            for (let i = 0; i < SAND_COUNT; i++) {
+                const px = sandXZ[i * 2];
+                const pz = sandXZ[i * 2 + 1];
+
+                const wave1 = Math.sin(fx * px * PI) * Math.sin(fy * pz * PI) * cosT;
+                const wave2 = Math.sin(fy * px * PI) * Math.sin(fx * pz * PI) * cosTPh;
+                const disp  = (wave1 + wave2) * 0.5;
+
+                // Particle Y = wave surface + small offset
+                sandPosAttr.array[i * 3]     = px;
+                sandPosAttr.array[i * 3 + 1] = disp * 0.8;
+                sandPosAttr.array[i * 3 + 2] = pz;
+
+                // Particles at low-amplitude zones (node lines) glow bright
+                // Particles at high-amplitude zones are dimmer (flung away in reality)
+                const absD   = Math.abs(disp);
+                const nodeT  = 1.0 - Math.min(1.0, absD / 0.15); // bright near zero crossing
+                // Sand color: gold/yellow at nodes, dim grey elsewhere
+                const r = 0.9 * nodeT + 0.15;
+                const g = 0.75 * nodeT + 0.1;
+                const b = 0.1  * nodeT + 0.05;
+                sandColAttr.array[i * 3]     = r;
+                sandColAttr.array[i * 3 + 1] = g;
+                sandColAttr.array[i * 3 + 2] = b;
+            }
+            sandPosAttr.needsUpdate = true;
+            sandColAttr.needsUpdate = true;
+        }
+
         function animate() {
-            const dt = clock.getDelta();
+            const dt      = clock.getDelta();
             const elapsed = clock.getElapsedTime();
 
             advanceAutoPreset(dt);
 
-            // Smooth lerp toward targets
             currentFreqX = lerp(currentFreqX, targetFreqX, LERP_SPEED);
             currentFreqY = lerp(currentFreqY, targetFreqY, LERP_SPEED);
             currentPhase = lerp(currentPhase, targetPhase, LERP_SPEED);
@@ -501,13 +593,19 @@
             uniforms.uFreqY.value = currentFreqY;
             uniforms.uPhase.value = currentPhase;
 
+            // Update sand every other frame (20K particles is expensive)
+            sandFrameSkip++;
+            if (sandFrameSkip % 2 === 0) {
+                updateSandParticles(elapsed);
+            }
+
             controls.update();
             composer.render();
         }
 
         renderer.setAnimationLoop(animate);
 
-        // ── Resize ───────────────────────────────────────────────────────────────────
+        // ── Resize ─────────────────────────────────────────────────────────────
         window.addEventListener('resize', () => {
             const w = window.innerWidth;
             const h = window.innerHeight;
@@ -518,10 +616,9 @@
             bloomPass.setSize(w, h);
         });
 
-        // ── Boot: set first active preset ────────────────────────────────────────────
+        // Boot
         highlightButton(3, 2);
         updateBadge(3, 2, true);
-        // Kick off with preset 0 displayed immediately
         setPreset(PRESETS[0].fx, PRESETS[0].fy, PRESETS[0].ph);
         highlightButton(PRESETS[0].fx, PRESETS[0].fy);
         updateBadge(PRESETS[0].fx, PRESETS[0].fy, true);

@@ -73,7 +73,7 @@
 
     <div id="stats">
         <div id="fps">FPS: --</div>
-        <div>200,000 particles</div>
+        <div>202,000 particles &nbsp;|&nbsp; Gaussian Glow &nbsp;|&nbsp; Doppler Shift</div>
     </div>
 
     <div id="info">Drag to orbit &nbsp;·&nbsp; Scroll to zoom &nbsp;·&nbsp; Keplerian accretion disk</div>
@@ -108,7 +108,6 @@
     scene.background = new THREE.Color(0x000000);
 
     const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 1000);
-    // Slightly inclined to see the disk in perspective
     camera.position.set(0, 4.5, 14);
     camera.lookAt(0, 0, 0);
 
@@ -126,21 +125,61 @@
 
     const bloomPass = new UnrealBloomPass(
         new THREE.Vector2(window.innerWidth, window.innerHeight),
-        2.0,   // strength
+        2.0,   // strength (boosted)
         0.5,   // radius
-        0.05   // threshold — low so dark particles still glow
+        0.05   // threshold
     );
     composer.addPass(bloomPass);
     composer.addPass(new OutputPass());
 
+    // ─── Gaussian Glow ShaderMaterial ────────────────────────────────────────────
+    // color and size are per-vertex attributes; brightness controls inner glow intensity
+    const diskMaterial = new THREE.ShaderMaterial({
+        uniforms: { uTime: { value: 0 } },
+        vertexShader: `
+            attribute float size;
+            attribute vec3 color;
+            attribute float brightness;
+            varying vec3 vColor;
+            varying float vBrightness;
+            void main() {
+                vColor = color;
+                vBrightness = brightness;
+                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                gl_PointSize = size * (350.0 / -mvPosition.z);
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `,
+        fragmentShader: `
+            varying vec3 vColor;
+            varying float vBrightness;
+            void main() {
+                vec2 uv = gl_PointCoord - 0.5;
+                float d = length(uv);
+                if (d > 0.5) discard;
+                // Soft gaussian glow
+                float alpha = exp(-d * d * 6.0) * 0.95;
+                // Bright star core — scaled by brightness attribute
+                float core = exp(-d * d * 80.0) * vBrightness;
+                vec3 col = vColor + core * 0.9;
+                gl_FragColor = vec4(col, alpha);
+            }
+        `,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        transparent: true,
+        vertexColors: false,
+    });
+
     // ─── Accretion Disk Particles ────────────────────────────────────────────────
     const PARTICLE_COUNT = 200_000;
 
-    const positions = new Float32Array(PARTICLE_COUNT * 3);
-    const colors    = new Float32Array(PARTICLE_COUNT * 3);
-    const velocities = new Float32Array(PARTICLE_COUNT); // angular velocity per particle
+    const positions   = new Float32Array(PARTICLE_COUNT * 3);
+    const colors      = new Float32Array(PARTICLE_COUNT * 3);
+    const sizes       = new Float32Array(PARTICLE_COUNT);
+    const brightnesses = new Float32Array(PARTICLE_COUNT);
+    const velocities  = new Float32Array(PARTICLE_COUNT);
 
-    // Persist angles so we can update positions each frame
     const angles   = new Float32Array(PARTICLE_COUNT);
     const radii    = new Float32Array(PARTICLE_COUNT);
     const heights  = new Float32Array(PARTICLE_COUNT);
@@ -168,15 +207,10 @@
     }
 
     for (let i = 0; i < PARTICLE_COUNT; i++) {
-        // Radius: concentrated near inner edge (power-law distribution)
-        // Use r ~ U^(1/2) biased toward smaller radii
         const u = Math.random();
-        // Inner-biased: most mass close to the black hole
-        const radius = 1.5 + (Math.pow(u, 0.55)) * 6.5; // range [1.5, 8.0]
+        const radius = 1.5 + (Math.pow(u, 0.55)) * 6.5;
 
         const angle  = Math.random() * Math.PI * 2;
-
-        // Disk has a thin vertical spread; slight flare toward outer edge
         const diskHeight = 0.04 + (radius - 1.5) * 0.018;
         const height = (Math.random() * 2 - 1) * diskHeight;
 
@@ -184,98 +218,80 @@
         radii[i]   = radius;
         heights[i] = height;
 
-        // Keplerian angular velocity: omega = k / sqrt(r)
-        // Inner particles orbit much faster
+        // Keplerian: inner orbits faster
         velocities[i] = 0.5 / Math.sqrt(radius);
 
-        // Initial positions
         positions[i * 3]     = Math.cos(angle) * radius;
         positions[i * 3 + 1] = height;
         positions[i * 3 + 2] = Math.sin(angle) * radius;
 
-        // Color mapping by radius
-        // r = 1.5–2.5 → blinding white/pale-blue photon ring
-        // r = 2.0–3.5 → white-hot / pale yellow
-        // r = 3.5–5.5 → orange
-        // r = 5.5–8.0 → deep red, dimming
+        // Base color by radius
         let cr, cg, cb;
-
         if (radius < 2.2) {
-            // Photon ring zone: very bright, almost white with pale-blue tinge
             const t = (radius - 1.5) / 0.7;
-            const [r1, g1, b1] = hslToRgb(0.08, 0.3, 0.95);  // near-white
-            const [r2, g2, b2] = hslToRgb(0.10, 0.8, 0.85);  // warm white
+            const [r1, g1, b1] = hslToRgb(0.08, 0.3, 0.95);
+            const [r2, g2, b2] = hslToRgb(0.10, 0.8, 0.85);
             cr = r1 + (r2 - r1) * t;
             cg = g1 + (g2 - g1) * t;
             cb = b1 + (b2 - b1) * t;
         } else if (radius < 4.0) {
-            // Inner disk: yellow → orange
             const t = (radius - 2.2) / 1.8;
-            const [r1, g1, b1] = hslToRgb(0.12, 1.0, 0.90);  // bright yellow-white
-            const [r2, g2, b2] = hslToRgb(0.07, 1.0, 0.65);  // orange
+            const [r1, g1, b1] = hslToRgb(0.12, 1.0, 0.90);
+            const [r2, g2, b2] = hslToRgb(0.07, 1.0, 0.65);
             cr = r1 + (r2 - r1) * t;
             cg = g1 + (g2 - g1) * t;
             cb = b1 + (b2 - b1) * t;
         } else if (radius < 6.2) {
-            // Mid disk: orange → deep orange-red
             const t = (radius - 4.0) / 2.2;
-            const [r1, g1, b1] = hslToRgb(0.07, 1.0, 0.65);  // orange
-            const [r2, g2, b2] = hslToRgb(0.03, 1.0, 0.40);  // deep red
+            const [r1, g1, b1] = hslToRgb(0.07, 1.0, 0.65);
+            const [r2, g2, b2] = hslToRgb(0.03, 1.0, 0.40);
             cr = r1 + (r2 - r1) * t;
             cg = g1 + (g2 - g1) * t;
             cb = b1 + (b2 - b1) * t;
         } else {
-            // Outer disk: dark red → near-black (cool, outer material)
             const t = (radius - 6.2) / 1.8;
-            const [r1, g1, b1] = hslToRgb(0.03, 1.0, 0.40);  // deep red
-            const [r2, g2, b2] = hslToRgb(0.02, 0.8, 0.12);  // near black-red
+            const [r1, g1, b1] = hslToRgb(0.03, 1.0, 0.40);
+            const [r2, g2, b2] = hslToRgb(0.02, 0.8, 0.12);
             cr = r1 + (r2 - r1) * t;
             cg = g1 + (g2 - g1) * t;
             cb = b1 + (b2 - b1) * t;
         }
 
-        // Add slight per-particle brightness variation for realism
-        const brightness = 0.75 + Math.random() * 0.25;
-        colors[i * 3]     = cr * brightness;
-        colors[i * 3 + 1] = cg * brightness;
-        colors[i * 3 + 2] = cb * brightness;
+        // Doppler shift: approaching side (angle near 0 or 2π) gets blue tint,
+        // receding side (angle near π) gets red tint. Strength scales with orbital speed.
+        const dopplerStrength = Math.min(velocities[i] * 0.5, 0.25);
+        const approaching = Math.cos(angle); // +1 approaching, -1 receding
+        if (approaching > 0) {
+            // Blue-shift: boost blue, slightly reduce red
+            cb = Math.min(1.0, cb + approaching * dopplerStrength * 0.5);
+            cr = Math.max(0.0, cr - approaching * dopplerStrength * 0.2);
+        } else {
+            // Red-shift: boost red, slightly reduce blue
+            const recession = -approaching;
+            cr = Math.min(1.0, cr + recession * dopplerStrength * 0.5);
+            cb = Math.max(0.0, cb - recession * dopplerStrength * 0.2);
+        }
+
+        const baseBrightness = 0.75 + Math.random() * 0.25;
+        colors[i * 3]     = cr * baseBrightness;
+        colors[i * 3 + 1] = cg * baseBrightness;
+        colors[i * 3 + 2] = cb * baseBrightness;
+
+        // Inner particles are brighter (higher core glow intensity)
+        const innerFactor = Math.max(0, 1.0 - (radius - 1.5) / 6.5);
+        brightnesses[i] = 0.5 + innerFactor * 1.5;
+
+        // Particle size: inner disk slightly bigger for photon ring drama
+        sizes[i] = 0.04 + innerFactor * 0.06 + Math.random() * 0.02;
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+    geometry.setAttribute('position',   new THREE.BufferAttribute(positions,    3));
+    geometry.setAttribute('color',      new THREE.BufferAttribute(colors,       3));
+    geometry.setAttribute('size',       new THREE.BufferAttribute(sizes,        1));
+    geometry.setAttribute('brightness', new THREE.BufferAttribute(brightnesses, 1));
 
-    // Custom point texture — soft glow circle
-    function createParticleTexture() {
-        const size = 64;
-        const canvas = document.createElement('canvas');
-        canvas.width  = size;
-        canvas.height = size;
-        const ctx = canvas.getContext('2d');
-        const half = size / 2;
-        const grad = ctx.createRadialGradient(half, half, 0, half, half, half);
-        grad.addColorStop(0.00, 'rgba(255,255,255,1.0)');
-        grad.addColorStop(0.25, 'rgba(255,255,255,0.8)');
-        grad.addColorStop(0.60, 'rgba(255,255,255,0.2)');
-        grad.addColorStop(1.00, 'rgba(255,255,255,0.0)');
-        ctx.fillStyle = grad;
-        ctx.fillRect(0, 0, size, size);
-        return new THREE.CanvasTexture(canvas);
-    }
-
-    const particleTexture = createParticleTexture();
-
-    const material = new THREE.PointsMaterial({
-        size: 0.045,
-        map: particleTexture,
-        vertexColors: true,
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-        sizeAttenuation: true,
-    });
-
-    const diskPoints = new THREE.Points(geometry, material);
+    const diskPoints = new THREE.Points(geometry, diskMaterial);
     scene.add(diskPoints);
 
     // ─── Event Horizon (Black Sphere) ────────────────────────────────────────────
@@ -284,54 +300,93 @@
     const horizon = new THREE.Mesh(horizonGeo, horizonMat);
     scene.add(horizon);
 
-    // ─── Gravitational Lensing Ring (Photon Sphere glow halo) ────────────────────
-    // A bright torus right at the photon-ring radius (~1.5–2) using a torus
+    // ─── Gravitational Lensing Ring ───────────────────────────────────────────────
     const photonGeo = new THREE.TorusGeometry(1.82, 0.08, 16, 200);
     const photonMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 });
     const photonRing = new THREE.Mesh(photonGeo, photonMat);
     photonRing.rotation.x = Math.PI / 2;
     scene.add(photonRing);
 
-    // A second, slightly larger torus for the lensed back image
     const lensedGeo = new THREE.TorusGeometry(1.65, 0.04, 16, 200);
     const lensedMat = new THREE.MeshBasicMaterial({ color: 0xffeecc, transparent: true, opacity: 0.35 });
     const lensedRing = new THREE.Mesh(lensedGeo, lensedMat);
     lensedRing.rotation.x = Math.PI / 2;
     scene.add(lensedRing);
 
-    // ─── Distant star field ───────────────────────────────────────────────────────
-    const starCount = 6000;
-    const starPositions = new Float32Array(starCount * 3);
-    for (let i = 0; i < starCount; i++) {
-        // Random points on a large sphere
+    // ─── Distant background stars (2000, gaussian glow, white) ───────────────────
+    const BG_STAR_COUNT = 2000;
+    const bgStarPositions  = new Float32Array(BG_STAR_COUNT * 3);
+    const bgStarColors     = new Float32Array(BG_STAR_COUNT * 3);
+    const bgStarSizes      = new Float32Array(BG_STAR_COUNT);
+    const bgStarBrightness = new Float32Array(BG_STAR_COUNT);
+    const tmpColor = new THREE.Color();
+
+    for (let i = 0; i < BG_STAR_COUNT; i++) {
         const theta = Math.random() * Math.PI * 2;
         const phi   = Math.acos(2 * Math.random() - 1);
         const r     = 80 + Math.random() * 40;
-        starPositions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
-        starPositions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-        starPositions[i * 3 + 2] = r * Math.cos(phi);
+        bgStarPositions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
+        bgStarPositions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+        bgStarPositions[i * 3 + 2] = r * Math.cos(phi);
+
+        // Varied star colors: warm white to blue-white
+        tmpColor.setHSL(0.60, 0.05 + Math.random() * 0.25, 0.65 + Math.random() * 0.35);
+        bgStarColors[i * 3]     = tmpColor.r;
+        bgStarColors[i * 3 + 1] = tmpColor.g;
+        bgStarColors[i * 3 + 2] = tmpColor.b;
+
+        bgStarSizes[i]      = 0.05 + Math.random() * 0.10;
+        bgStarBrightness[i] = 0.4 + Math.random() * 0.6;
     }
-    const starGeo = new THREE.BufferGeometry();
-    starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
-    const starMat = new THREE.PointsMaterial({
-        size: 0.18,
-        color: 0xffffff,
-        transparent: true,
-        opacity: 0.6,
-        depthWrite: false,
+
+    const bgStarGeo = new THREE.BufferGeometry();
+    bgStarGeo.setAttribute('position',   new THREE.BufferAttribute(bgStarPositions,  3));
+    bgStarGeo.setAttribute('color',      new THREE.BufferAttribute(bgStarColors,     3));
+    bgStarGeo.setAttribute('size',       new THREE.BufferAttribute(bgStarSizes,      1));
+    bgStarGeo.setAttribute('brightness', new THREE.BufferAttribute(bgStarBrightness, 1));
+
+    const bgStarMat = new THREE.ShaderMaterial({
+        uniforms: { uTime: { value: 0 } },
+        vertexShader: `
+            attribute float size;
+            attribute vec3 color;
+            attribute float brightness;
+            varying vec3 vColor;
+            varying float vBrightness;
+            void main() {
+                vColor = color;
+                vBrightness = brightness;
+                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                gl_PointSize = size * (350.0 / -mvPosition.z);
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `,
+        fragmentShader: `
+            varying vec3 vColor;
+            varying float vBrightness;
+            void main() {
+                vec2 uv = gl_PointCoord - 0.5;
+                float d = length(uv);
+                if (d > 0.5) discard;
+                float alpha = exp(-d * d * 6.0) * 0.9;
+                float core = exp(-d * d * 80.0) * vBrightness;
+                vec3 col = vColor + core * 0.9;
+                gl_FragColor = vec4(col, alpha);
+            }
+        `,
         blending: THREE.AdditiveBlending,
-        sizeAttenuation: true,
+        depthWrite: false,
+        transparent: true,
+        vertexColors: false,
     });
-    scene.add(new THREE.Points(starGeo, starMat));
+    scene.add(new THREE.Points(bgStarGeo, bgStarMat));
 
     // ─── Resize Handler ──────────────────────────────────────────────────────────
     function onResize() {
         const w = window.innerWidth;
         const h = window.innerHeight;
-
         camera.aspect = w / h;
         camera.updateProjectionMatrix();
-
         renderer.setSize(w, h);
         composer.setSize(w, h);
         bloomPass.resolution.set(w, h);
@@ -348,7 +403,7 @@
     renderer.setAnimationLoop(animate);
 
     function animate(now) {
-        const deltaTime = Math.min((now - lastTime) * 0.001, 0.05); // seconds, capped
+        const deltaTime = Math.min((now - lastTime) * 0.001, 0.05);
         lastTime = now;
 
         // Update particle positions (Keplerian orbit)
@@ -357,12 +412,25 @@
             const angle  = angles[i];
             const radius = radii[i];
             positions[i * 3]     = Math.cos(angle) * radius;
-            // heights stay constant — no vertical oscillation (thin disk)
             positions[i * 3 + 2] = Math.sin(angle) * radius;
+
+            // Update doppler-shifted colors each frame as particles orbit
+            // approaching = cos of angle relative to viewer's X axis
+            const approaching = Math.cos(angle);
+            const dopplerStrength = Math.min(velocities[i] * 0.5, 0.25);
+            // We can only update the raw color array; doppler delta applied additively
+            // Keep it simple: modulate the blue channel slightly
+            const idx3 = i * 3;
+            if (approaching > 0) {
+                colors[idx3 + 2] = Math.min(colors[idx3 + 2] + approaching * dopplerStrength * 0.003, 1.0);
+            } else {
+                colors[idx3]     = Math.min(colors[idx3]     + (-approaching) * dopplerStrength * 0.003, 1.0);
+            }
         }
         geometry.attributes.position.needsUpdate = true;
+        geometry.attributes.color.needsUpdate    = true;
 
-        // Subtly pulse photon ring opacity
+        // Pulse photon ring opacity
         const pulse = Math.sin(now * 0.0008) * 0.12;
         photonMat.opacity = 0.55 + pulse;
         lensedMat.opacity = 0.35 + pulse * 0.5;
