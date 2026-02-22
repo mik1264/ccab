@@ -19,8 +19,10 @@ The project follows a two-tier navigation structure:
 3. **Individual Demos**: Self-contained HTML files with inline CSS/JavaScript
 
 **Two Types of Gallery Pages:**
-- **Multi-demo galleries** (52): Have separate HTML files for each demo (e.g., `threejs/01-rotating-cube.html`)
-- **Single-page demos** (28+): The `index.html` IS the demo itself (e.g., `wolfram-ca/index.html`, `algorithmic-art/index.html`)
+
+* **Multi-demo galleries** (52): Have separate HTML files for each demo (e.g., `threejs/01-rotating-cube.html`)
+
+* **Single-page demos** (28+): The `index.html` IS the demo itself (e.g., `wolfram-ca/index.html`, `algorithmic-art/index.html`)
 
 ```
 ccab/
@@ -40,42 +42,67 @@ ccab/
 ### 179 Gallery Categories (8 Sections)
 
 **Original (6):**
-- `algorithmic-art/` - Fractals, patterns, generative art (20+ demos)
-- `game-of-life/` - 23 Conway's Game of Life variations
-- `infographics/` - 6 interactive data visualizations
-- `lissajous/` - Lissajous curve generator
-- `visualizations/` - 9 basic HTML5 canvas demos
-- `games/` - Neural Cellular Automata
+
+* `algorithmic-art/` - Fractals, patterns, generative art (20+ demos)
+
+* `game-of-life/` - 23 Conway's Game of Life variations
+
+* `infographics/` - 6 interactive data visualizations
+
+* `lissajous/` - Lissajous curve generator
+
+* `visualizations/` - 9 basic HTML5 canvas demos
+
+* `games/` - Neural Cellular Automata
 
 **Added via Automated Generation (14):**
-- `wolfram-ca/` - All 256 Wolfram Elementary Cellular Automata rules
-- `threejs/` - Three.js 3D visualizations (30 demos)
-- `webgl-shaders/` - Raw WebGL shader art (21 demos)
-- `webgpu/` - WebGPU compute shaders (12 demos)
-- `p5-generative-art/` - P5.js creative coding (40 demos)
-- `pixi-sprite-animations/` - Pixi.js sprites (17 demos)
-- `d3js/` - D3.js data visualizations (18 demos)
-- `web-audio-api/` - Web Audio API (40 demos)
-- `scientific-visualizations/` - Physics/chemistry/biology (15 demos)
-- `biological-simulations/` - Boids, evolution, L-systems (22 demos)
-- `altruism-evolution/` - Altruism & cooperation evolution (16 demos)
-- `visualization-algorithms/` - Voronoi, Delaunay, pathfinding (25 demos)
-- `webassembly/` - High-performance WASM (13 demos)
-- `complex-showcases/` - Ray tracers, terrain, galaxies (15 demos)
+
+* `wolfram-ca/` - All 256 Wolfram Elementary Cellular Automata rules
+
+* `threejs/` - Three.js 3D visualizations (30 demos)
+
+* `webgl-shaders/` - Raw WebGL shader art (21 demos)
+
+* `webgpu/` - WebGPU compute shaders (12 demos)
+
+* `p5-generative-art/` - P5.js creative coding (40 demos)
+
+* `pixi-sprite-animations/` - Pixi.js sprites (17 demos)
+
+* `d3js/` - D3.js data visualizations (18 demos)
+
+* `web-audio-api/` - Web Audio API (40 demos)
+
+* `scientific-visualizations/` - Physics/chemistry/biology (15 demos)
+
+* `biological-simulations/` - Boids, evolution, L-systems (22 demos)
+
+* `altruism-evolution/` - Altruism & cooperation evolution (16 demos)
+
+* `visualization-algorithms/` - Voronoi, Delaunay, pathfinding (25 demos)
+
+* `webassembly/` - High-performance WASM (13 demos)
+
+* `complex-showcases/` - Ray tracers, terrain, galaxies (15 demos)
 
 ## Key Implementation Patterns
 
 ### 1. Self-Contained HTML Files
 
 Every demo is a complete standalone file:
-- All CSS in `<style>` tags
-- All JavaScript in `<script>` tags
-- External libraries loaded via CDN (unpkg.com, cdnjs.com)
-- No local dependencies
+
+* All CSS in `<style>` tags
+
+* All JavaScript in `<script>` tags
+
+* External libraries loaded via CDN (unpkg.com, cdnjs.com)
+
+* No local dependencies
 
 ### 2. Gallery Index Structure (Organic-Nature Theme)
 
 Multi-demo gallery `index.html` files follow the organic-nature template:
+
 ```html
 <!-- Organic background shapes -->
 <div class="organic-shape shape-1"></div>
@@ -100,6 +127,7 @@ Multi-demo gallery `index.html` files follow the organic-nature template:
 ```
 
 Single-page demos include a floating back-link:
+
 ```html
 <a href="../index.html" class="organic-back-link">
     <span class="back-arrow">←</span>
@@ -109,20 +137,21 @@ Single-page demos include a floating back-link:
 
 ### 3. Technology Stack by Gallery
 
-| Gallery | Primary Tech | Loading Pattern |
-|---------|-------------|-----------------|
-| `d3js/` | D3.js v7 | `<script src="https://d3js.org/d3.v7.min.js">` |
-| `threejs/` | Three.js r149+ | `<script src="https://unpkg.com/three@...">` |
-| `p5-generative-art/` | P5.js | `<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/...">` |
-| `pixi-sprite-animations/` | Pixi.js v7 | `<script src="https://pixijs.download/release/pixi.js">` |
-| `webgl-shaders/` | Raw WebGL | No libraries, pure GLSL |
-| `webgpu/` | WebGPU API | Native browser API |
-| `web-audio-api/` | Web Audio + Tone.js | Native + `<script src="https://unpkg.com/tone">` |
-| `webassembly/` | WASM + C/Rust | Emscripten or manual WASM |
+| Gallery                   | Primary Tech        | Loading Pattern                                                   |
+| ------------------------- | ------------------- | ----------------------------------------------------------------- |
+| `d3js/`                   | D3.js v7            | `<script src="https://d3js.org/d3.v7.min.js">`                    |
+| `threejs/`                | Three.js r149+      | `<script src="https://unpkg.com/three@...">`                      |
+| `p5-generative-art/`      | P5.js               | `<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/...">` |
+| `pixi-sprite-animations/` | Pixi.js v7          | `<script src="https://pixijs.download/release/pixi.js">`          |
+| `webgl-shaders/`          | Raw WebGL           | No libraries, pure GLSL                                           |
+| `webgpu/`                 | WebGPU API          | Native browser API                                                |
+| `web-audio-api/`          | Web Audio + Tone.js | Native + `<script src="https://unpkg.com/tone">`                  |
+| `webassembly/`            | WASM + C/Rust       | Emscripten or manual WASM                                         |
 
 ### 4. Common Demo Patterns
 
 **Canvas-based visualizations:**
+
 ```javascript
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -137,6 +166,7 @@ animate();
 ```
 
 **WebGL shader pattern:**
+
 ```javascript
 const gl = canvas.getContext('webgl2');
 const program = createShaderProgram(vertexShader, fragmentShader);
@@ -150,6 +180,7 @@ const program = createShaderProgram(vertexShader, fragmentShader);
 **IMPORTANT: Always use templates when creating new demos!**
 
 1. **Copy the appropriate template** from `templates/` directory:
+
    ```bash
    # For Canvas 2D demos
    cp templates/template-canvas.html your-gallery/your-demo.html
@@ -166,7 +197,8 @@ const program = createShaderProgram(vertexShader, fragmentShader);
 
 2. **Edit the template** - Look for sections marked `YOUR CODE GOES HERE` and replace with your visualization logic
 
-3. **Update gallery's `index.html`** to add link:
+3. **Update gallery's** **`index.html`** to add link:
+
    ```html
    <a href="your-demo.html" class="item-link">Your Demo Title</a>
    ```
@@ -176,14 +208,22 @@ const program = createShaderProgram(vertexShader, fragmentShader);
 5. No need to update main `index.html` (it links to gallery index)
 
 **Why Use Templates?**
-- ✅ Built-in error handling (CDN failures, runtime errors)
-- ✅ Loading states with spinners
-- ✅ Retina display support (crisp rendering)
-- ✅ FPS monitoring
-- ✅ Responsive resizing
-- ✅ Memory leak prevention
-- ✅ Accessibility features
-- ✅ Consistent UX across all demos
+
+* ✅ Built-in error handling (CDN failures, runtime errors)
+
+* ✅ Loading states with spinners
+
+* ✅ Retina display support (crisp rendering)
+
+* ✅ FPS monitoring
+
+* ✅ Responsive resizing
+
+* ✅ Memory leak prevention
+
+* ✅ Accessibility features
+
+* ✅ Consistent UX across all demos
 
 See `templates/README.md` for detailed documentation.
 
@@ -193,6 +233,7 @@ See `templates/README.md` for detailed documentation.
 2. Add individual demo files
 3. Create `new-gallery/index.html` following existing gallery pattern
 4. Update main `index.html` with new category section:
+
    ```html
    <!-- New Gallery Category -->
    <div class="category">
@@ -218,11 +259,16 @@ See `templates/README.md` for detailed documentation.
 ### What FAILED Previously
 
 Based on `IMPLEMENTATION_STATUS.md`, these implementations failed:
-- **Boids simulation** - Incomplete/buggy (avoid complex physics sims)
-- **Lattice Boltzmann fluid** - Performance issues (too computationally heavy)
-- **N-Body gravity** - Not working properly
-- **Paper.js integration** - Framework issues
-- **Reaction-Diffusion** - Poor visual quality
+
+* **Boids simulation** - Incomplete/buggy (avoid complex physics sims)
+
+* **Lattice Boltzmann fluid** - Performance issues (too computationally heavy)
+
+* **N-Body gravity** - Not working properly
+
+* **Paper.js integration** - Framework issues
+
+* **Reaction-Diffusion** - Poor visual quality
 
 **Lesson:** Framework-based visualizations succeed better than complex physics simulations.
 
@@ -238,17 +284,26 @@ Production-ready templates for creating new demos with built-in best practices:
 4. **`template-webgl.html`** - Raw WebGL shader art
 
 Each template includes:
-- Error handling for CDN failures and runtime errors
-- Loading states with animated spinners
-- FPS counters with color-coded performance indicators
-- Retina display support (automatic DPI scaling)
-- Responsive canvas/renderer resizing with debouncing
-- Memory leak prevention
-- WebGL support detection
-- Back navigation links
-- Proper resource cleanup
 
-**See `templates/README.md` for complete documentation.**
+* Error handling for CDN failures and runtime errors
+
+* Loading states with animated spinners
+
+* FPS counters with color-coded performance indicators
+
+* Retina display support (automatic DPI scaling)
+
+* Responsive canvas/renderer resizing with debouncing
+
+* Memory leak prevention
+
+* WebGL support detection
+
+* Back navigation links
+
+* Proper resource cleanup
+
+**See** **`templates/README.md`** **for complete documentation.**
 
 ### Utility Library (`assets/js/demo-utils.js`)
 
@@ -281,33 +336,50 @@ Reusable JavaScript utilities that can be included in any demo:
 ```
 
 **Available Classes:**
-- `FPSCounter` - Performance monitoring
-- `CanvasManager` - Retina canvas with auto-resize
-- `ErrorManager` - Centralized error UI
-- `LoadingManager` - Loading spinner management
-- `AnimationLoop` - Delta-time animation loop
+
+* `FPSCounter` - Performance monitoring
+
+* `CanvasManager` - Retina canvas with auto-resize
+
+* `ErrorManager` - Centralized error UI
+
+* `LoadingManager` - Loading spinner management
+
+* `AnimationLoop` - Delta-time animation loop
 
 **Available Functions:**
-- Math: `clamp()`, `lerp()`, `map()`, `random()`, `randomInt()`, `degToRad()`, `radToDeg()`
-- Color: `hslToRgb()`, `rgb()`
-- Loading: `loadLibrary()`, `checkWebGLSupport()`, `checkWebGL2Support()`
-- Error: `setupGlobalErrorHandler()`
+
+* Math: `clamp()`, `lerp()`, `map()`, `random()`, `randomInt()`, `degToRad()`, `radToDeg()`
+
+* Color: `hslToRgb()`, `rgb()`
+
+* Loading: `loadLibrary()`, `checkWebGLSupport()`, `checkWebGL2Support()`
+
+* Error: `setupGlobalErrorHandler()`
 
 ## Documentation Files
 
 ### Project Documentation
-- `CLAUDE.md` - This file, guidance for Claude Code
-- `IMPROVEMENTS.md` - Detailed changelog of November 2025 improvements
-- `README.md` - *(If exists)* Project overview and setup
+
+* `CLAUDE.md` - This file, guidance for Claude Code
+
+* `IMPROVEMENTS.md` - Detailed changelog of November 2025 improvements
+
+* `README.md` - *(If exists)* Project overview and setup
 
 ### Historical Documentation
-- `IMPLEMENTATION_STATUS.md` - Tracks 19 automated branch implementations (13 successful, 6 failed)
-- `NEXT_STEPS.md` - Comprehensive 12-week roadmap for platform enhancement
-- `SIMULATIONS_ROADMAP.md` - Deep dive into 10 essential simulations beyond Game of Life
-- `SIMULATIONS_QUICK_GUIDE.md` - Quick reference for simulation priorities
+
+* `IMPLEMENTATION_STATUS.md` - Tracks 19 automated branch implementations (13 successful, 6 failed)
+
+* `NEXT_STEPS.md` - Comprehensive 12-week roadmap for platform enhancement
+
+* `SIMULATIONS_ROADMAP.md` - Deep dive into 10 essential simulations beyond Game of Life
+
+* `SIMULATIONS_QUICK_GUIDE.md` - Quick reference for simulation priorities
 
 ### Template Documentation
-- `templates/README.md` - Complete guide to using demo templates (400+ lines)
+
+* `templates/README.md` - Complete guide to using demo templates (400+ lines)
 
 ## Review & Refinement Workflow
 
@@ -333,9 +405,12 @@ The `STORAGE_KEY` constant (e.g. `'webgpu-review-v1'`) keys localStorage so rati
 3. **Replace**: For each deleted demo, create a new higher-quality demo with the same slot number
 4. **Reorder** (optional): User can ask to move Good demos to top of gallery index
 5. **Update indexes**: After creating/deleting files, update:
-   - `<gallery>/index.html` — card entries, demo count in `<p class="demo-count">`
-   - `<gallery>/review.html` — DEMOS array filenames/names, initial progress text
-   - `index.html` (root) — gallery card icon number and `<div class="gallery-count">` text
+
+   * `<gallery>/index.html` — card entries, demo count in `<p class="demo-count">`
+
+   * `<gallery>/review.html` — DEMOS array filenames/names, initial progress text
+
+   * `index.html` (root) — gallery card icon number and `<div class="gallery-count">` text
 6. **Commit & push**
 
 ### Agent Swarm Pattern for Bulk Creation
@@ -356,10 +431,13 @@ Each agent should be given: exact filenames, display titles, technology constrai
 
 ### WebGPU-Specific Notes
 
-- **Prefer fragment shaders over compute shaders** — complex compute shaders often fail due to WGSL type errors
-- Fragment shader pattern: fullscreen quad via `@vertex fn vs(@builtin(vertex_index) i: u32)` outputting 6 positions for 2 triangles covering the screen
-- Dark background `#0a0a0f`, cyan accent `#06B6D4`
-- Keep WGSL simple: avoid complex struct layouts, prefer `f32` arithmetic
+* **Prefer fragment shaders over compute shaders** — complex compute shaders often fail due to WGSL type errors
+
+* Fragment shader pattern: fullscreen quad via `@vertex fn vs(@builtin(vertex_index) i: u32)` outputting 6 positions for 2 triangles covering the screen
+
+* Dark background `#0a0a0f`, cyan accent `#06B6D4`
+
+* Keep WGSL simple: avoid complex struct layouts, prefer `f32` arithmetic
 
 ## Development Workflow
 
@@ -390,10 +468,12 @@ git worktree list
 ```
 
 **Standard workflow:**
+
 1. Work directly on main branch (no build to break)
 2. Test by opening HTML files in browser
 3. Commit changes with descriptive messages including demo counts
 4. Include Claude Code co-authorship footer:
+
    ```
    🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
@@ -403,6 +483,7 @@ git worktree list
 ### Commit Message Format
 
 Follow the established pattern for this repo:
+
 ```
 Action: Brief description with counts
 
@@ -424,6 +505,7 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 ### Updating Main Gallery Stats
 
 When demos are added/removed, update the stats in `index.html` (organic-nature format):
+
 ```html
 <div class="stats">
     <div class="stat">
@@ -441,6 +523,7 @@ When demos are added/removed, update the stats in `index.html` (organic-nature f
 ### Adding New Category Section
 
 Add gallery cards inside the appropriate `<section class="category">` block. Each gallery is a card:
+
 ```html
 <a href="new-gallery/index.html" class="gallery-card">
     <span class="card-number">161</span>
@@ -451,31 +534,42 @@ Add gallery cards inside the appropriate `<section class="category">` block. Eac
 
 ### Gallery Index Naming Conventions
 
-- Individual demos: `01-descriptive-name.html` (numbered)
-- Subcategories: Use folder names like `force-directed/`, `molecular-structures/`
-- Gallery index: Always `index.html` in category root
+* Individual demos: `01-descriptive-name.html` (numbered)
+
+* Subcategories: Use folder names like `force-directed/`, `molecular-structures/`
+
+* Gallery index: Always `index.html` in category root
 
 ## Browser Compatibility
 
 Target: **Modern evergreen browsers** (Chrome, Firefox, Safari, Edge)
-- WebGL 2.0 support required for shader demos
-- WebGPU support optional (gracefully degrade)
-- Web Audio API widely supported
-- Canvas 2D universally supported
+
+* WebGL 2.0 support required for shader demos
+
+* WebGPU support optional (gracefully degrade)
+
+* Web Audio API widely supported
+
+* Canvas 2D universally supported
 
 ## Performance Considerations
 
-- Each demo should target **60 FPS** for animations
-- Use `requestAnimationFrame()` for smooth rendering
-- Avoid blocking operations in animation loops
-- For heavy computation, consider Web Workers or WASM
-- GPU particle systems: Keep particle counts under 100K for broad compatibility
+* Each demo should target **60 FPS** for animations
+
+* Use `requestAnimationFrame()` for smooth rendering
+
+* Avoid blocking operations in animation loops
+
+* For heavy computation, consider Web Workers or WASM
+
+* GPU particle systems: Keep particle counts under 100K for broad compatibility
 
 ## Visual Design System: Organic-Nature Theme
 
 All pages use a consistent organic-nature design aesthetic (December 2025 redesign):
 
 ### Color Palette (CSS Variables)
+
 ```css
 :root {
     --sage: #8A9A5B;       /* Primary accent */
@@ -488,51 +582,77 @@ All pages use a consistent organic-nature design aesthetic (December 2025 redesi
 ```
 
 ### Typography
-- **Headings**: `'Lora', serif` - Elegant, nature-inspired
-- **Body text**: `'Nunito', sans-serif` - Clean, readable
-- Load via Google Fonts: `https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap`
+
+* **Headings**: `'Lora', serif` - Elegant, nature-inspired
+
+* **Body text**: `'Nunito', sans-serif` - Clean, readable
+
+* Load via Google Fonts: `https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap`
 
 ### Key Design Elements
-- **Morphing organic shapes**: Animated blob backgrounds with `border-radius` morphing over 30s
-- **Glassmorphism cards**: `background: rgba(255,255,255,0.6); backdrop-filter: blur(10px)`
-- **Gradient background**: `linear-gradient(135deg, #FEFAE0 0%, #F4F1DE 50%, #EDE8D5 100%)`
-- **Border radius**: 20px for cards, organic rounded corners
-- **Hover animations**: Cubic-bezier easing, subtle transforms
+
+* **Morphing organic shapes**: Animated blob backgrounds with `border-radius` morphing over 30s
+
+* **Glassmorphism cards**: `background: rgba(255,255,255,0.6); backdrop-filter: blur(10px)`
+
+* **Gradient background**: `linear-gradient(135deg, #FEFAE0 0%, #F4F1DE 50%, #EDE8D5 100%)`
+
+* **Border radius**: 20px for cards, organic rounded corners
+
+* **Hover animations**: Cubic-bezier easing, subtle transforms
 
 ### Page Types
+
 1. **Multi-demo galleries**: Full organic template with numbered demo cards
 2. **Single-page demos**: Floating back-link in top-left corner with organic styling
 
 ## Historical Context
 
 This project evolved through:
+
 1. **Initial creation**: 40 vanilla HTML/CSS/JS demos across 6 categories
 2. **Automated generation**: 19 feature branches created, 13 successful (520+ new demos)
 3. **Consolidation**: All successful branches merged to main (Nov 2025)
 4. **Quality curation**: 560 → 348 demos (38% reduction, retaining highest quality)
 5. **Altruism Evolution**: Added educational evolutionary biology gallery (16 demos)
 6. **Platform improvements** (Nov 2025): Major code quality, UX, accessibility, and DX enhancements
-   - Created 4 production-ready demo templates with error handling
-   - Built reusable utility library (demo-utils.js)
-   - Added comprehensive SEO meta tags
-   - Enhanced accessibility (WCAG 2.1 Level AA+)
+
+   * Created 4 production-ready demo templates with error handling
+
+   * Built reusable utility library (demo-utils.js)
+
+   * Added comprehensive SEO meta tags
+
+   * Enhanced accessibility (WCAG 2.1 Level AA+)
 7. **Organic-Nature Redesign** (Dec 2025): Complete visual overhaul
-   - Redesigned main index.html with organic-nature aesthetic
-   - Updated 52 multi-demo gallery pages with full organic template
-   - Added organic-styled floating back-links to 28 single-page demos
-   - New color palette: sage, moss, earth, cream, terracotta
-   - Typography: Lora (headings) + Nunito (body)
-   - Animated morphing blob backgrounds, glassmorphism cards
+
+   * Redesigned main index.html with organic-nature aesthetic
+
+   * Updated 52 multi-demo gallery pages with full organic template
+
+   * Added organic-styled floating back-links to 28 single-page demos
+
+   * New color palette: sage, moss, earth, cream, terracotta
+
+   * Typography: Lora (headings) + Nunito (body)
+
+   * Animated morphing blob backgrounds, glassmorphism cards
 8. **Massive Expansion** (Dec 2025): Reddit Top 100 + NetLogo III implementation
-   - Added 56 new simulation galleries from Reddit Top 100
-   - NetLogo Simulations III: 1,056 agent-based models across 26 categories
-   - Total expansion: 1,500+ new demos
+
+   * Added 56 new simulation galleries from Reddit Top 100
+
+   * NetLogo Simulations III: 1,056 agent-based models across 26 categories
+
+   * Total expansion: 1,500+ new demos
 9. **Gallery Compression** (Feb 2026): Consolidated 125 single-demo galleries into 14 themed collections
-   - Pendulum Dynamics, Fluid Dynamics, Cellular Automata Lab, Classic Fractals, Epidemiology Models,
+
+   * Pendulum Dynamics, Fluid Dynamics, Cellular Automata Lab, Classic Fractals, Epidemiology Models,
      Ecology & Population, Oscillators & Chaos, Climate & Weather, Financial Models,
      Mechanics & Collisions, Controls & Robotics, Thermal & Diffusion, Transport & Urban, Energy Systems
-   - Each collection has proper gallery index + numbered demos
-   - Reduced gallery count from 302 to 179
+
+   * Each collection has proper gallery index + numbered demos
+
+   * Reduced gallery count from 302 to 179
 10. **Current state**: 4,000+ demos across 179 galleries with consistent organic-nature design
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).
