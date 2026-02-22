@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rope Physics + Tension Map - CCAB</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root{--sage:#8A9A5B;--moss:#606C38;--earth:#DDA15E;--cream:#FEFAE0;--terracotta:#BC6C25;--dark-moss:#3d4423}
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{overflow:hidden;font-family:'Nunito',sans-serif;background:#0a0e1a;color:#e8e6e1;cursor:grab}
+        body.dragging{cursor:grabbing}
+        .back-link{position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:var(--earth);text-decoration:none;border-radius:6px;font-size:14px;z-index:999;transition:all 0.3s ease;cursor:default}
+        .back-link:hover{background:rgba(221,161,94,0.2);transform:translateX(-4px)}
+        #fps-counter{position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.7);color:var(--earth);padding:8px 12px;border-radius:6px;font-family:'Courier New',monospace;font-size:14px;z-index:999}
+        #hint{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.6);border:1px solid rgba(221,161,94,0.3);border-radius:8px;padding:8px 20px;font-size:13px;color:var(--earth);z-index:999;pointer-events:none}
+        #hybrid-container{position:relative;width:100vw;height:100vh}
+        #canvas{position:absolute;top:0;left:0;width:100%;height:100%;z-index:0}
+        #svg-overlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none}
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+    <div id="hint">Click and drag the rope to interact</div>
+    <script>
+    (function(){
+        var canvas = document.getElementById('canvas');
+        var ctx = canvas.getContext('2d');
+        var svg = document.getElementById('svg-overlay');
+        var svgNS = 'http://www.w3.org/2000/svg';
+        var W, H;
+
+        function resize(){
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+            svg.setAttribute('width', W);
+            svg.setAttribute('height', H);
+            initRope();
+        }
+
+        var N = 50; // segments
+        var GRAVITY = 0.4;
+        var DAMPING = 0.98;
+        var ITERATIONS = 15;
+        var SEGMENT_LEN;
+
+        var rx, ry, rpx, rpy; // current and previous positions
+        var pinned; // which nodes are pinned
+
+        function initRope(){
+            var ax = W*0.25, bx = W*0.75;
+            var ay = H*0.22, by = H*0.22;
+            SEGMENT_LEN = Math.sqrt((bx-ax)*(bx-ax)+(by-ay)*(by-ay))/(N-1) * 1.12;
+
+            rx = new Float32Array(N);
+            ry = new Float32Array(N);
+            rpx = new Float32Array(N);
+            rpy = new Float32Array(N);
+            pinned = new Uint8Array(N);
+
+            for(var i=0;i<N;i++){
+                var t = i/(N-1);
+                var startX = ax + (bx-ax)*t;
+                var startY = ay + (by-ay)*t + Math.sin(t*Math.PI)*30;
+                rx[i] = rpx[i] = startX;
+                ry[i] = rpy[i] = startY;
+            }
+            pinned[0] = 1;
+            pinned[N-1] = 1;
+        }
+
+        var W2, H2;
+        resize();
+        window.addEventListener('resize', function(){ W2=W; H2=H; resize(); });
+
+        // Wind
+        var windPhase = 0;
+
+        function simulate(){
+            windPhase += 0.015;
+            var windX = Math.sin(windPhase)*0.6 + Math.sin(windPhase*2.3)*0.3;
+
+            // Verlet integration
+            for(var i=0;i<N;i++){
+                if(pinned[i]) continue;
+                if(dragNode===i) continue;
+                var vvx = (rx[i]-rpx[i])*DAMPING;
+                var vvy = (ry[i]-rpy[i])*DAMPING;
+                rpx[i] = rx[i];
+                rpy[i] = ry[i];
+                rx[i] += vvx + windX*0.3;
+                ry[i] += vvy + GRAVITY;
+            }
+
+            // Constraints
+            for(var iter=0;iter<ITERATIONS;iter++){
+                for(var i=0;i<N-1;i++){
+                    var dx = rx[i+1]-rx[i];
+                    var dy = ry[i+1]-ry[i];
+                    var dist = Math.sqrt(dx*dx+dy*dy);
+                    if(dist < 0.001) continue;
+                    var diff = (dist-SEGMENT_LEN)/dist;
+                    var half = 0.5;
+                    if(!pinned[i] && dragNode!==i){
+                        rx[i] += dx*diff*half;
+                        ry[i] += dy*diff*half;
+                    }
+                    if(!pinned[i+1] && dragNode!==i+1){
+                        rx[i+1] -= dx*diff*half;
+                        ry[i+1] -= dy*diff*half;
+                    }
+                }
+            }
+
+            // Re-pin anchors
+            rx[0] = W*0.25; ry[0] = H*0.22;
+            rx[N-1] = W*0.75; ry[N-1] = H*0.22;
+        }
+
+        function getTension(i){
+            if(i<=0 || i>=N-1) return 0;
+            var dx1=rx[i]-rx[i-1], dy1=ry[i]-ry[i-1];
+            var dx2=rx[i+1]-rx[i], dy2=ry[i+1]-ry[i];
+            var l1=Math.sqrt(dx1*dx1+dy1*dy1);
+            var l2=Math.sqrt(dx2*dx2+dy2*dy2);
+            return Math.abs(l1-SEGMENT_LEN)+Math.abs(l2-SEGMENT_LEN);
+        }
+
+        function tensionColor(t){
+            var norm = Math.min(1, t/3);
+            if(norm<0.5){
+                var f=norm*2;
+                return 'rgb('+Math.round(30+f*225)+','+Math.round(100+f*100)+','+Math.round(200-f*180)+')';
+            } else {
+                var f=(norm-0.5)*2;
+                return 'rgb('+Math.round(255)+','+Math.round(200-f*200)+','+Math.round(20-f*20)+')';
+            }
+        }
+
+        // Mouse drag
+        var dragNode = -1;
+        var mouse = {x:0,y:0};
+
+        canvas.addEventListener('mousedown', function(e){
+            mouse.x=e.clientX; mouse.y=e.clientY;
+            var nearest=-1, nearDist=Infinity;
+            for(var i=1;i<N-1;i++){
+                var d=Math.sqrt((rx[i]-e.clientX)*(rx[i]-e.clientX)+(ry[i]-e.clientY)*(ry[i]-e.clientY));
+                if(d<nearDist){ nearDist=d; nearest=i; }
+            }
+            if(nearDist<40){
+                dragNode=nearest;
+                document.body.classList.add('dragging');
+            }
+        });
+        canvas.addEventListener('mousemove', function(e){
+            mouse.x=e.clientX; mouse.y=e.clientY;
+            if(dragNode>=0){
+                rx[dragNode]=e.clientX;
+                ry[dragNode]=e.clientY;
+                rpx[dragNode]=e.clientX;
+                rpy[dragNode]=e.clientY;
+            }
+        });
+        canvas.addEventListener('mouseup', function(){
+            dragNode=-1;
+            document.body.classList.remove('dragging');
+        });
+
+        // SVG elements
+        function svgEl(tag,attrs){
+            var el=document.createElementNS(svgNS,tag);
+            for(var k in attrs) el.setAttribute(k,attrs[k]);
+            return el;
+        }
+
+        // Tension chart (right side)
+        var CHART_W=120, CHART_H2=0; // height set in animate
+        var chartG=svgEl('g',{});
+        svg.appendChild(chartG);
+        var chartBg=svgEl('rect',{rx:8,fill:'rgba(0,0,0,0.72)',stroke:'rgba(221,161,94,0.35)','stroke-width':1});
+        chartG.appendChild(chartBg);
+        var chartTitleEl=svgEl('text',{fill:'#DDA15E','font-family':'Lora,serif','font-size':13,'font-weight':600,'text-anchor':'middle'});
+        chartTitleEl.textContent='Tension Map';
+        chartG.appendChild(chartTitleEl);
+
+        // Create tension bars for each segment
+        var tBars=[], tBgBars=[];
+        for(var i=0;i<N;i++){
+            var bg=svgEl('rect',{fill:'rgba(255,255,255,0.05)',rx:1});
+            chartG.appendChild(bg);
+            tBgBars.push(bg);
+            var bar=svgEl('rect',{rx:1});
+            chartG.appendChild(bar);
+            tBars.push(bar);
+        }
+
+        // Max tension label
+        var maxTLabel=svgEl('text',{fill:'#e8e6e1','font-family':'Courier New,monospace','font-size':10});
+        chartG.appendChild(maxTLabel);
+
+        // Wind indicator
+        var windG=svgEl('g',{});
+        svg.appendChild(windG);
+        var windBg=svgEl('rect',{width:120,height:50,rx:8,fill:'rgba(0,0,0,0.7)',stroke:'rgba(138,154,91,0.4)','stroke-width':1});
+        windG.appendChild(windBg);
+        var windTitle=svgEl('text',{fill:'#8A9A5B','font-family':'Lora,serif','font-size':12,'font-weight':600});
+        windTitle.textContent='Wind';
+        windG.appendChild(windTitle);
+        var windArrow=svgEl('line',{'stroke-width':2.5,'stroke-linecap':'round'});
+        windG.appendChild(windArrow);
+        var windHead=svgEl('polygon',{});
+        windG.appendChild(windHead);
+        var windSpeed=svgEl('text',{fill:'#e8e6e1','font-family':'Courier New,monospace','font-size':10});
+        windG.appendChild(windSpeed);
+
+        // Anchor labels
+        var anchorA=svgEl('text',{'text-anchor':'middle',fill:'#DDA15E','font-family':'Nunito,sans-serif','font-size':12});
+        anchorA.textContent='Anchor A';
+        svg.appendChild(anchorA);
+        var anchorB=svgEl('text',{'text-anchor':'middle',fill:'#DDA15E','font-family':'Nunito,sans-serif','font-size':12});
+        anchorB.textContent='Anchor B';
+        svg.appendChild(anchorB);
+
+        var fps=0,fpsFrames=0,fpsLast=performance.now();
+        var fpsEl=document.getElementById('fps-value');
+        var frame=0;
+
+        function animate(){
+            requestAnimationFrame(animate);
+            frame++;
+            fpsFrames++;
+            var now=performance.now();
+            if(now-fpsLast>500){
+                fps=Math.round(fpsFrames*1000/(now-fpsLast));
+                fpsEl.textContent=fps;
+                fpsFrames=0;fpsLast=now;
+            }
+
+            simulate();
+
+            ctx.clearRect(0,0,W,H);
+
+            // Background
+            ctx.fillStyle='#0a0e1a';
+            ctx.fillRect(0,0,W,H);
+
+            // Subtle grid
+            ctx.strokeStyle='rgba(255,255,255,0.03)';
+            ctx.lineWidth=1;
+            for(var gx=0;gx<W;gx+=60){
+                ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx,H); ctx.stroke();
+            }
+            for(var gy=0;gy<H;gy+=60){
+                ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
+            }
+
+            // Rope shadow
+            ctx.beginPath();
+            ctx.moveTo(rx[0]+3, ry[0]+4);
+            for(var i=1;i<N;i++) ctx.lineTo(rx[i]+3, ry[i]+4);
+            ctx.strokeStyle='rgba(0,0,0,0.4)';
+            ctx.lineWidth=7;
+            ctx.lineCap='round';
+            ctx.lineJoin='round';
+            ctx.stroke();
+
+            // Rope segments colored by tension
+            for(var i=0;i<N-1;i++){
+                var t1=getTension(i), t2=getTension(i+1);
+                var tAvg=(t1+t2)*0.5;
+                ctx.beginPath();
+                ctx.moveTo(rx[i],ry[i]);
+                ctx.lineTo(rx[i+1],ry[i+1]);
+                ctx.strokeStyle=tensionColor(tAvg);
+                ctx.lineWidth=5;
+                ctx.lineCap='round';
+                ctx.stroke();
+            }
+
+            // Anchor circles
+            ctx.beginPath();
+            ctx.arc(rx[0],ry[0],10,0,Math.PI*2);
+            ctx.fillStyle='#DDA15E';
+            ctx.fill();
+            ctx.strokeStyle='rgba(255,255,255,0.4)';
+            ctx.lineWidth=2;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(rx[N-1],ry[N-1],10,0,Math.PI*2);
+            ctx.fillStyle='#DDA15E';
+            ctx.fill();
+            ctx.stroke();
+
+            // Drag node indicator
+            if(dragNode>=0){
+                ctx.beginPath();
+                ctx.arc(rx[dragNode],ry[dragNode],12,0,Math.PI*2);
+                ctx.strokeStyle='rgba(255,255,255,0.6)';
+                ctx.lineWidth=2;
+                ctx.setLineDash([4,4]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // SVG tension chart
+            var CX=W-CHART_W-20, CY=80;
+            CHART_H2=H-180;
+            var ROW_H=Math.max(3, CHART_H2/N);
+            var maxBar=CHART_W-30;
+            var maxTension=0;
+            for(var i=0;i<N;i++){
+                var t2=getTension(i);
+                if(t2>maxTension) maxTension=t2;
+            }
+
+            chartBg.setAttribute('x',CX-8);
+            chartBg.setAttribute('y',CY-28);
+            chartBg.setAttribute('width',CHART_W+16);
+            chartBg.setAttribute('height',CHART_H2+48);
+            chartTitleEl.setAttribute('x',CX+CHART_W/2-15);
+            chartTitleEl.setAttribute('y',CY-12);
+
+            for(var i=0;i<N;i++){
+                var t2=getTension(i);
+                var barW=maxTension>0 ? (t2/maxTension)*maxBar : 0;
+                var ty2=CY+i*ROW_H;
+                tBgBars[i].setAttribute('x',CX);
+                tBgBars[i].setAttribute('y',ty2);
+                tBgBars[i].setAttribute('width',maxBar);
+                tBgBars[i].setAttribute('height',Math.max(1,ROW_H-0.5));
+                tBars[i].setAttribute('x',CX);
+                tBars[i].setAttribute('y',ty2);
+                tBars[i].setAttribute('width',barW);
+                tBars[i].setAttribute('height',Math.max(1,ROW_H-0.5));
+                tBars[i].setAttribute('fill',tensionColor(t2));
+            }
+            maxTLabel.setAttribute('x',CX);
+            maxTLabel.setAttribute('y',CY+CHART_H2+16);
+            maxTLabel.textContent='Max: '+maxTension.toFixed(2);
+
+            // Wind indicator
+            var windX2=Math.sin(windPhase)*0.6+Math.sin(windPhase*2.3)*0.3;
+            var windBX=W*0.5-60, windBY=H-70;
+            windBg.setAttribute('x',windBX);
+            windBg.setAttribute('y',windBY);
+            windTitle.setAttribute('x',windBX+10);
+            windTitle.setAttribute('y',windBY+18);
+            var wMag=Math.abs(windX2)*30;
+            var wDir=windX2>0?1:-1;
+            windArrow.setAttribute('x1',windBX+60);
+            windArrow.setAttribute('y1',windBY+35);
+            windArrow.setAttribute('x2',windBX+60+wDir*wMag);
+            windArrow.setAttribute('y2',windBY+35);
+            windArrow.setAttribute('stroke','#8A9A5B');
+            var hpx=windBX+60+wDir*wMag;
+            var hpy=windBY+35;
+            windHead.setAttribute('points',hpx+','+hpy+' '+(hpx-wDir*8)+','+(hpy-5)+' '+(hpx-wDir*8)+','+(hpy+5));
+            windHead.setAttribute('fill','#8A9A5B');
+            windSpeed.setAttribute('x',windBX+60+wDir*wMag+wDir*8);
+            windSpeed.setAttribute('y',windBY+39);
+            windSpeed.textContent=Math.abs(windX2).toFixed(2);
+
+            // Anchor labels
+            anchorA.setAttribute('x',rx[0]);
+            anchorA.setAttribute('y',ry[0]-18);
+            anchorB.setAttribute('x',rx[N-1]);
+            anchorB.setAttribute('y',ry[N-1]-18);
+        }
+
+        animate();
+    })();
+    </script>
+</body>
+</html>

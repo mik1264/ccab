@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Plasma Noise - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">GPU Plasma Noise</div>
+
+    <div class="controls">
+        <label>Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Turbulence: <span id="turbVal">1.5</span></label>
+        <input type="range" id="turbulence" min="0.0" max="4.0" step="0.1" value="1.5">
+        <label>Octaves: <span id="octVal">6</span></label>
+        <input type="range" id="octaves" min="1" max="8" step="1" value="6">
+        <label>Color Mode:</label>
+        <select id="colorMode">
+            <option value="0">Psychedelic</option>
+            <option value="1">Aurora</option>
+            <option value="2">Fire</option>
+            <option value="3">Deep Ocean</option>
+        </select>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span>
+    </div>
+
+    <div id="error">
+        WebGPU is not supported in your browser.<br>
+        Please use Chrome 113+, Edge 113+, or Safari 18+.
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        const W = canvas.width, H = canvas.height;
+
+        let speed = 1.0, turbulence = 1.5, octaves = 6, colorMode = 0;
+
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const computeShader = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                speed: f32,
+                turbulence: f32,
+                octaves: u32,
+                colorMode: u32,
+                aspect: f32,
+            }
+
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            // Simplex-like gradient noise using hash
+            fn hash2(p: vec2f) -> vec2f {
+                var pp = vec2f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)));
+                return fract(sin(pp) * 43758.5453) * 2.0 - 1.0;
+            }
+
+            fn noise(p: vec2f) -> f32 {
+                let i = floor(p);
+                let f = fract(p);
+                let u = f * f * (3.0 - 2.0 * f);
+
+                let a = dot(hash2(i + vec2f(0.0, 0.0)), f - vec2f(0.0, 0.0));
+                let b = dot(hash2(i + vec2f(1.0, 0.0)), f - vec2f(1.0, 0.0));
+                let c = dot(hash2(i + vec2f(0.0, 1.0)), f - vec2f(0.0, 1.0));
+                let d = dot(hash2(i + vec2f(1.0, 1.0)), f - vec2f(1.0, 1.0));
+
+                return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+            }
+
+            fn fbm(p: vec2f, octs: u32) -> f32 {
+                var val = 0.0;
+                var amp = 0.5;
+                var freq = 1.0;
+                var pp = p;
+                for (var i = 0u; i < octs; i++) {
+                    val += amp * noise(pp * freq);
+                    freq *= 2.0;
+                    amp *= 0.5;
+                    pp = pp * 1.02 + vec2f(1.3, 1.7); // slight rotation per octave
+                }
+                return val;
+            }
+
+            fn hsl(h: f32, s: f32, l: f32) -> vec3f {
+                let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+                let hp = fract(h) * 6.0;
+                let x = c * (1.0 - abs(hp % 2.0 - 1.0));
+                var rgb: vec3f;
+                if (hp < 1.0) { rgb = vec3f(c, x, 0.0); }
+                else if (hp < 2.0) { rgb = vec3f(x, c, 0.0); }
+                else if (hp < 3.0) { rgb = vec3f(0.0, c, x); }
+                else if (hp < 4.0) { rgb = vec3f(0.0, x, c); }
+                else if (hp < 5.0) { rgb = vec3f(x, 0.0, c); }
+                else { rgb = vec3f(c, 0.0, x); }
+                return rgb + vec3f(l - c * 0.5);
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let uv = vec2f(f32(id.x) / u.resolution.x * u.aspect, f32(id.y) / u.resolution.y);
+                let t = u.time * u.speed;
+                let octs = u.octaves;
+
+                // Domain warping: sample noise at warped coordinates
+                let scale = 3.0;
+                let p = uv * scale;
+
+                // First warp layer
+                let warp1 = u.turbulence * vec2f(
+                    fbm(p + vec2f(t * 0.3, t * 0.1), octs),
+                    fbm(p + vec2f(t * -0.2, t * 0.15) + vec2f(5.2, 1.3), octs)
+                );
+
+                // Second warp layer (warp the warp)
+                let warp2 = u.turbulence * vec2f(
+                    fbm(p + warp1 + vec2f(t * 0.1, t * -0.05) + vec2f(1.7, 9.2), octs),
+                    fbm(p + warp1 + vec2f(t * -0.08, t * 0.12) + vec2f(8.3, 2.8), octs)
+                );
+
+                let n = fbm(p + warp2, octs);
+
+                // Color mapping based on mode
+                var color: vec3f;
+
+                if (u.colorMode == 0u) {
+                    // Psychedelic: full rainbow cycling
+                    let hue = fract(n * 0.8 + t * 0.05);
+                    let sat = 0.8 + 0.2 * sin(n * 6.0);
+                    let lit = 0.4 + 0.35 * sin(n * 4.0 + t * 0.3);
+                    color = hsl(hue, sat, lit);
+                } else if (u.colorMode == 1u) {
+                    // Aurora: greens, teals, purples
+                    let hue = 0.3 + 0.25 * sin(n * 3.0 + t * 0.1);
+                    let sat = 0.7 + 0.3 * cos(n * 2.0);
+                    let lit = 0.15 + 0.5 * pow(max(n * 0.5 + 0.5, 0.0), 1.5);
+                    color = hsl(hue, sat, lit);
+                    // Add glow at bright spots
+                    color += vec3f(0.0, 0.1, 0.15) * pow(max(n * 0.5 + 0.5, 0.0), 3.0);
+                } else if (u.colorMode == 2u) {
+                    // Fire: reds, oranges, yellows
+                    let v = n * 0.5 + 0.5;
+                    let r = min(v * 2.5, 1.0);
+                    let g = max(0.0, min(v * 2.5 - 0.7, 1.0)) * 0.9;
+                    let b = max(0.0, v * 2.5 - 1.8) * 0.5;
+                    color = vec3f(r, g, b);
+                    // Add ember glow
+                    color += vec3f(0.15, 0.02, 0.0) * pow(max(v, 0.0), 4.0);
+                } else {
+                    // Deep Ocean: dark blues, bioluminescence
+                    let v = n * 0.5 + 0.5;
+                    let hue = 0.55 + 0.1 * sin(n * 4.0 + t * 0.2);
+                    let sat = 0.6 + 0.4 * v;
+                    let lit = 0.05 + 0.35 * pow(v, 1.8);
+                    color = hsl(hue, sat, lit);
+                    // Bioluminescent spots
+                    let glow = pow(max(sin(n * 10.0 + t * 0.5), 0.0), 8.0);
+                    color += vec3f(0.0, 0.3, 0.5) * glow * 0.4;
+                }
+
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let fpsC = 0, fpsT = performance.now();
+        let startTime = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const time = (now - startTime) * 0.001;
+
+            const buf = new ArrayBuffer(48);
+            const f32 = new Float32Array(buf);
+            const u32 = new Uint32Array(buf);
+            f32[0] = W; f32[1] = H;
+            f32[2] = time;
+            f32[3] = speed;
+            f32[4] = turbulence;
+            u32[5] = octaves;
+            u32[6] = colorMode;
+            f32[7] = W / H;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        // Controls
+        document.getElementById('speed').addEventListener('input', (e) => {
+            speed = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = speed.toFixed(1);
+        });
+        document.getElementById('turbulence').addEventListener('input', (e) => {
+            turbulence = parseFloat(e.target.value);
+            document.getElementById('turbVal').textContent = turbulence.toFixed(1);
+        });
+        document.getElementById('octaves').addEventListener('input', (e) => {
+            octaves = parseInt(e.target.value);
+            document.getElementById('octVal').textContent = octaves;
+        });
+        document.getElementById('colorMode').addEventListener('change', (e) => {
+            colorMode = parseInt(e.target.value);
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

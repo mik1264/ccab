@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Physarum Slime Mold - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 220px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 170px; }
+        .controls button { margin: 3px 2px; padding: 6px 12px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+        .controls button:hover { background: #67e8f9; }
+        .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+        .btn-row button { flex: 1; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title-overlay { position: fixed; top: 70px; left: 20px; z-index: 90; }
+        .title-overlay h1 { font-size: 1.4rem; color: #22d3ee; margin: 0 0 4px 0; }
+        .title-overlay p { font-size: 0.85rem; color: #888; margin: 0; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title-overlay">
+        <h1>Physarum Slime Mold</h1>
+        <p>200,000 agents forming organic transport networks</p>
+    </div>
+    <div class="controls">
+        <label>Sensor Angle: <span id="saVal">30</span>deg</label>
+        <input type="range" id="sensorAngle" min="15" max="60" step="1" value="30">
+        <label>Sensor Distance: <span id="sdVal">20</span>px</label>
+        <input type="range" id="sensorDist" min="5" max="40" step="1" value="20">
+        <label>Turn Speed: <span id="tsVal">0.40</span></label>
+        <input type="range" id="turnSpeed" min="0.1" max="1.5" step="0.05" value="0.40">
+        <label>Decay Rate: <span id="drVal">0.95</span></label>
+        <input type="range" id="decayRate" min="0.80" max="0.99" step="0.01" value="0.95">
+        <div class="btn-row">
+            <button onclick="window.resetSim()">Reset</button>
+            <button onclick="window.togglePause()"><span id="pauseLabel">Pause</span></button>
+        </div>
+    </div>
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Agents: <span id="agentCount">200,000</span> | Step: <span id="step">0</span>
+    </div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const W = 1024, H = 1024;
+        canvas.width = W; canvas.height = H;
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        const NUM_AGENTS = 200000;
+        let sensorAngle = 30, sensorDist = 20, turnSpeed = 0.40, decayRate = 0.95;
+        let paused = false, stepCount = 0;
+
+        // Params: sensorAngle(rad), sensorDist, turnSpeed, moveSpeed, decayRate, depositAmt, W, H
+        const paramsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        function updateParams() {
+            device.queue.writeBuffer(paramsBuffer, 0, new Float32Array([
+                sensorAngle * Math.PI / 180, sensorDist, turnSpeed, 1.5,
+                decayRate, 5.0, W, H
+            ]));
+        }
+        updateParams();
+
+        // Agent buffer: x, y, angle, pad
+        const agentBuffer = device.createBuffer({ size: NUM_AGENTS * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+        // Trail map: two float buffers for ping-pong
+        const trailBuffers = [
+            device.createBuffer({ size: W * H * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+            device.createBuffer({ size: W * H * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+        ];
+
+        // Render texture
+        const renderTex = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        // Agent compute shader: sense, rotate, move, deposit
+        const agentCode = `
+            struct Params { sensorAngle: f32, sensorDist: f32, turnSpeed: f32, moveSpeed: f32, decayRate: f32, depositAmt: f32, W: f32, H: f32 }
+            struct Agent { x: f32, y: f32, angle: f32, pad: f32 }
+
+            @group(0) @binding(0) var<storage, read_write> agents: array<Agent>;
+            @group(0) @binding(1) var<storage, read> trailIn: array<f32>;
+            @group(0) @binding(2) var<storage, read_write> trailOut: array<f32>;
+            @group(0) @binding(3) var<uniform> params: Params;
+
+            fn hash(n: u32) -> f32 {
+                var s = n;
+                s = s ^ (s >> 13u); s = s * 0x5bd1e995u; s = s ^ (s >> 15u);
+                return f32(s & 0x00FFFFFFu) / f32(0x01000000);
+            }
+
+            fn sampleTrail(x: f32, y: f32) -> f32 {
+                let ix = u32(x) % u32(params.W);
+                let iy = u32(y) % u32(params.H);
+                return trailIn[iy * u32(params.W) + ix];
+            }
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= ${NUM_AGENTS}u) { return; }
+
+                var a = agents[idx];
+                let rng = hash(idx * 1741u + u32(a.x * 137.0 + a.y * 311.0));
+
+                // Sense: sample trail at 3 sensor positions
+                let fwd_x = a.x + cos(a.angle) * params.sensorDist;
+                let fwd_y = a.y + sin(a.angle) * params.sensorDist;
+                let left_x = a.x + cos(a.angle + params.sensorAngle) * params.sensorDist;
+                let left_y = a.y + sin(a.angle + params.sensorAngle) * params.sensorDist;
+                let right_x = a.x + cos(a.angle - params.sensorAngle) * params.sensorDist;
+                let right_y = a.y + sin(a.angle - params.sensorAngle) * params.sensorDist;
+
+                let fwd_val = sampleTrail(fwd_x, fwd_y);
+                let left_val = sampleTrail(left_x, left_y);
+                let right_val = sampleTrail(right_x, right_y);
+
+                // Rotate based on sensor readings
+                if (fwd_val > left_val && fwd_val > right_val) {
+                    // Keep going straight
+                } else if (fwd_val < left_val && fwd_val < right_val) {
+                    // Random turn
+                    if (rng > 0.5) {
+                        a.angle += params.turnSpeed;
+                    } else {
+                        a.angle -= params.turnSpeed;
+                    }
+                } else if (left_val > right_val) {
+                    a.angle += params.turnSpeed;
+                } else if (right_val > left_val) {
+                    a.angle -= params.turnSpeed;
+                }
+
+                // Move forward
+                a.x += cos(a.angle) * params.moveSpeed;
+                a.y += sin(a.angle) * params.moveSpeed;
+
+                // Wrap around
+                a.x = (a.x + params.W) % params.W;
+                a.y = (a.y + params.H) % params.H;
+
+                agents[idx] = a;
+
+                // Deposit trail
+                let px = u32(a.x) % u32(params.W);
+                let py = u32(a.y) % u32(params.H);
+                let tidx = py * u32(params.W) + px;
+                trailOut[tidx] = trailOut[tidx] + params.depositAmt;
+            }
+        `;
+
+        // Diffuse + decay shader
+        const diffuseCode = `
+            struct Params { sensorAngle: f32, sensorDist: f32, turnSpeed: f32, moveSpeed: f32, decayRate: f32, depositAmt: f32, W: f32, H: f32 }
+
+            @group(0) @binding(0) var<storage, read> trailIn: array<f32>;
+            @group(0) @binding(1) var<storage, read_write> trailOut: array<f32>;
+            @group(0) @binding(2) var<uniform> params: Params;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let w = u32(params.W);
+                let h = u32(params.H);
+                if (gid.x >= w || gid.y >= h) { return; }
+
+                // 3x3 blur
+                var sum = 0.0;
+                for (var dy: i32 = -1; dy <= 1; dy++) {
+                    for (var dx: i32 = -1; dx <= 1; dx++) {
+                        let nx = (i32(gid.x) + dx + i32(w)) % i32(w);
+                        let ny = (i32(gid.y) + dy + i32(h)) % i32(h);
+                        sum += trailIn[u32(ny) * w + u32(nx)];
+                    }
+                }
+                sum /= 9.0;
+
+                // Decay
+                trailOut[gid.y * w + gid.x] = sum * params.decayRate;
+            }
+        `;
+
+        // Render shader
+        const renderCode = `
+            @group(0) @binding(0) var<storage, read> trail: array<f32>;
+            @group(0) @binding(1) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                if (gid.x >= ${W}u || gid.y >= ${H}u) { return; }
+                let val = clamp(trail[gid.y * ${W}u + gid.x] / 50.0, 0.0, 1.0);
+
+                // Hot palette: black -> red -> yellow -> white
+                var color: vec3f;
+                if (val < 0.25) {
+                    let t = val / 0.25;
+                    color = mix(vec3f(0.0, 0.0, 0.0), vec3f(0.6, 0.05, 0.0), t);
+                } else if (val < 0.5) {
+                    let t = (val - 0.25) / 0.25;
+                    color = mix(vec3f(0.6, 0.05, 0.0), vec3f(1.0, 0.4, 0.0), t);
+                } else if (val < 0.75) {
+                    let t = (val - 0.5) / 0.25;
+                    color = mix(vec3f(1.0, 0.4, 0.0), vec3f(1.0, 0.9, 0.2), t);
+                } else {
+                    let t = (val - 0.75) / 0.25;
+                    color = mix(vec3f(1.0, 0.9, 0.2), vec3f(1.0, 1.0, 1.0), t);
+                }
+
+                textureStore(outTex, vec2i(gid.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        // Display shader
+        const displayCode = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+                var p = array<vec2f, 4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f, 4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VO; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const agentPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: agentCode }), entryPoint: 'main' }
+        });
+        const diffusePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: diffuseCode }), entryPoint: 'main' }
+        });
+        const renderPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: renderCode }), entryPoint: 'main' }
+        });
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayCode }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayCode }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        // Bind groups - agents write to trailBuffers[1], diffuse reads from [1] writes to [0], next frame agents read from [0]
+        // Simplified: agents read trail[0], deposit into trail[0], then diffuse trail[0]->trail[1], swap
+        let pingpong = 0;
+
+        function createAgentBindGroup(readTrail, writeTrail) {
+            return device.createBindGroup({
+                layout: agentPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: agentBuffer } },
+                    { binding: 1, resource: { buffer: readTrail } },
+                    { binding: 2, resource: { buffer: writeTrail } },
+                    { binding: 3, resource: { buffer: paramsBuffer } }
+                ]
+            });
+        }
+
+        function createDiffuseBindGroup(inp, outp) {
+            return device.createBindGroup({
+                layout: diffusePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: inp } },
+                    { binding: 1, resource: { buffer: outp } },
+                    { binding: 2, resource: { buffer: paramsBuffer } }
+                ]
+            });
+        }
+
+        function createRenderBindGroup(trail) {
+            return device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: trail } },
+                    { binding: 1, resource: renderTex.createView() }
+                ]
+            });
+        }
+
+        const displayBindGroup = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: renderTex.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        function initAgents() {
+            const data = new Float32Array(NUM_AGENTS * 4);
+            for (let i = 0; i < NUM_AGENTS; i++) {
+                // Start in center circle
+                const angle = Math.random() * Math.PI * 2;
+                const radius = Math.random() * Math.min(W, H) * 0.35;
+                data[i * 4 + 0] = W / 2 + Math.cos(angle) * radius;
+                data[i * 4 + 1] = H / 2 + Math.sin(angle) * radius;
+                // Face inward toward center
+                data[i * 4 + 2] = angle + Math.PI + (Math.random() - 0.5) * 0.5;
+                data[i * 4 + 3] = 0;
+            }
+            device.queue.writeBuffer(agentBuffer, 0, data);
+        }
+
+        function clearTrails() {
+            const zeros = new Float32Array(W * H);
+            device.queue.writeBuffer(trailBuffers[0], 0, zeros);
+            device.queue.writeBuffer(trailBuffers[1], 0, zeros);
+        }
+
+        function resetSim() {
+            stepCount = 0; pingpong = 0;
+            initAgents();
+            clearTrails();
+        }
+        window.resetSim = resetSim;
+        window.togglePause = () => {
+            paused = !paused;
+            document.getElementById('pauseLabel').textContent = paused ? 'Resume' : 'Pause';
+        };
+
+        initAgents();
+        clearTrails();
+
+        // UI
+        document.getElementById('sensorAngle').addEventListener('input', e => { sensorAngle = parseFloat(e.target.value); document.getElementById('saVal').textContent = sensorAngle; updateParams(); });
+        document.getElementById('sensorDist').addEventListener('input', e => { sensorDist = parseFloat(e.target.value); document.getElementById('sdVal').textContent = sensorDist; updateParams(); });
+        document.getElementById('turnSpeed').addEventListener('input', e => { turnSpeed = parseFloat(e.target.value); document.getElementById('tsVal').textContent = turnSpeed.toFixed(2); updateParams(); });
+        document.getElementById('decayRate').addEventListener('input', e => { decayRate = parseFloat(e.target.value); document.getElementById('drVal').textContent = decayRate.toFixed(2); updateParams(); });
+
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+        const WG = Math.ceil(W / 16);
+        const AGENT_WG = Math.ceil(NUM_AGENTS / 256);
+
+        function render() {
+            const now = performance.now();
+            const elapsed = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++; fpsTime += elapsed;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            if (!paused) {
+                const enc = device.createCommandEncoder();
+
+                // Agent step: read from trail[pingpong], write agents + deposit to trail[pingpong]
+                const agentBG = createAgentBindGroup(trailBuffers[pingpong], trailBuffers[pingpong]);
+                const cp1 = enc.beginComputePass();
+                cp1.setPipeline(agentPipeline);
+                cp1.setBindGroup(0, agentBG);
+                cp1.dispatchWorkgroups(AGENT_WG);
+                cp1.end();
+
+                // Diffuse: read trail[pingpong], write trail[1-pingpong]
+                const diffBG = createDiffuseBindGroup(trailBuffers[pingpong], trailBuffers[1 - pingpong]);
+                const cp2 = enc.beginComputePass();
+                cp2.setPipeline(diffusePipeline);
+                cp2.setBindGroup(0, diffBG);
+                cp2.dispatchWorkgroups(WG, WG);
+                cp2.end();
+
+                device.queue.submit([enc.finish()]);
+                pingpong = 1 - pingpong;
+                stepCount++;
+            }
+
+            document.getElementById('step').textContent = stepCount.toLocaleString();
+
+            // Render trail
+            const enc2 = device.createCommandEncoder();
+            const rbg = createRenderBindGroup(trailBuffers[pingpong]);
+            const rcp = enc2.beginComputePass();
+            rcp.setPipeline(renderPipeline);
+            rcp.setBindGroup(0, rbg);
+            rcp.dispatchWorkgroups(WG, WG);
+            rcp.end();
+
+            const dp = enc2.beginRenderPass({
+                colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            dp.setPipeline(displayPipeline);
+            dp.setBindGroup(0, displayBindGroup);
+            dp.draw(4);
+            dp.end();
+
+            device.queue.submit([enc2.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

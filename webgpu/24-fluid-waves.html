@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ocean Wave Simulation - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 14px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title-overlay { position: fixed; top: 70px; left: 20px; z-index: 90; }
+        .title-overlay h1 { font-size: 1.4rem; color: #22d3ee; margin: 0 0 4px 0; }
+        .title-overlay p { font-size: 0.85rem; color: #888; margin: 0; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(220, 50, 50, 0.95); padding: 30px 40px; border-radius: 12px; display: none; text-align: center; max-width: 400px; line-height: 1.6; }
+        #error h2 { margin: 0 0 10px; }
+        .info { font-size: 10px; color: #666; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="title-overlay">
+        <h1>Ocean Wave Simulation</h1>
+        <p>Gerstner waves with Blinn-Phong lighting and foam</p>
+    </div>
+
+    <div class="controls">
+        <label>Wave Height: <span id="heightVal">1.0</span></label>
+        <input type="range" id="waveHeight" min="0.2" max="3.0" step="0.1" value="1.0">
+        <label>Wind Direction: <span id="windVal">45</span>&deg;</label>
+        <input type="range" id="windDir" min="0" max="360" step="5" value="45">
+        <label>Wave Count: <span id="waveCountVal">8</span></label>
+        <input type="range" id="waveCount" min="3" max="16" step="1" value="8">
+        <label>Foam Threshold: <span id="foamVal">0.6</span></label>
+        <input type="range" id="foam" min="0.2" max="1.5" step="0.05" value="0.6">
+        <label>Choppiness: <span id="chopVal">1.0</span></label>
+        <input type="range" id="chop" min="0.0" max="2.0" step="0.1" value="1.0">
+        <div class="info">Click to create ripple disturbance</div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span>
+    </div>
+
+    <div id="error">
+        <h2>WebGPU Not Supported</h2>
+        <p>Your browser does not support WebGPU.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</p>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        let waveHeight = 1.0, windDir = 45, waveCount = 8, foamThreshold = 0.6, choppiness = 1.0;
+        let clickX = -1, clickY = -1, clickTime = -10;
+
+        // Fullscreen fragment shader computing Gerstner waves with lighting
+        const shaderCode = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                waveHeight: f32,
+                windDir: f32,
+                waveCount: f32,
+                foamThreshold: f32,
+                choppiness: f32,
+                clickX: f32,
+                clickY: f32,
+                clickTime: f32,
+                _pad: f32,
+            }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+
+            struct VertexOutput { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+            @vertex fn vs(@builtin(vertex_index) idx: u32) -> VertexOutput {
+                var positions = array<vec2f, 4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var out: VertexOutput;
+                out.pos = vec4f(positions[idx], 0.0, 1.0);
+                out.uv = positions[idx] * 0.5 + 0.5;
+                return out;
+            }
+
+            fn hash(p: f32) -> f32 {
+                return fract(sin(p * 127.1) * 43758.5453);
+            }
+
+            // Single Gerstner wave contribution
+            fn gerstnerWave(pos: vec2f, dir: vec2f, freq: f32, amp: f32, steepness: f32, time: f32) -> vec3f {
+                let phase = freq * dot(dir, pos) - time * sqrt(9.81 * freq);
+                let c = cos(phase);
+                let s = sin(phase);
+                // Returns: x-displacement, y-displacement (height), accumulated steepness
+                return vec3f(
+                    steepness * amp * dir.x * c,
+                    amp * s,
+                    steepness * amp * dir.y * c
+                );
+            }
+
+            // Compute normal from Gerstner wave derivatives
+            fn gerstnerNormal(pos: vec2f, dir: vec2f, freq: f32, amp: f32, steepness: f32, time: f32) -> vec3f {
+                let phase = freq * dot(dir, pos) - time * sqrt(9.81 * freq);
+                let c = cos(phase);
+                let s = sin(phase);
+                let wa = freq * amp;
+                return vec3f(
+                    -dir.x * wa * c,
+                    1.0,
+                    -dir.y * wa * c
+                );
+            }
+
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                let aspect = u.resolution.x / u.resolution.y;
+
+                // Map UV to world XZ plane with perspective
+                let perspY = uv.y * 0.8 + 0.1;
+                let depth = 1.0 / max(perspY, 0.01);
+                let worldX = (uv.x - 0.5) * aspect * depth * 4.0;
+                let worldZ = depth * 8.0;
+                let worldPos = vec2f(worldX, worldZ);
+
+                // Base wind direction
+                let windRad = u.windDir * 3.14159 / 180.0;
+                let baseDir = vec2f(cos(windRad), sin(windRad));
+
+                var totalDisp = vec3f(0.0);
+                var normal = vec3f(0.0, 1.0, 0.0);
+                let nWaves = i32(u.waveCount);
+
+                // Sum multiple Gerstner waves
+                for (var i = 0; i < 16; i++) {
+                    if (i >= nWaves) { break; }
+                    let fi = f32(i);
+                    // Vary direction, frequency, amplitude
+                    let angleOffset = (hash(fi * 7.3) - 0.5) * 1.2;
+                    let angle = windRad + angleOffset;
+                    let dir = vec2f(cos(angle), sin(angle));
+
+                    let baseFreq = 0.8 + fi * 0.4;
+                    let freq = baseFreq * (0.7 + hash(fi * 3.1) * 0.6);
+                    let amp = u.waveHeight * 0.3 / (1.0 + fi * 0.4);
+                    let steepness = u.choppiness * 0.5 / (freq * amp * f32(nWaves));
+
+                    totalDisp += gerstnerWave(worldPos, dir, freq, amp, steepness, u.time);
+
+                    // Accumulate normal perturbation
+                    let phase = freq * dot(dir, worldPos) - u.time * sqrt(9.81 * freq);
+                    let wa = freq * amp;
+                    let c = cos(phase);
+                    normal.x -= dir.x * wa * c * steepness;
+                    normal.z -= dir.y * wa * c * steepness;
+                }
+
+                // Click ripple
+                if (u.clickTime > 0.0) {
+                    let dt = u.time - u.clickTime;
+                    if (dt < 5.0 && dt > 0.0) {
+                        let clickWorld = vec2f(
+                            (u.clickX / u.resolution.x - 0.5) * aspect * depth * 4.0,
+                            depth * 8.0
+                        );
+                        let dist = length(worldPos - clickWorld);
+                        let rippleSpeed = 3.0;
+                        let ripplePhase = dist - dt * rippleSpeed;
+                        let rippleAmp = 0.3 * exp(-dt * 0.8) * exp(-dist * 0.1);
+                        let ripple = sin(ripplePhase * 6.0) * rippleAmp;
+                        totalDisp.y += ripple;
+                        let rippleNorm = cos(ripplePhase * 6.0) * rippleAmp * 6.0;
+                        let toClick = normalize(worldPos - clickWorld + vec2f(0.001));
+                        normal.x -= toClick.x * rippleNorm;
+                        normal.z -= toClick.y * rippleNorm;
+                    }
+                }
+
+                normal = normalize(normal);
+                let height = totalDisp.y;
+
+                // Lighting
+                let lightDir = normalize(vec3f(0.4, 0.8, -0.3));
+                let viewDir = normalize(vec3f(0.0, 0.6, -1.0));
+                let halfVec = normalize(lightDir + viewDir);
+
+                let NdotL = max(dot(normal, lightDir), 0.0);
+                let NdotH = max(dot(normal, halfVec), 0.0);
+                let specular = pow(NdotH, 120.0);
+
+                // Fresnel (Schlick approximation)
+                let NdotV = max(dot(normal, viewDir), 0.0);
+                let fresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
+
+                // Ocean colors
+                let deepColor = vec3f(0.01, 0.05, 0.15);
+                let shallowColor = vec3f(0.02, 0.18, 0.28);
+                let skyColor = vec3f(0.4, 0.55, 0.7);
+
+                // Subsurface scattering approximation
+                let sss = pow(max(dot(viewDir, -lightDir + normal * 0.5), 0.0), 3.0) * 0.3;
+                let sssColor = vec3f(0.0, 0.3, 0.2) * sss;
+
+                // Water color based on height and angle
+                let heightFactor = clamp(height * 0.5 + 0.5, 0.0, 1.0);
+                var waterColor = mix(deepColor, shallowColor, heightFactor);
+                waterColor += NdotL * vec3f(0.02, 0.05, 0.08);
+
+                // Reflection
+                let reflectDir = reflect(-viewDir, normal);
+                let skyReflect = mix(skyColor * 0.3, skyColor, max(reflectDir.y, 0.0));
+                waterColor = mix(waterColor, skyReflect, fresnel * 0.7);
+
+                // Specular highlights
+                waterColor += vec3f(1.0, 0.95, 0.8) * specular * 2.0;
+
+                // Subsurface
+                waterColor += sssColor;
+
+                // Foam on wave peaks
+                let foamAmount = smoothstep(u.foamThreshold * 0.5, u.foamThreshold, height);
+                let foamNoise = fract(sin(dot(floor(worldPos * 8.0), vec2f(12.9898, 78.233))) * 43758.5453);
+                let foam = foamAmount * (0.6 + foamNoise * 0.4);
+                let foamColor = vec3f(0.85, 0.9, 0.95);
+                waterColor = mix(waterColor, foamColor, foam * 0.8);
+
+                // Depth fog for distant water
+                let fogFactor = clamp((depth - 2.0) / 20.0, 0.0, 0.8);
+                let horizonColor = vec3f(0.15, 0.25, 0.35);
+                waterColor = mix(waterColor, horizonColor, fogFactor);
+
+                // Sky above horizon
+                if (uv.y > 0.85) {
+                    let skyT = (uv.y - 0.85) / 0.15;
+                    let sky = mix(vec3f(0.5, 0.6, 0.75), vec3f(0.2, 0.3, 0.55), skyT);
+                    // Sun
+                    let sunDir = vec2f(0.3, 0.95);
+                    let sunDist = length(vec2f(uv.x, uv.y) - sunDir);
+                    sky += vec3f(1.0, 0.9, 0.6) * exp(-sunDist * sunDist * 80.0) * 2.0;
+                    sky += vec3f(1.0, 0.8, 0.5) * exp(-sunDist * 8.0) * 0.3;
+                    waterColor = sky;
+                }
+
+                // Tonemap
+                waterColor = waterColor / (1.0 + waterColor * 0.3);
+
+                return vec4f(waterColor, 1.0);
+            }
+        `;
+
+        const shaderModule = device.createShaderModule({ code: shaderCode });
+        const pipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: shaderModule, entryPoint: 'vs' },
+            fragment: { module: shaderModule, entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const uniformBuf = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuf } }]
+        });
+
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+        let totalTime = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = Math.min((now - lastTime) / 1000, 0.033);
+            lastTime = now;
+            totalTime += dt;
+
+            fpsFrames++; fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            const buf = new Float32Array(12);
+            buf[0] = canvas.width; buf[1] = canvas.height;
+            buf[2] = totalTime; buf[3] = waveHeight;
+            buf[4] = windDir; buf[5] = waveCount;
+            buf[6] = foamThreshold; buf[7] = choppiness;
+            buf[8] = clickX; buf[9] = clickY;
+            buf[10] = clickTime;
+            device.queue.writeBuffer(uniformBuf, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: ctx.getCurrentTexture().createView(),
+                    loadOp: 'clear', clearValue: { r: 0, g: 0, b: 0, a: 1 }, storeOp: 'store'
+                }]
+            });
+            rp.setPipeline(pipeline);
+            rp.setBindGroup(0, bindGroup);
+            rp.draw(4);
+            rp.end();
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+
+        canvas.addEventListener('click', e => {
+            clickX = e.clientX;
+            clickY = e.clientY;
+            clickTime = totalTime;
+        });
+
+        document.getElementById('waveHeight').addEventListener('input', e => {
+            waveHeight = parseFloat(e.target.value);
+            document.getElementById('heightVal').textContent = waveHeight.toFixed(1);
+        });
+        document.getElementById('windDir').addEventListener('input', e => {
+            windDir = parseFloat(e.target.value);
+            document.getElementById('windVal').textContent = Math.round(windDir);
+        });
+        document.getElementById('waveCount').addEventListener('input', e => {
+            waveCount = parseInt(e.target.value);
+            document.getElementById('waveCountVal').textContent = waveCount;
+        });
+        document.getElementById('foam').addEventListener('input', e => {
+            foamThreshold = parseFloat(e.target.value);
+            document.getElementById('foamVal').textContent = foamThreshold.toFixed(2);
+        });
+        document.getElementById('chop').addEventListener('input', e => {
+            choppiness = parseFloat(e.target.value);
+            document.getElementById('chopVal').textContent = choppiness.toFixed(1);
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            ctx.configure({ device, format, alphaMode: 'opaque' });
+        });
+
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

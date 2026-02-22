@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Menger Sponge - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 168px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title">Menger Sponge Fractal</div>
+
+    <div class="controls">
+        <label>Iterations: <span id="iterVal">4</span></label>
+        <input type="range" id="iterations" min="2" max="5" step="1" value="4">
+        <label>Rotation Speed: <span id="rotVal">0.3</span></label>
+        <input type="range" id="rotSpeed" min="0.0" max="1.0" step="0.05" value="0.3">
+        <label>Material:</label>
+        <select id="materialSelect">
+            <option value="0" selected>Steel Blue / Gold</option>
+            <option value="1">Obsidian / Ruby</option>
+            <option value="2">Marble / Jade</option>
+            <option value="3">Bronze / Silver</option>
+        </select>
+        <label>Bloom: <span id="bloomVal">0.6</span></label>
+        <input type="range" id="bloom" min="0.0" max="2.0" step="0.1" value="0.6">
+        <label>AO Strength: <span id="aoVal">1.0</span></label>
+        <input type="range" id="ao" min="0.0" max="2.0" step="0.1" value="1.0">
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Resolution: <span id="res">0x0</span>
+    </div>
+
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const W = Math.min(window.innerWidth, 1280);
+        const H = Math.min(window.innerHeight, 960);
+        canvas.width = W; canvas.height = H;
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        document.getElementById('res').textContent = W + 'x' + H;
+
+        const context = canvas.getContext('webgpu');
+        const fmt = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: fmt, alphaMode: 'opaque' });
+
+        let iterations = 4, rotSpeed = 0.3, materialId = 0, bloomIntensity = 0.6, aoStrength = 1.0;
+
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const shader = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                iterations: u32,
+                rotSpeed: f32,
+                materialId: u32,
+                bloomIntensity: f32,
+                aoStrength: f32,
+                pad0: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            fn sdBox(p: vec3f, b: vec3f) -> f32 {
+                let q = abs(p) - b;
+                return length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+            }
+
+            fn sdCross(p: vec3f) -> f32 {
+                let da = max(abs(p.x), abs(p.y));
+                let db = max(abs(p.y), abs(p.z));
+                let dc = max(abs(p.z), abs(p.x));
+                return min(da, min(db, dc)) - 1.0;
+            }
+
+            fn mengerSDF(pos: vec3f, iters: u32) -> vec2f {
+                // Returns vec2(distance, innerDepth) where innerDepth indicates how "deep" the cut
+                var d = sdBox(pos, vec3f(1.0));
+                var s = 1.0;
+                var depth = 0.0;
+
+                for (var i = 0u; i < 5u; i++) {
+                    if (i >= iters) { break; }
+
+                    let a = (pos * s) % vec3f(2.0) - vec3f(1.0);
+                    s *= 3.0;
+                    let r = abs(1.0 - 3.0 * abs(a));
+
+                    let da = max(r.x, r.y);
+                    let db = max(r.y, r.z);
+                    let dc = max(r.z, r.x);
+                    let c = (min(da, min(db, dc)) - 1.0) / s;
+
+                    if (c > d) {
+                        d = c;
+                        depth = f32(i + 1u) / f32(iters);
+                    }
+                }
+                return vec2f(d, depth);
+            }
+
+            fn rotY(a: f32) -> mat3x3f {
+                let c = cos(a); let s = sin(a);
+                return mat3x3f(vec3f(c,0,s), vec3f(0,1,0), vec3f(-s,0,c));
+            }
+
+            fn rotX(a: f32) -> mat3x3f {
+                let c = cos(a); let s = sin(a);
+                return mat3x3f(vec3f(1,0,0), vec3f(0,c,-s), vec3f(0,s,c));
+            }
+
+            fn calcNormal(p: vec3f) -> vec3f {
+                let e = vec2f(0.0005, 0.0);
+                return normalize(vec3f(
+                    mengerSDF(p + e.xyy, u.iterations).x - mengerSDF(p - e.xyy, u.iterations).x,
+                    mengerSDF(p + e.yxy, u.iterations).x - mengerSDF(p - e.yxy, u.iterations).x,
+                    mengerSDF(p + e.yyx, u.iterations).x - mengerSDF(p - e.yyx, u.iterations).x
+                ));
+            }
+
+            fn calcAO(pos: vec3f, nor: vec3f) -> f32 {
+                var occ = 0.0;
+                var sca = 1.0;
+                for (var i = 0; i < 5; i++) {
+                    let h = 0.01 + 0.15 * f32(i) / 4.0;
+                    let d = mengerSDF(pos + h * nor, u.iterations).x;
+                    occ += (h - d) * sca;
+                    sca *= 0.9;
+                }
+                return clamp(1.0 - u.aoStrength * 2.0 * occ, 0.0, 1.0);
+            }
+
+            fn softShadow(ro: vec3f, rd: vec3f, mint: f32, maxt: f32, k: f32) -> f32 {
+                var res = 1.0;
+                var t = mint;
+                for (var i = 0; i < 32; i++) {
+                    let h = mengerSDF(ro + rd * t, u.iterations).x;
+                    if (h < 0.0005) { return 0.0; }
+                    res = min(res, k * h / t);
+                    t += h;
+                    if (t > maxt) { break; }
+                }
+                return clamp(res, 0.0, 1.0);
+            }
+
+            fn getMaterial(depth: f32) -> vec2f {
+                // Returns index (0=outer, 1=inner cut) based on depth
+                return vec2f(step(0.1, depth), depth);
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let aspect = u.resolution.x / u.resolution.y;
+                let uv = vec2f(
+                    (2.0 * f32(id.x) / u.resolution.x - 1.0) * aspect,
+                    1.0 - 2.0 * f32(id.y) / u.resolution.y
+                );
+
+                // Camera orbiting
+                let t = u.time * u.rotSpeed;
+                let camDist = 3.2;
+                let camPos = vec3f(sin(t) * camDist, 1.2 + sin(t * 0.37) * 0.5, cos(t) * camDist);
+                let target = vec3f(0.0, 0.0, 0.0);
+                let camDir = normalize(target - camPos);
+                let camRight = normalize(cross(camDir, vec3f(0.0, 1.0, 0.0)));
+                let camUp = cross(camRight, camDir);
+
+                let rd = normalize(camDir + camRight * uv.x * 0.7 + camUp * uv.y * 0.7);
+
+                // Raymarch
+                var totalDist = 0.0;
+                var hit = false;
+                var hitInfo = vec2f(0.0);
+
+                for (var i = 0; i < 200; i++) {
+                    let pos = camPos + rd * totalDist;
+                    let res = mengerSDF(pos, u.iterations);
+                    if (res.x < 0.0003) {
+                        hit = true;
+                        hitInfo = res;
+                        break;
+                    }
+                    if (totalDist > 20.0) { break; }
+                    totalDist += res.x;
+                }
+
+                var color = vec3f(0.01, 0.01, 0.03);
+
+                if (hit) {
+                    let pos = camPos + rd * totalDist;
+                    let nor = calcNormal(pos);
+                    let depth = hitInfo.y;
+
+                    // Lighting
+                    let lightDir1 = normalize(vec3f(0.7, 0.9, -0.5));
+                    let lightDir2 = normalize(vec3f(-0.5, 0.3, 0.7));
+                    let diff1 = max(dot(nor, lightDir1), 0.0);
+                    let diff2 = max(dot(nor, lightDir2), 0.0);
+                    let spec1 = pow(max(dot(reflect(-lightDir1, nor), -rd), 0.0), 48.0);
+                    let spec2 = pow(max(dot(reflect(-lightDir2, nor), -rd), 0.0), 24.0);
+                    let ao = calcAO(pos, nor);
+                    let shadow = softShadow(pos + nor * 0.005, lightDir1, 0.01, 5.0, 16.0);
+
+                    // Fresnel rim
+                    let fresnel = pow(1.0 - max(dot(nor, -rd), 0.0), 4.0);
+
+                    // Material colors
+                    var outerCol: vec3f;
+                    var innerCol: vec3f;
+
+                    if (u.materialId == 0u) {
+                        outerCol = vec3f(0.45, 0.55, 0.7);  // steel blue
+                        innerCol = vec3f(0.85, 0.65, 0.3);  // gold
+                    } else if (u.materialId == 1u) {
+                        outerCol = vec3f(0.15, 0.15, 0.2);  // obsidian
+                        innerCol = vec3f(0.85, 0.15, 0.2);  // ruby
+                    } else if (u.materialId == 2u) {
+                        outerCol = vec3f(0.85, 0.82, 0.78); // marble
+                        innerCol = vec3f(0.2, 0.6, 0.35);   // jade
+                    } else {
+                        outerCol = vec3f(0.7, 0.5, 0.25);   // bronze
+                        innerCol = vec3f(0.8, 0.8, 0.85);   // silver
+                    }
+
+                    let mat = mix(outerCol, innerCol, depth);
+
+                    // Combine lighting
+                    let ambient = mat * 0.08;
+                    let diffuse = mat * (diff1 * shadow * 0.65 + diff2 * 0.15);
+                    let specular = vec3f(1.0) * (spec1 * shadow * 0.5 + spec2 * 0.15);
+                    let rim = fresnel * mix(outerCol, vec3f(1.0), 0.5) * 0.25;
+
+                    color = (ambient + diffuse + specular + rim) * ao;
+
+                    // Bloom on bright highlights
+                    let brightness = max(color.r, max(color.g, color.b));
+                    if (brightness > 0.7) {
+                        let bloomAmount = (brightness - 0.7) * u.bloomIntensity;
+                        color += color * bloomAmount;
+                    }
+
+                    // Distance fog
+                    let fog = 1.0 - exp(-totalDist * 0.08);
+                    color = mix(color, vec3f(0.01, 0.01, 0.03), fog);
+                }
+
+                // Gamma
+                color = pow(clamp(color, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2));
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: shader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format: fmt }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let startTime = performance.now();
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const buf = new ArrayBuffer(48);
+            const f = new Float32Array(buf);
+            const ui = new Uint32Array(buf);
+            f[0] = W; f[1] = H;
+            f[2] = (now - startTime) / 1000;
+            ui[3] = iterations;
+            f[4] = rotSpeed;
+            ui[5] = materialId;
+            f[6] = bloomIntensity;
+            f[7] = aoStrength;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        document.getElementById('iterations').addEventListener('input', (e) => {
+            iterations = parseInt(e.target.value);
+            document.getElementById('iterVal').textContent = iterations;
+        });
+        document.getElementById('rotSpeed').addEventListener('input', (e) => {
+            rotSpeed = parseFloat(e.target.value);
+            document.getElementById('rotVal').textContent = rotSpeed.toFixed(2);
+        });
+        document.getElementById('materialSelect').addEventListener('change', (e) => {
+            materialId = parseInt(e.target.value);
+        });
+        document.getElementById('bloom').addEventListener('input', (e) => {
+            bloomIntensity = parseFloat(e.target.value);
+            document.getElementById('bloomVal').textContent = bloomIntensity.toFixed(1);
+        });
+        document.getElementById('ao').addEventListener('input', (e) => {
+            aoStrength = parseFloat(e.target.value);
+            document.getElementById('aoVal').textContent = aoStrength.toFixed(1);
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

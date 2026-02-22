@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Particle Life v2 - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.82); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 220px; max-height: 90vh; overflow-y: auto; }
+        .controls label { display: block; margin: 6px 0 2px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 168px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .controls button { margin: 3px 2px; padding: 5px 10px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+        .controls button:hover { background: #67e8f9; }
+        .btn-row { display: flex; gap: 4px; margin-top: 6px; }
+        .btn-row button { flex: 1; }
+        .species-legend { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+        .species-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; vertical-align: middle; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title">Particle Life v2</div>
+
+    <div class="controls">
+        <label>Preset:</label>
+        <select id="presetSelect">
+            <option value="0" selected>Cells (Organelles)</option>
+            <option value="1">Galaxy (Rotating)</option>
+            <option value="2">Worms (Chains)</option>
+            <option value="3">Symbiosis</option>
+            <option value="4">Random</option>
+        </select>
+        <div class="species-legend">
+            <span><span class="species-dot" style="background:#ff4444"></span> Red</span>
+            <span><span class="species-dot" style="background:#44ffff"></span> Cyan</span>
+            <span><span class="species-dot" style="background:#ffff44"></span> Yellow</span>
+            <span><span class="species-dot" style="background:#cc44ff"></span> Purple</span>
+            <span><span class="species-dot" style="background:#44ff66"></span> Green</span>
+        </div>
+        <label>Particles: <span id="countVal">30000</span></label>
+        <input type="range" id="count" min="5000" max="50000" step="5000" value="30000">
+        <label>Friction: <span id="frictionVal">0.05</span></label>
+        <input type="range" id="friction" min="0.01" max="0.15" step="0.01" value="0.05">
+        <label>Force Range: <span id="rangeVal">80</span></label>
+        <input type="range" id="forceRange" min="40" max="150" step="5" value="80">
+        <label>Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.2" max="3.0" step="0.1" value="1.0">
+        <div class="btn-row">
+            <button onclick="randomizeMatrix()">Random Matrix</button>
+            <button onclick="resetParticles()">Reset Positions</button>
+        </div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Particles: <span id="particleCount">0</span>
+    </div>
+
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: 256 * 1024 * 1024 } });
+        const canvas = document.getElementById('canvas');
+        const W = window.innerWidth;
+        const H = window.innerHeight;
+        canvas.width = W; canvas.height = H;
+
+        const context = canvas.getContext('webgpu');
+        const fmt = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: fmt, alphaMode: 'opaque' });
+
+        const NUM_SPECIES = 5;
+        let numParticles = 30000;
+        let friction = 0.05, forceRange = 80, simSpeed = 1.0;
+
+        // Attraction matrix presets (5x5)
+        const presets = {
+            0: [ // Cells
+                 0.5, -0.3,  0.2, -0.1,  0.0,
+                -0.1,  0.5, -0.3,  0.2,  0.0,
+                 0.0, -0.1,  0.5, -0.3,  0.2,
+                 0.2,  0.0, -0.1,  0.5, -0.3,
+                -0.3,  0.2,  0.0, -0.1,  0.5,
+            ],
+            1: [ // Galaxy
+                 0.1,  0.6, -0.4,  0.0,  0.3,
+                -0.4,  0.1,  0.6,  0.0, -0.2,
+                 0.3, -0.4,  0.1,  0.6,  0.0,
+                 0.0,  0.3, -0.4,  0.1,  0.6,
+                 0.6,  0.0,  0.3, -0.4,  0.1,
+            ],
+            2: [ // Worms
+                 0.8, -0.5,  0.0,  0.0,  0.0,
+                 0.3,  0.8, -0.5,  0.0,  0.0,
+                 0.0,  0.3,  0.8, -0.5,  0.0,
+                 0.0,  0.0,  0.3,  0.8, -0.5,
+                -0.5,  0.0,  0.0,  0.3,  0.8,
+            ],
+            3: [ // Symbiosis
+                -0.2,  0.7,  0.0, -0.3,  0.0,
+                 0.7, -0.2,  0.0,  0.0, -0.3,
+                 0.0,  0.0, -0.2,  0.7,  0.0,
+                -0.3,  0.0,  0.7, -0.2,  0.0,
+                 0.0, -0.3,  0.0,  0.0, -0.2,
+            ],
+        };
+
+        let attractionMatrix = new Float32Array(presets[0]);
+
+        // Buffers: each particle = vec4(x, y, vx, vy) + vec4(species, 0, 0, 0)
+        const particleSize = 32; // 8 floats
+        const MAX_PARTICLES = 50000;
+        const particleBuffers = [
+            device.createBuffer({ size: MAX_PARTICLES * particleSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+            device.createBuffer({ size: MAX_PARTICLES * particleSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+        ];
+        const matrixBuffer = device.createBuffer({ size: NUM_SPECIES * NUM_SPECIES * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        function initParticles() {
+            const data = new Float32Array(MAX_PARTICLES * 8);
+            for (let i = 0; i < numParticles; i++) {
+                const off = i * 8;
+                data[off] = Math.random() * W;     // x
+                data[off+1] = Math.random() * H;   // y
+                data[off+2] = 0;                    // vx
+                data[off+3] = 0;                    // vy
+                const ui = new Uint32Array(data.buffer, (off+4)*4, 1);
+                ui[0] = i % NUM_SPECIES;            // species
+                data[off+5] = 0;
+                data[off+6] = 0;
+                data[off+7] = 0;
+            }
+            device.queue.writeBuffer(particleBuffers[0], 0, data);
+            device.queue.writeBuffer(particleBuffers[1], 0, data);
+            device.queue.writeBuffer(matrixBuffer, 0, attractionMatrix);
+            document.getElementById('particleCount').textContent = numParticles.toLocaleString();
+        }
+
+        const computeShader = `
+            struct Uniforms {
+                resolution: vec2f,
+                dt: f32,
+                numParticles: u32,
+                friction: f32,
+                forceRange: f32,
+                rMin: f32,
+                numSpecies: u32,
+            }
+
+            struct Particle {
+                pos: vec2f,
+                vel: vec2f,
+                species: u32,
+                pad0: u32,
+                pad1: u32,
+                pad2: u32,
+            }
+
+            @group(0) @binding(0) var<storage, read> particlesIn: array<Particle>;
+            @group(0) @binding(1) var<storage, read_write> particlesOut: array<Particle>;
+            @group(0) @binding(2) var<storage, read> matrix: array<f32>;
+            @group(0) @binding(3) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.numParticles) { return; }
+
+                let p = particlesIn[id.x];
+                var force = vec2f(0.0);
+                let mySpecies = p.species;
+
+                // Brute force but with early distance rejection
+                for (var j = 0u; j < u.numParticles; j++) {
+                    if (j == id.x) { continue; }
+                    let other = particlesIn[j];
+                    var delta = other.pos - p.pos;
+
+                    // Wrap around
+                    if (delta.x > u.resolution.x * 0.5) { delta.x -= u.resolution.x; }
+                    if (delta.x < -u.resolution.x * 0.5) { delta.x += u.resolution.x; }
+                    if (delta.y > u.resolution.y * 0.5) { delta.y -= u.resolution.y; }
+                    if (delta.y < -u.resolution.y * 0.5) { delta.y += u.resolution.y; }
+
+                    let dist = length(delta);
+                    if (dist > u.forceRange || dist < 0.5) { continue; }
+
+                    let dir = delta / dist;
+                    let attraction = matrix[mySpecies * u.numSpecies + other.species];
+
+                    if (dist < u.rMin) {
+                        // Strong repulsion within rMin
+                        let repulse = (u.rMin - dist) / u.rMin;
+                        force -= dir * repulse * 3.0;
+                    } else {
+                        // Attraction/repulsion zone
+                        let t = (dist - u.rMin) / (u.forceRange - u.rMin);
+                        let f = attraction * (1.0 - abs(2.0 * t - 1.0));
+                        force += dir * f;
+                    }
+                }
+
+                // Update velocity and position
+                var newVel = p.vel + force * u.dt * 0.5;
+                newVel *= (1.0 - u.friction);
+
+                // Speed limit
+                let speed = length(newVel);
+                if (speed > 5.0) { newVel = newVel / speed * 5.0; }
+
+                var newPos = p.pos + newVel * u.dt;
+
+                // Wrap
+                newPos.x = ((newPos.x % u.resolution.x) + u.resolution.x) % u.resolution.x;
+                newPos.y = ((newPos.y % u.resolution.y) + u.resolution.y) % u.resolution.y;
+
+                var out: Particle;
+                out.pos = newPos;
+                out.vel = newVel;
+                out.species = p.species;
+                out.pad0 = 0u;
+                out.pad1 = 0u;
+                out.pad2 = 0u;
+                particlesOut[id.x] = out;
+            }
+        `;
+
+        const renderShader = `
+            struct Uniforms {
+                resolution: vec2f,
+                dt: f32,
+                numParticles: u32,
+                friction: f32,
+                forceRange: f32,
+                rMin: f32,
+                numSpecies: u32,
+            }
+
+            struct Particle {
+                pos: vec2f,
+                vel: vec2f,
+                species: u32,
+                pad0: u32,
+                pad1: u32,
+                pad2: u32,
+            }
+
+            @group(0) @binding(0) var<storage, read> particles: array<Particle>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+            @group(0) @binding(2) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+            @compute @workgroup_size(16, 16)
+            fn clear(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+                textureStore(outTex, vec2i(id.xy), vec4f(0.01, 0.01, 0.02, 1.0));
+            }
+
+            @compute @workgroup_size(256)
+            fn draw(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.numParticles) { return; }
+                let p = particles[id.x];
+                let px = i32(p.pos.x);
+                let py = i32(p.pos.y);
+
+                if (px < 0 || px >= i32(u.resolution.x) || py < 0 || py >= i32(u.resolution.y)) { return; }
+
+                // Colors per species: red, cyan, yellow, purple, green
+                var color: vec3f;
+                if (p.species == 0u) { color = vec3f(1.0, 0.25, 0.25); }
+                else if (p.species == 1u) { color = vec3f(0.25, 1.0, 1.0); }
+                else if (p.species == 2u) { color = vec3f(1.0, 1.0, 0.25); }
+                else if (p.species == 3u) { color = vec3f(0.8, 0.25, 1.0); }
+                else { color = vec3f(0.25, 1.0, 0.4); }
+
+                // Draw a 2x2 dot with glow
+                let speed = length(p.vel);
+                let brightness = 0.6 + min(speed * 0.15, 0.4);
+                color *= brightness;
+
+                for (var dy = -1; dy <= 1; dy++) {
+                    for (var dx = -1; dx <= 1; dx++) {
+                        let nx = px + dx;
+                        let ny = py + dy;
+                        if (nx >= 0 && nx < i32(u.resolution.x) && ny >= 0 && ny < i32(u.resolution.y)) {
+                            let dist = f32(abs(dx) + abs(dy));
+                            let alpha = select(0.3, 1.0, dist < 1.0);
+                            textureStore(outTex, vec2i(nx, ny), vec4f(color * alpha, 1.0));
+                        }
+                    }
+                }
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computeModule = device.createShaderModule({ code: computeShader });
+        const renderModule = device.createShaderModule({ code: renderShader });
+
+        const simPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: computeModule, entryPoint: 'main' }
+        });
+
+        const clearPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: renderModule, entryPoint: 'clear' }
+        });
+
+        const drawPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: renderModule, entryPoint: 'draw' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format: fmt }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        // Create bind groups for sim ping-pong
+        const simBGs = [
+            device.createBindGroup({
+                layout: simPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: particleBuffers[0] } },
+                    { binding: 1, resource: { buffer: particleBuffers[1] } },
+                    { binding: 2, resource: { buffer: matrixBuffer } },
+                    { binding: 3, resource: { buffer: uniformBuffer } }
+                ]
+            }),
+            device.createBindGroup({
+                layout: simPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: particleBuffers[1] } },
+                    { binding: 1, resource: { buffer: particleBuffers[0] } },
+                    { binding: 2, resource: { buffer: matrixBuffer } },
+                    { binding: 3, resource: { buffer: uniformBuffer } }
+                ]
+            })
+        ];
+
+        const clearBG = device.createBindGroup({
+            layout: clearPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: particleBuffers[0] } },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+                { binding: 2, resource: outTexture.createView() }
+            ]
+        });
+
+        const drawBGs = [
+            device.createBindGroup({
+                layout: drawPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: particleBuffers[0] } },
+                    { binding: 1, resource: { buffer: uniformBuffer } },
+                    { binding: 2, resource: outTexture.createView() }
+                ]
+            }),
+            device.createBindGroup({
+                layout: drawPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: particleBuffers[1] } },
+                    { binding: 1, resource: { buffer: uniformBuffer } },
+                    { binding: 2, resource: outTexture.createView() }
+                ]
+            })
+        ];
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        initParticles();
+
+        let pingPong = 0;
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const dt = simSpeed;
+
+            // Update uniforms
+            const buf = new ArrayBuffer(48);
+            const f = new Float32Array(buf);
+            const u = new Uint32Array(buf);
+            f[0] = W; f[1] = H;
+            f[2] = dt;
+            u[3] = numParticles;
+            f[4] = friction;
+            f[5] = forceRange;
+            f[6] = 25.0; // rMin
+            u[7] = NUM_SPECIES;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+
+            // Simulation step
+            const cp = enc.beginComputePass();
+            cp.setPipeline(simPipeline);
+            cp.setBindGroup(0, simBGs[pingPong]);
+            cp.dispatchWorkgroups(Math.ceil(numParticles / 256));
+            cp.end();
+
+            pingPong = 1 - pingPong;
+
+            // Clear texture
+            const clr = enc.beginComputePass();
+            clr.setPipeline(clearPipeline);
+            clr.setBindGroup(0, clearBG);
+            clr.dispatchWorkgroups(Math.ceil(W / 16), Math.ceil(H / 16));
+            clr.end();
+
+            // Draw particles
+            const dr = enc.beginComputePass();
+            dr.setPipeline(drawPipeline);
+            dr.setBindGroup(0, drawBGs[pingPong]);
+            dr.dispatchWorkgroups(Math.ceil(numParticles / 256));
+            dr.end();
+
+            // Display
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        function randomizeMatrix() {
+            for (let i = 0; i < NUM_SPECIES * NUM_SPECIES; i++) {
+                attractionMatrix[i] = (Math.random() * 2 - 1);
+            }
+            device.queue.writeBuffer(matrixBuffer, 0, attractionMatrix);
+        }
+
+        function resetParticles() {
+            initParticles();
+            pingPong = 0;
+        }
+
+        function setPreset(idx) {
+            if (idx === 4) {
+                randomizeMatrix();
+            } else if (presets[idx]) {
+                attractionMatrix = new Float32Array(presets[idx]);
+                device.queue.writeBuffer(matrixBuffer, 0, attractionMatrix);
+            }
+            resetParticles();
+        }
+
+        window.randomizeMatrix = randomizeMatrix;
+        window.resetParticles = resetParticles;
+
+        document.getElementById('presetSelect').addEventListener('change', (e) => {
+            setPreset(parseInt(e.target.value));
+        });
+        document.getElementById('count').addEventListener('input', (e) => {
+            numParticles = parseInt(e.target.value);
+            document.getElementById('countVal').textContent = numParticles.toLocaleString();
+            resetParticles();
+        });
+        document.getElementById('friction').addEventListener('input', (e) => {
+            friction = parseFloat(e.target.value);
+            document.getElementById('frictionVal').textContent = friction.toFixed(2);
+        });
+        document.getElementById('forceRange').addEventListener('input', (e) => {
+            forceRange = parseInt(e.target.value);
+            document.getElementById('rangeVal').textContent = forceRange;
+        });
+        document.getElementById('speed').addEventListener('input', (e) => {
+            simSpeed = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = simSpeed.toFixed(1);
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

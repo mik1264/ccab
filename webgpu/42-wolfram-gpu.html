@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wolfram CA GPU - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 210px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 168px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .controls button { margin: 4px 2px; padding: 5px 10px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+        .controls button:hover { background: #67e8f9; }
+        .btn-row { display: flex; gap: 4px; margin-top: 6px; }
+        .btn-row button { flex: 1; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .rule-diagram { position: fixed; bottom: 20px; right: 20px; background: rgba(0,0,0,0.8); backdrop-filter: blur(10px); padding: 10px; border-radius: 8px; z-index: 100; }
+        .rule-diagram canvas { image-rendering: pixelated; }
+        .rule-label { font-size: 10px; color: #888; text-align: center; margin-top: 4px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title">Wolfram Elementary CA - GPU Accelerated</div>
+
+    <div class="controls">
+        <label>Rule: <span id="ruleVal">110</span></label>
+        <input type="range" id="rule" min="0" max="255" step="1" value="110">
+        <label>Preset Rules:</label>
+        <select id="presetSelect">
+            <option value="110">Rule 110 (Turing Complete)</option>
+            <option value="30">Rule 30 (Random Generator)</option>
+            <option value="90">Rule 90 (Sierpinski)</option>
+            <option value="184">Rule 184 (Traffic)</option>
+            <option value="73">Rule 73 (Complex)</option>
+            <option value="150">Rule 150 (Fractal)</option>
+        </select>
+        <label>Color Theme:</label>
+        <select id="colorSelect">
+            <option value="0">Classic B/W</option>
+            <option value="1" selected>Age Gradient</option>
+            <option value="2">Neon Glow</option>
+            <option value="3">Heat Map</option>
+        </select>
+        <label>Initial Condition:</label>
+        <select id="initSelect">
+            <option value="0" selected>Single Cell</option>
+            <option value="1">Random 50%</option>
+            <option value="2">Alternating</option>
+            <option value="3">Random 25%</option>
+        </select>
+        <label>Speed: <span id="speedVal">4</span> rows/frame</label>
+        <input type="range" id="speed" min="1" max="16" step="1" value="4">
+        <div class="btn-row">
+            <button onclick="restart()">Restart</button>
+            <button onclick="toggleWrap()"><span id="wrapLabel">Wrap: ON</span></button>
+        </div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Generation: <span id="gen">0</span> | Width: <span id="gridW">8192</span>
+    </div>
+
+    <div class="rule-diagram">
+        <canvas id="ruleCanvas" width="160" height="40"></canvas>
+        <div class="rule-label">Rule <span id="ruleDiagNum">110</span></div>
+    </div>
+
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const GRID_W = 8192;
+        const DISPLAY_ROWS = 512;
+        const W = Math.min(window.innerWidth, 1920);
+        const H = Math.min(window.innerHeight, 1080);
+        canvas.width = W; canvas.height = H;
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+
+        const context = canvas.getContext('webgpu');
+        const fmt = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: fmt, alphaMode: 'opaque' });
+
+        let ruleNum = 110, colorTheme = 1, stepsPerFrame = 4, wrapAround = true;
+        let generation = 0, paused = false;
+
+        // Two row buffers for ping-pong, plus history texture
+        const rowBuffer = [
+            device.createBuffer({ size: GRID_W * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+            device.createBuffer({ size: GRID_W * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+        ];
+        const uniformBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // History texture: stores DISPLAY_ROWS rows of the CA
+        const historyTexture = device.createTexture({
+            size: [GRID_W, DISPLAY_ROWS],
+            format: 'r32uint',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        });
+
+        // Output render texture
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        // CA step shader: compute next row from current row
+        const stepShader = `
+            struct Uniforms {
+                rule: u32,
+                gridW: u32,
+                wrapAround: u32,
+                currentRow: u32,
+                displayRows: u32,
+                colorTheme: u32,
+                pad0: u32,
+                pad1: u32,
+            }
+            @group(0) @binding(0) var<storage, read> rowIn: array<u32>;
+            @group(0) @binding(1) var<storage, read_write> rowOut: array<u32>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+            @group(0) @binding(3) var history: texture_storage_2d<r32uint, write>;
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.gridW) { return; }
+                let x = i32(id.x);
+                let w = i32(u.gridW);
+
+                var left: u32;
+                var center: u32 = rowIn[id.x];
+                var right: u32;
+
+                if (u.wrapAround == 1u) {
+                    left = rowIn[u32((x - 1 + w) % w)];
+                    right = rowIn[u32((x + 1) % w)];
+                } else {
+                    left = select(0u, rowIn[u32(x - 1)], x > 0);
+                    right = select(0u, rowIn[u32(x + 1)], x < w - 1);
+                }
+
+                let pattern = (left << 2u) | (center << 1u) | right;
+                let result = (u.rule >> pattern) & 1u;
+                rowOut[id.x] = result;
+
+                // Write to history at the current row (circular buffer)
+                let histY = u.currentRow % u.displayRows;
+                textureStore(history, vec2i(i32(id.x), i32(histY)), vec4u(result, 0u, 0u, 1u));
+            }
+        `;
+
+        // Render shader: read history texture and render to screen
+        const renderShader = `
+            struct Uniforms {
+                rule: u32,
+                gridW: u32,
+                wrapAround: u32,
+                currentRow: u32,
+                displayRows: u32,
+                colorTheme: u32,
+                pad0: u32,
+                pad1: u32,
+            }
+            @group(0) @binding(0) var histTex: texture_2d<u32>;
+            @group(0) @binding(1) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let outW = textureDimensions(outTex).x;
+                let outH = textureDimensions(outTex).y;
+                if (id.x >= u32(outW) || id.y >= u32(outH)) { return; }
+
+                // Map screen pixel to history grid cell
+                let gridX = i32(f32(id.x) / f32(outW) * f32(u.gridW));
+                let screenRow = i32(f32(id.y) / f32(outH) * f32(u.displayRows));
+
+                // Map to circular buffer: the newest row is at currentRow, oldest at currentRow+1
+                let histRow = (i32(u.currentRow) - i32(u.displayRows) + 1 + screenRow + i32(u.displayRows) * 2) % i32(u.displayRows);
+                let alive = textureLoad(histTex, vec2i(gridX, histRow), 0).r;
+
+                // Age: how old is this row relative to current
+                let age = f32(i32(u.displayRows) - 1 - screenRow) / f32(u.displayRows);
+
+                var color: vec3f;
+                if (u.colorTheme == 0u) {
+                    // Classic B/W
+                    color = select(vec3f(0.02, 0.02, 0.04), vec3f(0.95, 0.93, 0.88), alive == 1u);
+                } else if (u.colorTheme == 1u) {
+                    // Age gradient: bright cyan for new, dim for old
+                    if (alive == 1u) {
+                        let brightness = 1.0 - age * 0.7;
+                        color = vec3f(0.1 * brightness, 0.7 * brightness, 0.85 * brightness);
+                    } else {
+                        color = vec3f(0.02, 0.02 + age * 0.01, 0.04 + age * 0.02);
+                    }
+                } else if (u.colorTheme == 2u) {
+                    // Neon glow
+                    if (alive == 1u) {
+                        let hue = age * 3.14159;
+                        color = vec3f(
+                            sin(hue) * 0.5 + 0.5,
+                            sin(hue + 2.09) * 0.5 + 0.5,
+                            sin(hue + 4.18) * 0.5 + 0.5
+                        ) * (1.0 - age * 0.4);
+                    } else {
+                        color = vec3f(0.01, 0.01, 0.02);
+                    }
+                } else {
+                    // Heat map
+                    if (alive == 1u) {
+                        let t = 1.0 - age;
+                        let r = smoothstep(0.0, 0.5, t);
+                        let g = smoothstep(0.25, 0.75, t) * 0.8;
+                        let b = smoothstep(0.5, 1.0, t) * 0.3;
+                        color = vec3f(min(r, 1.0), g, b);
+                    } else {
+                        color = vec3f(0.02, 0.01, 0.01);
+                    }
+                }
+
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const stepPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: stepShader }), entryPoint: 'main' }
+        });
+
+        const renderPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format: fmt }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        // Bind groups for step (ping-pong)
+        const stepBGs = [
+            device.createBindGroup({
+                layout: stepPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: rowBuffer[0] } },
+                    { binding: 1, resource: { buffer: rowBuffer[1] } },
+                    { binding: 2, resource: { buffer: uniformBuffer } },
+                    { binding: 3, resource: historyTexture.createView() }
+                ]
+            }),
+            device.createBindGroup({
+                layout: stepPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: rowBuffer[1] } },
+                    { binding: 1, resource: { buffer: rowBuffer[0] } },
+                    { binding: 2, resource: { buffer: uniformBuffer } },
+                    { binding: 3, resource: historyTexture.createView() }
+                ]
+            })
+        ];
+
+        const renderBG = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: historyTexture.createView() },
+                { binding: 1, resource: outTexture.createView() },
+                { binding: 2, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        function initGrid(mode) {
+            const data = new Uint32Array(GRID_W);
+            if (mode === 0) {
+                data[Math.floor(GRID_W / 2)] = 1;
+            } else if (mode === 1) {
+                for (let i = 0; i < GRID_W; i++) data[i] = Math.random() < 0.5 ? 1 : 0;
+            } else if (mode === 2) {
+                for (let i = 0; i < GRID_W; i++) data[i] = i % 2;
+            } else {
+                for (let i = 0; i < GRID_W; i++) data[i] = Math.random() < 0.25 ? 1 : 0;
+            }
+            device.queue.writeBuffer(rowBuffer[0], 0, data);
+            generation = 0;
+
+            // Also write initial row to history
+            const histData = new Uint32Array(GRID_W * DISPLAY_ROWS);
+            for (let i = 0; i < GRID_W; i++) histData[i] = data[i];
+            device.queue.writeTexture(
+                { texture: historyTexture },
+                histData,
+                { bytesPerRow: GRID_W * 4 },
+                { width: GRID_W, height: DISPLAY_ROWS }
+            );
+        }
+
+        function drawRuleDiagram(rule) {
+            const rc = document.getElementById('ruleCanvas');
+            const ctx = rc.getContext('2d');
+            ctx.clearRect(0, 0, 160, 40);
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, 160, 40);
+
+            for (let pattern = 7; pattern >= 0; pattern--) {
+                const x = (7 - pattern) * 20;
+                const result = (rule >> pattern) & 1;
+                const bits = [(pattern >> 2) & 1, (pattern >> 1) & 1, pattern & 1];
+
+                for (let b = 0; b < 3; b++) {
+                    ctx.fillStyle = bits[b] ? '#22d3ee' : '#333';
+                    ctx.fillRect(x + b * 6 + 1, 2, 5, 5);
+                }
+                ctx.fillStyle = result ? '#22d3ee' : '#333';
+                ctx.fillRect(x + 7, 12, 5, 5);
+
+                ctx.fillStyle = '#666';
+                ctx.font = '7px monospace';
+                ctx.fillText(result.toString(), x + 8, 28);
+            }
+            document.getElementById('ruleDiagNum').textContent = rule;
+        }
+
+        initGrid(0);
+        drawRuleDiagram(ruleNum);
+
+        let pingPong = 0;
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            if (!paused) {
+                const enc = device.createCommandEncoder();
+
+                for (let s = 0; s < stepsPerFrame; s++) {
+                    const buf = new ArrayBuffer(32);
+                    const u32 = new Uint32Array(buf);
+                    u32[0] = ruleNum;
+                    u32[1] = GRID_W;
+                    u32[2] = wrapAround ? 1 : 0;
+                    u32[3] = generation % DISPLAY_ROWS;
+                    u32[4] = DISPLAY_ROWS;
+                    u32[5] = colorTheme;
+
+                    device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+                    const cp = enc.beginComputePass();
+                    cp.setPipeline(stepPipeline);
+                    cp.setBindGroup(0, stepBGs[pingPong]);
+                    cp.dispatchWorkgroups(Math.ceil(GRID_W / 256));
+                    cp.end();
+
+                    pingPong = 1 - pingPong;
+                    generation++;
+                }
+
+                device.queue.submit([enc.finish()]);
+            }
+
+            document.getElementById('gen').textContent = generation.toLocaleString();
+
+            // Update uniforms for render
+            const rbuf = new ArrayBuffer(32);
+            const ru32 = new Uint32Array(rbuf);
+            ru32[0] = ruleNum;
+            ru32[1] = GRID_W;
+            ru32[2] = wrapAround ? 1 : 0;
+            ru32[3] = (generation - 1) % DISPLAY_ROWS;
+            ru32[4] = DISPLAY_ROWS;
+            ru32[5] = colorTheme;
+            device.queue.writeBuffer(uniformBuffer, 0, rbuf);
+
+            const enc2 = device.createCommandEncoder();
+            const rcp = enc2.beginComputePass();
+            rcp.setPipeline(renderPipeline);
+            rcp.setBindGroup(0, renderBG);
+            rcp.dispatchWorkgroups(Math.ceil(W / 16), Math.ceil(H / 16));
+            rcp.end();
+
+            const rp = enc2.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc2.finish()]);
+        }
+
+        function restart() {
+            const initMode = parseInt(document.getElementById('initSelect').value);
+            initGrid(initMode);
+            pingPong = 0;
+        }
+
+        function toggleWrap() {
+            wrapAround = !wrapAround;
+            document.getElementById('wrapLabel').textContent = 'Wrap: ' + (wrapAround ? 'ON' : 'OFF');
+        }
+
+        window.restart = restart;
+        window.toggleWrap = toggleWrap;
+
+        document.getElementById('rule').addEventListener('input', (e) => {
+            ruleNum = parseInt(e.target.value);
+            document.getElementById('ruleVal').textContent = ruleNum;
+            drawRuleDiagram(ruleNum);
+        });
+        document.getElementById('presetSelect').addEventListener('change', (e) => {
+            ruleNum = parseInt(e.target.value);
+            document.getElementById('rule').value = ruleNum;
+            document.getElementById('ruleVal').textContent = ruleNum;
+            drawRuleDiagram(ruleNum);
+            restart();
+        });
+        document.getElementById('colorSelect').addEventListener('change', (e) => {
+            colorTheme = parseInt(e.target.value);
+        });
+        document.getElementById('initSelect').addEventListener('change', () => {
+            restart();
+        });
+        document.getElementById('speed').addEventListener('input', (e) => {
+            stepsPerFrame = parseInt(e.target.value);
+            document.getElementById('speedVal').textContent = stepsPerFrame;
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

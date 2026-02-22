@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lenia Continuous Cellular Automaton - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 220px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 170px; }
+        .controls button { margin: 3px 2px; padding: 6px 12px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+        .controls button:hover { background: #67e8f9; }
+        .controls select { background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 4px 8px; font-size: 11px; width: 100%; }
+        .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+        .btn-row button { flex: 1; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title-overlay { position: fixed; top: 70px; left: 20px; z-index: 90; }
+        .title-overlay h1 { font-size: 1.4rem; color: #22d3ee; margin: 0 0 4px 0; }
+        .title-overlay p { font-size: 0.85rem; color: #888; margin: 0; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title-overlay">
+        <h1>Lenia</h1>
+        <p>Continuous cellular automaton - smooth artificial life</p>
+    </div>
+    <div class="controls">
+        <label>Preset</label>
+        <select id="preset">
+            <option value="orbium">Orbium (Glider)</option>
+            <option value="geminium">Geminium (Splitter)</option>
+            <option value="random">Random Soup</option>
+        </select>
+        <label>Growth Center (mu): <span id="muVal">0.15</span></label>
+        <input type="range" id="mu" min="0.05" max="0.30" step="0.005" value="0.15">
+        <label>Growth Width (sigma): <span id="sigmaVal">0.016</span></label>
+        <input type="range" id="sigma" min="0.005" max="0.05" step="0.001" value="0.016">
+        <label>Time Step (dt): <span id="dtVal">0.10</span></label>
+        <input type="range" id="dt" min="0.02" max="0.20" step="0.01" value="0.10">
+        <div class="btn-row">
+            <button onclick="window.resetSim()">Reset</button>
+            <button onclick="window.togglePause()"><span id="pauseLabel">Pause</span></button>
+        </div>
+    </div>
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Step: <span id="step">0</span>
+    </div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = 512; canvas.height = 512;
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        const SIZE = 512;
+        const R = 13; // kernel radius
+
+        // Params uniform buffer
+        let mu = 0.15, sigma = 0.016, dt = 0.10;
+        let paused = false, stepCount = 0;
+        const paramsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        function updateParams() {
+            device.queue.writeBuffer(paramsBuffer, 0, new Float32Array([mu, sigma, dt, 0]));
+        }
+        updateParams();
+
+        // Precompute kernel on CPU and upload
+        const kernelSize = 2 * R + 1;
+        const kernelData = new Float32Array(kernelSize * kernelSize);
+        let kernelSum = 0;
+        for (let dy = -R; dy <= R; dy++) {
+            for (let dx = -R; dx <= R; dx++) {
+                const r = Math.sqrt(dx * dx + dy * dy) / R;
+                if (r <= 1.0) {
+                    // Bell-shaped kernel: exp(-((r - 0.5)^2) / (2 * 0.15^2))
+                    const val = Math.exp(-((r - 0.5) ** 2) / (2 * 0.15 * 0.15));
+                    kernelData[(dy + R) * kernelSize + (dx + R)] = val;
+                    kernelSum += val;
+                }
+            }
+        }
+        // Normalize
+        for (let i = 0; i < kernelData.length; i++) kernelData[i] /= kernelSum;
+
+        const kernelBuffer = device.createBuffer({ size: kernelData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(kernelBuffer, 0, kernelData);
+
+        // Grid storage buffers (ping-pong)
+        const gridBuffers = [
+            device.createBuffer({ size: SIZE * SIZE * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+            device.createBuffer({ size: SIZE * SIZE * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+        ];
+
+        // Render texture
+        const renderTex = device.createTexture({
+            size: [SIZE, SIZE], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        // Compute shader: convolution + growth + update
+        const computeCode = `
+            struct Params { mu: f32, sigma: f32, dt: f32, pad: f32 }
+            @group(0) @binding(0) var<storage, read> gridIn: array<f32>;
+            @group(0) @binding(1) var<storage, read_write> gridOut: array<f32>;
+            @group(0) @binding(2) var<storage, read> kernel: array<f32>;
+            @group(0) @binding(3) var<uniform> params: Params;
+
+            const SIZE: u32 = ${SIZE}u;
+            const R: i32 = ${R};
+            const KSIZE: i32 = ${kernelSize};
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                if (gid.x >= SIZE || gid.y >= SIZE) { return; }
+                let x = i32(gid.x);
+                let y = i32(gid.y);
+
+                // Convolution with kernel
+                var conv = 0.0;
+                for (var dy = -R; dy <= R; dy++) {
+                    for (var dx = -R; dx <= R; dx++) {
+                        let nx = ((x + dx) % i32(SIZE) + i32(SIZE)) % i32(SIZE);
+                        let ny = ((y + dy) % i32(SIZE) + i32(SIZE)) % i32(SIZE);
+                        let kw = kernel[(dy + R) * KSIZE + (dx + R)];
+                        conv += gridIn[u32(ny) * SIZE + u32(nx)] * kw;
+                    }
+                }
+
+                // Growth function: G(u) = 2 * exp(-((u - mu)^2) / (2 * sigma^2)) - 1
+                let diff = conv - params.mu;
+                let growth = 2.0 * exp(-(diff * diff) / (2.0 * params.sigma * params.sigma)) - 1.0;
+
+                // Update
+                let idx = gid.y * SIZE + gid.x;
+                let current = gridIn[idx];
+                let next = clamp(current + params.dt * growth, 0.0, 1.0);
+                gridOut[idx] = next;
+            }
+        `;
+
+        // Render shader: grid values to color
+        const renderCode = `
+            @group(0) @binding(0) var<storage, read> grid: array<f32>;
+            @group(0) @binding(1) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+            const SIZE: u32 = ${SIZE}u;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                if (gid.x >= SIZE || gid.y >= SIZE) { return; }
+                let val = grid[gid.y * SIZE + gid.x];
+
+                // Color gradient: black -> deep blue -> cyan -> white
+                var color: vec3f;
+                if (val < 0.2) {
+                    let t = val / 0.2;
+                    color = mix(vec3f(0.02, 0.01, 0.05), vec3f(0.05, 0.1, 0.4), t);
+                } else if (val < 0.5) {
+                    let t = (val - 0.2) / 0.3;
+                    color = mix(vec3f(0.05, 0.1, 0.4), vec3f(0.1, 0.6, 0.9), t);
+                } else if (val < 0.8) {
+                    let t = (val - 0.5) / 0.3;
+                    color = mix(vec3f(0.1, 0.6, 0.9), vec3f(0.3, 0.95, 1.0), t);
+                } else {
+                    let t = (val - 0.8) / 0.2;
+                    color = mix(vec3f(0.3, 0.95, 1.0), vec3f(1.0, 1.0, 1.0), t);
+                }
+
+                textureStore(outTex, vec2i(gid.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        // Display shader
+        const displayCode = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+                var p = array<vec2f, 4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f, 4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VO; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeCode }), entryPoint: 'main' }
+        });
+        const renderPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: renderCode }), entryPoint: 'main' }
+        });
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayCode }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayCode }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        // Bind groups
+        const computeBindGroups = [0, 1].map(i => device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: gridBuffers[i] } },
+                { binding: 1, resource: { buffer: gridBuffers[1 - i] } },
+                { binding: 2, resource: { buffer: kernelBuffer } },
+                { binding: 3, resource: { buffer: paramsBuffer } }
+            ]
+        }));
+        const renderBindGroups = [0, 1].map(i => device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: gridBuffers[i] } },
+                { binding: 1, resource: renderTex.createView() }
+            ]
+        }));
+        const displayBindGroup = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: renderTex.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        // Orbium initial pattern - approximate with smooth gaussian blobs
+        function initOrbium(buf) {
+            const data = new Float32Array(SIZE * SIZE);
+            const cx = SIZE / 2, cy = SIZE / 2;
+            // Orbium-like initial condition: ring-shaped pattern
+            for (let y = 0; y < SIZE; y++) {
+                for (let x = 0; x < SIZE; x++) {
+                    const dx = x - cx, dy = y - cy;
+                    const r = Math.sqrt(dx * dx + dy * dy);
+                    // Ring pattern with inner structure
+                    const ring = Math.exp(-((r - 18) ** 2) / 50) * 0.9;
+                    const inner = Math.exp(-((r - 8) ** 2) / 30) * 0.6;
+                    const core = Math.exp(-(r * r) / 20) * 0.3;
+                    data[y * SIZE + x] = Math.min(1.0, ring + inner + core);
+                }
+            }
+            device.queue.writeBuffer(buf, 0, data);
+        }
+
+        function initGeminium(buf) {
+            const data = new Float32Array(SIZE * SIZE);
+            const cx = SIZE / 2, cy = SIZE / 2;
+            // Two opposing blobs that split
+            for (let y = 0; y < SIZE; y++) {
+                for (let x = 0; x < SIZE; x++) {
+                    const dx1 = x - (cx - 10), dy1 = y - cy;
+                    const dx2 = x - (cx + 10), dy2 = y - cy;
+                    const r1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+                    const r2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+                    const v1 = Math.exp(-((r1 - 12) ** 2) / 40) * 0.85;
+                    const v2 = Math.exp(-((r2 - 12) ** 2) / 40) * 0.85;
+                    const c1 = Math.exp(-(r1 * r1) / 25) * 0.4;
+                    const c2 = Math.exp(-(r2 * r2) / 25) * 0.4;
+                    data[y * SIZE + x] = Math.min(1.0, v1 + v2 + c1 + c2);
+                }
+            }
+            device.queue.writeBuffer(buf, 0, data);
+        }
+
+        function initRandom(buf) {
+            const data = new Float32Array(SIZE * SIZE);
+            const cx = SIZE / 2, cy = SIZE / 2, patchR = 50;
+            for (let y = 0; y < SIZE; y++) {
+                for (let x = 0; x < SIZE; x++) {
+                    const dx = x - cx, dy = y - cy;
+                    if (Math.abs(dx) < patchR && Math.abs(dy) < patchR) {
+                        data[y * SIZE + x] = Math.random();
+                    }
+                }
+            }
+            device.queue.writeBuffer(buf, 0, data);
+        }
+
+        let frame = 0;
+        function resetSim() {
+            frame = 0; stepCount = 0;
+            const preset = document.getElementById('preset').value;
+            if (preset === 'orbium') {
+                mu = 0.15; sigma = 0.016; dt = 0.10;
+                initOrbium(gridBuffers[0]);
+            } else if (preset === 'geminium') {
+                mu = 0.14; sigma = 0.014; dt = 0.10;
+                initGeminium(gridBuffers[0]);
+            } else {
+                initRandom(gridBuffers[0]);
+            }
+            document.getElementById('mu').value = mu;
+            document.getElementById('sigma').value = sigma;
+            document.getElementById('dt').value = dt;
+            document.getElementById('muVal').textContent = mu.toFixed(3);
+            document.getElementById('sigmaVal').textContent = sigma.toFixed(3);
+            document.getElementById('dtVal').textContent = dt.toFixed(2);
+            updateParams();
+        }
+        window.resetSim = resetSim;
+        window.togglePause = () => {
+            paused = !paused;
+            document.getElementById('pauseLabel').textContent = paused ? 'Resume' : 'Pause';
+        };
+
+        initOrbium(gridBuffers[0]);
+
+        // UI
+        document.getElementById('mu').addEventListener('input', e => { mu = parseFloat(e.target.value); document.getElementById('muVal').textContent = mu.toFixed(3); updateParams(); });
+        document.getElementById('sigma').addEventListener('input', e => { sigma = parseFloat(e.target.value); document.getElementById('sigmaVal').textContent = sigma.toFixed(3); updateParams(); });
+        document.getElementById('dt').addEventListener('input', e => { dt = parseFloat(e.target.value); document.getElementById('dtVal').textContent = dt.toFixed(2); updateParams(); });
+        document.getElementById('preset').addEventListener('change', () => resetSim());
+
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+        const WG = Math.ceil(SIZE / 16);
+
+        function render() {
+            const now = performance.now();
+            const elapsed = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++; fpsTime += elapsed;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            if (!paused) {
+                const enc = device.createCommandEncoder();
+                const cp = enc.beginComputePass();
+                cp.setPipeline(computePipeline);
+                cp.setBindGroup(0, computeBindGroups[frame % 2]);
+                cp.dispatchWorkgroups(WG, WG);
+                cp.end();
+                device.queue.submit([enc.finish()]);
+                frame++;
+                stepCount++;
+            }
+
+            document.getElementById('step').textContent = stepCount.toLocaleString();
+
+            // Render to texture
+            const enc2 = device.createCommandEncoder();
+            const rcp = enc2.beginComputePass();
+            rcp.setPipeline(renderPipeline);
+            rcp.setBindGroup(0, renderBindGroups[frame % 2]);
+            rcp.dispatchWorkgroups(WG, WG);
+            rcp.end();
+
+            const dp = enc2.beginRenderPass({
+                colorAttachments: [{ view: ctx.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            dp.setPipeline(displayPipeline);
+            dp.setBindGroup(0, displayBindGroup);
+            dp.draw(4);
+            dp.end();
+
+            device.queue.submit([enc2.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

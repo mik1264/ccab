@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>500K Particle Galaxy - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #000005; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">500K Particle Galaxy</div>
+
+    <div class="controls">
+        <label>Rotation Speed: <span id="rotVal">1.0</span></label>
+        <input type="range" id="rotSpeed" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Arm Tightness: <span id="armVal">0.4</span></label>
+        <input type="range" id="armTight" min="0.1" max="1.0" step="0.05" value="0.4">
+        <label>Particle Size: <span id="sizeVal">2.0</span></label>
+        <input type="range" id="particleSize" min="0.5" max="5.0" step="0.25" value="2.0">
+        <label>Bulge Size: <span id="bulgeVal">0.15</span></label>
+        <input type="range" id="bulgeSize" min="0.05" max="0.4" step="0.01" value="0.15">
+        <label>Tilt Angle: <span id="tiltVal">30</span>&deg;</label>
+        <input type="range" id="tiltAngle" min="0" max="80" step="1" value="30">
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span> | Particles: 500,000</div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: 256 * 1024 * 1024 } });
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        let rotSpeed = 1.0, armTightness = 0.4, particleSize = 2.0, bulgeSize = 0.15, tiltAngle = 30;
+        document.getElementById('rotSpeed').oninput = e => { rotSpeed = +e.target.value; document.getElementById('rotVal').textContent = rotSpeed.toFixed(1); };
+        document.getElementById('armTight').oninput = e => { armTightness = +e.target.value; document.getElementById('armVal').textContent = armTightness.toFixed(2); };
+        document.getElementById('particleSize').oninput = e => { particleSize = +e.target.value; document.getElementById('sizeVal').textContent = particleSize.toFixed(1); };
+        document.getElementById('bulgeSize').oninput = e => { bulgeSize = +e.target.value; document.getElementById('bulgeVal').textContent = bulgeSize.toFixed(2); };
+        document.getElementById('tiltAngle').oninput = e => { tiltAngle = +e.target.value; document.getElementById('tiltVal').textContent = tiltAngle; };
+
+        const NUM_PARTICLES = 500000;
+        // Each particle: x, y, z, baseAngle, radius, armIndex, age, speed (8 floats)
+        const PARTICLE_FLOATS = 8;
+
+        // Initialize particles on CPU
+        const particleData = new Float32Array(NUM_PARTICLES * PARTICLE_FLOATS);
+        function gaussRandom() {
+            let u = 0, v = 0;
+            while (u === 0) u = Math.random();
+            while (v === 0) v = Math.random();
+            return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+        }
+
+        const NUM_ARMS = 2;
+        const BULGE_FRAC = 0.15; // fraction in central bulge
+        for (let i = 0; i < NUM_PARTICLES; i++) {
+            const base = i * PARTICLE_FLOATS;
+            const isBulge = Math.random() < BULGE_FRAC;
+            if (isBulge) {
+                // Central bulge - gaussian distribution
+                const r = Math.abs(gaussRandom()) * 0.12;
+                const theta = Math.random() * Math.PI * 2;
+                const z = gaussRandom() * 0.04;
+                particleData[base + 0] = r * Math.cos(theta);
+                particleData[base + 1] = r * Math.sin(theta);
+                particleData[base + 2] = z;
+                particleData[base + 3] = theta;
+                particleData[base + 4] = r;
+                particleData[base + 5] = -1; // bulge marker
+                particleData[base + 6] = Math.random(); // age (for color)
+                particleData[base + 7] = 0.3 + Math.random() * 0.5; // slow rotation
+            } else {
+                // Spiral arm
+                const armIdx = Math.floor(Math.random() * NUM_ARMS);
+                const armOffset = (armIdx / NUM_ARMS) * Math.PI * 2;
+                const t = Math.random(); // 0-1 along arm
+                const r = 0.05 + t * 0.85;
+                const spiralAngle = armOffset + t * Math.PI * 3.5; // tighter spiral
+                const crossArmSpread = gaussRandom() * 0.04 * (0.3 + t * 0.7);
+                const z = gaussRandom() * 0.01 * (1.0 - t * 0.5);
+                particleData[base + 0] = r * Math.cos(spiralAngle) + crossArmSpread;
+                particleData[base + 1] = r * Math.sin(spiralAngle) + gaussRandom() * 0.03 * (0.5 + t);
+                particleData[base + 2] = z;
+                particleData[base + 3] = spiralAngle;
+                particleData[base + 4] = r;
+                particleData[base + 5] = armIdx;
+                particleData[base + 6] = t; // age = position along arm
+                particleData[base + 7] = 1.0 / (0.5 + r * 2.0); // keplerian-ish speed
+            }
+        }
+
+        const particleBuf = device.createBuffer({ size: particleData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(particleBuf, 0, particleData);
+
+        // Uniform buffer
+        const uniformData = new Float32Array(12);
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Compute shader to update particle positions
+        const computeShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                rotSpeed: f32,
+                armTightness: f32,
+                bulgeSize: f32,
+                particleSize: f32,
+                tiltAngle: f32,
+                dt: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+            @group(0) @binding(0) var<storage, read_write> particles: array<f32>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= ${NUM_PARTICLES}u) { return; }
+                let base = idx * 8u;
+                let angle = particles[base + 3u];
+                let r = particles[base + 4u];
+                let armIdx = particles[base + 5u];
+                let speed = particles[base + 7u];
+
+                // Orbital rotation
+                let dAngle = speed * u.rotSpeed * u.dt * 0.3;
+                let newAngle = angle + dAngle;
+                particles[base + 3u] = newAngle;
+
+                if (armIdx < 0.0) {
+                    // Bulge particle: simple circular orbit
+                    particles[base + 0u] = r * cos(newAngle);
+                    particles[base + 1u] = r * sin(newAngle);
+                } else {
+                    // Arm particle: follow spiral with offset
+                    let spiralBase = (armIdx / 2.0) * 6.28318 + r * 3.14159 * 3.5 * u.armTightness / 0.4;
+                    let finalAngle = spiralBase + dAngle * u.time;
+                    // Keep original structure but rotate whole galaxy
+                    let cosR = cos(dAngle);
+                    let sinR = sin(dAngle);
+                    let ox = particles[base + 0u];
+                    let oy = particles[base + 1u];
+                    particles[base + 0u] = ox * cosR - oy * sinR;
+                    particles[base + 1u] = ox * sinR + oy * cosR;
+                }
+            }
+        `});
+
+        const computeBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+        });
+        const computePipeline = device.createComputePipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
+            compute: { module: computeShader, entryPoint: 'main' },
+        });
+        const computeBG = device.createBindGroup({
+            layout: computeBGL,
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+            ],
+        });
+
+        // Render shader: point sprites with additive blending
+        const renderShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                rotSpeed: f32,
+                armTightness: f32,
+                bulgeSize: f32,
+                particleSize: f32,
+                tiltAngle: f32,
+                dt: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+            struct VSOut {
+                @builtin(position) pos: vec4f,
+                @location(0) color: vec3f,
+                @location(1) @interpolate(flat) pointCenter: vec2f,
+                @location(2) screenPos: vec2f,
+            }
+            @group(0) @binding(0) var<storage, read> particles: array<f32>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            @vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+                let base = ii * 8u;
+                let px = particles[base + 0u];
+                let py = particles[base + 1u];
+                let pz = particles[base + 2u];
+                let r = particles[base + 4u];
+                let armIdx = particles[base + 5u];
+                let age = particles[base + 6u];
+
+                // 3D rotation (tilt)
+                let tilt = u.tiltAngle * 3.14159 / 180.0;
+                let ct = cos(tilt); let st = sin(tilt);
+                let y3d = py * ct - pz * st;
+                let z3d = py * st + pz * ct;
+
+                // Perspective
+                let scale = 1.8;
+                let aspect = u.resolution.x / u.resolution.y;
+                var screenX = px * scale / aspect;
+                var screenY = y3d * scale;
+
+                // Quad vertices for point sprite
+                var offsets = array<vec2f, 6>(
+                    vec2f(-1, -1), vec2f(1, -1), vec2f(-1, 1),
+                    vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1)
+                );
+                let pSize = u.particleSize / u.resolution.y;
+                let sizeScale = select(1.0, 1.5, armIdx < 0.0); // bulge slightly bigger
+                let finalSize = pSize * sizeScale;
+                let quadPos = vec2f(screenX, screenY) + offsets[vi] * finalSize;
+
+                // Color based on position and type
+                var col: vec3f;
+                if (armIdx < 0.0) {
+                    // Bulge: warm white/yellow
+                    col = mix(vec3f(1.0, 0.9, 0.6), vec3f(1.0, 0.95, 0.85), age);
+                } else {
+                    // Arms: blue-cyan (young) to red-orange (old scattered)
+                    if (age < 0.3) {
+                        // Inner arm = warmer
+                        col = mix(vec3f(0.9, 0.8, 0.5), vec3f(0.5, 0.7, 1.0), age / 0.3);
+                    } else if (age < 0.7) {
+                        // Mid arm = blue-cyan
+                        col = mix(vec3f(0.5, 0.7, 1.0), vec3f(0.3, 0.6, 1.0), (age - 0.3) / 0.4);
+                    } else {
+                        // Outer = dimmer, slightly scattered
+                        col = mix(vec3f(0.3, 0.6, 1.0), vec3f(0.6, 0.3, 0.2), (age - 0.7) / 0.3);
+                    }
+                }
+
+                // Distance dimming
+                let brightness = select(0.6, 1.2, armIdx < 0.0) / (0.5 + r * 3.0);
+                col *= brightness;
+
+                var out: VSOut;
+                out.pos = vec4f(quadPos, 0.0, 1.0);
+                out.color = col;
+                out.pointCenter = vec2f(screenX, screenY) * u.resolution * 0.5 + u.resolution * 0.5;
+                out.screenPos = quadPos * u.resolution * 0.5 + u.resolution * 0.5;
+                return out;
+            }
+
+            @fragment fn fs(inp: VSOut) -> @location(0) vec4f {
+                let dist = length(inp.screenPos - inp.pointCenter);
+                let maxR = u.particleSize * 1.5;
+                let alpha = exp(-dist * dist / (maxR * maxR * 0.5));
+                if (alpha < 0.01) { discard; }
+                return vec4f(inp.color * alpha, alpha);
+            }
+        `});
+
+        const renderBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+                { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            ],
+        });
+        const renderPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
+            vertex: { module: renderShader, entryPoint: 'vs' },
+            fragment: {
+                module: renderShader, entryPoint: 'fs',
+                targets: [{
+                    format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                    },
+                }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+        const renderBG = device.createBindGroup({
+            layout: renderBGL,
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+            ],
+        });
+
+        let frameCount = 0, lastFPSTime = performance.now(), lastTime = 0;
+
+        function frame(time) {
+            const now = performance.now();
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+            frameCount++;
+            if (now - lastFPSTime > 500) {
+                document.getElementById('fps').textContent = Math.round(frameCount / ((now - lastFPSTime) / 1000));
+                frameCount = 0; lastFPSTime = now;
+            }
+
+            uniformData[0] = canvas.width;
+            uniformData[1] = canvas.height;
+            uniformData[2] = time / 1000;
+            uniformData[3] = rotSpeed;
+            uniformData[4] = armTightness;
+            uniformData[5] = bulgeSize;
+            uniformData[6] = particleSize;
+            uniformData[7] = tiltAngle;
+            uniformData[8] = dt;
+            device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+            const encoder = device.createCommandEncoder();
+
+            // Compute pass: update particles
+            const computePass = encoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBG);
+            computePass.dispatchWorkgroups(Math.ceil(NUM_PARTICLES / 256));
+            computePass.end();
+
+            // Render pass: draw particles as point sprites
+            const renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.0, g: 0.0, b: 0.02, a: 1 },
+                }],
+            });
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBG);
+            renderPass.draw(6, NUM_PARTICLES);
+            renderPass.end();
+
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+    </script>
+</body>
+</html>

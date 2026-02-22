@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Magnetic Pendulum Fractal - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 14px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls button { margin-top: 10px; padding: 8px 16px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: 600; }
+        .controls button:hover { background: #67e8f9; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title-overlay { position: fixed; top: 70px; left: 20px; z-index: 90; }
+        .title-overlay h1 { font-size: 1.4rem; color: #22d3ee; margin: 0 0 4px 0; }
+        .title-overlay p { font-size: 0.85rem; color: #888; margin: 0; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(220, 50, 50, 0.95); padding: 30px 40px; border-radius: 12px; display: none; text-align: center; max-width: 400px; line-height: 1.6; }
+        #error h2 { margin: 0 0 10px; }
+        .info { font-size: 10px; color: #666; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="title-overlay">
+        <h1>Magnetic Pendulum Fractal</h1>
+        <p>Fractal basin boundaries from chaotic pendulum dynamics</p>
+    </div>
+
+    <div class="controls">
+        <label>Magnet Strength: <span id="magVal">1.0</span></label>
+        <input type="range" id="magStrength" min="0.2" max="3.0" step="0.1" value="1.0">
+        <label>Friction: <span id="fricVal">0.1</span></label>
+        <input type="range" id="friction" min="0.01" max="0.5" step="0.01" value="0.1">
+        <label>Height: <span id="heightVal">0.3</span></label>
+        <input type="range" id="height" min="0.05" max="1.0" step="0.05" value="0.3">
+        <label>Gravity: <span id="gravVal">0.5</span></label>
+        <input type="range" id="gravity" min="0.1" max="2.0" step="0.1" value="0.5">
+        <label>Zoom: <span id="zoomVal">3.0</span></label>
+        <input type="range" id="zoom" min="1.0" max="8.0" step="0.1" value="3.0">
+        <button onclick="recompute()">Recompute</button>
+        <div class="info">Adjust parameters and click Recompute to regenerate the fractal</div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Resolution: <span id="res">0</span>
+    </div>
+
+    <div id="error">
+        <h2>WebGPU Not Supported</h2>
+        <p>Your browser does not support WebGPU.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</p>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        document.getElementById('res').textContent = `${canvas.width}x${canvas.height}`;
+
+        let magStrength = 1.0, friction = 0.1, height = 0.3, gravityStr = 0.5, zoom = 3.0;
+        let needsRecompute = true;
+
+        // Compute shader: simulate pendulum from each pixel's starting position
+        const computeCode = `
+            struct Uniforms {
+                width: u32, height: u32,
+                magStrength: f32, friction: f32,
+                pendulumHeight: f32, gravity: f32,
+                zoom: f32, _pad: f32,
+            }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+            @group(0) @binding(1) var<storage, read_write> output: array<u32>;
+
+            fn magnetForce(pos: vec2f, magPos: vec2f, h: f32, strength: f32) -> vec2f {
+                let diff = magPos - pos;
+                let dist3d = sqrt(dot(diff, diff) + h * h);
+                let dist3 = dist3d * dist3d * dist3d;
+                return diff * strength / dist3;
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                if (gid.x >= u.width || gid.y >= u.height) { return; }
+
+                let aspect = f32(u.width) / f32(u.height);
+                let uv = vec2f(
+                    (f32(gid.x) / f32(u.width) - 0.5) * u.zoom * aspect,
+                    (f32(gid.y) / f32(u.height) - 0.5) * u.zoom
+                );
+
+                // 3 magnets at equilateral triangle positions
+                let mag0 = vec2f(1.0, 0.0);
+                let mag1 = vec2f(-0.5, 0.866);
+                let mag2 = vec2f(-0.5, -0.866);
+
+                var pos = uv;
+                var vel = vec2f(0.0, 0.0);
+                let dt: f32 = 0.01;
+                let maxSteps: u32 = 2000u;
+                var steps: u32 = 0u;
+                let h = u.pendulumHeight;
+                let str = u.magStrength;
+
+                // RK4 integration
+                for (var i = 0u; i < maxSteps; i++) {
+                    // Force calculation
+                    let f0 = magnetForce(pos, mag0, h, str);
+                    let f1 = magnetForce(pos, mag1, h, str);
+                    let f2 = magnetForce(pos, mag2, h, str);
+                    let restoring = -pos * u.gravity;
+                    let drag = -vel * u.friction;
+
+                    let acc1 = f0 + f1 + f2 + restoring + drag;
+
+                    // k1
+                    let k1v = acc1 * dt;
+                    let k1p = vel * dt;
+
+                    // k2
+                    let p2 = pos + k1p * 0.5;
+                    let v2 = vel + k1v * 0.5;
+                    let a2 = magnetForce(p2, mag0, h, str) + magnetForce(p2, mag1, h, str) + magnetForce(p2, mag2, h, str) - p2 * u.gravity - v2 * u.friction;
+                    let k2v = a2 * dt;
+                    let k2p = v2 * dt;
+
+                    // k3
+                    let p3 = pos + k2p * 0.5;
+                    let v3 = vel + k2v * 0.5;
+                    let a3 = magnetForce(p3, mag0, h, str) + magnetForce(p3, mag1, h, str) + magnetForce(p3, mag2, h, str) - p3 * u.gravity - v3 * u.friction;
+                    let k3v = a3 * dt;
+                    let k3p = v3 * dt;
+
+                    // k4
+                    let p4 = pos + k3p;
+                    let v4 = vel + k3v;
+                    let a4 = magnetForce(p4, mag0, h, str) + magnetForce(p4, mag1, h, str) + magnetForce(p4, mag2, h, str) - p4 * u.gravity - v4 * u.friction;
+                    let k4v = a4 * dt;
+                    let k4p = v4 * dt;
+
+                    pos += (k1p + 2.0 * k2p + 2.0 * k3p + k4p) / 6.0;
+                    vel += (k1v + 2.0 * k2v + 2.0 * k3v + k4v) / 6.0;
+                    steps = i;
+
+                    // Check if settled near a magnet
+                    if (length(vel) < 0.01 && (length(pos - mag0) < 0.15 || length(pos - mag1) < 0.15 || length(pos - mag2) < 0.15)) {
+                        break;
+                    }
+                }
+
+                // Determine which magnet
+                let d0 = length(pos - mag0);
+                let d1 = length(pos - mag1);
+                let d2 = length(pos - mag2);
+
+                var magnet: u32 = 0u;
+                if (d1 < d0 && d1 < d2) { magnet = 1u; }
+                else if (d2 < d0 && d2 < d1) { magnet = 2u; }
+
+                // Brightness by how quickly it settled
+                let brightness = clamp(1.0 - f32(steps) / 1500.0, 0.15, 1.0);
+
+                var r: f32; var g: f32; var b: f32;
+                if (magnet == 0u) {
+                    r = 0.9 * brightness; g = 0.15 * brightness; b = 0.2 * brightness;
+                } else if (magnet == 1u) {
+                    r = 0.15 * brightness; g = 0.85 * brightness; b = 0.25 * brightness;
+                } else {
+                    r = 0.2 * brightness; g = 0.3 * brightness; b = 0.9 * brightness;
+                }
+
+                // Add subtle glow at fractal boundaries (where steps are high)
+                let boundary = smoothstep(500.0, 1500.0, f32(steps));
+                r += boundary * 0.15;
+                g += boundary * 0.1;
+                b += boundary * 0.08;
+
+                let pixel = gid.y * u.width + gid.x;
+                let ri = u32(clamp(r, 0.0, 1.0) * 255.0);
+                let gi = u32(clamp(g, 0.0, 1.0) * 255.0);
+                let bi = u32(clamp(b, 0.0, 1.0) * 255.0);
+                output[pixel] = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
+            }
+        `;
+
+        // Fullscreen render shader that displays the computed texture
+        const renderCode = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+
+            struct VertexOutput { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+            @vertex fn vs(@builtin(vertex_index) idx: u32) -> VertexOutput {
+                var positions = array<vec2f, 4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var uvs = array<vec2f, 4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var out: VertexOutput;
+                out.pos = vec4f(positions[idx], 0.0, 1.0);
+                out.uv = uvs[idx];
+                return out;
+            }
+
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeCode }), entryPoint: 'main' }
+        });
+
+        const renderModule = device.createShaderModule({ code: renderCode });
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: renderModule, entryPoint: 'vs' },
+            fragment: { module: renderModule, entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        let uniformBuf, outputBuf, texture, computeBG, renderBG;
+
+        function createResources() {
+            const w = canvas.width, h = canvas.height;
+            const pixelCount = w * h;
+
+            uniformBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            outputBuf = device.createBuffer({ size: pixelCount * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+
+            texture = device.createTexture({
+                size: [w, h], format: 'rgba8unorm',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT
+            });
+
+            computeBG = device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: uniformBuf } },
+                    { binding: 1, resource: { buffer: outputBuf } }
+                ]
+            });
+
+            renderBG = device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: texture.createView() },
+                    { binding: 1, resource: sampler }
+                ]
+            });
+        }
+
+        createResources();
+
+        function runCompute() {
+            const w = canvas.width, h = canvas.height;
+            const buf = new ArrayBuffer(32);
+            const u32 = new Uint32Array(buf);
+            const f32 = new Float32Array(buf);
+            u32[0] = w; u32[1] = h;
+            f32[2] = magStrength; f32[3] = friction;
+            f32[4] = height; f32[5] = gravityStr;
+            f32[6] = zoom;
+            device.queue.writeBuffer(uniformBuf, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(w / 16), Math.ceil(h / 16));
+            cp.end();
+
+            enc.copyBufferToTexture(
+                { buffer: outputBuf, bytesPerRow: w * 4, rowsPerImage: h },
+                { texture: texture },
+                [w, h]
+            );
+            device.queue.submit([enc.finish()]);
+            needsRecompute = false;
+        }
+
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++; fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            if (needsRecompute) { runCompute(); }
+
+            const enc = device.createCommandEncoder();
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: ctx.getCurrentTexture().createView(),
+                    loadOp: 'clear', clearValue: { r: 0.02, g: 0.02, b: 0.05, a: 1 }, storeOp: 'store'
+                }]
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, renderBG);
+            rp.draw(4);
+            rp.end();
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+
+        function recompute() { needsRecompute = true; }
+        window.recompute = recompute;
+
+        document.getElementById('magStrength').addEventListener('input', e => {
+            magStrength = parseFloat(e.target.value);
+            document.getElementById('magVal').textContent = magStrength.toFixed(1);
+        });
+        document.getElementById('friction').addEventListener('input', e => {
+            friction = parseFloat(e.target.value);
+            document.getElementById('fricVal').textContent = friction.toFixed(2);
+        });
+        document.getElementById('height').addEventListener('input', e => {
+            height = parseFloat(e.target.value);
+            document.getElementById('heightVal').textContent = height.toFixed(2);
+        });
+        document.getElementById('gravity').addEventListener('input', e => {
+            gravityStr = parseFloat(e.target.value);
+            document.getElementById('gravVal').textContent = gravityStr.toFixed(1);
+        });
+        document.getElementById('zoom').addEventListener('input', e => {
+            zoom = parseFloat(e.target.value);
+            document.getElementById('zoomVal').textContent = zoom.toFixed(1);
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            ctx.configure({ device, format, alphaMode: 'opaque' });
+            document.getElementById('res').textContent = `${canvas.width}x${canvas.height}`;
+            createResources();
+            needsRecompute = true;
+        });
+
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Galaxy Formation Simulation - WebGPU - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #050510; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6,182,212,0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6,182,212,0.4); }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.8); backdrop-filter: blur(10px); padding: 15px; border-radius: 10px; z-index: 100; font-size: 12px; min-width: 220px; border: 1px solid rgba(6,182,212,0.15); }
+        .controls h3 { color: #22d3ee; margin-bottom: 10px; font-size: 14px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #94a3b8; font-size: 11px; }
+        .controls input[type=range] { width: 100%; height: 4px; -webkit-appearance: none; background: #1e293b; border-radius: 2px; outline: none; }
+        .controls input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; background: #22d3ee; border-radius: 50%; cursor: pointer; }
+        .controls .val { float: right; color: #22d3ee; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; color: #94a3b8; }
+        .stats span { color: #22d3ee; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); background: rgba(239,68,68,0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <div class="controls">
+        <h3>Galaxy Formation</h3>
+        <label>Dark Matter Mass <span class="val" id="dmVal">1.0</span></label>
+        <input type="range" id="darkMatter" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Bar Strength <span class="val" id="barVal">0.15</span></label>
+        <input type="range" id="barStrength" min="0.0" max="0.5" step="0.01" value="0.15">
+        <label>Time Speed <span class="val" id="tsVal">1.0</span></label>
+        <input type="range" id="timeSpeed" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Point Size <span class="val" id="psVal">1.5</span></label>
+        <input type="range" id="pointSize" min="0.5" max="4.0" step="0.1" value="1.5">
+    </div>
+    <div class="stats">
+        Particles: <span>200,000</span> | FPS: <span id="fps">0</span>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+
+        function resize() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            context.configure({ device, format, alphaMode: 'premultiplied' });
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const NUM_PARTICLES = 200000;
+
+        // Initialize particles: disk distribution with angular momentum
+        function initParticles() {
+            const data = new Float32Array(NUM_PARTICLES * 8); // x,y,z,mass, vx,vy,vz,age
+            for (let i = 0; i < NUM_PARTICLES; i++) {
+                const off = i * 8;
+                // Exponential disk distribution
+                const r = Math.sqrt(-2.0 * Math.log(1.0 - Math.random() * 0.95)) * 8.0;
+                const theta = Math.random() * Math.PI * 2;
+                const diskHeight = (Math.random() - 0.5) * 0.5 * Math.exp(-r * 0.3);
+
+                data[off + 0] = r * Math.cos(theta);     // x
+                data[off + 1] = r * Math.sin(theta);     // y
+                data[off + 2] = diskHeight;               // z
+
+                // Bulge particles (inner 15%)
+                if (i < NUM_PARTICLES * 0.15) {
+                    const br = Math.random() * 3.0;
+                    const btheta = Math.random() * Math.PI * 2;
+                    const bphi = Math.acos(2.0 * Math.random() - 1.0);
+                    data[off + 0] = br * Math.sin(bphi) * Math.cos(btheta);
+                    data[off + 1] = br * Math.sin(bphi) * Math.sin(btheta);
+                    data[off + 2] = br * Math.cos(bphi) * 0.5;
+                }
+
+                data[off + 3] = 1.0; // mass placeholder
+
+                // Circular orbital velocity: v = sqrt(GM/r) tangential
+                const px = data[off + 0], py = data[off + 1];
+                const dist = Math.sqrt(px * px + py * py) + 0.1;
+                const vc = Math.sqrt(50.0 / (dist + 2.0)) * 1.2;
+                data[off + 4] = -py / dist * vc + (Math.random() - 0.5) * 0.3; // vx
+                data[off + 5] =  px / dist * vc + (Math.random() - 0.5) * 0.3; // vy
+                data[off + 6] = (Math.random() - 0.5) * 0.05; // vz
+                data[off + 7] = Math.random(); // age (for color)
+            }
+            return data;
+        }
+
+        let particleData = initParticles();
+
+        const particleBuf = device.createBuffer({
+            size: NUM_PARTICLES * 8 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(particleBuf, 0, particleData);
+
+        // Uniforms: numParticles, dt, darkMatterMass, barStrength, time, width, height, pointSize
+        const uniformBuf = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const computeCode = `
+            struct Uniforms {
+                numParticles: f32, dt: f32, darkMatterMass: f32, barStrength: f32,
+                time: f32, width: f32, height: f32, pointSize: f32,
+                cameraAngleX: f32, cameraAngleY: f32, pad1: f32, pad2: f32,
+            }
+            struct Particle { pos: vec3f, mass: f32, vel: vec3f, age: f32 }
+
+            @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            fn galaxyForce(pos: vec3f) -> vec3f {
+                let r2 = dot(pos.xy, pos.xy) + 0.5;
+                let r = sqrt(r2);
+
+                // Logarithmic potential for flat rotation curve: F = -v0^2 * r / (r^2 + rc^2)
+                let v0 = 7.0;
+                let rc = 2.0;
+                let logForce = -v0 * v0 / (r2 + rc * rc);
+                var force = vec3f(pos.x * logForce, pos.y * logForce, 0.0);
+
+                // NFW dark matter halo
+                let rs = 5.0;
+                let rho0 = u.darkMatterMass * 10.0;
+                let r3d = sqrt(r2 + pos.z * pos.z) + 0.01;
+                let x_nfw = r3d / rs;
+                let nfwMass = rho0 * (log(1.0 + x_nfw) - x_nfw / (1.0 + x_nfw));
+                let nfwForce = -nfwMass / (r3d * r3d * r3d + 0.01);
+                force += pos * nfwForce;
+
+                // Bar potential for spiral density waves
+                let barAngle = u.time * 0.3;
+                let cosB = cos(barAngle);
+                let sinB = sin(barAngle);
+                let xBar = pos.x * cosB + pos.y * sinB;
+                let yBar = -pos.x * sinB + pos.y * cosB;
+                let barR2 = xBar * xBar / 9.0 + yBar * yBar / 1.0 + 1.0;
+                let barF = -u.barStrength * 20.0 / (barR2 * barR2);
+                let fxBar = barF * xBar / 4.5;
+                let fyBar = barF * yBar;
+                force.x += fxBar * cosB - fyBar * sinB;
+                force.y += fxBar * sinB + fyBar * cosB;
+
+                // Vertical restoring force (disk confinement)
+                force.z += -pos.z * 2.0;
+
+                return force;
+            }
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u32(u.numParticles)) { return; }
+
+                var p = particles[idx];
+                let dt = u.dt;
+
+                // RK2 integration (Heun's method)
+                let f1 = galaxyForce(p.pos);
+                let midPos = p.pos + p.vel * dt + f1 * dt * dt * 0.5;
+                let f2 = galaxyForce(midPos);
+                let avgForce = (f1 + f2) * 0.5;
+
+                p.vel += avgForce * dt;
+                p.pos += p.vel * dt;
+
+                // Light damping
+                p.vel *= 0.9997;
+
+                // Update velocity dispersion as age proxy
+                let speed = length(p.vel);
+                p.age = mix(p.age, speed, 0.01);
+
+                // Reset if too far
+                let r = length(p.pos);
+                if (r > 80.0) {
+                    let angle = f32(idx) * 0.618 + u.time;
+                    let newR = 2.0 + f32(idx % 100u) * 0.1;
+                    p.pos = vec3f(cos(angle) * newR, sin(angle) * newR, 0.0);
+                    let vc = sqrt(50.0 / (newR + 2.0)) * 1.2;
+                    p.vel = vec3f(-sin(angle) * vc, cos(angle) * vc, 0.0);
+                    p.age = 0.0;
+                }
+
+                particles[idx] = p;
+            }
+        `;
+
+        const renderCode = `
+            struct Uniforms {
+                numParticles: f32, dt: f32, darkMatterMass: f32, barStrength: f32,
+                time: f32, width: f32, height: f32, pointSize: f32,
+                cameraAngleX: f32, cameraAngleY: f32, pad1: f32, pad2: f32,
+            }
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) color: vec4f, @location(1) @interpolate(flat) psize: f32 }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+
+            @vertex
+            fn vs(@location(0) px: f32, @location(1) py: f32, @location(2) pz: f32, @location(3) mass: f32,
+                  @location(4) vx: f32, @location(5) vy: f32, @location(6) vz: f32, @location(7) age: f32) -> VSOut {
+                var out: VSOut;
+
+                // Camera rotation
+                let cax = u.cameraAngleX;
+                let cay = u.cameraAngleY;
+
+                // Rotate around Y axis (tilt)
+                let y1 = py * cos(cay) - pz * sin(cay);
+                let z1 = py * sin(cay) + pz * cos(cay);
+
+                // Rotate around Z axis (pan)
+                let x2 = px * cos(cax) - y1 * sin(cax);
+                let y2 = px * sin(cax) + y1 * cos(cax);
+
+                let scale = 0.025;
+                let aspect = u.width / u.height;
+
+                out.pos = vec4f(x2 * scale / aspect, y2 * scale, 0.5, 1.0);
+
+                // Color by velocity dispersion
+                let speed = length(vec3f(vx, vy, vz));
+                let t = clamp(speed * 0.12, 0.0, 1.0);
+                let r2 = px * px + py * py;
+                let distFromCenter = sqrt(r2);
+                let bulge = exp(-distFromCenter * 0.3);
+
+                // Hot fast stars: blue-white, Cold slow stars: red-orange, Bulge: yellow-white
+                var r = mix(1.0, 0.5, t) + bulge * 0.4;
+                var g = mix(0.3, 0.6, t) + bulge * 0.35;
+                var b = mix(0.1, 1.0, t * t) + bulge * 0.2;
+
+                let brightness = 0.15 + t * 0.3 + bulge * 0.5;
+                out.color = vec4f(r * brightness, g * brightness, b * brightness, brightness);
+                out.psize = u.pointSize;
+
+                return out;
+            }
+
+            @fragment
+            fn fs(@location(0) color: vec4f, @location(1) @interpolate(flat) psize: f32) -> @location(0) vec4f {
+                return color;
+            }
+        `;
+
+        const computeModule = device.createShaderModule({ code: computeCode });
+        const renderModule = device.createShaderModule({ code: renderCode });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: computeModule, entryPoint: 'main' },
+        });
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: renderModule, entryPoint: 'vs',
+                buffers: [{
+                    arrayStride: 32,
+                    attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32' },
+                        { shaderLocation: 1, offset: 4, format: 'float32' },
+                        { shaderLocation: 2, offset: 8, format: 'float32' },
+                        { shaderLocation: 3, offset: 12, format: 'float32' },
+                        { shaderLocation: 4, offset: 16, format: 'float32' },
+                        { shaderLocation: 5, offset: 20, format: 'float32' },
+                        { shaderLocation: 6, offset: 24, format: 'float32' },
+                        { shaderLocation: 7, offset: 28, format: 'float32' },
+                    ],
+                }],
+            },
+            fragment: {
+                module: renderModule, entryPoint: 'fs',
+                targets: [{
+                    format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                    },
+                }],
+            },
+            primitive: { topology: 'point-list' },
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuf } },
+            ],
+        });
+
+        const renderBG = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuf } },
+            ],
+        });
+
+        // Controls
+        const dmSlider = document.getElementById('darkMatter');
+        const barSlider = document.getElementById('barStrength');
+        const tsSlider = document.getElementById('timeSpeed');
+        const psSlider = document.getElementById('pointSize');
+        dmSlider.oninput = () => document.getElementById('dmVal').textContent = dmSlider.value;
+        barSlider.oninput = () => document.getElementById('barVal').textContent = barSlider.value;
+        tsSlider.oninput = () => document.getElementById('tsVal').textContent = tsSlider.value;
+        psSlider.oninput = () => document.getElementById('psVal').textContent = psSlider.value;
+
+        // Camera rotation via mouse drag
+        let cameraAngleX = 0.0, cameraAngleY = 0.7;
+        let dragging = false, lastMX = 0, lastMY = 0;
+        canvas.addEventListener('mousedown', (e) => { dragging = true; lastMX = e.clientX; lastMY = e.clientY; });
+        canvas.addEventListener('mouseup', () => dragging = false);
+        canvas.addEventListener('mouseleave', () => dragging = false);
+        canvas.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            cameraAngleX += (e.clientX - lastMX) * 0.005;
+            cameraAngleY += (e.clientY - lastMY) * 0.005;
+            cameraAngleY = Math.max(-1.5, Math.min(1.5, cameraAngleY));
+            lastMX = e.clientX; lastMY = e.clientY;
+        });
+
+        let time = 0;
+        let frameCount = 0, lastFpsTime = performance.now();
+
+        function frame() {
+            const timeSpeed = parseFloat(tsSlider.value);
+            const dt = 0.008 * timeSpeed;
+            time += dt;
+
+            const uniforms = new Float32Array([
+                NUM_PARTICLES, dt, parseFloat(dmSlider.value), parseFloat(barSlider.value),
+                time, canvas.width, canvas.height, parseFloat(psSlider.value),
+                cameraAngleX, cameraAngleY, 0, 0,
+            ]);
+            device.queue.writeBuffer(uniformBuf, 0, uniforms);
+
+            const encoder = device.createCommandEncoder();
+
+            // Compute pass
+            const cp = encoder.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(NUM_PARTICLES / 256));
+            cp.end();
+
+            // Render pass
+            const rp = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    clearValue: { r: 0.02, g: 0.01, b: 0.04, a: 1 },
+                    loadOp: 'clear', storeOp: 'store',
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, renderBG);
+            rp.setVertexBuffer(0, particleBuf);
+            rp.draw(NUM_PARTICLES);
+            rp.end();
+
+            device.queue.submit([encoder.finish()]);
+
+            // FPS
+            frameCount++;
+            const now = performance.now();
+            if (now - lastFpsTime > 500) {
+                document.getElementById('fps').textContent = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+                frameCount = 0; lastFpsTime = now;
+            }
+
+            requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+    </script>
+</body>
+</html>

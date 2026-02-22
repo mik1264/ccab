@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hilbert Curve Flow - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 168px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title">Hilbert Curve Particle Flow</div>
+
+    <div class="controls">
+        <label>Curve Order: <span id="orderVal">5</span></label>
+        <input type="range" id="order" min="1" max="6" step="1" value="5">
+        <label>Particles: <span id="particlesVal">50000</span></label>
+        <input type="range" id="particles" min="10000" max="100000" step="10000" value="50000">
+        <label>Flow Speed: <span id="speedVal">0.03</span></label>
+        <input type="range" id="speed" min="0.005" max="0.1" step="0.005" value="0.03">
+        <label>Trail Length: <span id="trailVal">0.92</span></label>
+        <input type="range" id="trail" min="0.80" max="0.98" step="0.01" value="0.92">
+        <label>Color Mode:</label>
+        <select id="colorSelect">
+            <option value="0" selected>Rainbow Phase</option>
+            <option value="1">Fire Trail</option>
+            <option value="2">Ocean Depth</option>
+            <option value="3">Neon Pulse</option>
+        </select>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Order: <span id="orderInfo">5</span> | Points: <span id="curvePoints">0</span>
+    </div>
+
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const W = window.innerWidth;
+        const H = window.innerHeight;
+        canvas.width = W; canvas.height = H;
+
+        const context = canvas.getContext('webgpu');
+        const fmt = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: fmt, alphaMode: 'opaque' });
+
+        let curveOrder = 5, numParticles = 50000, flowSpeed = 0.03, trailFade = 0.92, colorMode = 0;
+
+        // Hilbert curve: convert distance d to (x,y) for order n
+        function hilbertD2XY(n, d) {
+            let x = 0, y = 0;
+            let rx, ry, s, t = d;
+            for (s = 1; s < n; s *= 2) {
+                rx = 1 & (t / 2);
+                ry = 1 & (t ^ rx);
+                if (ry === 0) {
+                    if (rx === 1) { x = s - 1 - x; y = s - 1 - y; }
+                    const tmp = x; x = y; y = tmp;
+                }
+                x += s * rx;
+                y += s * ry;
+                t = Math.floor(t / 4);
+            }
+            return [x, y];
+        }
+
+        // Generate Hilbert curve points and upload
+        const MAX_CURVE_POINTS = 4096; // order 6 = 64x64 = 4096
+        const curveBuffer = device.createBuffer({ size: MAX_CURVE_POINTS * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const particleBuffer = device.createBuffer({ size: numParticles * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }); // phase per particle
+
+        // Two framebuffers for trail effect
+        const trailTextures = [
+            device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING }),
+            device.createTexture({ size: [W, H], format: 'rgba8unorm', usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING })
+        ];
+
+        let curvePointCount = 0;
+
+        function uploadCurve(order) {
+            const n = 1 << order;
+            const total = n * n;
+            curvePointCount = total;
+            const data = new Float32Array(MAX_CURVE_POINTS * 2);
+
+            const margin = 60;
+            const size = Math.min(W, H) - margin * 2;
+            const offsetX = (W - size) / 2;
+            const offsetY = (H - size) / 2;
+
+            for (let d = 0; d < total; d++) {
+                const [cx, cy] = hilbertD2XY(n, d);
+                data[d * 2] = offsetX + (cx + 0.5) / n * size;
+                data[d * 2 + 1] = offsetY + (cy + 0.5) / n * size;
+            }
+            device.queue.writeBuffer(curveBuffer, 0, data);
+            document.getElementById('curvePoints').textContent = total.toLocaleString();
+            document.getElementById('orderInfo').textContent = order;
+        }
+
+        function initParticles() {
+            const MAX_P = 100000;
+            const phases = new Float32Array(MAX_P);
+            for (let i = 0; i < MAX_P; i++) {
+                phases[i] = Math.random(); // random phase 0..1
+            }
+            device.queue.writeBuffer(particleBuffer, 0, phases);
+        }
+
+        uploadCurve(curveOrder);
+        initParticles();
+
+        // Compute shader: update particles (advance phase) and draw them
+        const computeShader = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                numParticles: u32,
+                curvePoints: u32,
+                flowSpeed: f32,
+                trailFade: f32,
+                colorMode: u32,
+                pad0: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read> curve: array<vec2f>;
+            @group(0) @binding(1) var<storage, read_write> phases: array<f32>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+            @group(0) @binding(3) var prevTex: texture_2d<f32>;
+            @group(0) @binding(4) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+            fn hsl2rgb(h: f32, s: f32, l: f32) -> vec3f {
+                let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+                let x = c * (1.0 - abs((h * 6.0 % 2.0) - 1.0));
+                let m = l - c * 0.5;
+                var rgb: vec3f;
+                let hh = h * 6.0;
+                if (hh < 1.0) { rgb = vec3f(c, x, 0.0); }
+                else if (hh < 2.0) { rgb = vec3f(x, c, 0.0); }
+                else if (hh < 3.0) { rgb = vec3f(0.0, c, x); }
+                else if (hh < 4.0) { rgb = vec3f(0.0, x, c); }
+                else if (hh < 5.0) { rgb = vec3f(x, 0.0, c); }
+                else { rgb = vec3f(c, 0.0, x); }
+                return rgb + vec3f(m);
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn fade(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let prev = textureLoad(prevTex, vec2i(id.xy), 0);
+                let faded = prev.rgb * u.trailFade;
+                textureStore(outTex, vec2i(id.xy), vec4f(faded, 1.0));
+            }
+
+            @compute @workgroup_size(256)
+            fn updateAndDraw(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.numParticles) { return; }
+
+                // Advance phase
+                var phase = phases[id.x] + u.flowSpeed;
+                if (phase >= 1.0) { phase -= 1.0; }
+                phases[id.x] = phase;
+
+                // Interpolate position along curve
+                let totalPoints = f32(u.curvePoints);
+                let exactIdx = phase * (totalPoints - 1.0);
+                let idx0 = u32(floor(exactIdx));
+                let idx1 = min(idx0 + 1u, u.curvePoints - 1u);
+                let frac = exactIdx - floor(exactIdx);
+
+                let p0 = curve[idx0];
+                let p1 = curve[idx1];
+                let pos = mix(p0, p1, frac);
+
+                let px = i32(pos.x);
+                let py = i32(pos.y);
+                if (px < 0 || px >= i32(u.resolution.x) || py < 0 || py >= i32(u.resolution.y)) { return; }
+
+                // Color by phase
+                var color: vec3f;
+                if (u.colorMode == 0u) {
+                    // Rainbow
+                    color = hsl2rgb(phase, 0.9, 0.55);
+                } else if (u.colorMode == 1u) {
+                    // Fire
+                    let t = phase;
+                    color = vec3f(
+                        min(t * 3.0, 1.0),
+                        max(0.0, t * 2.0 - 0.5) * 0.8,
+                        max(0.0, t - 0.7) * 0.5
+                    );
+                } else if (u.colorMode == 2u) {
+                    // Ocean
+                    let t = phase;
+                    color = vec3f(
+                        t * 0.2,
+                        0.2 + t * 0.5,
+                        0.4 + t * 0.6
+                    );
+                } else {
+                    // Neon pulse
+                    let pulse = sin(phase * 12.566 + u.time * 3.0) * 0.5 + 0.5;
+                    color = hsl2rgb(phase * 0.3 + u.time * 0.1, 1.0, 0.3 + pulse * 0.3);
+                }
+
+                // Brighten particles
+                color = min(color * 1.5, vec3f(1.0));
+
+                // Draw particle as bright dot
+                textureStore(outTex, vec2i(px, py), vec4f(color, 1.0));
+
+                // Also draw neighboring pixels for visibility at lower orders
+                if (u.curvePoints < 256u) {
+                    for (var dy = -1; dy <= 1; dy++) {
+                        for (var dx = -1; dx <= 1; dx++) {
+                            let nx = px + dx;
+                            let ny = py + dy;
+                            if (nx >= 0 && nx < i32(u.resolution.x) && ny >= 0 && ny < i32(u.resolution.y)) {
+                                textureStore(outTex, vec2i(nx, ny), vec4f(color * 0.7, 1.0));
+                            }
+                        }
+                    }
+                }
+            }
+        `;
+
+        // Also draw the curve itself as faint lines
+        const curveDrawShader = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                numParticles: u32,
+                curvePoints: u32,
+                flowSpeed: f32,
+                trailFade: f32,
+                colorMode: u32,
+                pad0: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read> curve: array<vec2f>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+            @group(0) @binding(2) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.curvePoints - 1u) { return; }
+
+                let p0 = curve[id.x];
+                let p1 = curve[id.x + 1u];
+
+                // Draw line between p0 and p1 using Bresenham-like stepping
+                let delta = p1 - p0;
+                let steps = max(abs(delta.x), abs(delta.y));
+                if (steps < 0.5) { return; }
+
+                let numSteps = i32(ceil(steps));
+                let lineColor = vec3f(0.15, 0.18, 0.25);
+
+                for (var i = 0; i <= numSteps; i++) {
+                    let t = f32(i) / f32(max(numSteps, 1));
+                    let pos = mix(p0, p1, t);
+                    let px = i32(pos.x);
+                    let py = i32(pos.y);
+                    if (px >= 0 && px < i32(u.resolution.x) && py >= 0 && py < i32(u.resolution.y)) {
+                        textureStore(outTex, vec2i(px, py), vec4f(lineColor, 1.0));
+                    }
+                }
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const computeModule = device.createShaderModule({ code: computeShader });
+        const curveDrawModule = device.createShaderModule({ code: curveDrawShader });
+
+        const fadePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: computeModule, entryPoint: 'fade' }
+        });
+
+        const updateDrawPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: computeModule, entryPoint: 'updateAndDraw' }
+        });
+
+        const curveLinePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: curveDrawModule, entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format: fmt }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        // Bind groups for fade (ping-pong)
+        const fadeBGs = [
+            device.createBindGroup({
+                layout: fadePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: curveBuffer } },
+                    { binding: 1, resource: { buffer: particleBuffer } },
+                    { binding: 2, resource: { buffer: uniformBuffer } },
+                    { binding: 3, resource: trailTextures[0].createView() },
+                    { binding: 4, resource: trailTextures[1].createView() }
+                ]
+            }),
+            device.createBindGroup({
+                layout: fadePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: curveBuffer } },
+                    { binding: 1, resource: { buffer: particleBuffer } },
+                    { binding: 2, resource: { buffer: uniformBuffer } },
+                    { binding: 3, resource: trailTextures[1].createView() },
+                    { binding: 4, resource: trailTextures[0].createView() }
+                ]
+            })
+        ];
+
+        // updateAndDraw uses same bind group layout as fade
+        const updateDrawBGs = [
+            device.createBindGroup({
+                layout: updateDrawPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: curveBuffer } },
+                    { binding: 1, resource: { buffer: particleBuffer } },
+                    { binding: 2, resource: { buffer: uniformBuffer } },
+                    { binding: 3, resource: trailTextures[0].createView() },
+                    { binding: 4, resource: trailTextures[1].createView() }
+                ]
+            }),
+            device.createBindGroup({
+                layout: updateDrawPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: curveBuffer } },
+                    { binding: 1, resource: { buffer: particleBuffer } },
+                    { binding: 2, resource: { buffer: uniformBuffer } },
+                    { binding: 3, resource: trailTextures[1].createView() },
+                    { binding: 4, resource: trailTextures[0].createView() }
+                ]
+            })
+        ];
+
+        const curveLineBGs = [
+            device.createBindGroup({
+                layout: curveLinePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: curveBuffer } },
+                    { binding: 1, resource: { buffer: uniformBuffer } },
+                    { binding: 2, resource: trailTextures[1].createView() }
+                ]
+            }),
+            device.createBindGroup({
+                layout: curveLinePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: curveBuffer } },
+                    { binding: 1, resource: { buffer: uniformBuffer } },
+                    { binding: 2, resource: trailTextures[0].createView() }
+                ]
+            })
+        ];
+
+        const displayBGs = [
+            device.createBindGroup({
+                layout: displayPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: trailTextures[1].createView() },
+                    { binding: 1, resource: sampler }
+                ]
+            }),
+            device.createBindGroup({
+                layout: displayPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: trailTextures[0].createView() },
+                    { binding: 1, resource: sampler }
+                ]
+            })
+        ];
+
+        let pingPong = 0;
+        let startTime = performance.now();
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const buf = new ArrayBuffer(48);
+            const f = new Float32Array(buf);
+            const ui = new Uint32Array(buf);
+            f[0] = W; f[1] = H;
+            f[2] = (now - startTime) / 1000;
+            ui[3] = numParticles;
+            ui[4] = curvePointCount;
+            f[5] = flowSpeed;
+            f[6] = trailFade;
+            ui[7] = colorMode;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+
+            // 1. Fade previous frame
+            const fadePass = enc.beginComputePass();
+            fadePass.setPipeline(fadePipeline);
+            fadePass.setBindGroup(0, fadeBGs[pingPong]);
+            fadePass.dispatchWorkgroups(Math.ceil(W / 16), Math.ceil(H / 16));
+            fadePass.end();
+
+            // 2. Draw curve lines (faint)
+            const linePass = enc.beginComputePass();
+            linePass.setPipeline(curveLinePipeline);
+            linePass.setBindGroup(0, curveLineBGs[pingPong]);
+            linePass.dispatchWorkgroups(Math.ceil(curvePointCount / 256));
+            linePass.end();
+
+            // 3. Update particles and draw them
+            const drawPass = enc.beginComputePass();
+            drawPass.setPipeline(updateDrawPipeline);
+            drawPass.setBindGroup(0, updateDrawBGs[pingPong]);
+            drawPass.dispatchWorkgroups(Math.ceil(numParticles / 256));
+            drawPass.end();
+
+            // 4. Display
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBGs[pingPong]);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+            pingPong = 1 - pingPong;
+        }
+
+        document.getElementById('order').addEventListener('input', (e) => {
+            curveOrder = parseInt(e.target.value);
+            document.getElementById('orderVal').textContent = curveOrder;
+            uploadCurve(curveOrder);
+        });
+        document.getElementById('particles').addEventListener('input', (e) => {
+            numParticles = parseInt(e.target.value);
+            document.getElementById('particlesVal').textContent = numParticles.toLocaleString();
+        });
+        document.getElementById('speed').addEventListener('input', (e) => {
+            flowSpeed = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = flowSpeed.toFixed(3);
+        });
+        document.getElementById('trail').addEventListener('input', (e) => {
+            trailFade = parseFloat(e.target.value);
+            document.getElementById('trailVal').textContent = trailFade.toFixed(2);
+        });
+        document.getElementById('colorSelect').addEventListener('change', (e) => {
+            colorMode = parseInt(e.target.value);
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

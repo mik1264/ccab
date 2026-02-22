@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Black Hole Gravitational Lensing - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #000; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 14px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title-overlay { position: fixed; top: 70px; left: 20px; z-index: 90; }
+        .title-overlay h1 { font-size: 1.4rem; color: #22d3ee; margin: 0 0 4px 0; }
+        .title-overlay p { font-size: 0.85rem; color: #888; margin: 0; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(220, 50, 50, 0.95); padding: 30px 40px; border-radius: 12px; display: none; text-align: center; max-width: 400px; line-height: 1.6; }
+        #error h2 { margin: 0 0 10px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="title-overlay">
+        <h1>Black Hole Gravitational Lensing</h1>
+        <p>Schwarzschild metric photon ray tracing with accretion disk</p>
+    </div>
+
+    <div class="controls">
+        <label>Black Hole Mass: <span id="massVal">1.0</span></label>
+        <input type="range" id="mass" min="0.3" max="3.0" step="0.1" value="1.0">
+        <label>Disk Brightness: <span id="diskVal">1.0</span></label>
+        <input type="range" id="diskBright" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Disk Inner Radius: <span id="innerVal">3.0</span></label>
+        <input type="range" id="innerRadius" min="1.5" max="6.0" step="0.1" value="3.0">
+        <label>Disk Outer Radius: <span id="outerVal">12.0</span></label>
+        <input type="range" id="outerRadius" min="6.0" max="25.0" step="0.5" value="12.0">
+        <label>Camera Distance: <span id="camVal">20.0</span></label>
+        <input type="range" id="camDist" min="8.0" max="50.0" step="1.0" value="20.0">
+        <label>Tilt Angle: <span id="tiltVal">75</span>&deg;</label>
+        <input type="range" id="tilt" min="10" max="90" step="1" value="75">
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span>
+    </div>
+
+    <div id="error">
+        <h2>WebGPU Not Supported</h2>
+        <p>Your browser does not support WebGPU.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</p>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        let bhMass = 1.0, diskBrightness = 1.0, innerRadius = 3.0, outerRadius = 12.0;
+        let camDist = 20.0, tiltAngle = 75.0;
+
+        // Fragment shader does all the work - fullscreen raytracing
+        const shaderCode = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                mass: f32,
+                diskBrightness: f32,
+                innerRadius: f32,
+                outerRadius: f32,
+                camDist: f32,
+                tiltAngle: f32,
+                _pad1: f32, _pad2: f32, _pad3: f32,
+            }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+
+            struct VertexOutput { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+            @vertex fn vs(@builtin(vertex_index) idx: u32) -> VertexOutput {
+                var positions = array<vec2f, 4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var out: VertexOutput;
+                out.pos = vec4f(positions[idx], 0.0, 1.0);
+                out.uv = positions[idx];
+                return out;
+            }
+
+            // Hash for procedural starfield
+            fn hash21(p: vec2f) -> f32 {
+                var p3 = fract(vec3f(p.x, p.y, p.x) * vec3f(0.1031, 0.1030, 0.0973));
+                p3 += dot(p3, vec3f(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            fn hash22(p: vec2f) -> vec2f {
+                let n = sin(dot(p, vec2f(127.1, 311.7)));
+                return fract(vec2f(n, n * 1.2345) * 43758.5453);
+            }
+
+            // Procedural starfield from direction
+            fn starfield(dir: vec3f) -> vec3f {
+                // Project direction to 2D
+                let theta = atan2(dir.z, dir.x);
+                let phi = asin(clamp(dir.y, -1.0, 1.0));
+                let uv = vec2f(theta * 3.0, phi * 6.0);
+                let grid = floor(uv);
+                var brightness = 0.0;
+
+                for (var dx = -1; dx <= 1; dx++) {
+                    for (var dy = -1; dy <= 1; dy++) {
+                        let cell = grid + vec2f(f32(dx), f32(dy));
+                        let starPos = cell + hash22(cell);
+                        let d = length(uv - starPos);
+                        let h = hash21(cell * 17.31);
+                        if (h > 0.92) {
+                            let size = (h - 0.92) * 12.5;
+                            brightness += size * exp(-d * d * 800.0);
+                        }
+                    }
+                }
+
+                // Star color variation
+                let colorSeed = hash21(floor(uv) * 7.7);
+                var starColor = vec3f(1.0);
+                if (colorSeed < 0.3) { starColor = vec3f(0.8, 0.85, 1.0); }
+                else if (colorSeed < 0.6) { starColor = vec3f(1.0, 0.95, 0.8); }
+                else { starColor = vec3f(1.0, 0.8, 0.7); }
+
+                return starColor * brightness;
+            }
+
+            // Accretion disk color
+            fn diskColor(r: f32, angle: f32) -> vec3f {
+                let t = clamp((r - u.innerRadius) / (u.outerRadius - u.innerRadius), 0.0, 1.0);
+                // Hot inner edge, cooler outer
+                let innerCol = vec3f(1.0, 0.85, 0.4);
+                let midCol = vec3f(0.9, 0.4, 0.1);
+                let outerCol = vec3f(0.3, 0.08, 0.02);
+
+                var col: vec3f;
+                if (t < 0.3) {
+                    col = mix(innerCol, midCol, t / 0.3);
+                } else {
+                    col = mix(midCol, outerCol, (t - 0.3) / 0.7);
+                }
+
+                // Spiral arm density variation
+                let spiral = sin(angle * 3.0 - r * 2.0 + u.time * 0.5) * 0.3 + 0.7;
+                let noise = hash21(vec2f(r * 10.0, angle * 5.0)) * 0.2 + 0.8;
+
+                // Brightness falls off with distance
+                let brightness = (1.0 - t * t) * spiral * noise * u.diskBrightness;
+
+                return col * brightness * 2.0;
+            }
+
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                let aspect = u.resolution.x / u.resolution.y;
+                let screenUV = vec2f(uv.x * aspect, uv.y);
+
+                // Camera setup
+                let tiltRad = u.tiltAngle * 3.14159 / 180.0;
+                let camPos = vec3f(0.0, sin(tiltRad) * u.camDist, cos(tiltRad) * u.camDist);
+                let camTarget = vec3f(0.0, 0.0, 0.0);
+
+                let forward = normalize(camTarget - camPos);
+                let right = normalize(cross(forward, vec3f(0.0, 1.0, 0.0)));
+                let up = cross(right, forward);
+
+                let fov = 1.5;
+                var rayDir = normalize(forward * fov + right * screenUV.x + up * screenUV.y);
+                var rayPos = camPos;
+
+                // Schwarzschild radius
+                let rs = 2.0 * u.mass;
+                let photonSphere = 1.5 * rs;
+
+                // Trace photon through curved spacetime
+                // Using Euler integration of geodesic equation
+                let stepSize = 0.15;
+                let maxSteps = 400;
+                var color = vec3f(0.0);
+                var diskHit = false;
+
+                let prevY = rayPos.y;
+
+                for (var i = 0; i < maxSteps; i++) {
+                    let r = length(rayPos);
+
+                    // Inside event horizon - absorbed
+                    if (r < rs) {
+                        color = vec3f(0.0);
+                        break;
+                    }
+
+                    // Gravitational deflection: acceleration = -1.5 * rs^2 / r^4 * pos
+                    // This is the Schwarzschild geodesic in isotropic coordinates (simplified)
+                    let accel = -1.5 * rs * rs / (r * r * r * r) * rayPos;
+
+                    // Update ray
+                    rayDir = normalize(rayDir + accel * stepSize);
+                    let prevPos = rayPos;
+                    rayPos += rayDir * stepSize;
+
+                    // Check disk intersection (y = 0 plane)
+                    if (prevPos.y * rayPos.y < 0.0 && !diskHit) {
+                        // Interpolate to find exact intersection
+                        let t = prevPos.y / (prevPos.y - rayPos.y);
+                        let hitPos = mix(prevPos, rayPos, t);
+                        let hitR = length(vec2f(hitPos.x, hitPos.z));
+                        let hitAngle = atan2(hitPos.z, hitPos.x);
+
+                        if (hitR > u.innerRadius && hitR < u.outerRadius) {
+                            // Doppler & gravitational redshift approximation
+                            let redshift = sqrt(1.0 - rs / hitR);
+                            let dCol = diskColor(hitR, hitAngle) * redshift;
+                            color += dCol;
+                            diskHit = true;
+                        }
+                    }
+
+                    // Escaped - sample starfield
+                    if (r > u.camDist * 3.0) {
+                        color += starfield(rayDir);
+                        break;
+                    }
+                }
+
+                // Add photon ring glow near the black hole
+                let screenR = length(screenUV);
+                let angularRS = rs / u.camDist;
+                let photonRingR = photonSphere / u.camDist * 1.5;
+                let ringGlow = exp(-abs(screenR - photonRingR) * 30.0 / angularRS) * 0.15;
+                color += vec3f(0.8, 0.5, 0.2) * ringGlow;
+
+                // Tonemap
+                color = color / (1.0 + color);
+                color = pow(color, vec3f(0.85));
+
+                return vec4f(color, 1.0);
+            }
+        `;
+
+        const shaderModule = device.createShaderModule({ code: shaderCode });
+        const pipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: shaderModule, entryPoint: 'vs' },
+            fragment: { module: shaderModule, entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const uniformBuf = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuf } }]
+        });
+
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+        let totalTime = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = Math.min((now - lastTime) / 1000, 0.033);
+            lastTime = now;
+            totalTime += dt;
+
+            fpsFrames++; fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            const buf = new Float32Array(12);
+            buf[0] = canvas.width; buf[1] = canvas.height;
+            buf[2] = totalTime; buf[3] = bhMass;
+            buf[4] = diskBrightness; buf[5] = innerRadius;
+            buf[6] = outerRadius; buf[7] = camDist;
+            buf[8] = tiltAngle;
+            device.queue.writeBuffer(uniformBuf, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: ctx.getCurrentTexture().createView(),
+                    loadOp: 'clear', clearValue: { r: 0, g: 0, b: 0, a: 1 }, storeOp: 'store'
+                }]
+            });
+            rp.setPipeline(pipeline);
+            rp.setBindGroup(0, bindGroup);
+            rp.draw(4);
+            rp.end();
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+
+        document.getElementById('mass').addEventListener('input', e => {
+            bhMass = parseFloat(e.target.value);
+            document.getElementById('massVal').textContent = bhMass.toFixed(1);
+        });
+        document.getElementById('diskBright').addEventListener('input', e => {
+            diskBrightness = parseFloat(e.target.value);
+            document.getElementById('diskVal').textContent = diskBrightness.toFixed(1);
+        });
+        document.getElementById('innerRadius').addEventListener('input', e => {
+            innerRadius = parseFloat(e.target.value);
+            document.getElementById('innerVal').textContent = innerRadius.toFixed(1);
+        });
+        document.getElementById('outerRadius').addEventListener('input', e => {
+            outerRadius = parseFloat(e.target.value);
+            document.getElementById('outerVal').textContent = outerRadius.toFixed(1);
+        });
+        document.getElementById('camDist').addEventListener('input', e => {
+            camDist = parseFloat(e.target.value);
+            document.getElementById('camVal').textContent = camDist.toFixed(1);
+        });
+        document.getElementById('tilt').addEventListener('input', e => {
+            tiltAngle = parseFloat(e.target.value);
+            document.getElementById('tiltVal').textContent = Math.round(tiltAngle);
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            ctx.configure({ device, format, alphaMode: 'opaque' });
+        });
+
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

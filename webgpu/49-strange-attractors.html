@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strange Attractor Collection - WebGPU - CCAB</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #050510; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6,182,212,0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6,182,212,0.4); }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.85); backdrop-filter: blur(10px); padding: 15px; border-radius: 10px; z-index: 100; font-size: 12px; min-width: 230px; border: 1px solid rgba(6,182,212,0.15); }
+        .controls h3 { color: #22d3ee; margin-bottom: 10px; font-size: 14px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #94a3b8; font-size: 11px; }
+        .controls input[type=range] { width: 100%; height: 4px; -webkit-appearance: none; background: #1e293b; border-radius: 2px; outline: none; }
+        .controls input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; background: #22d3ee; border-radius: 50%; cursor: pointer; }
+        .controls .val { float: right; color: #22d3ee; }
+        .attractor-btns { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+        .attr-btn { padding: 5px 10px; background: rgba(6,182,212,0.15); color: #22d3ee; border: 1px solid rgba(6,182,212,0.25); border-radius: 5px; cursor: pointer; font-size: 11px; transition: all 0.2s; }
+        .attr-btn:hover, .attr-btn.active { background: rgba(6,182,212,0.4); border-color: #22d3ee; }
+        .controls select { width: 100%; padding: 6px; background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; margin-top: 4px; font-size: 12px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; color: #94a3b8; }
+        .stats span { color: #22d3ee; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); background: rgba(239,68,68,0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <div class="controls">
+        <h3>Strange Attractors</h3>
+        <div class="attractor-btns">
+            <button class="attr-btn active" data-type="0">Lorenz</button>
+            <button class="attr-btn" data-type="1">Rossler</button>
+            <button class="attr-btn" data-type="2">Halvorsen</button>
+            <button class="attr-btn" data-type="3">Thomas</button>
+            <button class="attr-btn" data-type="4">Aizawa</button>
+        </div>
+        <label>Color Map</label>
+        <select id="colormap">
+            <option value="0">Inferno</option>
+            <option value="1">Viridis</option>
+            <option value="2">Plasma</option>
+            <option value="3">Cyan-Magenta</option>
+        </select>
+        <label>Time Step <span class="val" id="dtVal">0.003</span></label>
+        <input type="range" id="dt" min="0.0005" max="0.01" step="0.0005" value="0.003">
+        <label>Orbit Speed <span class="val" id="orbitVal">0.15</span></label>
+        <input type="range" id="orbit" min="0.0" max="0.5" step="0.01" value="0.15">
+        <label>Points <span class="val" id="pointVal">500K</span></label>
+        <input type="range" id="points" min="100000" max="1000000" step="100000" value="500000">
+        <label>Trail Fade <span class="val" id="fadeVal">0.985</span></label>
+        <input type="range" id="fade" min="0.95" max="0.999" step="0.001" value="0.985">
+    </div>
+    <div class="stats">
+        Points: <span id="count">500,000</span> | FPS: <span id="fps">0</span>
+    </div>
+    <canvas id="canvas"></canvas>
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+
+        function resize() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            context.configure({ device, format, alphaMode: 'premultiplied' });
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const MAX_PARTICLES = 1000000;
+        let numParticles = 500000;
+        let attractorType = 0;
+        let colormapType = 0;
+
+        // Attractor parameters
+        const attractorParams = [
+            { name: 'Lorenz', scale: 0.022, zOff: 25 },
+            { name: 'Rossler', scale: 0.04, zOff: 0 },
+            { name: 'Halvorsen', scale: 0.06, zOff: 0 },
+            { name: 'Thomas', scale: 0.18, zOff: 0 },
+            { name: 'Aizawa', scale: 0.25, zOff: 0 },
+        ];
+
+        function createParticles(n, type) {
+            const data = new Float32Array(n * 4);
+            for (let i = 0; i < n; i++) {
+                const off = i * 4;
+                if (type === 0) { // Lorenz
+                    data[off] = (Math.random() - 0.5) * 30;
+                    data[off+1] = (Math.random() - 0.5) * 30;
+                    data[off+2] = Math.random() * 40 + 5;
+                } else if (type === 1) { // Rossler
+                    data[off] = (Math.random() - 0.5) * 20;
+                    data[off+1] = (Math.random() - 0.5) * 20;
+                    data[off+2] = (Math.random() - 0.5) * 20;
+                } else if (type === 2) { // Halvorsen
+                    data[off] = (Math.random() - 0.5) * 10;
+                    data[off+1] = (Math.random() - 0.5) * 10;
+                    data[off+2] = (Math.random() - 0.5) * 10;
+                } else if (type === 3) { // Thomas
+                    data[off] = (Math.random() - 0.5) * 4;
+                    data[off+1] = (Math.random() - 0.5) * 4;
+                    data[off+2] = (Math.random() - 0.5) * 4;
+                } else { // Aizawa
+                    data[off] = (Math.random() - 0.5) * 2;
+                    data[off+1] = (Math.random() - 0.5) * 2;
+                    data[off+2] = (Math.random() - 0.5) * 2;
+                }
+                data[off+3] = Math.random(); // age
+            }
+            return data;
+        }
+
+        const particleBuf = device.createBuffer({
+            size: MAX_PARTICLES * 16,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+
+        let particleData = createParticles(numParticles, attractorType);
+        device.queue.writeBuffer(particleBuf, 0, particleData);
+
+        // Uniforms: numP, dt, type, time, width, height, fade, orbitSpeed, colormap, scale, zOff, pad
+        const uniformBuf = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const computeCode = `
+            struct Uniforms {
+                numP: f32, dt: f32, atype: f32, time: f32,
+                width: f32, height: f32, fade: f32, orbitSpeed: f32,
+                colormap: f32, scale: f32, zOff: f32, camAngleX: f32,
+                camAngleY: f32, pad1: f32, pad2: f32, pad3: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read_write> particles: array<vec4f>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            fn attractor(p: vec3f, atype: f32) -> vec3f {
+                var d = vec3f(0.0);
+
+                if (atype < 0.5) {
+                    // Lorenz
+                    let sigma = 10.0; let rho = 28.0; let beta = 2.6667;
+                    d.x = sigma * (p.y - p.x);
+                    d.y = p.x * (rho - p.z) - p.y;
+                    d.z = p.x * p.y - beta * p.z;
+                } else if (atype < 1.5) {
+                    // Rossler
+                    let a = 0.2; let b = 0.2; let c = 5.7;
+                    d.x = -p.y - p.z;
+                    d.y = p.x + a * p.y;
+                    d.z = b + p.z * (p.x - c);
+                } else if (atype < 2.5) {
+                    // Halvorsen
+                    let a = 1.4;
+                    d.x = -a * p.x - 4.0 * p.y - 4.0 * p.z - p.y * p.y;
+                    d.y = -a * p.y - 4.0 * p.z - 4.0 * p.x - p.z * p.z;
+                    d.z = -a * p.z - 4.0 * p.x - 4.0 * p.y - p.x * p.x;
+                } else if (atype < 3.5) {
+                    // Thomas
+                    let b = 0.208186;
+                    d.x = sin(p.y) - b * p.x;
+                    d.y = sin(p.z) - b * p.y;
+                    d.z = sin(p.x) - b * p.z;
+                } else {
+                    // Aizawa
+                    let a = 0.95; let b = 0.7; let c = 0.6; let dd = 3.5; let e = 0.25; let f = 0.1;
+                    d.x = (p.z - b) * p.x - dd * p.y;
+                    d.y = dd * p.x + (p.z - b) * p.y;
+                    d.z = c + a * p.z - p.z * p.z * p.z / 3.0 - (p.x * p.x + p.y * p.y) * (1.0 + e * p.z) + f * p.z * p.x * p.x * p.x;
+                }
+
+                return d;
+            }
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u32(u.numP)) { return; }
+
+                var p = particles[idx];
+                let pos = p.xyz;
+                let dt = u.dt;
+
+                // RK4 integration
+                let k1 = attractor(pos, u.atype);
+                let k2 = attractor(pos + k1 * dt * 0.5, u.atype);
+                let k3 = attractor(pos + k2 * dt * 0.5, u.atype);
+                let k4 = attractor(pos + k3 * dt, u.atype);
+
+                let newPos = pos + (k1 + 2.0 * k2 + 2.0 * k3 + k4) * dt / 6.0;
+                let speed = length(k1);
+
+                // Reset diverged
+                if (any(abs(newPos) > vec3f(200.0))) {
+                    let hash = f32(idx) * 0.00137 + u.time;
+                    let resetScale = select(20.0, select(10.0, select(2.0, select(2.0, 1.0, u.atype > 3.5), u.atype > 2.5), u.atype > 1.5), u.atype > 0.5);
+                    particles[idx] = vec4f(
+                        sin(hash * 7.3) * resetScale,
+                        cos(hash * 11.7) * resetScale,
+                        sin(hash * 3.1) * resetScale + select(25.0, 0.0, u.atype > 0.5),
+                        0.0
+                    );
+                    return;
+                }
+
+                // Encode speed as age for coloring
+                p = vec4f(newPos, clamp(speed * 0.02, 0.0, 1.0));
+                particles[idx] = p;
+            }
+        `;
+
+        const renderCode = `
+            struct Uniforms {
+                numP: f32, dt: f32, atype: f32, time: f32,
+                width: f32, height: f32, fade: f32, orbitSpeed: f32,
+                colormap: f32, scale: f32, zOff: f32, camAngleX: f32,
+                camAngleY: f32, pad1: f32, pad2: f32, pad3: f32,
+            }
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) color: vec4f }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+
+            fn inferno(t: f32) -> vec3f {
+                let c0 = vec3f(0.0002, 0.0016, 0.0139);
+                let c1 = vec3f(0.1065, 0.0639, 0.2519);
+                let c2 = vec3f(0.3289, 0.0597, 0.4046);
+                let c3 = vec3f(0.5765, 0.1184, 0.3616);
+                let c4 = vec3f(0.8417, 0.2435, 0.1903);
+                let c5 = vec3f(0.9756, 0.5578, 0.0392);
+                let c6 = vec3f(0.9882, 0.9984, 0.6447);
+                let tt = clamp(t, 0.0, 1.0) * 6.0;
+                let i = i32(floor(tt));
+                let f = fract(tt);
+                if (i == 0) { return mix(c0, c1, f); }
+                if (i == 1) { return mix(c1, c2, f); }
+                if (i == 2) { return mix(c2, c3, f); }
+                if (i == 3) { return mix(c3, c4, f); }
+                if (i == 4) { return mix(c4, c5, f); }
+                return mix(c5, c6, f);
+            }
+
+            fn viridis(t: f32) -> vec3f {
+                let c0 = vec3f(0.267, 0.004, 0.329);
+                let c1 = vec3f(0.283, 0.141, 0.458);
+                let c2 = vec3f(0.254, 0.265, 0.530);
+                let c3 = vec3f(0.163, 0.471, 0.558);
+                let c4 = vec3f(0.134, 0.658, 0.517);
+                let c5 = vec3f(0.478, 0.821, 0.318);
+                let c6 = vec3f(0.993, 0.906, 0.144);
+                let tt = clamp(t, 0.0, 1.0) * 6.0;
+                let i = i32(floor(tt));
+                let f = fract(tt);
+                if (i == 0) { return mix(c0, c1, f); }
+                if (i == 1) { return mix(c1, c2, f); }
+                if (i == 2) { return mix(c2, c3, f); }
+                if (i == 3) { return mix(c3, c4, f); }
+                if (i == 4) { return mix(c4, c5, f); }
+                return mix(c5, c6, f);
+            }
+
+            fn plasma(t: f32) -> vec3f {
+                let c0 = vec3f(0.050, 0.030, 0.528);
+                let c1 = vec3f(0.329, 0.010, 0.632);
+                let c2 = vec3f(0.576, 0.052, 0.541);
+                let c3 = vec3f(0.784, 0.196, 0.353);
+                let c4 = vec3f(0.928, 0.408, 0.153);
+                let c5 = vec3f(0.992, 0.680, 0.027);
+                let c6 = vec3f(0.940, 0.975, 0.131);
+                let tt = clamp(t, 0.0, 1.0) * 6.0;
+                let i = i32(floor(tt));
+                let f = fract(tt);
+                if (i == 0) { return mix(c0, c1, f); }
+                if (i == 1) { return mix(c1, c2, f); }
+                if (i == 2) { return mix(c2, c3, f); }
+                if (i == 3) { return mix(c3, c4, f); }
+                if (i == 4) { return mix(c4, c5, f); }
+                return mix(c5, c6, f);
+            }
+
+            fn cyanMagenta(t: f32) -> vec3f {
+                let tt = clamp(t, 0.0, 1.0);
+                return vec3f(tt * 0.8, 0.2 + (1.0 - abs(tt * 2.0 - 1.0)) * 0.6, 1.0 - tt * 0.7);
+            }
+
+            @vertex
+            fn vs(@location(0) xyz: vec3f, @location(1) speed: f32) -> VSOut {
+                var out: VSOut;
+
+                let camX = u.camAngleX;
+                let camY = u.camAngleY;
+
+                // Camera rotation: Y then X
+                let cy = cos(camY); let sy = sin(camY);
+                let y1 = xyz.y * cy - (xyz.z - u.zOff) * sy;
+                let z1 = xyz.y * sy + (xyz.z - u.zOff) * cy;
+
+                let cx = cos(camX); let sx = sin(camX);
+                let x2 = xyz.x * cx - y1 * sx;
+                let y2 = xyz.x * sx + y1 * cx;
+
+                // Perspective
+                let depth = z1 + 60.0;
+                let perspective = 60.0 / max(depth, 1.0);
+                let scale = u.scale * perspective;
+                let aspect = u.width / u.height;
+
+                out.pos = vec4f(x2 * scale / aspect, y2 * scale, 0.5, 1.0);
+
+                // Depth-based brightness
+                let depthFade = clamp(perspective * 0.8, 0.1, 1.0);
+
+                // Color by speed and colormap
+                var col = vec3f(0.0);
+                if (u.colormap < 0.5) { col = inferno(speed); }
+                else if (u.colormap < 1.5) { col = viridis(speed); }
+                else if (u.colormap < 2.5) { col = plasma(speed); }
+                else { col = cyanMagenta(speed); }
+
+                let alpha = 0.08 + speed * 0.25;
+                out.color = vec4f(col * depthFade, alpha * depthFade);
+                return out;
+            }
+
+            @fragment
+            fn fs(@location(0) color: vec4f) -> @location(0) vec4f {
+                return color;
+            }
+        `;
+
+        const computeModule = device.createShaderModule({ code: computeCode });
+        const renderModule = device.createShaderModule({ code: renderCode });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: computeModule, entryPoint: 'main' },
+        });
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: renderModule, entryPoint: 'vs',
+                buffers: [{
+                    arrayStride: 16,
+                    attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                        { shaderLocation: 1, offset: 12, format: 'float32' },
+                    ],
+                }],
+            },
+            fragment: {
+                module: renderModule, entryPoint: 'fs',
+                targets: [{
+                    format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                    },
+                }],
+            },
+            primitive: { topology: 'point-list' },
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuf } },
+            ],
+        });
+        const renderBG = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuf } },
+            ],
+        });
+
+        // Controls
+        const dtSlider = document.getElementById('dt');
+        const orbitSlider = document.getElementById('orbit');
+        const pointsSlider = document.getElementById('points');
+        const fadeSlider = document.getElementById('fade');
+        const colormapSelect = document.getElementById('colormap');
+
+        dtSlider.oninput = () => document.getElementById('dtVal').textContent = dtSlider.value;
+        orbitSlider.oninput = () => document.getElementById('orbitVal').textContent = orbitSlider.value;
+        fadeSlider.oninput = () => document.getElementById('fadeVal').textContent = fadeSlider.value;
+        pointsSlider.oninput = () => {
+            numParticles = parseInt(pointsSlider.value);
+            document.getElementById('pointVal').textContent = (numParticles / 1000) + 'K';
+            document.getElementById('count').textContent = numParticles.toLocaleString();
+            resetParticles();
+        };
+        colormapSelect.onchange = () => { colormapType = parseInt(colormapSelect.value); };
+
+        document.querySelectorAll('.attr-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.attr-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                attractorType = parseInt(btn.dataset.type);
+                resetParticles();
+            });
+        });
+
+        function resetParticles() {
+            particleData = createParticles(numParticles, attractorType);
+            device.queue.writeBuffer(particleBuf, 0, particleData);
+        }
+
+        // Mouse drag for camera
+        let camAngleX = 0.0, camAngleY = 0.3;
+        let isDragging = false, lastMX = 0, lastMY = 0;
+        canvas.addEventListener('mousedown', (e) => { isDragging = true; lastMX = e.clientX; lastMY = e.clientY; });
+        canvas.addEventListener('mouseup', () => isDragging = false);
+        canvas.addEventListener('mouseleave', () => isDragging = false);
+        canvas.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            camAngleX += (e.clientX - lastMX) * 0.005;
+            camAngleY += (e.clientY - lastMY) * 0.005;
+            camAngleY = Math.max(-1.5, Math.min(1.5, camAngleY));
+            lastMX = e.clientX; lastMY = e.clientY;
+        });
+
+        let time = 0;
+        let frameCount = 0, lastFpsTime = performance.now();
+
+        function frame() {
+            const orbitSpeed = parseFloat(orbitSlider.value);
+            time += 0.016;
+
+            // Auto-orbit if not dragging
+            if (!isDragging) {
+                camAngleX += orbitSpeed * 0.016;
+            }
+
+            const params = attractorParams[attractorType];
+            const uniforms = new Float32Array([
+                numParticles, parseFloat(dtSlider.value), attractorType, time,
+                canvas.width, canvas.height, parseFloat(fadeSlider.value), orbitSpeed,
+                colormapType, params.scale, params.zOff, camAngleX,
+                camAngleY, 0, 0, 0,
+            ]);
+            device.queue.writeBuffer(uniformBuf, 0, uniforms);
+
+            const encoder = device.createCommandEncoder();
+
+            // Compute: multiple integration steps
+            for (let i = 0; i < 4; i++) {
+                const cp = encoder.beginComputePass();
+                cp.setPipeline(computePipeline);
+                cp.setBindGroup(0, computeBG);
+                cp.dispatchWorkgroups(Math.ceil(numParticles / 256));
+                cp.end();
+            }
+
+            // Render
+            const rp = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    clearValue: { r: 0.015, g: 0.01, b: 0.03, a: 1 },
+                    loadOp: 'clear', storeOp: 'store',
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, renderBG);
+            rp.setVertexBuffer(0, particleBuf);
+            rp.draw(numParticles);
+            rp.end();
+
+            device.queue.submit([encoder.finish()]);
+
+            frameCount++;
+            const now = performance.now();
+            if (now - lastFpsTime > 500) {
+                document.getElementById('fps').textContent = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+                frameCount = 0; lastFpsTime = now;
+            }
+
+            requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+    </script>
+</body>
+</html>
