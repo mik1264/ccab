@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Complex Domain Coloring | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0f; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+        p5.disableFriendlyErrors = true;
+
+        // Complex number helpers
+        function cAdd(a, b) { return { r: a.r + b.r, i: a.i + b.i }; }
+        function cSub(a, b) { return { r: a.r - b.r, i: a.i - b.i }; }
+        function cMul(a, b) { return { r: a.r * b.r - a.i * b.i, i: a.r * b.i + a.i * b.r }; }
+        function cDiv(a, b) {
+            let d = b.r * b.r + b.i * b.i + 1e-30;
+            return { r: (a.r * b.r + a.i * b.i) / d, i: (a.i * b.r - a.r * b.i) / d };
+        }
+        function cAbs(a) { return Math.sqrt(a.r * a.r + a.i * a.i); }
+        function cArg(a) { return Math.atan2(a.i, a.r); }
+        function cPow(a, n) {
+            let r = Math.pow(cAbs(a), n);
+            let theta = cArg(a) * n;
+            return { r: r * Math.cos(theta), i: r * Math.sin(theta) };
+        }
+        function cExp(a) {
+            let er = Math.exp(Math.min(a.r, 20));
+            return { r: er * Math.cos(a.i), i: er * Math.sin(a.i) };
+        }
+        function cLog(a) { return { r: Math.log(cAbs(a) + 1e-30), i: cArg(a) }; }
+        function cSin(a) {
+            // sin(x+iy) = sin(x)cosh(y) + i*cos(x)sinh(y)
+            return {
+                r: Math.sin(a.r) * Math.cosh(a.i),
+                i: Math.cos(a.r) * Math.sinh(a.i)
+            };
+        }
+        function cCos(a) {
+            return {
+                r:  Math.cos(a.r) * Math.cosh(a.i),
+                i: -Math.sin(a.r) * Math.sinh(a.i)
+            };
+        }
+        function cTan(a) { return cDiv(cSin(a), cCos(a)); }
+        function cConj(a) { return { r: a.r, i: -a.i }; }
+
+        // Gamma function approximation (Lanczos)
+        function cGamma(z) {
+            // Reflection for Re(z) < 0.5
+            if (z.r < 0.5) {
+                let sinPiZ = cSin({ r: Math.PI * z.r, i: Math.PI * z.i });
+                let gammaOneMinusZ = cGamma({ r: 1 - z.r, i: -z.i });
+                let piC = { r: Math.PI, i: 0 };
+                return cDiv(piC, cMul(sinPiZ, gammaOneMinusZ));
+            }
+            // Lanczos coefficients
+            const g = 7;
+            const p = [0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+                       771.32342877765313, -176.61502916214059, 12.507343278686905,
+                       -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7];
+            let zz = { r: z.r - 1, i: z.i };
+            let x = { r: p[0], i: 0 };
+            for (let i = 1; i < g + 2; i++) {
+                let denom = { r: zz.r + i, i: zz.i };
+                x = cAdd(x, cDiv({ r: p[i], i: 0 }, denom));
+            }
+            let t = { r: zz.r + g + 0.5, i: zz.i };
+            let sqrtTwoPi = Math.sqrt(2 * Math.PI);
+            // (t)^(z+0.5) * exp(-t) * x * sqrt(2pi)
+            let pow1 = cPow(t, z.r + 0.5);
+            // more careful: t^(z+0.5) where exponent is complex
+            let logT = cLog(t);
+            let exp1 = { r: z.r + 0.5, i: z.i };
+            let logPow = cMul(exp1, logT);
+            let tPow = cExp(logPow);
+            let negT = { r: -t.r, i: -t.i };
+            let expNegT = cExp(negT);
+            return cMul(cMul(tPow, expNegT), cMul(x, { r: sqrtTwoPi, i: 0 }));
+        }
+
+        // Riemann zeta approximation (Euler-Maclaurin partial sum, N=40)
+        function cZeta(s, N) {
+            N = N || 40;
+            // Only valid for Re(s) > 1 in simple form; use functional eq for others
+            if (s.r > 0.9) {
+                let sum = { r: 0, i: 0 };
+                for (let n = 1; n <= N; n++) {
+                    // n^{-s} = exp(-s*log(n))
+                    let logN = Math.log(n);
+                    let expC = cExp({ r: -s.r * logN, i: -s.i * logN });
+                    sum = cAdd(sum, expC);
+                }
+                return sum;
+            } else {
+                // Functional equation: zeta(s) = 2^s * pi^(s-1) * sin(pi*s/2) * Gamma(1-s) * zeta(1-s)
+                let oneMinusS = { r: 1 - s.r, i: -s.i };
+                let zetaOMS = cZeta(oneMinusS, N);
+                let gammaOMS = cGamma(oneMinusS);
+                let twoS = cExp(cMul(s, cLog({ r: 2, i: 0 })));
+                let piSm1 = cExp(cMul(cSub(s, { r: 1, i: 0 }), cLog({ r: Math.PI, i: 0 })));
+                let sinHalf = cSin(cMul({ r: Math.PI / 2, i: 0 }, s));
+                return cMul(cMul(cMul(twoS, piSm1), sinHalf), cMul(gammaOMS, zetaOMS));
+            }
+        }
+
+        const functions = [
+            { name: 'z³ − 1', fn: (z) => cSub(cPow(z, 3), { r: 1, i: 0 }) },
+            { name: '(z⁶−1) / (z³+1)', fn: (z) => cDiv(cSub(cPow(z,6), {r:1,i:0}), cAdd(cPow(z,3), {r:1,i:0})) },
+            { name: 'sin(z)', fn: (z) => cSin(z) },
+            { name: 'z² + 0.5/(z−1)', fn: (z) => cAdd(cPow(z,2), cDiv({r:0.5,i:0}, cSub(z,{r:1,i:0}))) },
+            { name: 'tan(z)', fn: (z) => cTan(z) },
+            { name: 'Γ(z)', fn: (z) => cGamma(z) },
+            { name: 'ζ(z)', fn: (z) => cZeta(z, 30) },
+        ];
+
+        // View ranges per function [xMin, xMax, yMin, yMax]
+        const views = [
+            [-2.0, 2.0, -2.0, 2.0],
+            [-2.0, 2.0, -2.0, 2.0],
+            [-4.0, 4.0, -4.0, 4.0],
+            [-3.0, 3.0, -3.0, 3.0],
+            [-5.0, 5.0, -5.0, 5.0],
+            [-5.0, 5.0, -5.0, 5.0],
+            [-4.0, 6.0, -5.0, 5.0],
+        ];
+
+        let funcIndex = 0;
+        let funcTimer = 0;
+        const FUNC_DURATION = 7000; // ms
+        let pg = null;             // off-screen pixel buffer
+        let nextPg = null;
+        let renderProgress = 0;
+        let needsRender = true;
+        let blendT = 0;            // crossfade [0..1]
+        let isFading = false;
+
+        function domainColor(z, fn) {
+            let w = fn(z);
+            let mod = cAbs(w);
+            let arg = cArg(w);
+            // Hue from argument
+            let h = ((arg / (2 * Math.PI)) * 360 + 360) % 360;
+            // Brightness from modulus with contours
+            let bBase = 100 * (1 - Math.exp(-mod));
+            // Modulus contours (log2 rings)
+            let rings = 1 + 0.3 * Math.sin(2 * Math.PI * Math.log(mod + 1e-10) / Math.LN2);
+            let b = Math.min(100, bBase * rings);
+            // Saturation: 100 except near poles (very large mod) fade to white
+            let s = 100;
+            if (mod > 30) { s = Math.max(0, 100 - (mod - 30) * 3); b = 100; }
+            return [h, s, b];
+        }
+
+        function renderToBuffer(g, fnIdx) {
+            let fn = functions[fnIdx].fn;
+            let [xMin, xMax, yMin, yMax] = views[fnIdx];
+            g.loadPixels();
+            let w = g.width, h = g.height;
+            for (let py = 0; py < h; py++) {
+                for (let px = 0; px < w; px++) {
+                    let re = xMin + (px / w) * (xMax - xMin);
+                    let im = yMax - (py / h) * (yMax - yMin);
+                    let [hue, sat, bri] = domainColor({ r: re, i: im }, fn);
+                    // HSB to RGB
+                    let rgb = hsbToRgb(hue, sat / 100, bri / 100);
+                    let idx = (py * w + px) * 4;
+                    g.pixels[idx]     = rgb[0];
+                    g.pixels[idx + 1] = rgb[1];
+                    g.pixels[idx + 2] = rgb[2];
+                    g.pixels[idx + 3] = 255;
+                }
+            }
+            g.updatePixels();
+        }
+
+        function hsbToRgb(h, s, b) {
+            h = h % 360;
+            let c = b * s;
+            let x = c * (1 - Math.abs((h / 60) % 2 - 1));
+            let m = b - c;
+            let r, g, bl;
+            if (h < 60)      { r=c; g=x; bl=0; }
+            else if (h < 120){ r=x; g=c; bl=0; }
+            else if (h < 180){ r=0; g=c; bl=x; }
+            else if (h < 240){ r=0; g=x; bl=c; }
+            else if (h < 300){ r=x; g=0; bl=c; }
+            else             { r=c; g=0; bl=x; }
+            return [Math.round((r+m)*255), Math.round((g+m)*255), Math.round((bl+m)*255)];
+        }
+
+        // Incremental rendering
+        let renderRow = 0;
+        let renderFnIdx = 0;
+        const ROWS_PER_FRAME = 8;
+
+        function setup() {
+            createCanvas(windowWidth, windowHeight);
+            colorMode(HSB, 360, 100, 100, 100);
+            pixelDensity(1);
+
+            let sz = Math.min(width, height);
+            pg   = createGraphics(sz, sz);
+            nextPg = createGraphics(sz, sz);
+            pg.pixelDensity(1);
+            nextPg.pixelDensity(1);
+
+            // Render first function synchronously (small size is fine)
+            renderToBuffer(pg, 0);
+            renderFnIdx = 0;
+            renderRow = 0;
+        }
+
+        // Render next function incrementally into nextPg
+        function renderNextIncremental() {
+            let fn = functions[renderFnIdx].fn;
+            let [xMin, xMax, yMin, yMax] = views[renderFnIdx];
+            let g = nextPg;
+            let w = g.width, h = g.height;
+
+            if (renderRow === 0) g.loadPixels();
+
+            let endRow = Math.min(renderRow + ROWS_PER_FRAME, h);
+            for (let py = renderRow; py < endRow; py++) {
+                for (let px = 0; px < w; px++) {
+                    let re = xMin + (px / w) * (xMax - xMin);
+                    let im = yMax - (py / h) * (yMax - yMin);
+                    let [hue, sat, bri] = domainColor({ r: re, i: im }, fn);
+                    let rgb = hsbToRgb(hue, sat / 100, bri / 100);
+                    let idx = (py * w + px) * 4;
+                    g.pixels[idx]     = rgb[0];
+                    g.pixels[idx + 1] = rgb[1];
+                    g.pixels[idx + 2] = rgb[2];
+                    g.pixels[idx + 3] = 255;
+                }
+            }
+            renderRow = endRow;
+
+            if (renderRow >= h) {
+                g.updatePixels();
+                return true; // done
+            }
+            return false;
+        }
+
+        let nextRenderStarted = false;
+
+        function draw() {
+            background(240, 20, 4);
+
+            let sz = Math.min(width, height);
+
+            // Timer for function cycling
+            funcTimer += deltaTime;
+
+            // Start pre-rendering next function
+            if (!nextRenderStarted && funcTimer > FUNC_DURATION - 3000) {
+                renderFnIdx = (funcIndex + 1) % functions.length;
+                renderRow = 0;
+                nextRenderStarted = true;
+            }
+
+            if (nextRenderStarted && !isFading) {
+                let done = renderNextIncremental();
+                if (done && funcTimer >= FUNC_DURATION) {
+                    isFading = true;
+                    blendT = 0;
+                }
+            }
+
+            if (isFading) {
+                blendT += deltaTime / 1200;
+                if (blendT >= 1) {
+                    blendT = 1;
+                    isFading = false;
+                    nextRenderStarted = false;
+                    funcIndex = (funcIndex + 1) % functions.length;
+                    funcTimer = 0;
+                    // Swap buffers
+                    let tmp = pg;
+                    pg = nextPg;
+                    nextPg = tmp;
+                }
+            }
+
+            // Draw current buffer
+            let ox = (width - sz) / 2;
+            let oy = (height - sz) / 2;
+            tint(360, 0, 100, 100);
+            image(pg, ox, oy, sz, sz);
+
+            // Overlay next during fade
+            if (isFading) {
+                tint(360, 0, 100, blendT * 100);
+                image(nextPg, ox, oy, sz, sz);
+            }
+            tint(360, 0, 100, 100);
+
+            // Function name label
+            noStroke();
+            fill(0, 0, 0, 70);
+            rect(ox, oy + sz - 44, 240, 36, 4);
+            fill(60, 80, 100, 100);
+            textSize(15);
+            textFont('monospace');
+            textAlign(LEFT, BOTTOM);
+            text('f(z) = ' + functions[funcIndex].name, ox + 10, oy + sz - 12);
+
+            // Next function preview
+            if (nextRenderStarted) {
+                let progress = renderRow / nextPg.height;
+                noStroke();
+                fill(0, 0, 0, 50);
+                rect(ox + sz - 170, oy + sz - 44, 168, 36, 4);
+                fill(200, 60, 80, 80);
+                textSize(10);
+                textAlign(RIGHT, BOTTOM);
+                let nextName = functions[(funcIndex + 1) % functions.length].name;
+                text('Next: f(z) = ' + nextName + ' (' + Math.round(progress * 100) + '%)', ox + sz - 10, oy + sz - 12);
+            }
+
+            // Timer bar
+            let barW = sz * Math.min(funcTimer / FUNC_DURATION, 1);
+            noStroke();
+            fill(200, 60, 30, 50);
+            rect(ox, oy + sz, sz, 3);
+            fill(200, 80, 100, 80);
+            rect(ox, oy + sz, barW, 3);
+
+            // FPS
+            fill(0, 0, 0, 60);
+            rect(width - 80, 10, 70, 28, 14);
+            let fps = Math.round(frameRate());
+            fill(120, 60, 100);
+            textSize(13);
+            textFont('monospace');
+            textAlign(RIGHT, TOP);
+            text(fps + ' fps', width - 14, 18);
+
+            // Instructions
+            noStroke();
+            fill(0, 0, 60, 60);
+            textSize(10);
+            textAlign(CENTER, TOP);
+            text('Click to advance function', width / 2, height - 20);
+        }
+
+        function mousePressed() {
+            // Advance to next function on click
+            funcTimer = FUNC_DURATION + 1;
+        }
+
+        function windowResized() {
+            resizeCanvas(windowWidth, windowHeight);
+            let sz = Math.min(width, height);
+            pg = createGraphics(sz, sz);
+            nextPg = createGraphics(sz, sz);
+            pg.pixelDensity(1);
+            nextPg.pixelDensity(1);
+            renderToBuffer(pg, funcIndex);
+            renderRow = 0;
+            nextRenderStarted = false;
+            isFading = false;
+            funcTimer = 0;
+        }
+    </script>
+</body>
+</html>

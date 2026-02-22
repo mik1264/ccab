@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wave Machine 3D | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #050510; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+        p5.disableFriendlyErrors = true;
+
+        new p5(function(p) {
+            const NX = 28, NZ = 28;
+            const SPACING = 22;
+            const BASE_Y  = 80;      // rod base Y
+            const ROD_LEN = 60;      // max rod length
+            const BALL_R  = 5;
+
+            // Wave modes (kx, kz, amplitude)
+            const MODES = [
+                { kx: 1, kz: 1, name: 'Mode (1,1)' },
+                { kx: 2, kz: 1, name: 'Mode (2,1)' },
+                { kx: 1, kz: 2, name: 'Mode (1,2)' },
+                { kx: 2, kz: 2, name: 'Mode (2,2)' },
+                { kx: 3, kz: 2, name: 'Mode (3,2)' },
+                { kx: 2, kz: 3, name: 'Mode (2,3)' },
+                { kx: -99, kz: -99, name: 'Multi-mode Sum' } // special
+            ];
+
+            let currentMode = 0;
+            let modeTimer = 0;
+            const MODE_HOLD = 300; // frames per mode
+
+            // Pulse system for click disturbances
+            let pulses = [];
+
+            // Heights computed per frame
+            const heights = new Float32Array(NX * NZ);
+
+            let autoRotY = 0;
+            let fpsArr = [], lastTime = 0;
+
+            function getHeight(ix, iz, t) {
+                const mode = MODES[currentMode];
+                const x = ix / (NX - 1);
+                const z = iz / (NZ - 1);
+
+                // Reflect boundary standing wave: sin(kx*pi*x)*sin(kz*pi*z)*cos(wt)
+                if (mode.kx === -99) {
+                    // Multi-mode sum
+                    let h = 0;
+                    h += 0.5  * Math.sin(1 * Math.PI * x) * Math.sin(1 * Math.PI * z) * Math.cos(t * 0.06);
+                    h += 0.35 * Math.sin(2 * Math.PI * x) * Math.sin(1 * Math.PI * z) * Math.cos(t * 0.09);
+                    h += 0.35 * Math.sin(1 * Math.PI * x) * Math.sin(2 * Math.PI * z) * Math.cos(t * 0.09 + 0.8);
+                    h += 0.2  * Math.sin(3 * Math.PI * x) * Math.sin(2 * Math.PI * z) * Math.cos(t * 0.13 + 1.6);
+                    return h;
+                }
+                return Math.sin(mode.kx * Math.PI * x) * Math.sin(mode.kz * Math.PI * z) * Math.cos(t * 0.07);
+            }
+
+            function getPulseContrib(ix, iz, t) {
+                let total = 0;
+                for (let k = pulses.length - 1; k >= 0; k--) {
+                    const pl = pulses[k];
+                    const age = t - pl.birthT;
+                    if (age > 300) { pulses.splice(k, 1); continue; }
+                    const dist = Math.sqrt((ix - pl.ix)**2 + (iz - pl.iz)**2);
+                    const wavefront = age * 0.12;
+                    const sigma = 2.5;
+                    const envelope = Math.exp(-((dist - wavefront)**2) / (2 * sigma * sigma));
+                    const decay = Math.exp(-age * 0.012);
+                    total += pl.strength * envelope * decay * Math.sin(dist * 0.8 - age * 0.18);
+                }
+                return total;
+            }
+
+            p.setup = function() {
+                p.createCanvas(p.windowWidth, p.windowHeight, p.WEBGL);
+                p.colorMode(p.HSB, 360, 100, 100, 100);
+            };
+
+            p.mousePressed = function() {
+                // Map click to grid coords (approx)
+                const mx = (p.mouseX - p.width  / 2) / SPACING + NX / 2;
+                const mz = (p.mouseY - p.height / 2) / SPACING + NZ / 2;
+                pulses.push({
+                    ix: p.constrain(Math.round(mx), 0, NX - 1),
+                    iz: p.constrain(Math.round(mz), 0, NZ - 1),
+                    strength: 1.0,
+                    birthT: p.frameCount
+                });
+            };
+
+            p.draw = function() {
+                p.background(220, 60, 5);
+                p.orbitControl(3, 3, 0.05);
+
+                autoRotY += 0.006;
+                p.rotateY(autoRotY);
+                p.rotateX(0.55);
+
+                p.ambientLight(15, 10, 20);
+                p.directionalLight(200, 50, 80,  0.6, -1, -0.4);
+                p.directionalLight(0,   80, 90, -0.5, -0.5, 0.7);
+
+                // Mode cycling
+                modeTimer++;
+                if (modeTimer >= MODE_HOLD) {
+                    modeTimer = 0;
+                    currentMode = (currentMode + 1) % MODES.length;
+                }
+
+                const t = p.frameCount;
+                const offX = -(NX - 1) * SPACING * 0.5;
+                const offZ = -(NZ - 1) * SPACING * 0.5;
+
+                // Compute heights
+                for (let ix = 0; ix < NX; ix++) {
+                    for (let iz = 0; iz < NZ; iz++) {
+                        const baseH  = getHeight(ix, iz, t);
+                        const pulseH = getPulseContrib(ix, iz, t);
+                        heights[ix + NX * iz] = (baseH + pulseH) * ROD_LEN * 0.48;
+                    }
+                }
+
+                // Draw rods and balls
+                for (let ix = 0; ix < NX; ix++) {
+                    for (let iz = 0; iz < NZ; iz++) {
+                        const wx = offX + ix * SPACING;
+                        const wz = offZ + iz * SPACING;
+                        const h  = heights[ix + NX * iz];
+
+                        // Ball Y: positive h = up (negative Y in p5)
+                        const ballY = BASE_Y - ROD_LEN * 0.5 - h;
+
+                        // Rod color: thin white line
+                        p.stroke(0, 0, 50, 40);
+                        p.strokeWeight(1.2);
+                        p.line(wx, BASE_Y, wz, wx, ballY, wz);
+
+                        // Ball color by height
+                        const norm = h / (ROD_LEN * 0.48); // -1 to 1
+                        let hue, sat, bri;
+                        if (norm > 0) {
+                            // Up: orange-red
+                            hue = 20 - norm * 20;
+                            sat = 80 + norm * 15;
+                            bri = 55 + norm * 40;
+                        } else {
+                            // Down: blue
+                            hue = 210 + norm * (-40);
+                            sat = 80;
+                            bri = 50 + norm * (-30);
+                        }
+                        // Near zero: green
+                        const nearZero = 1 - Math.abs(norm);
+                        hue = p.lerp(hue, 120, nearZero * nearZero * 0.4);
+
+                        p.noStroke();
+                        p.fill(hue, sat, p.constrain(bri, 20, 100), 95);
+                        p.ambientMaterial(hue, sat, p.constrain(bri, 20, 100));
+                        p.push();
+                        p.translate(wx, ballY, wz);
+                        p.sphere(BALL_R, 5, 5);
+                        p.pop();
+                    }
+                }
+
+                // FPS in screen space
+                const now = p.millis();
+                const dt = now - lastTime; lastTime = now;
+                fpsArr.push(1000 / Math.max(dt, 1));
+                if (fpsArr.length > 30) fpsArr.shift();
+                const fps = Math.round(fpsArr.reduce((a, b) => a + b, 0) / fpsArr.length);
+
+                p.resetMatrix();
+                p.noLights();
+                p.noStroke();
+                p.fill(0, 0, 100, 70);
+                p.textFont('monospace');
+                p.textSize(13);
+                p.textAlign(p.RIGHT);
+                p.text(`FPS: ${fps}`, p.width / 2 - 12, -p.height / 2 + 28);
+
+                // Mode label
+                p.textAlign(p.LEFT);
+                p.fill(0, 0, 70, 70);
+                p.text(MODES[currentMode].name, -p.width / 2 + 80, p.height / 2 - 20);
+            };
+
+            p.windowResized = function() { p.resizeCanvas(p.windowWidth, p.windowHeight); };
+        });
+    </script>
+</body>
+</html>

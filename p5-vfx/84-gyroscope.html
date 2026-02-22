@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gyroscope Precession | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0f; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+        p5.disableFriendlyErrors = true;
+
+        // Gyroscope simulation via Euler angles (Lagrangian approach)
+        // State: theta (nutation), phi (precession), psi (spin)
+        // Euler equations for symmetric top in gravity:
+        //   I1 * theta_dd = I1*phi_d²*sin(theta)*cos(theta) - I3*(phi_d*sin(theta))*(phi_d*cos(theta) - psi_d)*sin(theta) ...
+        // We use the exact Euler-Lagrange for symmetric heavy top:
+        //   I1 = I2 (disk symmetry), I3 = spin axis moment
+        //   Conserved: E, Lz = I1*phi_d*sin²(theta) + I3*(psi_d + phi_d*cos(theta))*cos(theta)
+        //              n = I3*(psi_d + phi_d*cos(theta)) = angular momentum along symmetry axis (const)
+        // Equations of motion:
+        //   I1*theta_dd = I1*phi_d²*sin(theta)*cos(theta) - n*phi_d*sin(theta) + M*g*l*sin(theta)
+        // Wait, let me use simpler numerical integration of Euler equations directly
+
+        // State vector: [theta, theta_dot, phi, phi_dot, psi, psi_dot]
+        // Inertia tensor in body frame (disk): I1=I2 (perpendicular), I3 (spin axis)
+        // For a disk: I3 = 0.5*m*R², I1 = I2 = 0.25*m*R² + m*L² (parallel axis)
+
+        const m  = 1.0;    // mass
+        const R  = 0.8;    // disk radius (visual)
+        const L_arm = 1.2; // distance from pivot to center of mass
+        const g  = 9.8;
+
+        // Inertia
+        const I3 = 0.5 * m * R * R;                          // spin axis (disk)
+        const I1 = 0.25 * m * R * R + m * L_arm * L_arm;    // perpendicular
+
+        // Initial conditions
+        let theta, thetaDot, phi, phiDot, psi, psiDot;
+
+        const OMEGA_SPIN = 40.0; // fast initial spin
+        const DT_PHYS = 0.001;   // physics timestep
+        const STEPS_PER_FRAME = 20;
+
+        // Axle tip trail
+        let trail = [];
+        const MAX_TRAIL = 800;
+
+        // Friction (very small)
+        const SPIN_FRICTION = 0.002;
+
+        function resetGyro() {
+            theta    = 0.45;   // ~25° from vertical (nutation angle)
+            thetaDot = 0.0;
+            phi      = 0.0;    // precession angle
+            phiDot   = 0.0;
+            psi      = 0.0;    // spin angle
+            psiDot   = OMEGA_SPIN;
+            trail    = [];
+        }
+
+        // Euler equations for heavy symmetric top
+        // (Using d/dt of Euler equations in body frame)
+        // We integrate in Euler angle space:
+        //   I1*theta_dd = (I1 - I3)*phi_d²*sin(theta)*cos(theta) + I3*phi_d*psi_d*sin(theta) - m*g*L*sin(theta)
+        //   ... but with sign from Lagrangian convention where psi_d is spin relative
+        //
+        // Exact EOM for Lagrangian heavy symmetric top:
+        //   p_psi = I3*(psi_d + phi_d*cos(theta)) = n (conserved, spin ang mom)
+        //   p_phi = I1*phi_d*sin²(theta) + n*cos(theta) = lz (conserved)
+        //   I1*theta_dd = (p_phi - n*cos(theta))²*cos(theta)/(I1*sin³(theta)) - n*(p_phi - n*cos(theta))/(I1*sin(theta)) + n²*cos(theta)/(I1*sin(theta))
+        //   Wait, let me just use:
+
+        // Standard: I1*theta_dd = I1*sin(theta)*cos(theta)*phi_d² - I3*sin(theta)*phi_d*n/I3 + m*g*L_arm*sin(theta)
+        // No. Let me use the clean form:
+        // Omega_body = body angular velocity components
+        // For symmetric top:
+        //   omega_1 = theta_dot*cos(psi) + phi_dot*sin(theta)*sin(psi)
+        //   omega_2 = -theta_dot*sin(psi) + phi_dot*sin(theta)*cos(psi)
+        //   omega_3 = psi_dot + phi_dot*cos(theta)
+        // Euler eqs in body frame:
+        //   I1*omega_1_dot + (I3-I1)*omega_2*omega_3 = tau_1
+        //   I1*omega_2_dot + (I1-I3)*omega_1*omega_3 = tau_2
+        //   I3*omega_3_dot = tau_3 = 0 (torque has no component along symmetry axis)
+        // Gravity torque in body frame: tau = M*g*L * (sin(theta)*...)
+        // This is complex. Use the Lagrangian EOM directly:
+
+        function derivatives(state) {
+            let [th, thd, ph, phd, ps, psd] = state;
+            let sth = Math.sin(th), cth = Math.cos(th);
+
+            // n = I3*(psi_d + phi_d*cos(theta)) = conserved spin momentum
+            let n = I3 * (psd + phd * cth);
+
+            // lz = I1*phi_d*sin²(th) + n*cos(th) = conserved z-ang-mom
+            let lz = I1 * phd * sth * sth + n * cth;
+
+            if (Math.abs(sth) < 1e-6) sth = 1e-6;
+
+            // theta_dotdot from EOM
+            let th_dd = ((lz - n * cth) * (lz * cth - n) / (I1 * sth * sth * sth))
+                        - (m * g * L_arm * sth) / I1
+                        + n * (lz - n * cth) * cth / (I1 * sth * sth * sth)
+                        - n * (lz * cth - n) / (I1 * sth);
+            // Simpler: standard form
+            // I1*th_dd = I1*sin(th)*cos(th)*ph_d² - I3*(psd + phd*cos(th))*phd*sin(th) + m*g*L*sin(th)
+            th_dd = (I1 * sth * cth * phd * phd
+                    - n * phd * sth
+                    + m * g * L_arm * sth) / I1;
+
+            // phi_dotdot (from conservation of lz, differentiate):
+            // lz = I1*ph_d*sth² + n*cth
+            // dlz/dt = I1*ph_dd*sth² + 2*I1*ph_d*sth*cth*th_d - n*sth*th_d = 0
+            let ph_dd = (n * sth * (-th_dd > -1e9 ? 1 : 1) * 0
+                        - 2 * I1 * phd * sth * cth * thd) / (I1 * sth * sth + 1e-10);
+            // Actually just: ph_dd = (n*sin(th)*thd - 2*I1*phd*sin(th)*cos(th)*thd) / (I1*sin²(th))
+            ph_dd = (n * sth - 2 * I1 * phd * sth * cth) * thd / (I1 * sth * sth + 1e-10);
+
+            // psi_dotdot: n = I3*(psd + phd*cth) => psd = n/I3 - phd*cth
+            // d(psd)/dt = -phd_dot*cth + phd*sth*thd - ... wait n is conserved
+            // Actually omega3 = psd + phd*cth => omega3 = n/I3 = const
+            // so: ps_dd = -ph_dd*cth + phd*sth*thd
+            let ps_dd = -ph_dd * cth + phd * sth * thd
+                        - SPIN_FRICTION * psd;
+
+            return [thd, th_dd, phd, ph_dd, psd, ps_dd];
+        }
+
+        function rk4Step(state, dt) {
+            let k1 = derivatives(state);
+            let s2 = state.map((v, i) => v + k1[i] * dt / 2);
+            let k2 = derivatives(s2);
+            let s3 = state.map((v, i) => v + k2[i] * dt / 2);
+            let k3 = derivatives(s3);
+            let s4 = state.map((v, i) => v + k3[i] * dt);
+            let k4 = derivatives(s4);
+            return state.map((v, i) => v + dt / 6 * (k1[i] + 2*k2[i] + 2*k3[i] + k4[i]));
+        }
+
+        let state;
+
+        function setup() {
+            createCanvas(windowWidth, windowHeight, WEBGL);
+            colorMode(HSB, 360, 100, 100, 100);
+            resetGyro();
+            state = [theta, thetaDot, phi, phiDot, psi, psiDot];
+        }
+
+        function drawDisk(radius, thickness, col) {
+            let [h, s, b] = col;
+            // Top face
+            fill(h, s, b, 90);
+            noStroke();
+            beginShape(TRIANGLE_FAN);
+            vertex(0, 0, thickness / 2);
+            for (let i = 0; i <= 40; i++) {
+                let a = (i / 40) * TWO_PI;
+                let r2 = radius * (0.9 + 0.1 * Math.cos(6 * a)); // slight faceting
+                vertex(r2 * Math.cos(a), r2 * Math.sin(a), thickness / 2);
+            }
+            endShape();
+            // Bottom face
+            fill(h, s, b - 15, 90);
+            beginShape(TRIANGLE_FAN);
+            vertex(0, 0, -thickness / 2);
+            for (let i = 0; i <= 40; i++) {
+                let a = (i / 40) * TWO_PI;
+                let r2 = radius * (0.9 + 0.1 * Math.cos(6 * a));
+                vertex(r2 * Math.cos(a), r2 * Math.sin(a), -thickness / 2);
+            }
+            endShape();
+            // Rim
+            stroke(h, s, b + 10, 70);
+            strokeWeight(1);
+            noFill();
+            beginShape();
+            for (let i = 0; i <= 40; i++) {
+                let a = (i / 40) * TWO_PI;
+                vertex(radius * Math.cos(a), radius * Math.sin(a), thickness / 2);
+            }
+            endShape(CLOSE);
+            beginShape();
+            for (let i = 0; i <= 40; i++) {
+                let a = (i / 40) * TWO_PI;
+                vertex(radius * Math.cos(a), radius * Math.sin(a), -thickness / 2);
+            }
+            endShape(CLOSE);
+        }
+
+        function drawRing(radius, tubeR, hue, sat, bri) {
+            let N = 36;
+            noFill();
+            stroke(hue, sat, bri, 80);
+            strokeWeight(tubeR * 80);
+            beginShape();
+            for (let i = 0; i <= N; i++) {
+                let a = (i / N) * TWO_PI;
+                vertex(radius * Math.cos(a), radius * Math.sin(a), 0);
+            }
+            endShape(CLOSE);
+        }
+
+        function drawCylinder(r, h, hue, sat, bri) {
+            fill(hue, sat, bri, 80);
+            noStroke();
+            let N = 16;
+            // Side
+            beginShape(QUAD_STRIP);
+            for (let i = 0; i <= N; i++) {
+                let a = (i / N) * TWO_PI;
+                vertex(r * Math.cos(a), r * Math.sin(a), -h / 2);
+                vertex(r * Math.cos(a), r * Math.sin(a), h / 2);
+            }
+            endShape();
+        }
+
+        // Euler angle rotation matrix (ZXZ convention)
+        // R = Rz(phi) * Rx(theta) * Rz(psi)
+        function eulerMatrix(phi, theta, psi) {
+            let cp = Math.cos(phi), sp = Math.sin(phi);
+            let ct = Math.cos(theta), st = Math.sin(theta);
+            let cs = Math.cos(psi), ss = Math.sin(psi);
+            // Using 3-1-3 Euler angles (phi=precession, theta=nutation, psi=spin)
+            return [
+                cp*cs - sp*ct*ss, -cp*ss - sp*ct*cs,  sp*st,
+                sp*cs + cp*ct*ss, -sp*ss + cp*ct*cs, -cp*st,
+                st*ss,             st*cs,              ct
+            ];
+        }
+
+        function applyEulerRotation(phi, theta, psi) {
+            // Apply rotation via applyMatrix (WEBGL 4x4 column-major)
+            let M = eulerMatrix(phi, theta, psi);
+            // p5 applyMatrix is row-major 4x4
+            applyMatrix(
+                M[0], M[1], M[2], 0,
+                M[3], M[4], M[5], 0,
+                M[6], M[7], M[8], 0,
+                0,    0,    0,    1
+            );
+        }
+
+        let simRunning = true;
+
+        function draw() {
+            background(240, 20, 4);
+
+            // Step physics
+            if (simRunning) {
+                for (let s = 0; s < STEPS_PER_FRAME; s++) {
+                    state = rk4Step(state, DT_PHYS);
+                    // Clamp theta to (0, pi)
+                    state[0] = Math.max(0.01, Math.min(Math.PI - 0.01, state[0]));
+                }
+                [theta, thetaDot, phi, phiDot, psi, psiDot] = state;
+            }
+
+            // Axle tip in world coordinates (pivot at origin, axle along body z)
+            let ARM = 140; // visual scale
+            let tipX = ARM * Math.sin(theta) * Math.sin(phi);
+            let tipY = -ARM * Math.cos(theta);
+            let tipZ = ARM * Math.sin(theta) * Math.cos(phi);
+
+            trail.push({ x: tipX, y: tipY, z: tipZ });
+            if (trail.length > MAX_TRAIL) trail.shift();
+
+            // Camera
+            orbitControl(1.2, 1.2, 0.05);
+
+            // Lighting
+            ambientLight(200, 15, 30);
+            directionalLight(200, 20, 100, 0.5, -1, 0.3);
+            directionalLight(40, 30, 80, -0.5, -0.5, -0.5);
+
+            // Draw trail
+            noFill();
+            let tLen = trail.length;
+            for (let i = 1; i < tLen; i++) {
+                let t0 = trail[i - 1], t1 = trail[i];
+                let alpha = map(i, 0, tLen, 0, 80);
+                let hue = map(i, 0, tLen, 20, 40);
+                stroke(hue, 100, 100, alpha);
+                strokeWeight(map(i, 0, tLen, 0.5, 2.5));
+                line(t0.x, t0.y, t0.z, t1.x, t1.y, t1.z);
+            }
+
+            // Pivot point
+            noStroke();
+            fill(0, 0, 90, 90);
+            sphere(5);
+
+            // Ground plane reference (faint)
+            noFill();
+            stroke(220, 20, 25, 40);
+            strokeWeight(0.5);
+            let gN = 10, gS = 200;
+            for (let i = -gN; i <= gN; i++) {
+                line(-gS, 0, i * gS / gN, gS, 0, i * gS / gN);
+                line(i * gS / gN, 0, -gS, i * gS / gN, 0, gS);
+            }
+
+            // Vertical axis
+            stroke(220, 30, 40, 50);
+            strokeWeight(1);
+            line(0, -200, 0, 0, 150, 0);
+            noStroke();
+            fill(220, 60, 80);
+            textSize(12);
+            text('y', 0, -210, 0);
+
+            // Gyroscope: apply Euler rotation
+            push();
+            // Rotate to match current Euler angles
+            // phi around Y (world up = -Y in WebGL), theta around X', psi around Z''
+            // We use ZXZ Euler: rotate phi about Z, theta about new X, psi about new Z
+            rotateY(-phi);
+            rotateX(theta);
+            rotateZ(psi);
+
+            // Axle: along z-axis (local), length L_arm on each side
+            let AX = L_arm * ARM;
+            drawCylinder(4, AX * 2.2, 210, 20, 70);
+
+            // Disk at center of mass (at z = +AX from pivot, but pivot is origin)
+            push();
+            translate(0, 0, AX);
+            drawDisk(R * ARM * 0.85, 20, [215, 60, 75]);
+
+            // Spoke details on disk
+            stroke(215, 40, 90, 60);
+            strokeWeight(2);
+            noFill();
+            for (let i = 0; i < 6; i++) {
+                let a = (i / 6) * TWO_PI;
+                line(0, 0, 12, R * ARM * 0.75 * Math.cos(a), R * ARM * 0.75 * Math.sin(a), 12);
+            }
+            pop();
+
+            // Gimbal rings
+            // Outer ring (fixed to precession)
+            push();
+            rotateZ(psi * 0); // stay in nutation frame
+            drawRing(R * ARM * 1.05, 0.025, 45, 80, 85); // gold
+            pop();
+
+            // Inner ring
+            push();
+            rotateX(PI / 2);
+            drawRing(R * ARM * 1.0, 0.02, 35, 70, 80); // brass
+            pop();
+
+            pop(); // end gyroscope rotation
+
+            // HUD (drawn in 2D overlay style)
+            // Switch to 2D temporarily
+            let fps = Math.round(frameRate());
+
+            // Exit WEBGL context for 2D text
+            push();
+            // Use ortho camera for HUD
+            ortho(-width/2, width/2, -height/2, height/2, -1000, 1000);
+            camera();
+            noLights();
+
+            noStroke();
+            // FPS box
+            fill(0, 0, 0, 60);
+            rect(width/2 - 80, -height/2 + 10, 70, 28, 14);
+            fill(120, 60, 100);
+            textSize(13);
+            textFont('monospace');
+            textAlign(RIGHT, TOP);
+            text(fps + ' fps', width/2 - 14, -height/2 + 18);
+
+            // Info panel
+            fill(0, 0, 0, 60);
+            rect(-width/2 + 100, -height/2 + 10, 200, 90, 8);
+            fill(215, 60, 100);
+            textSize(14);
+            textAlign(CENTER, TOP);
+            text('Gyroscope Precession', -width/2 + 200, -height/2 + 15);
+            fill(0, 0, 70);
+            textSize(10);
+            textAlign(LEFT, TOP);
+            text('θ (nutation):  ' + degrees(theta).toFixed(1) + '°', -width/2 + 110, -height/2 + 36);
+            text('φ̇ (precession): ' + phiDot.toFixed(3) + ' rad/s', -width/2 + 110, -height/2 + 51);
+            text('ψ̇ (spin):      ' + psiDot.toFixed(1) + ' rad/s', -width/2 + 110, -height/2 + 66);
+            text('Trail: ' + trail.length + ' pts  |  Drag to orbit', -width/2 + 110, -height/2 + 81);
+
+            pop();
+        }
+
+        function keyPressed() {
+            if (key === ' ') {
+                resetGyro();
+                state = [theta, thetaDot, phi, phiDot, psi, psiDot];
+            }
+        }
+
+        function windowResized() {
+            resizeCanvas(windowWidth, windowHeight);
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accretion Disk | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0f; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+p5.disableFriendlyErrors = true;
+
+new p5(function(p) {
+    const N = 5000;
+    const GM = 45000;           // gravitational parameter (px^3/s^2 style)
+    const HORIZON = 18;         // event horizon radius
+    const DISK_INNER = 26;      // innermost stable orbit
+    const DISK_OUTER = 260;     // outer disk radius
+    const TILT = 0.32;          // disk tilt (radians) for 3D feel
+    const REPLENISH = 12;       // particles added per frame from outer edge
+
+    // Particle arrays (flat for performance)
+    let px2 = new Float32Array(N);
+    let py  = new Float32Array(N);
+    let vx  = new Float32Array(N);
+    let vy  = new Float32Array(N);
+    let r0  = new Float32Array(N);   // initial radius (for color baseline)
+    let alive = new Uint8Array(N);
+
+    let cx, cy; // screen center
+
+    let fpsVal = 0, fpsLast = 0, fpsFrames = 0;
+
+    function initParticle(i, radius) {
+        const angle = p.random(p.TWO_PI);
+        const r = radius || p.random(DISK_INNER * 1.2, DISK_OUTER);
+        // Circular orbit velocity
+        const v = Math.sqrt(GM / r);
+        px2[i] = cx + Math.cos(angle) * r;
+        py[i]  = cy + Math.sin(angle) * r * Math.cos(TILT);
+        // Perpendicular velocity for circular orbit
+        vx[i] = -Math.sin(angle) * v * (0.98 + p.random(0.04));
+        vy[i] =  Math.cos(angle) * v * Math.cos(TILT) * (0.98 + p.random(0.04));
+        r0[i] = r;
+        alive[i] = 1;
+    }
+
+    p.setup = function() {
+        p.createCanvas(p.windowWidth, p.windowHeight);
+        p.colorMode(p.HSB, 360, 100, 100, 100);
+        p.pixelDensity(1);
+        cx = p.width / 2;
+        cy = p.height / 2;
+        for (let i = 0; i < N; i++) initParticle(i, null);
+    };
+
+    // Map radius to blackbody-inspired color
+    // Inner: orange-red (hot), outer: blue-white (cooler/doppler blue)
+    function radiusToColor(r, doppler) {
+        const norm = p.constrain((r - DISK_INNER) / (DISK_OUTER - DISK_INNER), 0, 1);
+        // norm=0 → innermost: hot white-orange
+        // norm=1 → outermost: cool blue
+        let h, s, b2;
+        if (norm < 0.15) {
+            // Innermost: white-hot
+            h = p.lerp(30, 15, norm / 0.15);
+            s = p.lerp(20, 70, norm / 0.15);
+            b2 = p.lerp(100, 95, norm / 0.15);
+        } else if (norm < 0.45) {
+            const t = (norm - 0.15) / 0.30;
+            h = p.lerp(15, 5, t);     // orange → red
+            s = p.lerp(70, 90, t);
+            b2 = p.lerp(95, 80, t);
+        } else if (norm < 0.75) {
+            const t = (norm - 0.45) / 0.30;
+            h = p.lerp(5, 270, t);    // red → violet
+            s = p.lerp(90, 80, t);
+            b2 = p.lerp(80, 55, t);
+        } else {
+            const t = (norm - 0.75) / 0.25;
+            h = p.lerp(270, 210, t);  // violet → blue
+            s = p.lerp(80, 70, t);
+            b2 = p.lerp(55, 50, t);
+        }
+        // Doppler: approaching side (+) is blueshifted, receding side (-) is redshifted
+        h += doppler * 25;
+        b2 += doppler * 15;
+        return [((h % 360) + 360) % 360, p.constrain(s, 0, 100), p.constrain(b2, 0, 100)];
+    }
+
+    // Update a particle with gravity (Verlet step)
+    function updateParticle(i) {
+        const dx = cx - px2[i];
+        const dy = (cy - py[i]) / Math.cos(TILT); // un-tilt for gravity
+        const r2 = dx*dx + dy*dy;
+        const r  = Math.sqrt(r2);
+        if (r <= HORIZON) { alive[i] = 0; return; }
+        const a = GM / r2;
+        const ax = a * dx / r;
+        const ay = a * (cy - py[i]) / (r * 1); // gravity in screen y
+        const dt = 0.3;
+        vx[i] += ax * dt;
+        vy[i] += ay * dt;
+        px2[i] += vx[i] * dt;
+        py[i]  += vy[i] * dt;
+    }
+
+    p.draw = function() {
+        fpsFrames++;
+        const now = performance.now();
+        if (now - fpsLast >= 600) {
+            fpsVal = Math.round(fpsFrames / ((now - fpsLast) / 1000));
+            fpsFrames = 0; fpsLast = now;
+        }
+
+        // Trail fade (very slow for long glowing trails)
+        p.colorMode(p.RGB);
+        p.fill(10, 10, 15, 18);
+        p.noStroke();
+        p.rect(0, 0, p.width, p.height);
+        p.colorMode(p.HSB, 360, 100, 100, 100);
+
+        // Replenish dead particles
+        let replenished = 0;
+        for (let i = 0; i < N && replenished < REPLENISH; i++) {
+            if (!alive[i]) { initParticle(i, p.random(DISK_OUTER * 0.85, DISK_OUTER)); replenished++; }
+        }
+
+        // Update & render
+        p.drawingContext.globalCompositeOperation = 'lighter';
+        p.noStroke();
+
+        for (let i = 0; i < N; i++) {
+            if (!alive[i]) continue;
+            updateParticle(i);
+            if (!alive[i]) continue;
+
+            const dx = px2[i] - cx;
+            const dy = (py[i] - cy) / Math.cos(TILT);
+            const r  = Math.sqrt(dx*dx + dy*dy);
+            const r0i = r0[i];
+
+            // Doppler: based on x-velocity direction relative to observer
+            // Particles on left moving toward us: approaching → blue
+            // Particles on right moving away: receding → red
+            const doppler = p.constrain(vx[i] / 300, -1, 1);
+
+            const [h, s, b2] = radiusToColor(r, doppler);
+            // Brightness falloff with distance from disk plane (minimal — it's thin)
+            const brightness = p.constrain(b2 - r * 0.04, 5, 100);
+            // Proximity boost: inner particles very bright
+            const innerBoost = r < DISK_INNER * 2 ? 1.5 : 1.0;
+
+            p.fill(h, s, Math.min(brightness * innerBoost, 100), 55);
+            p.ellipse(px2[i], py[i], 2.5, 2.5);
+        }
+
+        // Einstein ring / gravitational lensing
+        p.drawingContext.globalCompositeOperation = 'lighter';
+        const ringR = HORIZON * 2.6;
+        for (let a = 0; a < p.TWO_PI; a += 0.03) {
+            const rx = cx + Math.cos(a) * ringR;
+            const ry = cy + Math.sin(a) * ringR * Math.cos(TILT);
+            const bright = 40 + 30 * Math.sin(a * 2 + p.frameCount * 0.02);
+            p.fill(30, 60, bright, 25);
+            p.ellipse(rx, ry, 3, 3);
+        }
+
+        // Black hole
+        p.drawingContext.globalCompositeOperation = 'source-over';
+        // Accretion glow
+        for (let ring = 5; ring >= 1; ring--) {
+            const gR = HORIZON + ring * 4;
+            p.fill(20, 70, 30 * (1 / ring), 20);
+            p.ellipse(cx, cy, gR * 2, gR * 2 * Math.cos(TILT));
+        }
+        // Shadow
+        p.fill(0, 0, 0);
+        p.ellipse(cx, cy, HORIZON * 2, HORIZON * 2 * Math.cos(TILT));
+
+        // FPS
+        p.textFont('monospace');
+        p.textSize(12);
+        p.textAlign(p.RIGHT, p.TOP);
+        p.noStroke();
+        p.fill(0, 0, 70, 70);
+        p.text('FPS: ' + fpsVal, p.width - 12, 12);
+
+        // Label
+        p.textAlign(p.CENTER, p.BOTTOM);
+        p.fill(30, 20, 65, 60);
+        p.textSize(11);
+        p.text('Accretion Disk  |  ' + N + ' particles  |  relativistic color shift + Doppler', p.width / 2, p.height - 8);
+    };
+
+    p.windowResized = function() {
+        p.resizeCanvas(p.windowWidth, p.windowHeight);
+        cx = p.width / 2; cy = p.height / 2;
+        for (let i = 0; i < N; i++) initParticle(i, null);
+    };
+});
+    </script>
+</body>
+</html>

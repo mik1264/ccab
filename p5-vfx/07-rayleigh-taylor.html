@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rayleigh-Taylor Instability | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #050510; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+        }
+        .back-link:hover { color: white; }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+        p5.disableFriendlyErrors = true;
+
+        const GW = 200, GH = 200;
+        let density, vx, vy, density2, vx2, vy2;
+        let pxScale;
+        let simTime = 0;
+
+        function setup() {
+            createCanvas(windowWidth, windowHeight);
+            colorMode(HSB, 360, 100, 100, 100);
+            pixelDensity(1);
+            pxScale = min(width / GW, height / GH);
+            initSim();
+        }
+
+        function initSim() {
+            density  = new Float32Array(GW * GH);
+            vx       = new Float32Array(GW * GH);
+            vy       = new Float32Array(GW * GH);
+            density2 = new Float32Array(GW * GH);
+            vx2      = new Float32Array(GW * GH);
+            vy2      = new Float32Array(GW * GH);
+            simTime  = 0;
+
+            // Dense fluid (density=1) on top half, light (density=0) on bottom
+            for (let j = 0; j < GH; j++) {
+                for (let i = 0; i < GW; i++) {
+                    let idx = j * GW + i;
+                    let fi = i / GW, fj = j / GH;
+                    // Interface at mid-height with small sinusoidal + random perturbation
+                    let interfaceY = 0.5
+                        + 0.015 * sin(fi * TWO_PI * 3)
+                        + 0.015 * sin(fi * TWO_PI * 7 + 1.3)
+                        + 0.008 * sin(fi * TWO_PI * 13 + 2.7)
+                        + 0.008 * (Math.random() - 0.5);
+                    density[idx] = (fj < interfaceY) ? 1.0 : 0.0;
+                    // Smooth interface
+                    let dist = (fj - interfaceY) / 0.04;
+                    density[idx] = 1.0 / (1.0 + Math.exp(dist * 5.0));
+                    vx[idx] = 0;
+                    vy[idx] = 0;
+                }
+            }
+        }
+
+        function bilinearSample(field, fx, fy) {
+            fx = max(0.5, min(GW - 1.5, fx));
+            fy = max(0.5, min(GH - 1.5, fy));
+            let ix = Math.floor(fx), iy = Math.floor(fy);
+            let tx = fx - ix, ty = fy - iy;
+            let i00 = iy * GW + ix, i10 = iy * GW + ix + 1;
+            let i01 = (iy+1)*GW + ix, i11 = (iy+1)*GW + ix + 1;
+            return field[i00]*(1-tx)*(1-ty) + field[i10]*tx*(1-ty)
+                 + field[i01]*(1-tx)*ty     + field[i11]*tx*ty;
+        }
+
+        function stepSim() {
+            const dt = 0.4;
+            const diff = 0.0003;
+            const buoyancy = 0.18;
+            const viscosity = 0.0005;
+
+            // Compute pressure-like divergence correction (simple)
+            // 1. Advect density and velocity (semi-Lagrangian)
+            for (let j = 0; j < GH; j++) {
+                for (let i = 0; i < GW; i++) {
+                    let idx = j * GW + i;
+                    let srcX = i - dt * vx[idx];
+                    let srcY = j - dt * vy[idx];
+                    density2[idx] = bilinearSample(density, srcX, srcY);
+                    vx2[idx] = bilinearSample(vx, srcX, srcY);
+                    vy2[idx] = bilinearSample(vy, srcX, srcY);
+                }
+            }
+
+            // 2. Apply buoyancy force: heavy fluid feels gravity (sinks), light rises
+            for (let j = 0; j < GH; j++) {
+                for (let i = 0; i < GW; i++) {
+                    let idx = j * GW + i;
+                    // buoyancy: dense fluid (density=1) gets +vy (downward in screen coords)
+                    // light fluid (density=0) gets -vy (upward)
+                    let rho = density2[idx];
+                    vy2[idx] += dt * buoyancy * (rho - 0.5);
+                    // Add small random forcing at interface to maintain instability
+                    if (rho > 0.2 && rho < 0.8) {
+                        vx2[idx] += dt * 0.015 * (Math.random() - 0.5);
+                    }
+                }
+            }
+
+            // 3. Diffusion step (Gauss-Seidel, 2 iters)
+            for (let iter = 0; iter < 2; iter++) {
+                for (let j = 1; j < GH-1; j++) {
+                    for (let i = 1; i < GW-1; i++) {
+                        let idx = j * GW + i;
+                        let neighbors = density2[idx-1] + density2[idx+1]
+                                      + density2[idx-GW] + density2[idx+GW];
+                        density2[idx] = (density2[idx] + diff * dt * neighbors) / (1 + 4 * diff * dt);
+                        let vxn = vx2[idx-1]+vx2[idx+1]+vx2[idx-GW]+vx2[idx+GW];
+                        let vyn = vy2[idx-1]+vy2[idx+1]+vy2[idx-GW]+vy2[idx+GW];
+                        vx2[idx] = (vx2[idx] + viscosity * dt * vxn) / (1 + 4*viscosity*dt);
+                        vy2[idx] = (vy2[idx] + viscosity * dt * vyn) / (1 + 4*viscosity*dt);
+                    }
+                }
+            }
+
+            // 4. Boundary conditions (no-slip walls, periodic L/R)
+            for (let j = 0; j < GH; j++) {
+                // Periodic left-right
+                density2[j*GW + 0] = density2[j*GW + GW-2];
+                density2[j*GW + GW-1] = density2[j*GW + 1];
+                vx2[j*GW] = vx2[j*GW + GW-2];
+                vx2[j*GW + GW-1] = vx2[j*GW + 1];
+                vy2[j*GW] = vy2[j*GW + GW-2];
+                vy2[j*GW + GW-1] = vy2[j*GW + 1];
+            }
+            for (let i = 0; i < GW; i++) {
+                // Top/bottom: no-flux
+                density2[i] = density2[GW + i];
+                density2[(GH-1)*GW + i] = density2[(GH-2)*GW + i];
+                vy2[i] = 0; vy2[(GH-1)*GW + i] = 0;
+                vx2[i] = 0; vx2[(GH-1)*GW + i] = 0;
+            }
+
+            // Swap buffers
+            let tmp = density; density = density2; density2 = tmp;
+            tmp = vx; vx = vx2; vx2 = tmp;
+            tmp = vy; vy = vy2; vy2 = tmp;
+
+            simTime += dt;
+
+            // Auto-reset after the fingers fully develop
+            if (simTime > 600) {
+                initSim();
+            }
+        }
+
+        function draw() {
+            // Run multiple simulation steps per frame for visible evolution
+            let stepsPerFrame = 3;
+            for (let s = 0; s < stepsPerFrame; s++) stepSim();
+
+            // Render density field to pixels
+            loadPixels();
+            let offX = floor((width  - GW * pxScale) / 2);
+            let offY = floor((height - GH * pxScale) / 2);
+
+            // Fill background black
+            for (let k = 0; k < width * height * 4; k += 4) {
+                pixels[k]   = 5;
+                pixels[k+1] = 5;
+                pixels[k+2] = 16;
+                pixels[k+3] = 255;
+            }
+
+            for (let j = 0; j < GH; j++) {
+                for (let i = 0; i < GW; i++) {
+                    let d = density[j * GW + i];
+                    // Dense (d=1) = deep crimson-red, light (d=0) = bright cyan-blue
+                    // Interpolate in RGB
+                    // Blue: r=0, g=180, b=255
+                    // Red: r=200, g=10, b=30
+                    let r = d * 200 + (1-d) * 0;
+                    let g = d * 10  + (1-d) * 150;
+                    let b = d * 30  + (1-d) * 255;
+                    // Boost at interface (mixing region)
+                    let mix = 4 * d * (1-d);
+                    r += mix * 80;
+                    g += mix * 60;
+                    b += mix * 0;
+
+                    let pr = floor(r), pg = floor(g), pb = floor(b);
+                    pr = min(255, max(0, pr));
+                    pg = min(255, max(0, pg));
+                    pb = min(255, max(0, pb));
+
+                    // Map grid cell to screen pixels
+                    for (let dj = 0; dj < pxScale; dj++) {
+                        for (let di = 0; di < pxScale; di++) {
+                            let px = offX + i * pxScale + di;
+                            let py = offY + j * pxScale + dj;
+                            if (px < 0 || px >= width || py < 0 || py >= height) continue;
+                            let pidx = (py * width + px) * 4;
+                            pixels[pidx]   = pr;
+                            pixels[pidx+1] = pg;
+                            pixels[pidx+2] = pb;
+                            pixels[pidx+3] = 255;
+                        }
+                    }
+                }
+            }
+            updatePixels();
+
+            // FPS counter
+            noStroke();
+            fill(0, 0, 0, 60);
+            rect(width - 80, 8, 72, 22, 4);
+            fill(0, 0, 100, 80);
+            textSize(13);
+            textAlign(RIGHT, TOP);
+            textFont('monospace');
+            text(nf(frameRate(), 1, 1) + ' fps', width - 12, 13);
+
+            // Title
+            fill(0, 0, 100, 60);
+            textSize(11);
+            textAlign(LEFT, BOTTOM);
+            text('Rayleigh-Taylor Instability  |  t=' + nf(simTime/60, 1, 1) + 's', offX + 4, offY + GH * pxScale - 4);
+        }
+
+        function windowResized() {
+            resizeCanvas(windowWidth, windowHeight);
+            pxScale = min(width / GW, height / GH);
+        }
+    </script>
+</body>
+</html>

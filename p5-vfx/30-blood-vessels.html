@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blood Vessel Formation | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0d0508; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px); transition: all 0.3s ease;
+        }
+        .back-link:hover { color: white; background: rgba(0,0,0,0.8); }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+p5.disableFriendlyErrors = true;
+
+// Angiogenesis — Blood Vessel Formation
+// Vessel tips grow up VEGF gradient toward oxygen-starved tissue
+
+var tips = [];
+var segments = [];
+var oxygenField = [];
+var vegfField = [];
+var OFW, OFH; // oxygen field dimensions
+var OF_SCALE = 8; // pixels per field cell
+var stepsPerFrame = 3;
+var maxTips = 500;
+
+// Vessel structure: each segment has a start, end, thickness, generation
+// Tips grow out from segment ends
+
+function setup() {
+    createCanvas(windowWidth, windowHeight);
+    colorMode(HSB, 360, 100, 100, 100);
+    frameRate(60);
+
+    OFW = Math.ceil(width  / OF_SCALE);
+    OFH = Math.ceil(height / OF_SCALE);
+    oxygenField = new Float32Array(OFW * OFH);
+    vegfField   = new Float32Array(OFW * OFH);
+
+    // Initialize oxygen low everywhere (tissue is starved)
+    for (var i = 0; i < OFW * OFH; i++) {
+        oxygenField[i] = 0.05 + Math.random() * 0.1;
+        vegfField[i]   = 0.8 + Math.random() * 0.2; // high VEGF = starved = wants vessels
+    }
+
+    // Start with 2 main vessels from top-center
+    var cx = width / 2;
+    var startY = height * 0.08;
+
+    addMainVessel(cx - 40, startY, PI * 0.5, 0); // going down
+    addMainVessel(cx + 40, startY, PI * 0.5, 0);
+}
+
+function addMainVessel(x, y, angle, generation) {
+    tips.push({
+        x: x, y: y,
+        angle: angle,
+        generation: generation,
+        stepLen: 8,
+        active: true,
+        noGrowCount: 0
+    });
+}
+
+function draw() {
+    // Dark tissue background
+    background(330, 40, 5, 100);
+
+    // Update oxygen/VEGF field diffusion
+    if (frameCount % 3 === 0) {
+        updateOxygenField();
+    }
+
+    // Draw oxygen glow
+    drawOxygenField();
+
+    // Grow vessels
+    for (var s = 0; s < stepsPerFrame; s++) {
+        growVessels();
+    }
+
+    // Draw vessel segments
+    drawSegments();
+
+    // Draw active tips
+    drawTips();
+
+    // FPS
+    push();
+    fill(0, 0, 100, 50);
+    noStroke();
+    textFont('monospace');
+    textSize(12);
+    textAlign(RIGHT, TOP);
+    text(Math.round(frameRate()) + ' fps', width - 16, 16);
+    pop();
+
+    // Info
+    push();
+    fill(350, 60, 80, 50);
+    noStroke();
+    textFont('sans-serif');
+    textSize(12);
+    textAlign(LEFT, BOTTOM);
+    text('Angiogenesis — VEGF-Guided Vessel Sprouting', 16, height - 12);
+    pop();
+}
+
+function updateOxygenField() {
+    // Simple diffusion: oxygen spreads from vessel segments, decays elsewhere
+    // Mark cells near vessels as oxygenated
+    var newOxy = new Float32Array(oxygenField.length);
+    for (var i = 0; i < oxygenField.length; i++) newOxy[i] = oxygenField[i];
+
+    // Diffuse
+    for (var y = 1; y < OFH - 1; y++) {
+        for (var x = 1; x < OFW - 1; x++) {
+            var i = y * OFW + x;
+            var avg = (oxygenField[i-1] + oxygenField[i+1] +
+                       oxygenField[i-OFW] + oxygenField[i+OFW]) * 0.25;
+            newOxy[i] = oxygenField[i] * 0.85 + avg * 0.15;
+            // Decay toward baseline
+            newOxy[i] = newOxy[i] * 0.995 + 0.05 * 0.005;
+        }
+    }
+
+    // Inject oxygen near vessel segments
+    for (var si = 0; si < segments.length; si++) {
+        var seg = segments[si];
+        var steps = 5;
+        for (var t = 0; t <= steps; t++) {
+            var px = lerp(seg.x1, seg.x2, t / steps);
+            var py = lerp(seg.y1, seg.y2, t / steps);
+            var gx = Math.floor(px / OF_SCALE);
+            var gy = Math.floor(py / OF_SCALE);
+            // Deposit oxygen in radius
+            var radius = max(1, 3 - seg.generation * 0.3);
+            for (var dy = -Math.ceil(radius); dy <= Math.ceil(radius); dy++) {
+                for (var dx = -Math.ceil(radius); dx <= Math.ceil(radius); dx++) {
+                    var ngx = gx + dx;
+                    var ngy = gy + dy;
+                    if (ngx < 0 || ngx >= OFW || ngy < 0 || ngy >= OFH) continue;
+                    var d = Math.sqrt(dx*dx + dy*dy);
+                    if (d <= radius) {
+                        var ni = ngy * OFW + ngx;
+                        newOxy[ni] = Math.min(1.0, newOxy[ni] + 0.4 * (1 - d / radius));
+                    }
+                }
+            }
+        }
+    }
+
+    // VEGF inversely related to oxygen
+    for (var i2 = 0; i2 < OFW * OFH; i2++) {
+        oxygenField[i2] = newOxy[i2];
+        vegfField[i2] = max(0, 1.0 - newOxy[i2] * 1.2);
+    }
+}
+
+function drawOxygenField() {
+    // Draw VEGF as soft blue-green glow
+    push();
+    noStroke();
+    for (var y = 0; y < OFH; y++) {
+        for (var x = 0; x < OFW; x++) {
+            var v = vegfField[y * OFW + x];
+            if (v < 0.1) continue;
+            // Blue-green oxygen-starved glow
+            fill(165, 70, 25, v * 25);
+            rect(x * OF_SCALE, y * OF_SCALE, OF_SCALE, OF_SCALE);
+        }
+    }
+    pop();
+}
+
+function growVessels() {
+    var newTips = [];
+
+    for (var t = 0; t < tips.length; t++) {
+        var tip = tips[t];
+        if (!tip.active) continue;
+
+        // Sample VEGF gradient around tip to steer toward high VEGF
+        var gradX = 0, gradY = 0;
+        var sampleR = 3; // field cells
+        var gx0 = Math.floor(tip.x / OF_SCALE);
+        var gy0 = Math.floor(tip.y / OF_SCALE);
+
+        for (var dy = -sampleR; dy <= sampleR; dy++) {
+            for (var dx = -sampleR; dx <= sampleR; dx++) {
+                var gx = gx0 + dx;
+                var gy = gy0 + dy;
+                if (gx < 0 || gx >= OFW || gy < 0 || gy >= OFH) continue;
+                var v = vegfField[gy * OFW + gx];
+                var dist2 = Math.sqrt(dx*dx + dy*dy) || 1;
+                gradX += (dx / dist2) * v;
+                gradY += (dy / dist2) * v;
+            }
+        }
+
+        // Combine gradient with current direction
+        var currentDx = Math.cos(tip.angle);
+        var currentDy = Math.sin(tip.angle);
+        var gLen = Math.sqrt(gradX*gradX + gradY*gradY) || 1;
+        gradX /= gLen; gradY /= gLen;
+
+        // Blend: mostly gradient, some persistence, some noise
+        var blendX = currentDx * 0.35 + gradX * 0.5 + (Math.random()-0.5) * 0.3;
+        var blendY = currentDy * 0.35 + gradY * 0.5 + (Math.random()-0.5) * 0.3;
+        var bLen = Math.sqrt(blendX*blendX + blendY*blendY) || 1;
+        blendX /= bLen; blendY /= bLen;
+
+        // New position
+        var stepLen = max(1.5, tip.stepLen - tip.generation * 0.4);
+        var nx = tip.x + blendX * stepLen;
+        var ny = tip.y + blendY * stepLen;
+
+        // Boundary check
+        if (nx < 5 || nx > width - 5 || ny < 5 || ny > height - 5) {
+            tip.active = false;
+            continue;
+        }
+
+        // Update angle
+        tip.angle = Math.atan2(blendY, blendX);
+
+        // Add segment
+        var thickness = max(0.4, 3.5 - tip.generation * 0.3);
+        segments.push({
+            x1: tip.x, y1: tip.y,
+            x2: nx, y2: ny,
+            generation: tip.generation,
+            thickness: thickness
+        });
+
+        tip.x = nx;
+        tip.y = ny;
+
+        // Branching: depends on VEGF at current location and generation
+        var vegfHere = 0;
+        if (gx0 >= 0 && gx0 < OFW && gy0 >= 0 && gy0 < OFH) {
+            vegfHere = vegfField[gy0 * OFW + gx0];
+        }
+
+        var branchProb = 0.004 + vegfHere * 0.008;
+        if (tip.generation < 10 && Math.random() < branchProb && tips.length + newTips.length < maxTips) {
+            var branchAngle = tip.angle + (Math.random() * 0.8 - 0.4) * PI * 0.6;
+            newTips.push({
+                x: nx, y: ny,
+                angle: branchAngle,
+                generation: tip.generation + 1,
+                stepLen: max(1.5, tip.stepLen * 0.85),
+                active: true,
+                noGrowCount: 0
+            });
+        }
+
+        // If in well-oxygenated region, slow down
+        var oxyHere = oxygenField[gy0 * OFW + gx0] || 0;
+        if (oxyHere > 0.8 && Math.random() < 0.05) {
+            tip.active = false;
+        }
+    }
+
+    for (var nt = 0; nt < newTips.length; nt++) {
+        tips.push(newTips[nt]);
+    }
+}
+
+function drawSegments() {
+    push();
+    for (var i = 0; i < segments.length; i++) {
+        var seg = segments[i];
+        var gen = seg.generation;
+
+        // Color: trunk = dark crimson, tips = bright vivid red
+        var hue = lerp(340, 355, min(gen / 8, 1));
+        var sat = lerp(90, 100, min(gen / 8, 1));
+        var bri = lerp(35, 65, min(gen / 8, 1));
+
+        stroke(hue, sat, bri, 90);
+        strokeWeight(seg.thickness);
+        noFill();
+        line(seg.x1, seg.y1, seg.x2, seg.y2);
+
+        // Soft glow on thicker segments
+        if (seg.thickness > 1.5) {
+            stroke(350, 80, 80, 15);
+            strokeWeight(seg.thickness * 3);
+            line(seg.x1, seg.y1, seg.x2, seg.y2);
+        }
+    }
+    pop();
+}
+
+function drawTips() {
+    push();
+    noStroke();
+    for (var t = 0; t < tips.length; t++) {
+        var tip = tips[t];
+        if (!tip.active) continue;
+        // Bright red tip pulse
+        var pulse = 0.5 + 0.5 * sin(frameCount * 0.15 + t * 1.3);
+        fill(355, 90, 100, 70 + pulse * 30);
+        ellipse(tip.x, tip.y, 3 + pulse * 2, 3 + pulse * 2);
+        fill(355, 70, 100, 20);
+        ellipse(tip.x, tip.y, 10 + pulse * 5, 10 + pulse * 5);
+    }
+    pop();
+}
+
+function windowResized() {
+    resizeCanvas(windowWidth, windowHeight);
+    OFW = Math.ceil(width  / OF_SCALE);
+    OFH = Math.ceil(height / OF_SCALE);
+    oxygenField = new Float32Array(OFW * OFH);
+    vegfField   = new Float32Array(OFW * OFH);
+    for (var i = 0; i < OFW * OFH; i++) {
+        oxygenField[i] = 0.05 + Math.random() * 0.1;
+        vegfField[i]   = 0.8 + Math.random() * 0.2;
+    }
+}
+    </script>
+</body>
+</html>

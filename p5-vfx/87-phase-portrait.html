@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phase Portrait Gallery | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0f; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+p5.disableFriendlyErrors = true;
+
+new p5(function(p) {
+    const CYCLE_TIME = 8000; // ms per system
+    let systemIdx = 0;
+    let cycleStart = 0;
+    let particles = [];
+    let arrows = [];
+    let t_global = 0; // used by Duffing
+
+    let fpsVal = 0, fpsLast = 0, fpsFrames = 0;
+
+    // Each system: { name, f(x,y,t)->({dx,dy}), xRange, yRange, color(x,y), fixedPoints }
+    const SYSTEMS = [
+        {
+            name: 'Harmonic Oscillator  dx/dt=y   dy/dt=\u2212x',
+            xRange: [-3, 3], yRange: [-3, 3],
+            f: (x, y) => ({ dx: y, dy: -x }),
+            color: (x, y) => {
+                const E = x*x + y*y;
+                return [200 + E * 10, 80, 60 + E * 8, 80];
+            },
+            fixedPoints: [{ x: 0, y: 0, stable: true }]
+        },
+        {
+            name: 'Van der Pol  \u03bc=2',
+            xRange: [-3.5, 3.5], yRange: [-5, 5],
+            f: (x, y) => {
+                const mu = 2;
+                return { dx: y, dy: mu * (1 - x*x) * y - x };
+            },
+            color: (x, y) => {
+                const r2 = x*x + y*y * 0.04;
+                return [120 - r2 * 8, 85, 55 + r2 * 4, 75];
+            },
+            fixedPoints: [{ x: 0, y: 0, stable: false }]
+        },
+        {
+            name: 'Lotka-Volterra  \u03b1=1  \u03b2=1  \u03b4=1  \u03b3=1',
+            xRange: [-0.2, 3.5], yRange: [-0.2, 3.5],
+            f: (x, y) => {
+                const xc = Math.max(x, 0.01), yc = Math.max(y, 0.01);
+                return { dx: xc - xc * yc, dy: xc * yc - yc };
+            },
+            color: (x, y) => {
+                const d = Math.abs(x*y - 1);
+                return [60 + d * 30, 80, 60 + d * 10, 80];
+            },
+            fixedPoints: [
+                { x: 0, y: 0, stable: false },
+                { x: 1, y: 1, stable: true }
+            ]
+        },
+        {
+            name: 'Pendulum  dx/dt=y   dy/dt=\u2212sin(x)\u22120.05y',
+            xRange: [-Math.PI * 2 - 0.5, Math.PI * 2 + 0.5], yRange: [-3.5, 3.5],
+            f: (x, y) => ({ dx: y, dy: -Math.sin(x) - 0.05 * y }),
+            color: (x, y) => {
+                const E = -Math.cos(x) + 0.5 * y * y;
+                const t2 = (E + 1) / 2;
+                return [190 + t2 * 120, 80, 50 + t2 * 40, 80];
+            },
+            fixedPoints: [
+                { x: 0,            y: 0, stable: true },
+                { x:  Math.PI,     y: 0, stable: false },
+                { x: -Math.PI,     y: 0, stable: false },
+            ]
+        },
+        {
+            name: 'Duffing  dx/dt=y   dy/dt=x\u2212x\u00b3+0.3cos(t)',
+            xRange: [-2.2, 2.2], yRange: [-2.2, 2.2],
+            f: (x, y, t) => ({
+                dx: y,
+                dy: x - x*x*x + 0.3 * Math.cos(t)
+            }),
+            color: (x, y) => {
+                const t2 = (x + 2) / 4;
+                return [300 * t2, 85, 55 + t2 * 35, 80];
+            },
+            fixedPoints: [
+                { x: -1, y: 0, stable: true },
+                { x:  1, y: 0, stable: true },
+                { x:  0, y: 0, stable: false }
+            ]
+        },
+        {
+            name: 'FitzHugh-Nagumo  (excitable neuron)',
+            xRange: [-2.5, 2.5], yRange: [-1.5, 2.5],
+            f: (x, y) => {
+                const I = 0.5;
+                const a2 = 0.7, b2 = 0.8, tau = 12.5;
+                return {
+                    dx: x - (x*x*x)/3 - y + I,
+                    dy: (x + a2 - b2 * y) / tau
+                };
+            },
+            color: (x, y) => {
+                const d = Math.sqrt(x*x + y*y);
+                return [160 + d * 40, 80, 55 + d * 12, 80];
+            },
+            fixedPoints: []
+        }
+    ];
+
+    function worldToScreen(wx, wy, sys) {
+        const [xMin, xMax] = sys.xRange;
+        const [yMin, yMax] = sys.yRange;
+        const margin = 60;
+        const W = p.width - margin * 2;
+        const H = p.height - margin * 2;
+        const sx = margin + (wx - xMin) / (xMax - xMin) * W;
+        const sy = (p.height - margin) - (wy - yMin) / (yMax - yMin) * H;
+        return { sx, sy };
+    }
+
+    function screenToWorld(sx, sy, sys) {
+        const [xMin, xMax] = sys.xRange;
+        const [yMin, yMax] = sys.yRange;
+        const margin = 60;
+        const W = p.width - margin * 2;
+        const H = p.height - margin * 2;
+        const wx = xMin + (sx - margin) / W * (xMax - xMin);
+        const wy = yMin + (p.height - margin - sy) / H * (yMax - yMin);
+        return { wx, wy };
+    }
+
+    function buildParticles(sys) {
+        particles = [];
+        const N = 35;
+        for (let i = 0; i < N; i++) {
+            const wx = p.random(sys.xRange[0], sys.xRange[1]);
+            const wy = p.random(sys.yRange[0], sys.yRange[1]);
+            particles.push({
+                wx, wy,
+                age: p.random(0, 200),
+                maxAge: p.random(300, 600),
+                hue: p.random(360)
+            });
+        }
+    }
+
+    function buildArrows(sys) {
+        arrows = [];
+        const NX = 16, NY = 12;
+        for (let i = 0; i <= NX; i++) {
+            for (let j = 0; j <= NY; j++) {
+                const wx = p.lerp(sys.xRange[0], sys.xRange[1], i / NX);
+                const wy = p.lerp(sys.yRange[0], sys.yRange[1], j / NY);
+                arrows.push({ wx, wy });
+            }
+        }
+    }
+
+    function initSystem() {
+        const sys = SYSTEMS[systemIdx];
+        buildParticles(sys);
+        buildArrows(sys);
+        t_global = 0;
+    }
+
+    p.setup = function() {
+        p.createCanvas(p.windowWidth, p.windowHeight);
+        p.colorMode(p.HSB, 360, 100, 100, 100);
+        cycleStart = p.millis();
+        initSystem();
+    };
+
+    function rk4(wx, wy, dt, sys) {
+        const t = t_global;
+        const k1 = sys.f(wx, wy, t);
+        const k2 = sys.f(wx + 0.5*dt*k1.dx, wy + 0.5*dt*k1.dy, t + dt*0.5);
+        const k3 = sys.f(wx + 0.5*dt*k2.dx, wy + 0.5*dt*k2.dy, t + dt*0.5);
+        const k4 = sys.f(wx + dt*k3.dx, wy + dt*k3.dy, t + dt);
+        return {
+            wx: wx + (dt/6) * (k1.dx + 2*k2.dx + 2*k3.dx + k4.dx),
+            wy: wy + (dt/6) * (k1.dy + 2*k2.dy + 2*k3.dy + k4.dy)
+        };
+    }
+
+    p.draw = function() {
+        fpsFrames++;
+        const now = performance.now();
+        if (now - fpsLast >= 600) {
+            fpsVal = Math.round(fpsFrames / ((now - fpsLast) / 1000));
+            fpsFrames = 0; fpsLast = now;
+        }
+
+        // Cycle systems
+        if (p.millis() - cycleStart > CYCLE_TIME) {
+            systemIdx = (systemIdx + 1) % SYSTEMS.length;
+            cycleStart = p.millis();
+            initSystem();
+        }
+
+        const progress = (p.millis() - cycleStart) / CYCLE_TIME;
+        const sys = SYSTEMS[systemIdx];
+        const dt = 0.03;
+        t_global += dt;
+
+        p.background(0, 0, 4);
+
+        // Draw vector field arrows
+        for (let ar of arrows) {
+            const d = sys.f(ar.wx, ar.wy, t_global);
+            const mag = Math.sqrt(d.dx*d.dx + d.dy*d.dy);
+            if (mag < 0.0001) continue;
+            const scale = Math.min(0.3, 0.15 / mag);
+            const { sx: x0, sy: y0 } = worldToScreen(ar.wx, ar.wy, sys);
+            const ex = ar.wx + d.dx * scale;
+            const ey = ar.wy + d.dy * scale;
+            const { sx: x1, sy: y1 } = worldToScreen(ex, ey, sys);
+            const logMag = Math.log(1 + mag * 0.5);
+            p.stroke(200, 30, 25 + logMag * 8, 40);
+            p.strokeWeight(0.6);
+            p.line(x0, y0, x1, y1);
+            // Arrow head
+            const angle = Math.atan2(y0 - y1, x0 - x1);
+            const hs = 4;
+            p.stroke(200, 30, 35, 40);
+            p.line(x1, y1, x1 + Math.cos(angle - 0.4)*hs, y1 + Math.sin(angle - 0.4)*hs);
+            p.line(x1, y1, x1 + Math.cos(angle + 0.4)*hs, y1 + Math.sin(angle + 0.4)*hs);
+        }
+
+        // Step and draw particles
+        p.strokeWeight(1.5);
+        for (let pt of particles) {
+            const prev = { wx: pt.wx, wy: pt.wy };
+            const next = rk4(pt.wx, pt.wy, dt, sys);
+
+            // Boundary wrap or reset
+            if (next.wx < sys.xRange[0] || next.wx > sys.xRange[1] ||
+                next.wy < sys.yRange[0] || next.wy > sys.yRange[1]) {
+                pt.wx = p.random(sys.xRange[0], sys.xRange[1]);
+                pt.wy = p.random(sys.yRange[0], sys.yRange[1]);
+                pt.age = 0;
+                continue;
+            }
+            pt.wx = next.wx; pt.wy = next.wy;
+            pt.age++;
+            if (pt.age > pt.maxAge) {
+                pt.wx = p.random(sys.xRange[0], sys.xRange[1]);
+                pt.wy = p.random(sys.yRange[0], sys.yRange[1]);
+                pt.age = 0;
+            }
+
+            const fadeIn  = Math.min(pt.age / 30, 1);
+            const fadeOut = Math.max(1 - (pt.age - pt.maxAge * 0.8) / (pt.maxAge * 0.2), 0);
+            const alpha = fadeIn * fadeOut * 85;
+
+            const [h, s, b, _] = sys.color(pt.wx, pt.wy);
+            const { sx: x0, sy: y0 } = worldToScreen(prev.wx, prev.wy, sys);
+            const { sx: x1, sy: y1 } = worldToScreen(pt.wx, pt.wy, sys);
+            p.stroke(h, s, b, alpha);
+            p.line(x0, y0, x1, y1);
+            // Particle dot
+            p.noStroke();
+            p.fill(h, s, 100, alpha * 0.9);
+            p.ellipse(x1, y1, 3, 3);
+        }
+
+        // Fixed points
+        for (let fp of sys.fixedPoints) {
+            const { sx, sy } = worldToScreen(fp.wx || fp.x, fp.wy || fp.y, sys);
+            if (fp.stable) {
+                p.noFill();
+                p.stroke(120, 80, 90, 90);
+                p.strokeWeight(2);
+                p.ellipse(sx, sy, 12, 12);
+            } else {
+                p.stroke(0, 80, 90, 90);
+                p.strokeWeight(2);
+                p.line(sx - 5, sy - 5, sx + 5, sy + 5);
+                p.line(sx + 5, sy - 5, sx - 5, sy + 5);
+            }
+        }
+
+        // Axes
+        const { sx: ox, sy: oy } = worldToScreen(0, 0, sys);
+        p.stroke(255, 0, 40, 35);
+        p.strokeWeight(0.8);
+        p.line(ox, 60, ox, p.height - 60);
+        p.line(60, oy, p.width - 60, oy);
+
+        // Progress bar
+        p.noStroke();
+        p.fill(200, 60, 50, 30);
+        p.rect(60, p.height - 40, (p.width - 120) * progress, 3);
+
+        // System name
+        p.textFont('monospace');
+        p.textSize(14);
+        p.textAlign(p.CENTER, p.BOTTOM);
+        p.noStroke();
+        p.fill(60, 20, 85, 90);
+        p.text(sys.name, p.width / 2, p.height - 16);
+
+        // FPS
+        p.textAlign(p.RIGHT, p.TOP);
+        p.fill(0, 0, 70, 70);
+        p.textSize(12);
+        p.text('FPS: ' + fpsVal, p.width - 12, 12);
+
+        // System counter
+        p.textAlign(p.LEFT, p.TOP);
+        p.fill(0, 0, 50, 60);
+        p.textSize(11);
+        p.text((systemIdx + 1) + ' / ' + SYSTEMS.length, 60, 12);
+    };
+
+    p.windowResized = function() {
+        p.resizeCanvas(p.windowWidth, p.windowHeight);
+    };
+});
+    </script>
+</body>
+</html>

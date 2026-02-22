@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flow Landscape | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #050510; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+        p5.disableFriendlyErrors = true;
+
+        new p5(function(p) {
+            // Terrain resolution (lower than screen for performance, then upscaled)
+            const TW = 320, TH = 180;
+            let terrainImg;
+            let terrainH;  // Float32Array height field TW*TH
+            let terrainR, terrainG, terrainB; // Uint8 terrain color buffers
+
+            // Particles
+            const N_PARTICLES = 2800;
+            const px = new Float32Array(N_PARTICLES);
+            const py = new Float32Array(N_PARTICLES);
+            const pvx = new Float32Array(N_PARTICLES);
+            const pvy = new Float32Array(N_PARTICLES);
+            const pAge = new Float32Array(N_PARTICLES);
+            const pMaxAge = new Float32Array(N_PARTICLES);
+
+            // Cloud shadows
+            const N_CLOUDS = 6;
+            const clouds = [];
+
+            // Day/night cycle (30s period)
+            const DAY_PERIOD = 1800; // frames
+
+            // FPS
+            let fpsArr = [], lastTime = 0;
+
+            // Terrain time offset (breathes slowly)
+            let terrainTime = 0;
+
+            // ---- FBM Noise ----
+            // Simple value noise + FBM using p5 noise
+            function fbm(nx, ny, octaves) {
+                let v = 0, amp = 0.5, freq = 1, maxAmp = 0;
+                for (let o = 0; o < octaves; o++) {
+                    v += p.noise(nx * freq, ny * freq) * amp;
+                    maxAmp += amp;
+                    amp  *= 0.52;
+                    freq *= 2.1;
+                }
+                return v / maxAmp;
+            }
+
+            function getTerrainH(tx, ty) {
+                // Multiple octaves of noise for realistic terrain
+                const nx = tx / TW * 3.2;
+                const ny = ty / TH * 3.2;
+                let h = fbm(nx + terrainTime * 0.004, ny + terrainTime * 0.002, 7);
+                // Add ridge noise for mountains
+                const ridge = 1 - Math.abs(fbm(nx * 1.5 + 10, ny * 1.5 + terrainTime * 0.002, 4) * 2 - 1);
+                h = h * 0.7 + ridge * ridge * 0.3;
+                return h; // 0..1
+            }
+
+            function heightToColor(h) {
+                // Layered terrain coloring
+                let r, g, b;
+                if (h < 0.30) {
+                    // Deep water
+                    const t = h / 0.30;
+                    r = p.lerp(5, 20, t);
+                    g = p.lerp(15, 55, t);
+                    b = p.lerp(45, 110, t);
+                } else if (h < 0.36) {
+                    // Shallow water / coast
+                    const t = (h - 0.30) / 0.06;
+                    r = p.lerp(20, 180, t);
+                    g = p.lerp(55, 160, t);
+                    b = p.lerp(110, 100, t);
+                } else if (h < 0.40) {
+                    // Sand / beach
+                    const t = (h - 0.36) / 0.04;
+                    r = p.lerp(180, 120, t);
+                    g = p.lerp(160, 140, t);
+                    b = p.lerp(100, 70, t);
+                } else if (h < 0.62) {
+                    // Grassland / lowland
+                    const t = (h - 0.40) / 0.22;
+                    r = p.lerp(45, 30, t);
+                    g = p.lerp(110, 80, t);
+                    b = p.lerp(30, 25, t);
+                } else if (h < 0.75) {
+                    // Forest / highland
+                    const t = (h - 0.62) / 0.13;
+                    r = p.lerp(30, 60, t);
+                    g = p.lerp(80, 70, t);
+                    b = p.lerp(25, 45, t);
+                } else if (h < 0.87) {
+                    // Rock / mountain
+                    const t = (h - 0.75) / 0.12;
+                    r = p.lerp(80, 110, t);
+                    g = p.lerp(75, 105, t);
+                    b = p.lerp(65, 100, t);
+                } else {
+                    // Snow cap
+                    const t = (h - 0.87) / 0.13;
+                    r = p.lerp(200, 255, t);
+                    g = p.lerp(215, 255, t);
+                    b = p.lerp(235, 255, t);
+                }
+                return { r, g, b };
+            }
+
+            function buildTerrainBuffers() {
+                terrainH = new Float32Array(TW * TH);
+                terrainR = new Uint8Array(TW * TH);
+                terrainG = new Uint8Array(TW * TH);
+                terrainB = new Uint8Array(TW * TH);
+
+                for (let ty = 0; ty < TH; ty++) {
+                    for (let tx = 0; tx < TW; tx++) {
+                        const h = getTerrainH(tx, ty);
+                        const i = tx + ty * TW;
+                        terrainH[i] = h;
+                        const col = heightToColor(h);
+                        terrainR[i] = col.r;
+                        terrainG[i] = col.g;
+                        terrainB[i] = col.b;
+                    }
+                }
+            }
+
+            function getHAtScreen(sx, sy) {
+                const tx = p.constrain(Math.floor(sx / p.width  * TW), 0, TW - 1);
+                const ty = p.constrain(Math.floor(sy / p.height * TH), 0, TH - 1);
+                return terrainH[tx + ty * TW];
+            }
+
+            function getGradient(sx, sy) {
+                // Central differences in screen space, mapped to terrain grid
+                const eps = p.width / TW;
+                const hR = getHAtScreen(sx + eps, sy);
+                const hL = getHAtScreen(sx - eps, sy);
+                const hD = getHAtScreen(sx, sy + eps);
+                const hU = getHAtScreen(sx, sy - eps);
+                return { gx: hR - hL, gy: hD - hU };
+            }
+
+            function resetParticle(i) {
+                px[i]  = p.random(p.width);
+                py[i]  = p.random(p.height);
+                pvx[i] = 0;
+                pvy[i] = 0;
+                pAge[i] = 0;
+                pMaxAge[i] = p.random(120, 400);
+            }
+
+            function initParticles() {
+                for (let i = 0; i < N_PARTICLES; i++) resetParticle(i);
+            }
+
+            function initClouds() {
+                clouds.length = 0;
+                for (let c = 0; c < N_CLOUDS; c++) {
+                    clouds.push({
+                        x: p.random(p.width),
+                        y: p.random(p.height * 0.2, p.height * 0.8),
+                        rx: p.random(80, 180),
+                        ry: p.random(40, 90),
+                        speed: p.random(0.25, 0.6),
+                        alpha: p.random(18, 35)
+                    });
+                }
+            }
+
+            function updateParticles() {
+                const GRAVITY = 0.25;  // downhill pull
+                const FRICTION = 0.88;
+                const NOISE_SCALE = 0.004;
+                const T = p.frameCount * 0.008;
+
+                for (let i = 0; i < N_PARTICLES; i++) {
+                    pAge[i]++;
+                    if (pAge[i] > pMaxAge[i]) { resetParticle(i); continue; }
+
+                    const h = getHAtScreen(px[i], py[i]);
+                    // Water particles stay in water; non-water slow down
+                    if (h > 0.36) {
+                        // Land: flow downhill
+                        const grad = getGradient(px[i], py[i]);
+                        pvx[i] += -grad.gx * GRAVITY;
+                        pvy[i] += -grad.gy * GRAVITY;
+                    } else {
+                        // Water: random drift + slight current
+                        pvx[i] += p.noise(px[i] * NOISE_SCALE, py[i] * NOISE_SCALE, T) * 0.6 - 0.3;
+                        pvy[i] += p.noise(px[i] * NOISE_SCALE + 100, py[i] * NOISE_SCALE, T) * 0.4 - 0.2;
+                    }
+
+                    pvx[i] *= FRICTION;
+                    pvy[i] *= FRICTION;
+                    px[i]  += pvx[i];
+                    py[i]  += pvy[i];
+
+                    // Wrap
+                    if (px[i] < 0) px[i] = p.width;
+                    if (px[i] > p.width) px[i] = 0;
+                    if (py[i] < 0) py[i] = p.height;
+                    if (py[i] > p.height) py[i] = 0;
+                }
+            }
+
+            // Terrain texture (off-screen graphics updated periodically)
+            let terrainPg;
+            let terrainUpdateCounter = 0;
+            const TERRAIN_REGEN_INTERVAL = 90; // frames between slow terrain shifts
+
+            function renderTerrainToGraphics() {
+                terrainPg.loadPixels();
+                const W = terrainPg.width, H = terrainPg.height;
+                const d = terrainPg.pixels;
+                const scaleX = TW / W, scaleY = TH / H;
+                for (let y = 0; y < H; y++) {
+                    for (let x = 0; x < W; x++) {
+                        const tx = Math.floor(x * scaleX);
+                        const ty = Math.floor(y * scaleY);
+                        const ti = tx + ty * TW;
+                        const pi4 = (x + y * W) * 4;
+                        d[pi4]     = terrainR[ti];
+                        d[pi4 + 1] = terrainG[ti];
+                        d[pi4 + 2] = terrainB[ti];
+                        d[pi4 + 3] = 255;
+                    }
+                }
+                terrainPg.updatePixels();
+            }
+
+            p.setup = function() {
+                p.createCanvas(p.windowWidth, p.windowHeight);
+                p.colorMode(p.HSB, 360, 100, 100, 100);
+                p.noiseDetail(8, 0.5);
+
+                terrainPg = p.createGraphics(p.floor(p.width / 2), p.floor(p.height / 2));
+                buildTerrainBuffers();
+                renderTerrainToGraphics();
+                initParticles();
+                initClouds();
+            };
+
+            p.draw = function() {
+                // ---- Day/Night cycle ----
+                const dayPhase = (p.frameCount % DAY_PERIOD) / DAY_PERIOD; // 0..1
+                // Smooth day/night: 0=midnight, 0.25=dawn, 0.5=noon, 0.75=dusk
+                const sunAngle = dayPhase * Math.PI * 2 - Math.PI;
+                const sunHeight = Math.sin(sunAngle); // -1..1
+                // Sky color
+                let skyH, skyS, skyB;
+                if (sunHeight > 0.3) {
+                    // Daytime — deep blue sky
+                    const t = p.constrain((sunHeight - 0.3) / 0.7, 0, 1);
+                    skyH = p.lerp(220, 210, t);
+                    skyS = p.lerp(60, 75, t);
+                    skyB = p.lerp(55, 25, t);
+                } else if (sunHeight > -0.15) {
+                    // Dawn/dusk — warm pink-orange
+                    const t = (sunHeight + 0.15) / 0.45;
+                    skyH = p.lerp(0, 220, t);
+                    skyS = p.lerp(70, 60, t);
+                    skyB = p.lerp(65, 55, t);
+                } else {
+                    // Night — deep dark blue
+                    const t = p.constrain((-sunHeight - 0.15) / 0.85, 0, 1);
+                    skyH = 235;
+                    skyS = p.lerp(70, 90, t);
+                    skyB = p.lerp(20, 5, t);
+                }
+                p.background(skyH, skyS, skyB);
+
+                // ---- Terrain ----
+                // Periodically shift terrain time for subtle breathing
+                terrainUpdateCounter++;
+                if (terrainUpdateCounter >= TERRAIN_REGEN_INTERVAL) {
+                    terrainUpdateCounter = 0;
+                    terrainTime++;
+                    buildTerrainBuffers();
+                    renderTerrainToGraphics();
+                }
+
+                // Draw terrain (upscaled from half-res)
+                p.blendMode(p.BLEND);
+                p.image(terrainPg, 0, 0, p.width, p.height);
+
+                // ---- Ambient light overlay (night darkening) ----
+                const nightAmount = p.constrain((0.2 - sunHeight) / 0.6, 0, 0.75);
+                if (nightAmount > 0) {
+                    p.fill(235, 80, 5, nightAmount * 75);
+                    p.noStroke();
+                    p.rect(0, 0, p.width, p.height);
+                }
+
+                // ---- Cloud shadows ----
+                p.blendMode(p.BLEND);
+                p.noStroke();
+                for (const cloud of clouds) {
+                    cloud.x += cloud.speed;
+                    if (cloud.x > p.width + cloud.rx * 2) cloud.x = -cloud.rx * 2;
+                    // Only show shadows during day
+                    const shadowAlpha = cloud.alpha * (1 - nightAmount * 1.5);
+                    if (shadowAlpha > 1) {
+                        p.fill(230, 30, 8, shadowAlpha);
+                        p.ellipse(cloud.x, cloud.y, cloud.rx * 2, cloud.ry * 2);
+                    }
+                }
+
+                // ---- Particles (water flow) ----
+                updateParticles();
+
+                p.blendMode(p.ADD);
+                p.noStroke();
+                for (let i = 0; i < N_PARTICLES; i++) {
+                    const h    = getHAtScreen(px[i], py[i]);
+                    const spd  = Math.sqrt(pvx[i] * pvx[i] + pvy[i] * pvy[i]);
+                    const ageRatio = pAge[i] / pMaxAge[i];
+                    const fadeIn  = Math.min(ageRatio * 8, 1);
+                    const fadeOut = Math.max(1 - (ageRatio - 0.8) * 5, 0);
+                    const alpha   = fadeIn * fadeOut;
+
+                    // Only draw in water zones and land flow zones
+                    let partH, partS, partB, partA;
+                    if (h < 0.36) {
+                        // Ocean / water particles — teal glow
+                        const fastness = p.constrain(spd * 10, 0, 1);
+                        partH = p.lerp(195, 175, fastness);
+                        partS = 90;
+                        partB = p.lerp(40, 80, fastness);
+                        partA = alpha * 30;
+                    } else if (h < 0.62) {
+                        // Grassland rivers — bright cyan
+                        partH = 180;
+                        partS = 80;
+                        partB = p.lerp(30, 90, p.constrain(spd * 6, 0, 1));
+                        partA = alpha * 22;
+                    } else {
+                        // Mountain streams — ice-blue
+                        partH = 200;
+                        partS = 60;
+                        partB = p.lerp(50, 100, p.constrain(spd * 4, 0, 1));
+                        partA = alpha * 18;
+                    }
+
+                    // Night makes particles glow more
+                    partA *= (1 + nightAmount * 1.2);
+                    if (partA < 1) continue;
+
+                    p.fill(partH, partS, partB, p.constrain(partA, 0, 90));
+                    p.ellipse(px[i], py[i], 2.5, 2.5);
+                }
+
+                // ---- Stars at night ----
+                if (nightAmount > 0.15) {
+                    p.blendMode(p.ADD);
+                    p.noStroke();
+                    p.randomSeed(42);
+                    const starCount = 180;
+                    for (let s = 0; s < starCount; s++) {
+                        const sx = p.random(p.width);
+                        const sy = p.random(p.height * 0.5);
+                        const sbri = p.random(60, 100);
+                        const starAlpha = (nightAmount - 0.15) / 0.85 * p.random(30, 70);
+                        p.fill(220, 10, sbri, starAlpha);
+                        const starR = p.random(0.5, 2);
+                        p.ellipse(sx, sy, starR, starR);
+                    }
+                    p.randomSeed(); // reset
+                }
+
+                // ---- FPS + time label ----
+                p.blendMode(p.BLEND);
+                const now = p.millis();
+                const dt  = now - lastTime; lastTime = now;
+                fpsArr.push(1000 / Math.max(dt, 1));
+                if (fpsArr.length > 30) fpsArr.shift();
+                const fps = Math.round(fpsArr.reduce((a, b) => a + b, 0) / fpsArr.length);
+
+                p.noStroke();
+                p.fill(0, 0, 0, 55);
+                p.rect(p.width - 88, 8, 80, 26, 4);
+                p.fill(0, 0, 100, 80);
+                p.textFont('monospace');
+                p.textSize(13);
+                p.textAlign(p.RIGHT);
+                p.text(`FPS: ${fps}`, p.width - 12, 26);
+
+                // Time of day label
+                const hourF = dayPhase * 24;
+                const hour  = Math.floor(hourF);
+                const min   = Math.floor((hourF - hour) * 60);
+                const timeStr = `${hour.toString().padStart(2,'0')}:${min.toString().padStart(2,'0')}`;
+                p.fill(0, 0, 0, 55);
+                p.rect(8, 8, 56, 26, 4);
+                p.fill(0, 0, 90, 80);
+                p.textAlign(p.LEFT);
+                p.text(timeStr, 14, 26);
+            };
+
+            p.windowResized = function() {
+                p.resizeCanvas(p.windowWidth, p.windowHeight);
+                terrainPg = p.createGraphics(p.floor(p.width / 2), p.floor(p.height / 2));
+                buildTerrainBuffers();
+                renderTerrainToGraphics();
+                initParticles();
+                initClouds();
+            };
+        });
+    </script>
+</body>
+</html>

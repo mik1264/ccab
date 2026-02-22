@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Soft Body Simulation | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0f; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+        }
+        .back-link:hover { color: white; background: rgba(0,0,0,0.8); }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+p5.disableFriendlyErrors = true;
+
+const sketch = (p) => {
+    const VERTS = 22;
+    const GRAVITY = 0.35;
+    const DAMPING = 0.985;
+    const ITERATIONS = 12;
+    const BOUNCE = 0.48;
+    const FRICTION = 0.82;
+    const PRESSURE_MULT = 1.05;
+
+    let blobs = [];
+    let fpsVal = 0;
+
+    const BLOB_CONFIGS = [
+        { hue: 135, cx: 0.25, cy: 0.25, r: 52 },
+        { hue: 285, cx: 0.55, cy: 0.18, r: 44 },
+        { hue: 45,  cx: 0.75, cy: 0.30, r: 36 },
+        { hue: 185, cx: 0.40, cy: 0.12, r: 30 },
+    ];
+
+    class SoftBlob {
+        constructor(cx, cy, r, hue) {
+            this.hue = hue;
+            this.r = r;
+            this.verts = [];
+            this.prevVerts = [];
+            this.restLengths = [];
+            this.restArea = 0;
+            this.mass = r * r * 0.008;
+
+            for (let i = 0; i < VERTS; i++) {
+                const a = (i / VERTS) * p.TWO_PI;
+                const x = cx + Math.cos(a) * r;
+                const y = cy + Math.sin(a) * r;
+                this.verts.push({ x, y });
+                this.prevVerts.push({ x, y });
+            }
+
+            for (let i = 0; i < VERTS; i++) {
+                const j = (i + 1) % VERTS;
+                this.restLengths.push(p.dist(
+                    this.verts[i].x, this.verts[i].y,
+                    this.verts[j].x, this.verts[j].y
+                ));
+            }
+
+            this.restArea = this.computeArea();
+        }
+
+        computeArea() {
+            let area = 0;
+            for (let i = 0; i < VERTS; i++) {
+                const j = (i + 1) % VERTS;
+                area += this.verts[i].x * this.verts[j].y;
+                area -= this.verts[j].x * this.verts[i].y;
+            }
+            return Math.abs(area) * 0.5;
+        }
+
+        centroid() {
+            let cx = 0, cy = 0;
+            for (let v of this.verts) { cx += v.x; cy += v.y; }
+            return { x: cx / VERTS, y: cy / VERTS };
+        }
+
+        applyImpulse(ix, iy, fx, fy) {
+            const threshold = this.r * 1.8;
+            for (let i = 0; i < VERTS; i++) {
+                const d = p.dist(ix, iy, this.verts[i].x, this.verts[i].y);
+                if (d < threshold) {
+                    const f = p.map(d, 0, threshold, 1, 0);
+                    this.prevVerts[i].x -= fx * f * 3;
+                    this.prevVerts[i].y -= fy * f * 3;
+                }
+            }
+        }
+
+        update() {
+            const floor = p.height - 20;
+            const leftWall = 0, rightWall = p.width;
+
+            // Verlet integration + gravity
+            for (let i = 0; i < VERTS; i++) {
+                const v = this.verts[i];
+                const pv = this.prevVerts[i];
+                const vx = (v.x - pv.x) * DAMPING;
+                const vy = (v.y - pv.y) * DAMPING;
+                pv.x = v.x;
+                pv.y = v.y;
+                v.x += vx;
+                v.y += vy + GRAVITY;
+            }
+
+            // Constraint solving
+            for (let iter = 0; iter < ITERATIONS; iter++) {
+                // Edge spring constraints
+                for (let i = 0; i < VERTS; i++) {
+                    const j = (i + 1) % VERTS;
+                    const a = this.verts[i], b = this.verts[j];
+                    const dx = b.x - a.x, dy = b.y - a.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
+                    const diff = (dist - this.restLengths[i]) / dist * 0.45;
+                    a.x += dx * diff;
+                    a.y += dy * diff;
+                    b.x -= dx * diff;
+                    b.y -= dy * diff;
+                }
+
+                // Pressure (area conservation)
+                const currentArea = this.computeArea();
+                const areaDiff = (this.restArea * PRESSURE_MULT - currentArea) / (VERTS * this.restLengths[0]);
+                const c = this.centroid();
+                for (let i = 0; i < VERTS; i++) {
+                    const v = this.verts[i];
+                    const nx = v.x - c.x, ny = v.y - c.y;
+                    const len = Math.sqrt(nx * nx + ny * ny) || 0.001;
+                    v.x += (nx / len) * areaDiff * 0.6;
+                    v.y += (ny / len) * areaDiff * 0.6;
+                }
+
+                // Floor collision
+                for (let i = 0; i < VERTS; i++) {
+                    const v = this.verts[i], pv = this.prevVerts[i];
+                    if (v.y > floor) {
+                        v.y = floor;
+                        const vy = v.y - pv.y;
+                        pv.y = v.y + vy * BOUNCE;
+                        pv.x = v.x - (v.x - pv.x) * (1 - FRICTION);
+                    }
+                    if (v.x < leftWall) { v.x = leftWall; pv.x = v.x + (v.x - pv.x) * BOUNCE; }
+                    if (v.x > rightWall) { v.x = rightWall; pv.x = v.x + (v.x - pv.x) * BOUNCE; }
+                }
+            }
+        }
+
+        draw() {
+            const c = this.centroid();
+
+            // Shadow
+            p.noStroke();
+            const shadowY = p.height - 20;
+            const shadowDist = p.constrain((shadowY - c.y) / p.height, 0, 0.5);
+            const shadowScale = p.map(shadowDist, 0, 0.5, 0.85, 0.2);
+            const shadowAlpha = p.map(shadowDist, 0, 0.5, 35, 5);
+            p.fill(0, 0, 0, shadowAlpha);
+            p.ellipse(c.x, shadowY - 4, this.r * 2.2 * shadowScale, this.r * 0.35 * shadowScale);
+
+            // Blob fill
+            p.beginShape();
+            for (let i = 0; i < VERTS; i++) {
+                const next = (i + 1) % VERTS;
+                const prev = (i - 1 + VERTS) % VERTS;
+                p.curveVertex(this.verts[i].x, this.verts[i].y);
+            }
+            p.endShape(p.CLOSE);
+
+            // Draw with two passes: fill then outline
+            // Fill - translucent
+            p.fill(this.hue, 85, 85, 55);
+            p.noStroke();
+            p.beginShape();
+            for (let i = 0; i < VERTS; i++) {
+                p.curveVertex(this.verts[i].x, this.verts[i].y);
+            }
+            // close the curve properly
+            p.curveVertex(this.verts[0].x, this.verts[0].y);
+            p.curveVertex(this.verts[1].x, this.verts[1].y);
+            p.endShape(p.CLOSE);
+
+            // Inner highlight
+            p.fill(this.hue, 50, 100, 20);
+            p.beginShape();
+            for (let i = 0; i < VERTS; i++) {
+                const fx = p.lerp(c.x, this.verts[i].x, 0.55) - 4;
+                const fy = p.lerp(c.y, this.verts[i].y, 0.55) - 4;
+                p.curveVertex(fx, fy);
+            }
+            p.endShape(p.CLOSE);
+
+            // Bright outline
+            p.stroke(this.hue, 75, 100, 85);
+            p.strokeWeight(2);
+            p.noFill();
+            p.beginShape();
+            for (let i = 0; i < VERTS; i++) {
+                p.curveVertex(this.verts[i].x, this.verts[i].y);
+            }
+            p.curveVertex(this.verts[0].x, this.verts[0].y);
+            p.curveVertex(this.verts[1].x, this.verts[1].y);
+            p.endShape(p.CLOSE);
+        }
+
+        collideWith(other) {
+            const myC = this.centroid();
+            const otC = other.centroid();
+            const d = p.dist(myC.x, myC.y, otC.x, otC.y);
+            if (d > (this.r + other.r) * 1.3) return;
+
+            // Simple blob-blob repulsion via centroid distance
+            for (let i = 0; i < VERTS; i++) {
+                for (let j = 0; j < other.verts.length; j++) {
+                    const v1 = this.verts[i], v2 = other.verts[j];
+                    const dx = v2.x - v1.x, dy = v2.y - v1.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const minD = 8;
+                    if (dist < minD && dist > 0.001) {
+                        const push = (minD - dist) / dist * 0.5;
+                        v1.x -= dx * push;
+                        v1.y -= dy * push;
+                        v2.x += dx * push;
+                        v2.y += dy * push;
+                    }
+                }
+            }
+        }
+    }
+
+    p.setup = () => {
+        p.createCanvas(p.windowWidth, p.windowHeight);
+        p.colorMode(p.HSB, 360, 100, 100, 100);
+        p.frameRate(60);
+        init();
+    };
+
+    function init() {
+        blobs = [];
+        for (let cfg of BLOB_CONFIGS) {
+            blobs.push(new SoftBlob(cfg.cx * p.width, cfg.cy * p.height, cfg.r, cfg.hue));
+        }
+    }
+
+    p.draw = () => {
+        p.background(240, 8, 5, 100);
+
+        // Floor line
+        p.stroke(0, 0, 30, 60);
+        p.strokeWeight(1);
+        p.line(0, p.height - 20, p.width, p.height - 20);
+
+        // Update
+        for (let b of blobs) b.update();
+
+        // Collisions between blobs
+        for (let i = 0; i < blobs.length; i++) {
+            for (let j = i + 1; j < blobs.length; j++) {
+                blobs[i].collideWith(blobs[j]);
+            }
+        }
+
+        // Draw
+        for (let b of blobs) b.draw();
+
+        // FPS
+        fpsVal = p.lerp(fpsVal, p.frameRate(), 0.05);
+        p.fill(0, 0, 85, 90);
+        p.noStroke();
+        p.textFont('monospace');
+        p.textSize(12);
+        p.textAlign(p.RIGHT, p.TOP);
+        p.text(Math.round(fpsVal) + ' fps', p.width - 14, 14);
+
+        // Hint
+        p.fill(0, 0, 55, 60);
+        p.textSize(11);
+        p.textAlign(p.CENTER, p.BOTTOM);
+        p.text('Click to throw a blob', p.width / 2, p.height - 4);
+    };
+
+    p.mousePressed = () => {
+        // Add impulse to nearest blob
+        let best = null, bestD = Infinity;
+        for (let b of blobs) {
+            const c = b.centroid();
+            const d = p.dist(p.mouseX, p.mouseY, c.x, c.y);
+            if (d < bestD) { best = b; bestD = d; }
+        }
+        if (best) {
+            const c = best.centroid();
+            const fx = p.mouseX - c.x;
+            const fy = p.mouseY - c.y;
+            best.applyImpulse(p.mouseX, p.mouseY, fx * 0.06, fy * 0.06);
+        }
+    };
+
+    p.windowResized = () => {
+        p.resizeCanvas(p.windowWidth, p.windowHeight);
+        init();
+    };
+};
+
+new p5(sketch);
+    </script>
+</body>
+</html>

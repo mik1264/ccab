@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lagrange Points | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #030308; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px);
+        }
+        .back-link:hover { color: white; }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+        p5.disableFriendlyErrors = true;
+
+        // Restricted Three-Body Problem — Sun-Earth rotating frame
+        // Units: distance in AU (Earth-Sun = 1), time in years, G*M_sun = 4π²
+        // Mass ratio μ = M_earth / (M_sun + M_earth) ≈ 3.003e-6
+
+        const MU = 3.003e-6;   // Earth/(Sun+Earth)
+        const OMEGA = TWO_PI;  // Angular velocity (1 year = 1 orbit)
+
+        // In rotating frame: Sun at (-μ, 0), Earth at (1-μ, 0)
+        const SUN_X   = -MU;
+        const EARTH_X = 1 - MU;
+
+        // Lagrange points (accurate analytic/numeric values)
+        const L_POINTS = [
+            { name: 'L1', x:  0.9900, y:  0.000 },
+            { name: 'L2', x:  1.0101, y:  0.000 },
+            { name: 'L3', x: -1.0000, y:  0.000 },
+            { name: 'L4', x:  0.5 - MU, y:  sqrt(3)/2 },
+            { name: 'L5', x:  0.5 - MU, y: -sqrt(3)/2 }
+        ];
+
+        const N_PARTICLES  = 220;
+        const TROJAN_COUNT = 80;   // particles seeded near L4/L5
+        const DT_SIM       = 0.002; // years per step
+        const STEPS_PER_FRAME = 8;
+
+        let particles = [];
+        let scale, cx, cy;   // world-to-screen transform
+        let potentialImg;
+        let potentialDirty = true;
+
+        function setup() {
+            createCanvas(windowWidth, windowHeight);
+            colorMode(HSB, 360, 100, 100, 100);
+            pixelDensity(1);
+            computeScale();
+            initParticles();
+        }
+
+        function computeScale() {
+            cx = width  / 2;
+            cy = height / 2;
+            scale = min(width, height) * 0.30;
+            potentialDirty = true;
+        }
+
+        // Effective potential in rotating frame:
+        // U_eff = -0.5*(x²+y²) - (1-μ)/r1 - μ/r2
+        function effectivePotential(x, y) {
+            let r1 = sqrt((x - SUN_X)*(x - SUN_X) + y*y);
+            let r2 = sqrt((x - EARTH_X)*(x - EARTH_X) + y*y);
+            return -0.5*(x*x + y*y) - (1-MU)/max(r1,0.01) - MU/max(r2,0.01);
+        }
+
+        // Acceleration in rotating frame (equation of motion)
+        function accel(x, y, vxp, vyp) {
+            let dx1 = x - SUN_X,   dy1 = y;
+            let dx2 = x - EARTH_X, dy2 = y;
+            let r1  = sqrt(dx1*dx1 + dy1*dy1);
+            let r2  = sqrt(dx2*dx2 + dy2*dy2);
+            let r1c = max(r1, 0.03);
+            let r2c = max(r2, 0.01);
+            // Gravity from Sun and Earth
+            let gx = -(1-MU)*dx1/(r1c*r1c*r1c) - MU*dx2/(r2c*r2c*r2c);
+            let gy = -(1-MU)*dy1/(r1c*r1c*r1c) - MU*dy2/(r2c*r2c*r2c);
+            // Centrifugal
+            gx += OMEGA*OMEGA * x;
+            gy += OMEGA*OMEGA * y;
+            // Coriolis: 2ω × v
+            gx += 2*OMEGA*vyp;
+            gy -= 2*OMEGA*vxp;
+            return { ax: gx, ay: gy };
+        }
+
+        function initParticles() {
+            particles = [];
+
+            // Trojan particles near L4 and L5
+            let L4 = L_POINTS[3], L5 = L_POINTS[4];
+            for (let i = 0; i < TROJAN_COUNT; i++) {
+                let angle = random(TWO_PI);
+                let r = random(0.01, 0.12);
+                let Lp = (i < TROJAN_COUNT/2) ? L4 : L5;
+                let x = Lp.x + r * cos(angle);
+                let y = Lp.y + r * sin(angle);
+                // Small libration velocity
+                let vx = random(-0.01, 0.01);
+                let vy = random(-0.01, 0.01);
+                particles.push({ x, y, vx, vy, type: 'trojan', trail: [], alive: true });
+            }
+
+            // Other particles spread around
+            for (let i = 0; i < N_PARTICLES - TROJAN_COUNT; i++) {
+                let angle = random(TWO_PI);
+                let r = random(0.35, 1.6);
+                let x = r * cos(angle);
+                let y = r * sin(angle);
+                // Circular velocity minus Coriolis term
+                let vc = sqrt(max(0, (1-MU)/max(r,0.1)));
+                let vx = -vc * sin(angle) * 0.6 + random(-0.05, 0.05);
+                let vy =  vc * cos(angle) * 0.6 + random(-0.05, 0.05);
+                // Label by proximity to L4/L5
+                let dL4 = dist(x,y, L4.x,L4.y), dL5 = dist(x,y, L5.x,L5.y);
+                let type = (dL4 < 0.25 || dL5 < 0.25) ? 'trojan' : 'other';
+                particles.push({ x, y, vx, vy, type, trail: [], alive: true });
+            }
+        }
+
+        // RK4 integration step
+        function rkStep(p) {
+            let h = DT_SIM;
+            let k1 = accel(p.x, p.y, p.vx, p.vy);
+            let k2 = accel(p.x + h/2*p.vx + h*h/8*k1.ax,
+                           p.y + h/2*p.vy + h*h/8*k1.ay,
+                           p.vx + h/2*k1.ax, p.vy + h/2*k1.ay);
+            let k3 = accel(p.x + h/2*p.vx + h*h/8*k2.ax,
+                           p.y + h/2*p.vy + h*h/8*k2.ay,
+                           p.vx + h/2*k2.ax, p.vy + h/2*k2.ay);
+            let k4 = accel(p.x + h*p.vx + h*h/2*k3.ax,
+                           p.y + h*p.vy + h*h/2*k3.ay,
+                           p.vx + h*k3.ax, p.vy + h*k3.ay);
+            p.x  += h*(p.vx + (k1.ax + 2*k2.ax + 2*k3.ax)/6*h);
+            p.y  += h*(p.vy + (k1.ay + 2*k2.ay + 2*k3.ay)/6*h);
+            p.vx += h*(k1.ax + 2*k2.ax + 2*k3.ax + k4.ax)/6;
+            p.vy += h*(k1.ay + 2*k2.ay + 2*k3.ay + k4.ay)/6;
+        }
+
+        function worldToScreen(x, y) {
+            return { sx: cx + x * scale, sy: cy - y * scale };
+        }
+
+        function buildPotentialImage() {
+            potentialImg = createImage(width, height);
+            potentialImg.loadPixels();
+            let gridW = min(200, width), gridH = min(130, height);
+            let stepX = width  / gridW;
+            let stepY = height / gridH;
+
+            // Sample effective potential on a coarse grid
+            let potMin = 1e9, potMax = -1e9;
+            let pots = [];
+            for (let pj = 0; pj < gridH; pj++) {
+                for (let pi = 0; pi < gridW; pi++) {
+                    let wx = (pi / gridW - 0.5) * 3.6;
+                    let wy = (0.5 - pj / gridH) * 3.6;
+                    let U = effectivePotential(wx, wy);
+                    U = max(-20, min(-1, U)); // clamp
+                    pots.push(U);
+                    if (U < potMin) potMin = U;
+                    if (U > potMax) potMax = U;
+                }
+            }
+
+            for (let k = 0; k < pots.length; k++) {
+                let t = (pots[k] - potMin) / (potMax - potMin + 0.001);
+                // Color: deep space blue at low potential, warm at saddle points
+                let r = floor(lerp(5,  30, t));
+                let g = floor(lerp(5,  25, t));
+                let b = floor(lerp(25, 60, t));
+                let pi = k % gridW, pj = floor(k / gridW);
+                // Fill screen region
+                for (let dy = 0; dy < stepY; dy++) {
+                    for (let dx = 0; dx < stepX; dx++) {
+                        let sx = floor(pi * stepX + dx);
+                        let sy = floor(pj * stepY + dy);
+                        if (sx >= width || sy >= height) continue;
+                        let idx = (sy * width + sx) * 4;
+                        potentialImg.pixels[idx]   = r;
+                        potentialImg.pixels[idx+1] = g;
+                        potentialImg.pixels[idx+2] = b;
+                        potentialImg.pixels[idx+3] = 255;
+                    }
+                }
+            }
+            potentialImg.updatePixels();
+            potentialDirty = false;
+        }
+
+        let simT = 0;
+        const MAX_TRAIL = 80;
+
+        function draw() {
+            if (potentialDirty) buildPotentialImage();
+            image(potentialImg, 0, 0);
+
+            // Step all particles
+            for (let s = 0; s < STEPS_PER_FRAME; s++) {
+                simT += DT_SIM;
+                for (let p of particles) {
+                    if (!p.alive) continue;
+                    rkStep(p);
+                    // Kill if escapes too far
+                    if (p.x*p.x + p.y*p.y > 9 || isNaN(p.x)) {
+                        p.alive = false;
+                    } else {
+                        p.trail.push({ x: p.x, y: p.y });
+                        if (p.trail.length > MAX_TRAIL) p.trail.shift();
+                    }
+                }
+            }
+
+            // Draw orbital reference circles
+            noFill();
+            stroke(200, 20, 50, 30);
+            strokeWeight(0.5);
+            ellipse(cx, cy, scale*2, scale*2);   // Earth orbit
+
+            // Draw particle trails
+            for (let p of particles) {
+                if (!p.alive || p.trail.length < 2) continue;
+                let isTrojan = p.type === 'trojan';
+                let n = p.trail.length;
+                for (let i = 1; i < n; i++) {
+                    let alpha = map(i, 0, n, 0, isTrojan ? 75 : 35);
+                    let h = isTrojan ? 45 : map(i, 0, n, 220, 190);
+                    let s2 = isTrojan ? 90 : 40;
+                    let b  = isTrojan ? 100 : 70;
+                    stroke(h, s2, b, alpha);
+                    strokeWeight(isTrojan ? 1.2 : 0.7);
+                    let a = worldToScreen(p.trail[i-1].x, p.trail[i-1].y);
+                    let b2 = worldToScreen(p.trail[i].x, p.trail[i].y);
+                    line(a.sx, a.sy, b2.sx, b2.sy);
+                }
+            }
+
+            // Draw Earth orbit (rotating frame — Earth fixed on +x axis)
+            let earthScreen = worldToScreen(EARTH_X, 0);
+            let sunScreen   = worldToScreen(SUN_X, 0);
+
+            // Sun
+            noStroke();
+            for (let r = 22; r >= 5; r -= 3) {
+                fill(50, map(r,5,22,40,90), map(r,5,22,100,80), map(r,5,22,100,0));
+                ellipse(sunScreen.sx, sunScreen.sy, r*2);
+            }
+            fill(50, 100, 100);
+            ellipse(sunScreen.sx, sunScreen.sy, 8);
+
+            // Earth
+            for (let r = 10; r >= 3; r -= 2) {
+                fill(200, map(r,3,10,30,70), map(r,3,10,100,60), map(r,3,10,80,0));
+                ellipse(earthScreen.sx, earthScreen.sy, r*2);
+            }
+            fill(200, 80, 90);
+            ellipse(earthScreen.sx, earthScreen.sy, 6);
+
+            // L-points
+            for (let i = 0; i < L_POINTS.length; i++) {
+                let lp = L_POINTS[i];
+                let ls = worldToScreen(lp.x, lp.y);
+                let isTrojan = i >= 3;
+                noFill();
+                stroke(isTrojan ? 45 : 0, isTrojan ? 80 : 0, isTrojan ? 100 : 80, 70);
+                strokeWeight(1);
+                let crossSize = 6;
+                line(ls.sx - crossSize, ls.sy, ls.sx + crossSize, ls.sy);
+                line(ls.sx, ls.sy - crossSize, ls.sx, ls.sy + crossSize);
+                // Stability ring for L4/L5
+                if (isTrojan) {
+                    noFill();
+                    stroke(45, 70, 100, 20);
+                    ellipse(ls.sx, ls.sy, scale * 0.24, scale * 0.24);
+                }
+                fill(isTrojan ? 45 : 0, isTrojan ? 60 : 0, 90, 80);
+                textSize(11);
+                textAlign(LEFT, CENTER);
+                noStroke();
+                text(lp.name, ls.sx + 8, ls.sy);
+            }
+
+            // Legend
+            noStroke();
+            fill(45, 80, 100, 80);
+            rect(width - 180, height - 55, 170, 44, 6);
+            fill(0, 0, 10, 90);
+            textSize(10);
+            textAlign(LEFT, TOP);
+            fill(45, 90, 100);
+            ellipse(width - 165, height - 33, 7);
+            fill(0, 0, 80);
+            text('Trojan (stable libration)', width - 156, height - 38);
+            stroke(190, 50, 75);
+            strokeWeight(1);
+            line(width - 170, height - 20, width - 156, height - 20);
+            noStroke();
+            fill(0, 0, 80);
+            text('Other orbits', width - 156, height - 25);
+
+            // FPS
+            noStroke();
+            fill(0, 0, 0, 60);
+            rect(width - 80, 8, 72, 22, 4);
+            fill(0, 0, 100, 80);
+            textSize(13);
+            textAlign(RIGHT, TOP);
+            textFont('monospace');
+            text(nf(frameRate(), 1, 1) + ' fps', width - 12, 13);
+
+            fill(0, 0, 80, 50);
+            textSize(11);
+            textAlign(CENTER, BOTTOM);
+            noStroke();
+            text('Lagrange Points — Sun-Earth rotating frame  |  t=' + nf(simT, 1, 1) + ' yr', width/2, height - 10);
+        }
+
+        function windowResized() {
+            resizeCanvas(windowWidth, windowHeight);
+            computeScale();
+            potentialDirty = true;
+        }
+    </script>
+</body>
+</html>
