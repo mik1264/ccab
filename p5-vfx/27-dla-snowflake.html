@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DLA Snowflake | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px); transition: all 0.3s ease;
+        }
+        .back-link:hover { color: white; background: rgba(0,0,0,0.8); }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+p5.disableFriendlyErrors = true;
+
+// DLA Snowflake — Diffusion-Limited Aggregation with 6-fold symmetry
+
+var cx, cy;
+var aggregate = [];   // {x, y, gen} — pixel coords relative to center
+var occupiedSet = {}; // "ix,iy" -> true for grid membership check
+var walkers = [];
+var NUM_WALKERS = 20;
+var MAX_AGGREGATE = 7000;
+var GRID_SCALE = 2;   // each aggregate pixel = 2 canvas pixels
+
+// Generation (distance from center in grid steps)
+var maxGen = 1;
+
+// Respawn radius grows as aggregate grows
+var spawnRadius = 30;
+var killRadius = 200;
+
+function gridKey(ix, iy) {
+    return ix + ',' + iy;
+}
+
+function addPoint(ix, iy, gen) {
+    var key = gridKey(ix, iy);
+    if (occupiedSet[key]) return false;
+    occupiedSet[key] = true;
+    aggregate.push({ ix: ix, iy: iy, gen: gen });
+    // Symmetry: rotate 60° x5
+    for (var k = 1; k < 6; k++) {
+        var angle = (k * TWO_PI) / 6;
+        var cos6 = cos(angle);
+        var sin6 = sin(angle);
+        var rx = round(ix * cos6 - iy * sin6);
+        var ry = round(ix * sin6 + iy * cos6);
+        var sk = gridKey(rx, ry);
+        if (!occupiedSet[sk]) {
+            occupiedSet[sk] = true;
+            aggregate.push({ ix: rx, iy: ry, gen: gen });
+        }
+    }
+    return true;
+}
+
+function isOccupied(ix, iy) {
+    // Check this point and all 6-fold rotations
+    if (occupiedSet[gridKey(ix, iy)]) return true;
+    return false;
+}
+
+function isAdjacentToAggregate(ix, iy) {
+    var dirs = [[1,0],[-1,0],[0,1],[0,-1],[1,-1],[-1,1]];
+    for (var d = 0; d < dirs.length; d++) {
+        if (occupiedSet[gridKey(ix + dirs[d][0], iy + dirs[d][1])]) return true;
+    }
+    return false;
+}
+
+function newWalker() {
+    var angle = random(TWO_PI);
+    var r = spawnRadius + random(5);
+    return {
+        ix: round(cos(angle) * r),
+        iy: round(sin(angle) * r)
+    };
+}
+
+function setup() {
+    createCanvas(windowWidth, windowHeight);
+    colorMode(HSB, 360, 100, 100, 100);
+    blendMode(ADD);
+    noStroke();
+
+    cx = floor(width / 2);
+    cy = floor(height / 2);
+
+    // Seed
+    addPoint(0, 0, 0);
+    spawnRadius = 10;
+
+    for (var i = 0; i < NUM_WALKERS; i++) {
+        walkers.push(newWalker());
+    }
+}
+
+function draw() {
+    background(0, 0, 3, 40);
+
+    // Run simulation steps
+    if (aggregate.length < MAX_AGGREGATE) {
+        var stepsPerFrame = 80;
+        for (var s = 0; s < stepsPerFrame; s++) {
+            for (var wi = 0; wi < walkers.length; wi++) {
+                var w = walkers[wi];
+
+                // Kill if too far
+                var wr = sqrt(w.ix * w.ix + w.iy * w.iy);
+                if (wr > killRadius) {
+                    walkers[wi] = newWalker();
+                    continue;
+                }
+
+                // Check all 6 rotations for adjacency
+                var stuck = false;
+                for (var k = 0; k < 6; k++) {
+                    var angle = (k * TWO_PI) / 6;
+                    var rx = round(w.ix * cos(angle) - w.iy * sin(angle));
+                    var ry = round(w.ix * sin(angle) + w.iy * cos(angle));
+                    if (isAdjacentToAggregate(rx, ry)) {
+                        stuck = true;
+                        break;
+                    }
+                }
+
+                if (stuck) {
+                    var gen = round(sqrt(w.ix * w.ix + w.iy * w.iy));
+                    addPoint(w.ix, w.iy, gen);
+                    if (gen > maxGen) maxGen = gen;
+                    // Update spawn radius
+                    var currentMax = 0;
+                    for (var ai = 0; ai < aggregate.length; ai++) {
+                        var ar = sqrt(aggregate[ai].ix * aggregate[ai].ix + aggregate[ai].iy * aggregate[ai].iy);
+                        if (ar > currentMax) currentMax = ar;
+                    }
+                    spawnRadius = min(currentMax + 8, killRadius - 10);
+                    walkers[wi] = newWalker();
+                } else {
+                    // Random walk with slight inward bias for first walker type
+                    var dirs = [[1,0],[-1,0],[0,1],[0,-1],[1,-1],[-1,1],[1,1],[-1,-1],[0,2],[2,0]];
+                    var step = dirs[floor(random(dirs.length))];
+                    w.ix += step[0];
+                    w.iy += step[1];
+                }
+            }
+        }
+    }
+
+    // Render aggregate
+    for (var i = 0; i < aggregate.length; i++) {
+        var pt = aggregate[i];
+        var px = cx + pt.ix * GRID_SCALE;
+        var py = cy + pt.iy * GRID_SCALE;
+
+        var dist_r = sqrt(pt.ix * pt.ix + pt.iy * pt.iy);
+        var t = maxGen > 0 ? dist_r / maxGen : 0;
+
+        // Color: center = white/pale blue, outer = cyan to violet
+        var hue, sat, bri;
+        if (t < 0.1) {
+            hue = 200;
+            sat = 20;
+            bri = 100;
+        } else if (t < 0.5) {
+            hue = map(t, 0.1, 0.5, 190, 180);
+            sat = map(t, 0.1, 0.5, 30, 80);
+            bri = map(t, 0.1, 0.5, 100, 90);
+        } else {
+            hue = map(t, 0.5, 1.0, 180, 270);
+            sat = 90;
+            bri = map(t, 0.5, 1.0, 90, 70);
+        }
+
+        var sz = map(t, 0, 1, 5, 3);
+        // Glow
+        fill(hue, sat, bri, 18);
+        ellipse(px, py, sz * 3, sz * 3);
+        fill(hue, sat, bri, 70);
+        ellipse(px, py, sz, sz);
+    }
+
+    // Active walkers
+    for (var wi2 = 0; wi2 < walkers.length; wi2++) {
+        var w2 = walkers[wi2];
+        var wx = cx + w2.ix * GRID_SCALE;
+        var wy = cy + w2.iy * GRID_SCALE;
+        fill(60, 80, 100, 50);
+        ellipse(wx, wy, 3, 3);
+    }
+
+    // HUD
+    blendMode(BLEND);
+    fill(0, 0, 70, 80);
+    noStroke();
+    textFont('monospace');
+    textSize(13);
+    textAlign(LEFT);
+    text('DLA Snowflake', 14, height - 28);
+    fill(0, 0, 55, 70);
+    textSize(12);
+    text('Points: ' + aggregate.length + ' / ' + MAX_AGGREGATE, 14, height - 12);
+    blendMode(ADD);
+}
+
+function windowResized() {
+    resizeCanvas(windowWidth, windowHeight);
+    cx = floor(width / 2);
+    cy = floor(height / 2);
+}
+    </script>
+</body>
+</html>

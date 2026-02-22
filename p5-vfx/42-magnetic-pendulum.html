@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Magnetic Pendulum | P5.js VFX</title>
+<style>
+body { margin:0; overflow:hidden; background:#0a0a0f; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#info { position:fixed; top:12px; right:12px; color:#aaa; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.6); padding:6px 10px; border-radius:6px; z-index:999; line-height:1.6; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back-link">← Gallery</a>
+<div id="info">Magnetic Pendulum<br>Fractal Basins of Attraction</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+p5.disableFriendlyErrors = true;
+
+// Basin pixel grid resolution
+const GRID = 200;
+
+// Simulation constants
+const DAMPING = 0.985;
+const MAGNET_STRENGTH = 0.18;
+const GRAVITY = 0.04;
+const PENDULUM_LEN = 1.0;
+const MAX_STEPS = 800;
+const SETTLE_DIST = 0.08;
+
+let basinPixels;    // Float32Array [r,g,b] per cell
+let basinCanvas;    // p5.Graphics offscreen
+let magnets;        // [{x,y}] in world coords [-1,1]
+let computeDone = false;
+
+// For animated zoom/pan
+let viewCx = 0, viewCy = 0, viewZoom = 1.0;
+let viewTargetZoom = 1.0;
+let viewTargetCx = 0, viewTargetCy = 0;
+
+// Live pendulum
+let livePend;
+let liveTrail = [];
+const TRAIL_LEN = 120;
+
+// hues for three magnets
+const MAGNET_HUES = [0, 120, 240];
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  pixelDensity(1);
+  noSmooth();
+
+  // Three magnets at equilateral triangle, radius 0.5 in world coords
+  const R = 0.5;
+  magnets = [
+    { x: R * cos(radians(-90)),     y: R * sin(radians(-90))     },
+    { x: R * cos(radians(-90+120)), y: R * sin(radians(-90+120)) },
+    { x: R * cos(radians(-90+240)), y: R * sin(radians(-90+240)) }
+  ];
+
+  // Precompute basin
+  basinPixels = new Uint8Array(GRID * GRID * 4);
+  computeBasin();
+
+  // Create offscreen graphics for basin texture
+  basinCanvas = createGraphics(GRID, GRID);
+  basinCanvas.pixelDensity(1);
+  uploadBasinToGraphics();
+
+  // Initial live pendulum
+  resetLivePendulum();
+
+  // Start a gentle animated drift
+  scheduleNextView();
+}
+
+function computeBasin() {
+  // World range: [-1,1] x [-1,1]
+  for (let gy = 0; gy < GRID; gy++) {
+    for (let gx = 0; gx < GRID; gx++) {
+      let wx = map(gx, 0, GRID-1, -1, 1);
+      let wy = map(gy, 0, GRID-1, -1, 1);
+      let [magIdx, steps] = simulatePendulum(wx, wy);
+      let idx = (gy * GRID + gx) * 4;
+      if (magIdx < 0) {
+        basinPixels[idx]   = 15;
+        basinPixels[idx+1] = 15;
+        basinPixels[idx+2] = 20;
+        basinPixels[idx+3] = 255;
+      } else {
+        let hue = MAGNET_HUES[magIdx];
+        // brightness: fast settling = dim, slow = bright
+        let t = steps / MAX_STEPS;
+        let bri = map(t, 0, 1, 40, 100);
+        let sat = map(t, 0, 1, 50, 90);
+        let [r, g, b] = hsbToRgb(hue, sat, bri);
+        basinPixels[idx]   = r;
+        basinPixels[idx+1] = g;
+        basinPixels[idx+2] = b;
+        basinPixels[idx+3] = 255;
+      }
+    }
+  }
+}
+
+function hsbToRgb(h, s, b) {
+  h = h / 360; s = s / 100; b = b / 100;
+  let r, g, bl;
+  let i = Math.floor(h * 6);
+  let f = h * 6 - i;
+  let p = b * (1 - s);
+  let q = b * (1 - f * s);
+  let t = b * (1 - (1 - f) * s);
+  switch (i % 6) {
+    case 0: r=b; g=t; bl=p; break;
+    case 1: r=q; g=b; bl=p; break;
+    case 2: r=p; g=b; bl=t; break;
+    case 3: r=p; g=q; bl=b; break;
+    case 4: r=t; g=p; bl=b; break;
+    case 5: r=b; g=p; bl=q; break;
+  }
+  return [Math.round(r*255), Math.round(g*255), Math.round(bl*255)];
+}
+
+function simulatePendulum(startX, startY) {
+  // Simple 2D magnetic pendulum ODE via Euler
+  let px = startX, py = startY;
+  let vx = 0, vy = 0;
+  for (let step = 0; step < MAX_STEPS; step++) {
+    // Gravity pulls toward origin
+    let ax = -GRAVITY * px;
+    let ay = -GRAVITY * py;
+
+    // Magnetic attraction to each magnet
+    for (let m of magnets) {
+      let dx = m.x - px;
+      let dy = m.y - py;
+      let dist2 = dx*dx + dy*dy + 0.05; // soften
+      let dist = sqrt(dist2);
+      let force = MAGNET_STRENGTH / (dist2 * dist);
+      ax += force * dx;
+      ay += force * dy;
+    }
+
+    vx = (vx + ax) * DAMPING;
+    vy = (vy + ay) * DAMPING;
+    px += vx;
+    py += vy;
+
+    // Check if settled near a magnet
+    for (let mi = 0; mi < magnets.length; mi++) {
+      let dx = magnets[mi].x - px;
+      let dy = magnets[mi].y - py;
+      if (dx*dx + dy*dy < SETTLE_DIST*SETTLE_DIST && abs(vx)+abs(vy) < 0.002) {
+        return [mi, step];
+      }
+    }
+  }
+  return [-1, MAX_STEPS];
+}
+
+function uploadBasinToGraphics() {
+  basinCanvas.loadPixels();
+  for (let i = 0; i < GRID * GRID * 4; i++) {
+    basinCanvas.pixels[i] = basinPixels[i];
+  }
+  basinCanvas.updatePixels();
+}
+
+function resetLivePendulum() {
+  livePend = {
+    px: random(-0.8, 0.8),
+    py: random(-0.8, 0.8),
+    vx: 0, vy: 0,
+    age: 0
+  };
+  liveTrail = [];
+}
+
+let viewTimer = 0;
+function scheduleNextView() {
+  viewTargetCx = random(-0.3, 0.3);
+  viewTargetCy = random(-0.3, 0.3);
+  viewTargetZoom = random(1.0, 2.8);
+  viewTimer = 0;
+}
+
+function draw() {
+  // Black backdrop
+  background(0, 0, 4);
+
+  // Animate view pan/zoom
+  viewTimer++;
+  if (viewTimer > 400) scheduleNextView();
+  viewCx = lerp(viewCx, viewTargetCx, 0.008);
+  viewCy = lerp(viewCy, viewTargetCy, 0.008);
+  viewZoom = lerp(viewZoom, viewTargetZoom, 0.008);
+
+  // Draw basin texture (stretched to fill canvas with pan/zoom)
+  push();
+  translate(width/2, height/2);
+  scale(viewZoom);
+  let dim = min(width, height);
+  imageMode(CENTER);
+  image(basinCanvas, viewCx * dim * 0.5, viewCy * dim * 0.5, dim, dim);
+  pop();
+
+  // Simulate live pendulum
+  let lp = livePend;
+  let ax = -GRAVITY * lp.px;
+  let ay = -GRAVITY * lp.py;
+  for (let m of magnets) {
+    let dx = m.x - lp.px;
+    let dy = m.y - lp.py;
+    let dist2 = dx*dx + dy*dy + 0.05;
+    let dist = sqrt(dist2);
+    let force = MAGNET_STRENGTH / (dist2 * dist);
+    ax += force * dx;
+    ay += force * dy;
+  }
+  lp.vx = (lp.vx + ax) * DAMPING;
+  lp.vy = (lp.vy + ay) * DAMPING;
+  lp.px += lp.vx;
+  lp.py += lp.vy;
+  lp.age++;
+
+  // Convert world coord to screen
+  function worldToScreen(wx, wy) {
+    let dim = min(width, height);
+    let sx = width/2  + (wx - viewCx) * dim * 0.5 * viewZoom;
+    let sy = height/2 + (wy - viewCy) * dim * 0.5 * viewZoom;
+    return [sx, sy];
+  }
+
+  liveTrail.push({ x: lp.px, y: lp.py });
+  if (liveTrail.length > TRAIL_LEN) liveTrail.shift();
+
+  // Reset pendulum if settled or out of range
+  let speed = sqrt(lp.vx*lp.vx + lp.vy*lp.vy);
+  if ((speed < 0.0005 && lp.age > 60) || lp.age > 1200) {
+    resetLivePendulum();
+  }
+
+  // Draw trail
+  blendMode(ADD);
+  noFill();
+  for (let i = 1; i < liveTrail.length; i++) {
+    let t = i / liveTrail.length;
+    let alpha = t * 80;
+    let hue = (frameCount * 0.8 + i * 2) % 360;
+    stroke(hue, 80, 100, alpha);
+    strokeWeight(1.5 * t);
+    let [ax2, ay2] = worldToScreen(liveTrail[i-1].x, liveTrail[i-1].y);
+    let [bx2, by2] = worldToScreen(liveTrail[i].x, liveTrail[i].y);
+    line(ax2, ay2, bx2, by2);
+  }
+
+  // Draw pendulum bob
+  let [bsx, bsy] = worldToScreen(lp.px, lp.py);
+  noStroke();
+  fill(60, 80, 100, 90);
+  circle(bsx, bsy, 10);
+  fill(60, 40, 100, 60);
+  circle(bsx, bsy, 18);
+
+  // Draw magnets
+  for (let mi = 0; mi < magnets.length; mi++) {
+    let [mx, my] = worldToScreen(magnets[mi].x, magnets[mi].y);
+    let mhue = MAGNET_HUES[mi];
+    fill(mhue, 90, 100, 70);
+    noStroke();
+    circle(mx, my, 14);
+    fill(mhue, 60, 100, 40);
+    circle(mx, my, 22);
+  }
+
+  blendMode(BLEND);
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+</script>
+</body></html>

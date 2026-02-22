@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spherical Harmonics | P5.js VFX</title>
+<style>
+body { margin:0; overflow:hidden; background:#0a0a0f; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#info { position:fixed; top:12px; right:12px; color:#ddd; font-family:monospace; font-size:14px; background:rgba(0,0,0,0.65); padding:8px 14px; border-radius:6px; z-index:999; line-height:1.8; text-align:right; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back-link">← Gallery</a>
+<div id="info">Spherical Harmonics<br><span id="lm-label">Y(2,0)</span></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+p5.disableFriendlyErrors = true;
+
+// (l, m) sequence to cycle through
+const MODES = [
+  [2,0],[2,1],[2,2],
+  [3,0],[3,1],[3,2],[3,3],
+  [4,0],[4,1],[4,2],[4,3],[4,4],
+  [5,0],[5,2],[5,4],
+];
+
+const GRID_N = 50;        // theta x phi grid
+const HOLD_TIME = 3.0;    // seconds to hold each mode
+const MORPH_TIME = 1.0;   // seconds to morph
+
+let modeIdx = 0;
+let morphT = 0;           // 0..1 during morph
+let isMorphing = false;
+let holdTimer = 0;
+
+let vertices = [];        // current deformed sphere vertices [x,y,z,ylm]
+let verticesPrev = [];    // previous mode vertices
+let verticesNext = [];    // next mode vertices
+let lmLabel;
+
+// Associated Legendre polynomial P_l^m(x), abs(m)<=l
+function legendreP(l, m, x) {
+  // For this use we only need positive m (m >= 0)
+  // Boost via recurrence
+  m = Math.abs(m);
+  // P_m^m
+  let pmm = 1.0;
+  if (m > 0) {
+    let somx2 = Math.sqrt((1 - x) * (1 + x));
+    let fact = 1.0;
+    for (let i = 1; i <= m; i++) {
+      pmm *= (-fact) * somx2;
+      fact += 2.0;
+    }
+  }
+  if (l === m) return pmm;
+  let pmmp1 = x * (2*m+1) * pmm;
+  if (l === m+1) return pmmp1;
+  let pll = 0;
+  for (let ll = m+2; ll <= l; ll++) {
+    pll = ((2*ll - 1) * x * pmmp1 - (ll + m - 1) * pmm) / (ll - m);
+    pmm = pmmp1;
+    pmmp1 = pll;
+  }
+  return pll;
+}
+
+// Real spherical harmonic Y_l^m(theta, phi)
+// theta in [0,PI], phi in [0,2PI]
+function Ylm(l, m, theta, phi) {
+  // Normalization constant (without Condon-Shortley phase for sign-consistent display)
+  let absM = Math.abs(m);
+  let norm = Math.sqrt((2*l+1) / (4*Math.PI));
+  // Factor in factorial ratio
+  let factRatio = 1.0;
+  for (let i = l - absM + 1; i <= l + absM; i++) factRatio *= i;
+  norm *= Math.sqrt(1.0 / factRatio);
+  if (m !== 0) norm *= Math.SQRT2;
+
+  let Plm = legendreP(l, absM, Math.cos(theta));
+
+  if (m > 0) return norm * Plm * Math.cos(m * phi);
+  if (m < 0) return norm * Plm * Math.sin(absM * phi);
+  return norm * Plm;
+}
+
+function buildSphereVertices(l, m) {
+  let verts = [];
+  for (let i = 0; i <= GRID_N; i++) {
+    let theta = map(i, 0, GRID_N, 0.001, PI - 0.001);
+    let row = [];
+    for (let j = 0; j <= GRID_N; j++) {
+      let phi = map(j, 0, GRID_N, 0, TWO_PI);
+      let y = Ylm(l, m, theta, phi);
+      let r = 1.0 + 0.4 * Math.abs(y);
+      row.push({
+        x: r * sin(theta) * cos(phi),
+        y: r * sin(theta) * sin(phi),
+        z: r * cos(theta),
+        ylm: y
+      });
+    }
+    verts.push(row);
+  }
+  return verts;
+}
+
+// Lerp between two vertex grids
+function lerpVerts(a, b, t) {
+  let out = [];
+  for (let i = 0; i <= GRID_N; i++) {
+    let row = [];
+    for (let j = 0; j <= GRID_N; j++) {
+      let va = a[i][j], vb = b[i][j];
+      row.push({
+        x: va.x + (vb.x - va.x) * t,
+        y: va.y + (vb.y - va.y) * t,
+        z: va.z + (vb.z - va.z) * t,
+        ylm: va.ylm + (vb.ylm - va.ylm) * t
+      });
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+function setup() {
+  createCanvas(windowWidth, windowHeight, WEBGL);
+  colorMode(HSB, 360, 100, 100, 100);
+  pixelDensity(min(pixelDensity(), 2));
+
+  lmLabel = document.getElementById('lm-label');
+
+  let [l, m] = MODES[modeIdx];
+  vertices = buildSphereVertices(l, m);
+  verticesPrev = vertices;
+  verticesNext = vertices;
+  updateLabel();
+}
+
+function updateLabel() {
+  let [l, m] = MODES[modeIdx];
+  lmLabel.textContent = `Y(${l},${m})`;
+}
+
+function draw() {
+  background(0, 0, 4);
+
+  // Camera & lights
+  ambientLight(0, 0, 15);
+  pointLight(200, 60, 100, 0, -300, 300);
+  pointLight(30, 70, 90, 300, 200, -200);
+
+  // Orbit control
+  orbitControl(2, 2, 0.1);
+
+  // Auto-rotate
+  rotateY(frameCount * 0.005);
+  rotateX(0.35);
+
+  // Update morph/hold logic
+  let dt = deltaTime / 1000;
+  if (isMorphing) {
+    morphT += dt / MORPH_TIME;
+    if (morphT >= 1.0) {
+      morphT = 1.0;
+      isMorphing = false;
+      holdTimer = 0;
+      verticesPrev = verticesNext;
+      vertices = verticesNext;
+    } else {
+      vertices = lerpVerts(verticesPrev, verticesNext, morphT);
+    }
+  } else {
+    holdTimer += dt;
+    if (holdTimer >= HOLD_TIME) {
+      // Start morph to next mode
+      modeIdx = (modeIdx + 1) % MODES.length;
+      updateLabel();
+      let [l, m] = MODES[modeIdx];
+      verticesNext = buildSphereVertices(l, m);
+      isMorphing = true;
+      morphT = 0;
+    }
+  }
+
+  let MESH_SCALE = min(width, height) * 0.34;
+
+  // Draw triangle mesh
+  noStroke();
+  for (let i = 0; i < GRID_N; i++) {
+    for (let j = 0; j < GRID_N; j++) {
+      let v00 = vertices[i][j];
+      let v10 = vertices[i+1][j];
+      let v01 = vertices[i][j+1];
+      let v11 = vertices[i+1][j+1];
+
+      // Color by ylm value: positive=cyan(200), negative=orange(30)
+      let yAvg = (v00.ylm + v10.ylm + v01.ylm + v11.ylm) * 0.25;
+      let h, s, b;
+      if (yAvg >= 0) {
+        h = 200;
+        s = map(yAvg, 0, 0.5, 20, 95);
+        b = map(yAvg, 0, 0.5, 60, 100);
+      } else {
+        h = 30;
+        s = map(-yAvg, 0, 0.5, 20, 95);
+        b = map(-yAvg, 0, 0.5, 60, 100);
+      }
+
+      fill(h, s, b, 95);
+
+      // Two triangles per quad
+      beginShape(TRIANGLES);
+      vertex(v00.x*MESH_SCALE, v00.z*MESH_SCALE, v00.y*MESH_SCALE);
+      vertex(v10.x*MESH_SCALE, v10.z*MESH_SCALE, v10.y*MESH_SCALE);
+      vertex(v01.x*MESH_SCALE, v01.z*MESH_SCALE, v01.y*MESH_SCALE);
+      endShape();
+
+      beginShape(TRIANGLES);
+      vertex(v10.x*MESH_SCALE, v10.z*MESH_SCALE, v10.y*MESH_SCALE);
+      vertex(v11.x*MESH_SCALE, v11.z*MESH_SCALE, v11.y*MESH_SCALE);
+      vertex(v01.x*MESH_SCALE, v01.z*MESH_SCALE, v01.y*MESH_SCALE);
+      endShape();
+    }
+  }
+
+  // Wire frame on top (very faint)
+  stroke(0, 0, 60, 12);
+  strokeWeight(0.4);
+  noFill();
+  for (let i = 0; i <= GRID_N; i += 5) {
+    beginShape();
+    for (let j = 0; j <= GRID_N; j++) {
+      let v = vertices[i][j];
+      vertex(v.x*MESH_SCALE, v.z*MESH_SCALE, v.y*MESH_SCALE);
+    }
+    endShape();
+  }
+  for (let j = 0; j <= GRID_N; j += 5) {
+    beginShape();
+    for (let i = 0; i <= GRID_N; i++) {
+      let v = vertices[i][j];
+      vertex(v.x*MESH_SCALE, v.z*MESH_SCALE, v.y*MESH_SCALE);
+    }
+    endShape();
+  }
+  noStroke();
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+</script>
+</body></html>

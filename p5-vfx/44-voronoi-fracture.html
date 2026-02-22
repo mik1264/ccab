@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voronoi Fracture | P5.js VFX</title>
+<style>
+body { margin:0; overflow:hidden; background:#0a0a0f; cursor:crosshair; }
+.back-link { position:fixed; top:12px; left:12px; color:#aaa; text-decoration:none; font-family:monospace; font-size:13px; background:rgba(0,0,0,0.6); padding:6px 12px; border-radius:6px; z-index:999; }
+.back-link:hover { color:#fff; }
+#hint { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); color:#8af; font-family:monospace; font-size:14px; background:rgba(0,0,0,0.55); padding:6px 16px; border-radius:20px; z-index:999; pointer-events:none; }
+</style>
+</head>
+<body>
+<a href="../index.html" class="back-link">← Gallery</a>
+<div id="hint">Click anywhere to shatter</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+p5.disableFriendlyErrors = true;
+
+// States: 'intact', 'shattering'
+let state = 'intact';
+let shards = [];
+const SHARD_LIFETIME = 180; // frames at 60fps = 3s
+let shatterTimer = 0;
+
+// Glass panel properties
+let panelX, panelY, panelW, panelH;
+
+// Voronoi points
+let sites = [];
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  pixelDensity(min(pixelDensity(), 2));
+  setupPanel();
+}
+
+function setupPanel() {
+  panelW = width * 0.72;
+  panelH = height * 0.72;
+  panelX = (width - panelW) / 2;
+  panelY = (height - panelH) / 2;
+}
+
+function mousePressed() {
+  if (state === 'intact') {
+    shatter(mouseX, mouseY);
+  }
+}
+
+function shatter(cx, cy) {
+  // Generate 45-55 Voronoi sites around click
+  let count = floor(random(45, 56));
+  sites = [];
+
+  for (let i = 0; i < count; i++) {
+    // Gaussian-ish distribution around click
+    let angle = random(TWO_PI);
+    // More points near click, some spread across panel
+    let r;
+    if (i < count * 0.6) {
+      r = random(0, min(panelW, panelH) * 0.22);
+    } else {
+      r = random(0, min(panelW, panelH) * 0.52);
+    }
+    let sx = constrain(cx + cos(angle) * r, panelX, panelX + panelW);
+    let sy = constrain(cy + sin(angle) * r, panelY, panelY + panelH);
+    sites.push({ x: sx, y: sy });
+  }
+
+  // Build Voronoi cells via scan
+  shards = buildVoronoiShards(cx, cy);
+  state = 'shattering';
+  shatterTimer = 0;
+}
+
+function buildVoronoiShards(cx, cy) {
+  // Each shard: polygon of pixels belonging to a Voronoi cell
+  // We'll build approximate convex-hull cells using clipping
+
+  let cells = sites.map((s, i) => ({
+    site: s,
+    pts: [],
+    color: { h: random(185, 215), s: random(15, 40), b: random(75, 100) },
+    vx: 0, vy: 0, vr: 0,
+    x: s.x, y: s.y, angle: 0
+  }));
+
+  // For each site, compute its Voronoi polygon by clipping against half-planes
+  // Start with bounding rectangle, then clip against each bisector
+  for (let i = 0; i < sites.length; i++) {
+    let poly = [
+      { x: panelX,         y: panelY          },
+      { x: panelX+panelW,  y: panelY          },
+      { x: panelX+panelW,  y: panelY+panelH   },
+      { x: panelX,         y: panelY+panelH   }
+    ];
+
+    for (let j = 0; j < sites.length; j++) {
+      if (i === j) continue;
+      // Clip polygon to the half-plane closer to sites[i] than sites[j]
+      poly = sutherlandHodgman(poly, sites[i], sites[j]);
+      if (poly.length < 3) break;
+    }
+
+    cells[i].pts = poly;
+
+    // Physics: velocity away from click
+    let dx = cells[i].site.x - cx;
+    let dy = cells[i].site.y - cy;
+    let dist = sqrt(dx*dx + dy*dy) + 1;
+    let speed = map(dist, 0, min(panelW, panelH) * 0.5, 12, 3);
+    cells[i].vx = (dx / dist) * speed + random(-1, 1);
+    cells[i].vy = (dy / dist) * speed + random(-2, 0);
+    cells[i].vr = random(-0.06, 0.06);
+    cells[i].x = cells[i].site.x;
+    cells[i].y = cells[i].site.y;
+  }
+
+  return cells;
+}
+
+// Sutherland-Hodgman clipping: clip polygon to half-plane on sites[a] side of bisector(a,b)
+function sutherlandHodgman(poly, sA, sB) {
+  // Midpoint of bisector
+  let mx = (sA.x + sB.x) / 2;
+  let my = (sA.y + sB.y) / 2;
+  // Normal points from sB toward sA
+  let nx = sA.x - sB.x;
+  let ny = sA.y - sB.y;
+
+  let output = [];
+  for (let k = 0; k < poly.length; k++) {
+    let cur = poly[k];
+    let nxt = poly[(k+1) % poly.length];
+    let dCur = (cur.x - mx)*nx + (cur.y - my)*ny;
+    let dNxt = (nxt.x - mx)*nx + (nxt.y - my)*ny;
+    if (dCur >= 0) output.push(cur);
+    if ((dCur >= 0) !== (dNxt >= 0)) {
+      // Intersection
+      let t = dCur / (dCur - dNxt);
+      output.push({ x: cur.x + t*(nxt.x - cur.x), y: cur.y + t*(nxt.y - cur.y) });
+    }
+  }
+  return output;
+}
+
+function draw() {
+  background(0, 0, 4);
+
+  if (state === 'intact') {
+    drawIntactGlass();
+  } else {
+    shatterTimer++;
+
+    // Update and draw shards
+    blendMode(BLEND);
+    let allDead = true;
+    for (let s of shards) {
+      if (s.pts.length < 3) continue;
+      let progress = shatterTimer / SHARD_LIFETIME;
+      if (progress < 1) allDead = false;
+
+      // Physics update
+      s.vy += 0.25;           // gravity
+      s.x  += s.vx;
+      s.y  += s.vy;
+      s.angle += s.vr;
+
+      let alpha = map(progress, 0.3, 1.0, 95, 0);
+      if (alpha <= 0) continue;
+
+      push();
+      translate(s.x - s.site.x, s.y - s.site.y);
+      rotate(s.angle);
+
+      // Ghost / motion blur
+      let ghostAlpha = alpha * 0.25;
+      fill(s.color.h, s.color.s, s.color.b * 0.6, ghostAlpha);
+      noStroke();
+      drawPoly(s.pts, s.site.x, s.site.y);
+
+      // Main shard fill
+      fill(s.color.h, s.color.s, s.color.b, alpha * 0.85);
+      drawPoly(s.pts, s.site.x, s.site.y);
+
+      // Edge glow (cyan)
+      blendMode(ADD);
+      stroke(190, 80, 100, alpha * 0.7);
+      strokeWeight(1.2);
+      noFill();
+      drawPoly(s.pts, s.site.x, s.site.y);
+      blendMode(BLEND);
+
+      pop();
+    }
+
+    if (allDead) {
+      state = 'intact';
+      shards = [];
+    }
+  }
+}
+
+function drawIntactGlass() {
+  // Shimmer
+  let shimmer = sin(frameCount * 0.02) * 5;
+
+  // Glass panel gradient: layered rects
+  noStroke();
+  for (let i = 0; i < 8; i++) {
+    let t = i / 7;
+    fill(200, 20 + t * 20, 80 + t * 20, 12 + t * 10);
+    rect(panelX, panelY, panelW, panelH, 4);
+  }
+
+  // Glint lines
+  blendMode(ADD);
+  let glintX = panelX + (panelW * 0.2) + shimmer;
+  stroke(200, 30, 100, 12);
+  strokeWeight(18);
+  line(glintX, panelY, glintX + panelH * 0.4, panelY + panelH);
+  strokeWeight(6);
+  stroke(200, 20, 100, 18);
+  line(glintX + 40, panelY, glintX + 40 + panelH * 0.4, panelY + panelH);
+
+  // Border glow
+  noFill();
+  stroke(195, 60, 100, 40);
+  strokeWeight(2);
+  rect(panelX, panelY, panelW, panelH, 4);
+  blendMode(BLEND);
+}
+
+function drawPoly(pts, ox, oy) {
+  beginShape();
+  for (let p of pts) vertex(p.x - ox, p.y - oy);
+  endShape(CLOSE);
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  setupPanel();
+  state = 'intact';
+  shards = [];
+}
+</script>
+</body></html>

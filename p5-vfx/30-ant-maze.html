@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ant Maze | P5.js VFX</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; overflow: hidden; }
+        canvas { display: block; }
+        .back-link {
+            position: fixed; top: 16px; left: 16px; z-index: 100;
+            color: rgba(255,255,255,0.7); text-decoration: none; font-family: sans-serif;
+            font-size: 13px; background: rgba(0,0,0,0.5); padding: 6px 12px;
+            border-radius: 20px; backdrop-filter: blur(10px); transition: all 0.3s ease;
+        }
+        .back-link:hover { color: white; background: rgba(0,0,0,0.8); }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">← Gallery</a>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+    <script>
+p5.disableFriendlyErrors = true;
+
+// Ant Colony Maze Solver
+// 15x15 grid maze, 200 ants, pheromone trails
+
+var COLS = 15;
+var ROWS = 15;
+var CELL;     // cell size in pixels
+var OFFSET_X, OFFSET_Y;
+
+// Maze grid: 1 = wall, 0 = path
+var maze = [];
+
+// Pheromone grid (per cell)
+var pher = [];
+var EVAP = 0.995;
+var MAX_PHER = 200;
+
+var ants = [];
+var NUM_ANTS = 200;
+
+// Start = (0,0) open corner, Food = (COLS-1, ROWS-1)
+var startCol = 1, startRow = 1;
+var foodCol, foodRow;
+
+// Directions: 0=R, 1=D, 2=L, 3=U
+var DX = [1, 0, -1, 0];
+var DY = [0, 1, 0, -1];
+
+function idx(c, r) { return r * COLS + c; }
+
+function generateMaze() {
+    // Initialize all walls
+    for (var i = 0; i < COLS * ROWS; i++) maze[i] = 1;
+
+    // Recursive backtracker from (1,1)
+    var stack = [];
+    var visited = new Array(COLS * ROWS).fill(false);
+
+    function carve(c, r) {
+        maze[idx(c, r)] = 0;
+        visited[idx(c, r)] = true;
+        var dirs = [0, 1, 2, 3];
+        // Shuffle dirs
+        for (var i3 = dirs.length - 1; i3 > 0; i3--) {
+            var j3 = floor(random(i3 + 1));
+            var tmp = dirs[i3]; dirs[i3] = dirs[j3]; dirs[j3] = tmp;
+        }
+        for (var d = 0; d < 4; d++) {
+            var nc = c + DX[dirs[d]] * 2;
+            var nr = r + DY[dirs[d]] * 2;
+            if (nc > 0 && nc < COLS - 1 && nr > 0 && nr < ROWS - 1 && !visited[idx(nc, nr)]) {
+                // Carve passage through wall
+                maze[idx(c + DX[dirs[d]], r + DY[dirs[d]])] = 0;
+                carve(nc, nr);
+            }
+        }
+    }
+    carve(1, 1);
+
+    // Ensure start and food are open
+    maze[idx(startCol, startRow)] = 0;
+    maze[idx(foodCol, foodRow)] = 0;
+    // Make sure food corner is reachable (open neighbors)
+    maze[idx(foodCol - 1, foodRow)] = 0;
+    maze[idx(foodCol, foodRow - 1)] = 0;
+}
+
+function setupAnts() {
+    ants = [];
+    for (var i = 0; i < NUM_ANTS; i++) {
+        ants.push(new Ant());
+    }
+}
+
+function Ant() {
+    this.reset();
+}
+
+Ant.prototype.reset = function() {
+    this.c = startCol;
+    this.r = startRow;
+    this.path = [{ c: startCol, r: startRow }];
+    this.foundFood = false;
+    this.returning = false;
+    this.returnIdx = 0;
+    this.dir = floor(random(4));
+    this.stepsWithoutProgress = 0;
+};
+
+Ant.prototype.step = function() {
+    if (this.returning) {
+        // Walk back along path
+        this.returnIdx++;
+        if (this.returnIdx >= this.path.length) {
+            // Deposit pheromone on entire path
+            var pathLen = this.path.length;
+            var deposit = min(MAX_PHER * 0.5, 50 + 200 / pathLen);
+            for (var i = 0; i < this.path.length; i++) {
+                var p = this.path[i];
+                pher[idx(p.c, p.r)] = min(MAX_PHER, pher[idx(p.c, p.r)] + deposit);
+            }
+            this.reset();
+        } else {
+            var pt = this.path[this.path.length - 1 - this.returnIdx];
+            this.c = pt.c;
+            this.r = pt.r;
+        }
+        return;
+    }
+
+    // Find valid neighbors
+    var neighbors = [];
+    for (var d = 0; d < 4; d++) {
+        var nc = this.c + DX[d];
+        var nr = this.r + DY[d];
+        if (nc >= 0 && nc < COLS && nr >= 0 && nr < ROWS && maze[idx(nc, nr)] === 0) {
+            // Avoid last position to reduce backtracking (except if no option)
+            var last = this.path.length >= 2 ? this.path[this.path.length - 2] : null;
+            if (!last || nc !== last.c || nr !== last.r) {
+                neighbors.push({ c: nc, r: nr, d: d });
+            }
+        }
+    }
+
+    // If no forward moves, allow backtrack
+    if (neighbors.length === 0) {
+        for (var d2 = 0; d2 < 4; d2++) {
+            var nc2 = this.c + DX[d2];
+            var nr2 = this.r + DY[d2];
+            if (nc2 >= 0 && nc2 < COLS && nr2 >= 0 && nr2 < ROWS && maze[idx(nc2, nr2)] === 0) {
+                neighbors.push({ c: nc2, r: nr2, d: d2 });
+            }
+        }
+    }
+
+    if (neighbors.length === 0) { this.reset(); return; }
+
+    // Weighted random by pheromone + heuristic (distance to food)
+    var weights = [];
+    var totalW = 0;
+    for (var ni = 0; ni < neighbors.length; ni++) {
+        var n = neighbors[ni];
+        var ph = pher[idx(n.c, n.r)] + 1.0;
+        // Heuristic: prefer direction toward food
+        var dToFood = abs(foodCol - n.c) + abs(foodRow - n.r);
+        var heur = 1.0 / (dToFood + 1);
+        var w = pow(ph, 2.0) * pow(heur, 0.5);
+        weights.push(w);
+        totalW += w;
+    }
+
+    var rnd = random(totalW);
+    var chosen = neighbors[0];
+    var acc = 0;
+    for (var wi = 0; wi < weights.length; wi++) {
+        acc += weights[wi];
+        if (rnd <= acc) { chosen = neighbors[wi]; break; }
+    }
+
+    this.c = chosen.c;
+    this.r = chosen.r;
+    this.path.push({ c: this.c, r: this.r });
+
+    // Max path length to avoid infinite wandering
+    if (this.path.length > COLS * ROWS * 2) {
+        this.reset();
+        return;
+    }
+
+    // Check if reached food
+    if (this.c === foodCol && this.r === foodRow) {
+        this.foundFood = true;
+        this.returning = true;
+        this.returnIdx = 0;
+    }
+};
+
+function setup() {
+    createCanvas(windowWidth, windowHeight);
+    colorMode(HSB, 360, 100, 100, 100);
+
+    // Compute cell size to fit maze centered on canvas
+    var maxW = min(width, height) * 0.85;
+    CELL = floor(maxW / COLS);
+    OFFSET_X = floor((width - COLS * CELL) / 2);
+    OFFSET_Y = floor((height - ROWS * CELL) / 2);
+
+    foodCol = COLS - 2;
+    foodRow = ROWS - 2;
+
+    // Init pheromone
+    for (var i = 0; i < COLS * ROWS; i++) pher[i] = 0;
+
+    generateMaze();
+    setupAnts();
+    frameRate(60);
+}
+
+function draw() {
+    background(0, 0, 4, 100);
+
+    // Evaporate pheromone
+    for (var i = 0; i < COLS * ROWS; i++) {
+        pher[i] *= EVAP;
+        if (pher[i] < 0.01) pher[i] = 0;
+    }
+
+    // Step ants
+    for (var steps = 0; steps < 3; steps++) {
+        for (var ai = 0; ai < ants.length; ai++) {
+            ants[ai].step();
+        }
+    }
+
+    // Draw maze cells
+    noStroke();
+    for (var r = 0; r < ROWS; r++) {
+        for (var c = 0; c < COLS; c++) {
+            var px = OFFSET_X + c * CELL;
+            var py = OFFSET_Y + r * CELL;
+            if (maze[idx(c, r)] === 1) {
+                // Wall
+                fill(0, 0, 12, 100);
+                rect(px, py, CELL, CELL);
+            } else {
+                // Path — show pheromone
+                fill(0, 0, 8, 100);
+                rect(px, py, CELL, CELL);
+
+                var ph = pher[idx(c, r)];
+                if (ph > 0.5) {
+                    // Draw pheromone glow with additive blend
+                    var t = min(ph / MAX_PHER, 1.0);
+                    var hue = map(t, 0, 1, 85, 55);
+                    var sat = 90;
+                    var bri = map(t, 0, 1, 40, 100);
+                    var alpha = map(t, 0, 1, 30, 90);
+                    blendMode(ADD);
+                    fill(hue, sat, bri, alpha);
+                    rect(px + 1, py + 1, CELL - 2, CELL - 2, 2);
+                    blendMode(BLEND);
+                }
+            }
+        }
+    }
+
+    // Draw start (green)
+    blendMode(BLEND);
+    var sx = OFFSET_X + startCol * CELL + CELL / 2;
+    var sy = OFFSET_Y + startRow * CELL + CELL / 2;
+    fill(120, 100, 90, 100);
+    ellipse(sx, sy, CELL * 0.7, CELL * 0.7);
+
+    // Draw food (yellow)
+    var fx = OFFSET_X + foodCol * CELL + CELL / 2;
+    var fy = OFFSET_Y + foodRow * CELL + CELL / 2;
+    fill(55, 100, 100, 100);
+    ellipse(fx, fy, CELL * 0.7, CELL * 0.7);
+
+    // Draw ants
+    blendMode(ADD);
+    for (var ai2 = 0; ai2 < ants.length; ai2++) {
+        var ant = ants[ai2];
+        var ax = OFFSET_X + ant.c * CELL + CELL / 2;
+        var ay = OFFSET_Y + ant.r * CELL + CELL / 2;
+        if (ant.returning) {
+            fill(55, 100, 100, 80);
+        } else {
+            fill(0, 0, 95, 70);
+        }
+        ellipse(ax, ay, 3, 3);
+    }
+
+    // HUD
+    blendMode(BLEND);
+    fill(0, 0, 60, 80);
+    noStroke();
+    textFont('monospace');
+    textSize(13);
+    textAlign(LEFT);
+    text('Ant Maze', 14, height - 28);
+    textSize(11);
+    fill(0, 0, 45, 70);
+    var returning = 0;
+    for (var ai3 = 0; ai3 < ants.length; ai3++) { if (ants[ai3].returning) returning++; }
+    text('Returning: ' + returning + ' / ' + NUM_ANTS, 14, height - 12);
+}
+
+function windowResized() {
+    resizeCanvas(windowWidth, windowHeight);
+    var maxW = min(width, height) * 0.85;
+    CELL = floor(maxW / COLS);
+    OFFSET_X = floor((width - COLS * CELL) / 2);
+    OFFSET_Y = floor((height - ROWS * CELL) / 2);
+}
+    </script>
+</body>
+</html>
