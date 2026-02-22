@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mandelbrot Auto-Zoom - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .controls button { margin-top: 8px; padding: 6px 12px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; width: 100%; }
+        .controls button:hover { background: #06b6d4; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Mandelbrot Auto-Zoom</div>
+
+    <div class="controls">
+        <label>Zoom Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Max Iterations: <span id="iterVal">512</span></label>
+        <input type="range" id="iterations" min="256" max="4096" step="256" value="512">
+        <label>Color Palette:</label>
+        <select id="palette">
+            <option value="0">Ultra Violet</option>
+            <option value="1">Inferno</option>
+            <option value="2">Electric</option>
+            <option value="3">Ocean</option>
+        </select>
+        <button id="resetBtn">Reset Zoom</button>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Zoom: <span id="zoom">1.0</span>x
+    </div>
+
+    <div id="error">
+        WebGPU is not supported in your browser.<br>
+        Please use Chrome 113+, Edge 113+, or Safari 18+.
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        const W = canvas.width, H = canvas.height;
+
+        let zoomSpeed = 1.0, maxIter = 512, palette = 0;
+
+        const uniformBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Seahorse valley target coordinates
+        const targetX = -0.7435669;
+        const targetY = 0.1314023;
+
+        let currentZoom = 1.0;
+        let startTime = performance.now();
+        let resetFlag = false;
+
+        const computeShader = `
+            struct Uniforms {
+                resolution: vec2f,
+                centerX: f32,
+                centerY: f32,
+                zoom: f32,
+                maxIter: u32,
+                palette: u32,
+                time: f32,
+                aspect: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            fn palette0(t: f32, time: f32) -> vec3f {
+                // Ultra Violet: purples, magentas, blues
+                let s = fract(t + time * 0.02);
+                let r = 0.5 + 0.5 * cos(6.28318 * (s * 1.0 + 0.0));
+                let g = 0.5 + 0.5 * cos(6.28318 * (s * 1.0 + 0.6));
+                let b = 0.5 + 0.5 * cos(6.28318 * (s * 1.0 + 0.3));
+                return vec3f(r * 0.7 + 0.1, g * 0.3, b * 0.9 + 0.1);
+            }
+
+            fn palette1(t: f32, time: f32) -> vec3f {
+                // Inferno: black -> red -> yellow -> white
+                let s = fract(t + time * 0.02);
+                let r = clamp(s * 3.0, 0.0, 1.0);
+                let g = clamp(s * 3.0 - 1.0, 0.0, 1.0);
+                let b = clamp(sin(s * 3.14159) * 0.6, 0.0, 1.0);
+                return vec3f(r, g * 0.8, b);
+            }
+
+            fn palette2(t: f32, time: f32) -> vec3f {
+                // Electric: neon cyan/pink/green
+                let s = fract(t + time * 0.02);
+                let r = 0.5 + 0.5 * sin(6.28318 * s * 2.0 + 0.0);
+                let g = 0.5 + 0.5 * sin(6.28318 * s * 2.0 + 2.1);
+                let b = 0.5 + 0.5 * sin(6.28318 * s * 2.0 + 4.2);
+                return vec3f(r, g, b);
+            }
+
+            fn palette3(t: f32, time: f32) -> vec3f {
+                // Ocean: deep blues, teals, white foam
+                let s = fract(t + time * 0.02);
+                let r = 0.1 + 0.3 * pow(s, 2.0);
+                let g = 0.2 + 0.6 * s;
+                let b = 0.4 + 0.6 * sqrt(s);
+                return vec3f(r, g, b);
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let uv = vec2f(
+                    (f32(id.x) / u.resolution.x - 0.5) * u.aspect,
+                    f32(id.y) / u.resolution.y - 0.5
+                );
+
+                let scale = 3.0 / u.zoom;
+                let c = vec2f(u.centerX + uv.x * scale, u.centerY + uv.y * scale);
+
+                var z = vec2f(0.0, 0.0);
+                var i = 0u;
+                var smooth_i = 0.0;
+
+                for (; i < u.maxIter; i++) {
+                    let zx = z.x * z.x - z.y * z.y + c.x;
+                    let zy = 2.0 * z.x * z.y + c.y;
+                    z = vec2f(zx, zy);
+
+                    let mag2 = dot(z, z);
+                    if (mag2 > 256.0) {
+                        smooth_i = f32(i) + 1.0 - log2(log2(mag2) * 0.5);
+                        break;
+                    }
+                }
+
+                var color: vec3f;
+                if (i >= u.maxIter) {
+                    color = vec3f(0.0);
+                } else {
+                    let t = smooth_i * 0.015;
+
+                    if (u.palette == 0u) {
+                        color = palette0(t, u.time);
+                    } else if (u.palette == 1u) {
+                        color = palette1(t, u.time);
+                    } else if (u.palette == 2u) {
+                        color = palette2(t, u.time);
+                    } else {
+                        color = palette3(t, u.time);
+                    }
+                }
+
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            if (resetFlag) {
+                currentZoom = 1.0;
+                startTime = now;
+                resetFlag = false;
+            }
+
+            const elapsed = (now - startTime) * 0.001 * zoomSpeed;
+            currentZoom = Math.pow(1.5, elapsed);
+
+            // Cap zoom to avoid precision artifacts
+            if (currentZoom > 1e12) {
+                currentZoom = 1.0;
+                startTime = now;
+            }
+
+            const time = (now - startTime) * 0.001;
+
+            document.getElementById('zoom').textContent = currentZoom > 1e6
+                ? currentZoom.toExponential(1) : currentZoom.toFixed(1);
+
+            const buf = new ArrayBuffer(64);
+            const f32 = new Float32Array(buf);
+            const u32 = new Uint32Array(buf);
+            f32[0] = W; f32[1] = H;
+            f32[2] = targetX;
+            f32[3] = targetY;
+            f32[4] = currentZoom;
+            u32[5] = maxIter;
+            u32[6] = palette;
+            f32[7] = time;
+            f32[8] = W / H;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        document.getElementById('speed').addEventListener('input', (e) => {
+            zoomSpeed = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = zoomSpeed.toFixed(1);
+        });
+        document.getElementById('iterations').addEventListener('input', (e) => {
+            maxIter = parseInt(e.target.value);
+            document.getElementById('iterVal').textContent = maxIter;
+        });
+        document.getElementById('palette').addEventListener('change', (e) => {
+            palette = parseInt(e.target.value);
+        });
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            resetFlag = true;
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

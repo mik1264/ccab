@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fractal Lightning - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Fractal Lightning</div>
+
+    <div class="controls">
+        <label>Bolt Count: <span id="boltVal">3</span></label>
+        <input type="range" id="boltCount" min="1" max="6" step="1" value="3">
+        <label>Branching: <span id="branchVal">5</span></label>
+        <input type="range" id="branching" min="2" max="8" step="1" value="5">
+        <label>Flash Rate: <span id="flashVal">1.0</span></label>
+        <input type="range" id="flashRate" min="0.3" max="3.0" step="0.1" value="1.0">
+        <label>Glow Width: <span id="glowVal">3.0</span></label>
+        <input type="range" id="glowWidth" min="1.0" max="8.0" step="0.5" value="3.0">
+        <label>Color Mode:</label>
+        <select id="colorMode">
+            <option value="0">Classic White-Blue</option>
+            <option value="1">Purple Storm</option>
+            <option value="2">Green Tesla</option>
+            <option value="3">Fire Lightning</option>
+        </select>
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        const W = canvas.width, H = canvas.height;
+        let boltCount = 3, branching = 5, flashRate = 1.0, glowWidth = 3.0, colorMode = 0;
+
+        // Lightning generation on CPU using midpoint displacement
+        const MAX_SEGMENTS = 4096;
+        // Each segment: x1, y1, x2, y2 (4 floats)
+        const segmentData = new Float32Array(MAX_SEGMENTS * 4);
+        let segmentCount = 0;
+
+        function generateBolt(x1, y1, x2, y2, depth, maxDepth, segments) {
+            if (depth >= maxDepth || segments.length >= MAX_SEGMENTS - 2) {
+                segments.push(x1, y1, x2, y2);
+                return;
+            }
+
+            const mx = (x1 + x2) / 2 + (Math.random() - 0.5) * Math.abs(y2 - y1) * 0.4;
+            const my = (y1 + y2) / 2 + (Math.random() - 0.5) * Math.abs(x2 - x1) * 0.15;
+
+            generateBolt(x1, y1, mx, my, depth + 1, maxDepth, segments);
+            generateBolt(mx, my, x2, y2, depth + 1, maxDepth, segments);
+
+            // Branch
+            if (depth < maxDepth - 1 && Math.random() < 0.35) {
+                const angle = (Math.random() - 0.5) * 1.2;
+                const len = 0.05 + Math.random() * 0.12;
+                const dx = x2 - x1, dy = y2 - y1;
+                const bx = mx + Math.cos(angle) * len * (dx > 0 ? 1 : -1) + (Math.random() - 0.5) * 0.03;
+                const by = my + Math.abs(dy) * len * 0.5 + len * 0.3;
+                generateBolt(mx, my, bx, by, depth + 1, maxDepth - 1, segments);
+            }
+        }
+
+        function regenerateLightning() {
+            const segments = [];
+            const numBolts = boltCount;
+            for (let b = 0; b < numBolts; b++) {
+                const startX = 0.15 + Math.random() * 0.7;
+                const endX = startX + (Math.random() - 0.5) * 0.3;
+                generateBolt(startX, 0.0, endX, 0.85 + Math.random() * 0.15, 0, branching, segments);
+            }
+            segmentCount = Math.min(Math.floor(segments.length / 4), MAX_SEGMENTS);
+            for (let i = 0; i < segmentCount * 4; i++) {
+                segmentData[i] = segments[i];
+            }
+            device.queue.writeBuffer(segmentBuffer, 0, segmentData);
+            // Update count
+            const countBuf = new Uint32Array([segmentCount]);
+            device.queue.writeBuffer(countBuffer, 0, countBuf);
+        }
+
+        const segmentBuffer = device.createBuffer({ size: segmentData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const countBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        regenerateLightning();
+
+        const shaderCode = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                glowWidth: f32,
+                colorMode: u32,
+                flashPhase: f32,
+                aspect: f32,
+                pad: f32,
+                pad2: f32,
+                pad3: f32,
+                pad4: f32,
+                pad5: f32,
+            }
+
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+            @group(0) @binding(2) var<storage, read> segments: array<f32>;
+            @group(0) @binding(3) var<uniform> segCount: u32;
+
+            fn hash(p: vec2f) -> f32 {
+                var p3 = fract(vec3f(p.x, p.y, p.x) * 0.1031);
+                p3 = p3 + dot(p3, vec3f(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            fn noise(p: vec2f) -> f32 {
+                let i = floor(p);
+                let f = fract(p);
+                let u2 = f * f * (3.0 - 2.0 * f);
+                return mix(mix(hash(i), hash(i + vec2f(1.0, 0.0)), u2.x),
+                           mix(hash(i + vec2f(0.0, 1.0)), hash(i + vec2f(1.0, 1.0)), u2.x), u2.y);
+            }
+
+            fn fbm(p: vec2f) -> f32 {
+                var val = 0.0;
+                var amp = 0.5;
+                var pp = p;
+                for (var i = 0; i < 5; i++) {
+                    val += amp * noise(pp);
+                    pp *= 2.0;
+                    amp *= 0.5;
+                }
+                return val;
+            }
+
+            // Distance from point to line segment
+            fn distToSeg(p: vec2f, a: vec2f, b: vec2f) -> f32 {
+                let pa = p - a;
+                let ba = b - a;
+                let t = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+                return length(pa - ba * t);
+            }
+
+            fn getLightningColor(intensity: f32) -> vec3f {
+                if (u.colorMode == 0u) {
+                    // Classic white-blue
+                    let core = vec3f(1.0, 1.0, 1.0) * intensity;
+                    let glow = vec3f(0.3, 0.5, 1.0) * intensity * 0.6;
+                    return core + glow;
+                } else if (u.colorMode == 1u) {
+                    // Purple storm
+                    let core = vec3f(0.9, 0.7, 1.0) * intensity;
+                    let glow = vec3f(0.5, 0.1, 0.8) * intensity * 0.6;
+                    return core + glow;
+                } else if (u.colorMode == 2u) {
+                    // Green Tesla
+                    let core = vec3f(0.8, 1.0, 0.8) * intensity;
+                    let glow = vec3f(0.1, 0.8, 0.3) * intensity * 0.6;
+                    return core + glow;
+                } else {
+                    // Fire lightning
+                    let core = vec3f(1.0, 0.95, 0.8) * intensity;
+                    let glow = vec3f(1.0, 0.4, 0.05) * intensity * 0.6;
+                    return core + glow;
+                }
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let uv = vec2f(f32(id.x) / u.resolution.x, f32(id.y) / u.resolution.y);
+                let pixel = vec2f(uv.x * u.aspect, uv.y);
+
+                // Dark thunderstorm sky
+                let skyNoise = fbm(uv * 3.0 + vec2f(u.time * 0.05, 0.0));
+                let sky2 = fbm(uv * 5.0 + vec2f(-u.time * 0.03, u.time * 0.02));
+                var skyColor = vec3f(0.02, 0.02, 0.06);
+                // Cloud layer
+                let cloudVal = smoothstep(0.35, 0.7, skyNoise) * 0.15;
+                let cloud2 = smoothstep(0.4, 0.75, sky2) * 0.1;
+                skyColor += vec3f(0.05, 0.05, 0.08) * cloudVal;
+                skyColor += vec3f(0.04, 0.04, 0.07) * cloud2;
+                // Darker at bottom
+                skyColor *= (0.6 + 0.4 * (1.0 - uv.y));
+
+                // Flash effect: brightens the whole sky
+                let flashBright = pow(max(u.flashPhase, 0.0), 3.0);
+                skyColor += vec3f(0.08, 0.08, 0.15) * flashBright;
+
+                // Cloud illumination near top during flash
+                let cloudIllum = smoothstep(0.3, 0.6, skyNoise) * flashBright * 0.4;
+                skyColor += vec3f(0.15, 0.15, 0.25) * cloudIllum * (1.0 - uv.y);
+
+                // Compute distance to all lightning segments
+                var minDist: f32 = 1e10;
+                let gw = u.glowWidth / u.resolution.x;
+
+                for (var i = 0u; i < segCount; i++) {
+                    let base = i * 4u;
+                    let a = vec2f(segments[base] * u.aspect, segments[base + 1u]);
+                    let b = vec2f(segments[base + 2u] * u.aspect, segments[base + 3u]);
+                    let d = distToSeg(pixel, a, b);
+                    minDist = min(minDist, d);
+                }
+
+                // Multi-layer glow
+                let coreGlow = exp(-minDist * minDist / (gw * gw * 0.1)) * u.flashPhase;
+                let innerGlow = exp(-minDist * minDist / (gw * gw * 1.0)) * u.flashPhase * 0.7;
+                let outerGlow = exp(-minDist * minDist / (gw * gw * 4.0)) * u.flashPhase * 0.3;
+                let farGlow = exp(-minDist * minDist / (gw * gw * 16.0)) * u.flashPhase * 0.1;
+
+                let totalIntensity = coreGlow + innerGlow + outerGlow + farGlow;
+                let lightningCol = getLightningColor(totalIntensity);
+
+                var col = skyColor + lightningCol;
+
+                // Gamma
+                col = pow(clamp(col, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2));
+                textureStore(outTex, vec2u(id.x, id.y), vec4f(col, 1.0));
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const bindGroupLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+        });
+        const pipeline = device.createComputePipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+            compute: { module: device.createShaderModule({ code: shaderCode }), entryPoint: 'main' },
+        });
+        const bindGroup = device.createBindGroup({
+            layout: bindGroupLayout,
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+                { binding: 2, resource: { buffer: segmentBuffer } },
+                { binding: 3, resource: { buffer: countBuffer } },
+            ],
+        });
+
+        // Blit
+        const blitModule = device.createShaderModule({ code: `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var pos = array<vec2f, 6>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(-1,1), vec2f(1,-1), vec2f(1,1));
+                var out: VSOut;
+                out.pos = vec4f(pos[i], 0, 1);
+                out.uv = pos[i] * 0.5 + 0.5;
+                out.uv.y = 1.0 - out.uv.y;
+                return out;
+            }
+            @fragment fn fs(inp: VSOut) -> @location(0) vec4f {
+                return textureSample(tex, samp, inp.uv);
+            }
+        `});
+        const blitBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+            ],
+        });
+        const blitPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [blitBGL] }),
+            vertex: { module: blitModule, entryPoint: 'vs' },
+            fragment: { module: blitModule, entryPoint: 'fs', targets: [{ format }] },
+        });
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        const blitBG = device.createBindGroup({
+            layout: blitBGL,
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler },
+            ],
+        });
+
+        // Lightning flash timing
+        let lastStrike = 0;
+        let flashPhase = 0;
+        let strikeInterval = 2.0;
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const time = now * 0.001;
+            strikeInterval = 1.0 / flashRate + Math.sin(time * 0.7) * 0.3;
+
+            // Flash cycle: sharp onset, exponential decay
+            const timeSinceStrike = time - lastStrike;
+            if (timeSinceStrike > strikeInterval) {
+                lastStrike = time;
+                regenerateLightning();
+                flashPhase = 1.0;
+            } else {
+                // Multi-flash effect: main strike + aftershock
+                const t1 = timeSinceStrike;
+                const mainFlash = Math.exp(-t1 * 6.0);
+                const aftershock = Math.exp(-(t1 - 0.15) * 8.0) * (t1 > 0.12 ? 0.5 : 0.0);
+                flashPhase = Math.max(mainFlash, aftershock);
+            }
+
+            const uData = new Float32Array(12);
+            const uInt = new Uint32Array(uData.buffer);
+            uData[0] = W; uData[1] = H;
+            uData[2] = time;
+            uData[3] = glowWidth;
+            uInt[4] = colorMode;
+            uData[5] = flashPhase;
+            uData[6] = W / H;
+            device.queue.writeBuffer(uniformBuffer, 0, uData);
+
+            const encoder = device.createCommandEncoder();
+            const cp = encoder.beginComputePass();
+            cp.setPipeline(pipeline);
+            cp.setBindGroup(0, bindGroup);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = encoder.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+            });
+            rp.setPipeline(blitPipeline);
+            rp.setBindGroup(0, blitBG);
+            rp.draw(6);
+            rp.end();
+            device.queue.submit([encoder.finish()]);
+        }
+
+        document.getElementById('boltCount').oninput = e => { boltCount = +e.target.value; document.getElementById('boltVal').textContent = boltCount; };
+        document.getElementById('branching').oninput = e => { branching = +e.target.value; document.getElementById('branchVal').textContent = branching; };
+        document.getElementById('flashRate').oninput = e => { flashRate = +e.target.value; document.getElementById('flashVal').textContent = flashRate.toFixed(1); };
+        document.getElementById('glowWidth').oninput = e => { glowWidth = +e.target.value; document.getElementById('glowVal').textContent = glowWidth.toFixed(1); };
+        document.getElementById('colorMode').onchange = e => { colorMode = +e.target.value; };
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

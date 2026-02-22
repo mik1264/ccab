@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Rain - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 166px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Digital Rain</div>
+
+    <div class="controls">
+        <label>Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.3" max="3.0" step="0.1" value="1.0">
+        <label>Density: <span id="densityVal">0.7</span></label>
+        <input type="range" id="density" min="0.3" max="1.0" step="0.05" value="0.7">
+        <label>Glow: <span id="glowVal">1.0</span></label>
+        <input type="range" id="glow" min="0.2" max="2.0" step="0.1" value="1.0">
+        <label>Color:</label>
+        <select id="colorMode">
+            <option value="0">Green</option>
+            <option value="1">Cyan</option>
+            <option value="2">Amber</option>
+            <option value="3">Red</option>
+        </select>
+        <label>Font Size: <span id="fontVal">16</span></label>
+        <input type="range" id="fontSize" min="10" max="28" step="2" value="16">
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span> | Columns: <span id="cols">0</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        let speed = 1.0, density = 0.7, glow = 1.0, colorMode = 0, fontSize = 16;
+        document.getElementById('speed').oninput = e => { speed = +e.target.value; document.getElementById('speedVal').textContent = speed.toFixed(1); };
+        document.getElementById('density').oninput = e => { density = +e.target.value; document.getElementById('densityVal').textContent = density.toFixed(2); };
+        document.getElementById('glow').oninput = e => { glow = +e.target.value; document.getElementById('glowVal').textContent = glow.toFixed(1); };
+        document.getElementById('colorMode').onchange = e => { colorMode = +e.target.value; };
+        document.getElementById('fontSize').oninput = e => { fontSize = +e.target.value; document.getElementById('fontVal').textContent = fontSize; };
+
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Column state buffer (CPU-managed, uploaded each frame)
+        // Each column: headY (float), speed (float), length (float), brightness (float)
+        const MAX_COLS = 256;
+        const colStateData = new Float32Array(MAX_COLS * 4);
+        const colStateBuffer = device.createBuffer({ size: MAX_COLS * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+        // Initialize columns
+        function initColumns(numCols) {
+            for (let i = 0; i < numCols; i++) {
+                colStateData[i * 4] = Math.random() * 2.0 - 0.5; // headY (start at random position)
+                colStateData[i * 4 + 1] = 0.3 + Math.random() * 0.7; // speed
+                colStateData[i * 4 + 2] = 8 + Math.floor(Math.random() * 20); // trail length
+                colStateData[i * 4 + 3] = 0.5 + Math.random() * 0.5; // brightness
+            }
+        }
+
+        let numCols = Math.floor(canvas.width / fontSize);
+        initColumns(numCols);
+        document.getElementById('cols').textContent = numCols;
+
+        const shaderCode = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                speed: f32,
+                density: f32,
+                glow: f32,
+                colorMode: u32,
+                fontSize: f32,
+                numCols: u32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+            @group(0) @binding(1) var<storage, read> columns: array<f32>;
+
+            fn hash(p: vec2f) -> f32 {
+                let h = dot(p, vec2f(127.1, 311.7));
+                return fract(sin(h) * 43758.5453);
+            }
+
+            // Procedural glyph rendering - creates abstract character shapes
+            fn glyph(cellUV: vec2f, seed: f32) -> f32 {
+                let id = floor(seed * 47.0) % 47.0;
+                var g: f32 = 0.0;
+                let cx = cellUV.x;
+                let cy = cellUV.y;
+
+                // Create character-like patterns using combinations of rectangles and lines
+                let h1 = hash(vec2f(id, 0.0));
+                let h2 = hash(vec2f(id, 1.0));
+                let h3 = hash(vec2f(id, 2.0));
+                let h4 = hash(vec2f(id, 3.0));
+
+                // Vertical strokes
+                if (h1 > 0.3) {
+                    let sx = 0.2 + h2 * 0.3;
+                    if (abs(cx - sx) < 0.08) { g = max(g, 1.0); }
+                }
+                if (h2 > 0.4) {
+                    let sx = 0.5 + h3 * 0.3;
+                    if (abs(cx - sx) < 0.08) { g = max(g, 1.0); }
+                }
+
+                // Horizontal strokes
+                if (h3 > 0.3) {
+                    let sy = 0.15 + h1 * 0.2;
+                    if (abs(cy - sy) < 0.08 && cx > 0.15 && cx < 0.85) { g = max(g, 1.0); }
+                }
+                if (h4 > 0.4) {
+                    let sy = 0.55 + h2 * 0.3;
+                    if (abs(cy - sy) < 0.08 && cx > 0.15 && cx < 0.85) { g = max(g, 1.0); }
+                }
+
+                // Diagonal
+                if (h1 + h2 > 1.0) {
+                    let d = abs((cx - 0.5) - (cy - 0.5) * h3);
+                    if (d < 0.08) { g = max(g, 0.8); }
+                }
+
+                // Circular element
+                if (h4 > 0.6) {
+                    let cd = length(vec2f(cx - 0.5, cy - 0.5));
+                    if (abs(cd - 0.25) < 0.07) { g = max(g, 0.9); }
+                }
+
+                // Small dot
+                if (h3 + h4 > 1.2) {
+                    let dd = length(vec2f(cx - 0.5, cy - (0.3 + h1 * 0.4)));
+                    if (dd < 0.1) { g = max(g, 1.0); }
+                }
+
+                // Margin clipping
+                if (cx < 0.1 || cx > 0.9 || cy < 0.05 || cy > 0.95) { g = 0.0; }
+
+                return g;
+            }
+
+            fn getColor(brightness: f32) -> vec3f {
+                if (u.colorMode == 0u) {
+                    return vec3f(0.1, 1.0, 0.3) * brightness;
+                } else if (u.colorMode == 1u) {
+                    return vec3f(0.1, 0.8, 1.0) * brightness;
+                } else if (u.colorMode == 2u) {
+                    return vec3f(1.0, 0.7, 0.1) * brightness;
+                } else {
+                    return vec3f(1.0, 0.15, 0.1) * brightness;
+                }
+            }
+
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                var pos = array<vec2f, 6>(
+                    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+                    vec2f(-1,1), vec2f(1,-1), vec2f(1,1)
+                );
+                return vec4f(pos[i], 0.0, 1.0);
+            }
+
+            @fragment fn fs(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
+                let px = fragCoord.x;
+                let py = u.resolution.y - fragCoord.y; // flip Y so rain falls downward
+
+                let cellSize = u.fontSize;
+                let colIdx = u32(floor(px / cellSize));
+                let rowIdx = floor(py / cellSize);
+
+                if (colIdx >= u.numCols) {
+                    return vec4f(0.0, 0.0, 0.0, 1.0);
+                }
+
+                // Column state
+                let base = colIdx * 4u;
+                let headY = columns[base];
+                let colSpeed = columns[base + 1u];
+                let trailLen = columns[base + 2u];
+                let colBright = columns[base + 3u];
+
+                // Current row in normalized space
+                let numRows = u.resolution.y / cellSize;
+                let rowNorm = rowIdx / numRows;
+
+                // Distance from head of column (in row units)
+                let headRow = headY * numRows;
+                let dist = headRow - rowIdx;
+
+                // Only draw if in trail range and column is active
+                if (dist < 0.0 || dist > trailLen) {
+                    // Background: very subtle noise
+                    let bg = hash(vec2f(px * 0.01, py * 0.01 + u.time * 0.1)) * 0.01;
+                    return vec4f(0.0, bg * 0.5, 0.0, 1.0);
+                }
+
+                // Brightness falloff along trail
+                let trailFade = 1.0 - dist / trailLen;
+                let headGlow = exp(-dist * 0.5); // bright head
+
+                // Character seed changes over time for animation
+                let charSeed = hash(vec2f(f32(colIdx) * 7.13, floor(rowIdx) * 3.71 + floor(u.time * 3.0 + f32(colIdx) * 0.5)));
+
+                // Cell UV for glyph rendering
+                let cellUV = vec2f(fract(px / cellSize), fract(py / cellSize));
+                let glyphVal = glyph(cellUV, charSeed);
+
+                // Combine brightness
+                var brightness = glyphVal * (trailFade * 0.6 + headGlow * 0.8) * colBright;
+
+                // Random bright flash on some characters
+                let flashSeed = hash(vec2f(f32(colIdx), rowIdx + floor(u.time * 2.0)));
+                if (flashSeed > 0.97) {
+                    brightness = max(brightness, glyphVal * 1.5);
+                }
+
+                // Head of column is brightest white-ish
+                var color: vec3f;
+                if (dist < 1.5) {
+                    let headMix = 1.0 - dist / 1.5;
+                    let baseColor = getColor(brightness);
+                    color = mix(baseColor, vec3f(brightness * 1.2), headMix * 0.7);
+                } else {
+                    color = getColor(brightness);
+                }
+
+                // Glow effect
+                let glowRadius = u.glow * 0.4;
+                let cellCenter = vec2f((f32(colIdx) + 0.5) * cellSize, (rowIdx + 0.5) * cellSize);
+                let distToCenter = length(fragCoord.xy - vec2f(cellCenter.x, u.resolution.y - cellCenter.y));
+                let glowFactor = exp(-distToCenter * distToCenter / (cellSize * cellSize * glowRadius)) * trailFade * 0.15;
+                color += getColor(glowFactor);
+
+                return vec4f(color, 1.0);
+            }
+        `;
+
+        const shaderModule = device.createShaderModule({ code: shaderCode });
+        const pipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: shaderModule, entryPoint: 'vs' },
+            fragment: { module: shaderModule, entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-list' }
+        });
+
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: 1, resource: { buffer: colStateBuffer } }
+            ]
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            context.configure({ device, format, alphaMode: 'opaque' });
+            numCols = Math.floor(canvas.width / fontSize);
+            initColumns(numCols);
+            document.getElementById('cols').textContent = numCols;
+        });
+
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+        const startTime = performance.now();
+
+        function render() {
+            const now = performance.now();
+            const time = (now - startTime) / 1000;
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++; fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            // Update column states on CPU
+            for (let i = 0; i < numCols; i++) {
+                if (Math.random() > density) continue; // skip inactive columns
+
+                colStateData[i * 4] += colStateData[i * 4 + 1] * speed * dt * 0.5;
+
+                // Reset column when it goes off screen
+                if (colStateData[i * 4] > 1.5) {
+                    colStateData[i * 4] = -0.1 - Math.random() * 0.5;
+                    colStateData[i * 4 + 1] = 0.3 + Math.random() * 0.7;
+                    colStateData[i * 4 + 2] = 8 + Math.floor(Math.random() * 20);
+                    colStateData[i * 4 + 3] = 0.5 + Math.random() * 0.5;
+                }
+            }
+            device.queue.writeBuffer(colStateBuffer, 0, colStateData.subarray(0, numCols * 4));
+
+            const uBuf = new ArrayBuffer(48);
+            const uf = new Float32Array(uBuf);
+            const uu = new Uint32Array(uBuf);
+            uf[0] = canvas.width; uf[1] = canvas.height;
+            uf[2] = time; uf[3] = speed;
+            uf[4] = density; uf[5] = glow;
+            uu[6] = colorMode; uf[7] = fontSize;
+            uu[8] = numCols;
+            device.queue.writeBuffer(uniformBuffer, 0, uf);
+
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    storeOp: 'store'
+                }]
+            });
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.draw(6);
+            pass.end();
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

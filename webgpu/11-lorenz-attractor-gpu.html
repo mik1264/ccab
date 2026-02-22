@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lorenz Storm - 1M Points - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 210px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Lorenz Storm &mdash; 1M Points</div>
+
+    <div class="controls">
+        <label>Sigma (&sigma;): <span id="sigmaVal">10.0</span></label>
+        <input type="range" id="sigma" min="1" max="30" step="0.5" value="10">
+        <label>Rho (&rho;): <span id="rhoVal">28.0</span></label>
+        <input type="range" id="rho" min="1" max="50" step="0.5" value="28">
+        <label>Beta (&beta;): <span id="betaVal">2.67</span></label>
+        <input type="range" id="beta" min="0.5" max="8" step="0.05" value="2.67">
+        <label>Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Color Theme:</label>
+        <select id="theme">
+            <option value="0">Z-Height Rainbow</option>
+            <option value="1">Fire</option>
+            <option value="2">Ice</option>
+            <option value="3">Neon</option>
+        </select>
+        <label>Point Count:</label>
+        <select id="pointCount">
+            <option value="100000">100K</option>
+            <option value="500000">500K</option>
+            <option value="1000000" selected>1M</option>
+        </select>
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span> | Points: <span id="pcount">1,000,000</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: 256 * 1024 * 1024 } });
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        let sigma = 10.0, rho = 28.0, beta = 2.67, speed = 1.0, theme = 0;
+        let NUM_PARTICLES = 1000000;
+
+        document.getElementById('sigma').oninput = e => { sigma = +e.target.value; document.getElementById('sigmaVal').textContent = sigma.toFixed(1); };
+        document.getElementById('rho').oninput = e => { rho = +e.target.value; document.getElementById('rhoVal').textContent = rho.toFixed(1); };
+        document.getElementById('beta').oninput = e => { beta = +e.target.value; document.getElementById('betaVal').textContent = beta.toFixed(2); };
+        document.getElementById('speed').oninput = e => { speed = +e.target.value; document.getElementById('speedVal').textContent = speed.toFixed(1); };
+        document.getElementById('theme').onchange = e => { theme = +e.target.value; };
+        document.getElementById('pointCount').onchange = e => {
+            document.getElementById('pcount').textContent = (+e.target.value).toLocaleString();
+        };
+
+        // Each particle: x, y, z, age (4 floats)
+        const FLOATS_PER = 4;
+        const particleData = new Float32Array(NUM_PARTICLES * FLOATS_PER);
+
+        // Initialize near the attractor with slight perturbations
+        for (let i = 0; i < NUM_PARTICLES; i++) {
+            const base = i * FLOATS_PER;
+            // Start near the attractor's center with random offsets
+            particleData[base + 0] = (Math.random() - 0.5) * 30; // x: [-15, 15]
+            particleData[base + 1] = (Math.random() - 0.5) * 30; // y: [-15, 15]
+            particleData[base + 2] = Math.random() * 45 + 5;      // z: [5, 50]
+            particleData[base + 3] = Math.random();                // age for color variation
+        }
+
+        const particleBuf = device.createBuffer({ size: particleData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(particleBuf, 0, particleData);
+
+        const uniformBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Compute shader: RK4 integration of Lorenz system
+        const computeShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                dt: f32,
+                sigma: f32,
+                rho: f32,
+                beta: f32,
+                speed: f32,
+                theme: u32,
+                particleCount: u32,
+                camAngle: f32,
+                pad1: f32,
+            }
+            @group(0) @binding(0) var<storage, read_write> particles: array<f32>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            fn lorenz(p: vec3f) -> vec3f {
+                return vec3f(
+                    u.sigma * (p.y - p.x),
+                    p.x * (u.rho - p.z) - p.y,
+                    p.x * p.y - u.beta * p.z
+                );
+            }
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u.particleCount) { return; }
+                let base = idx * 4u;
+
+                var p = vec3f(particles[base], particles[base + 1u], particles[base + 2u]);
+
+                // RK4 integration
+                let h = u.dt * u.speed * 0.005;
+
+                let k1 = lorenz(p);
+                let k2 = lorenz(p + k1 * h * 0.5);
+                let k3 = lorenz(p + k2 * h * 0.5);
+                let k4 = lorenz(p + k3 * h);
+
+                p += (k1 + 2.0 * k2 + 2.0 * k3 + k4) * (h / 6.0);
+
+                // Reset if diverged
+                let r = length(p);
+                if (r > 200.0 || r != r) {
+                    let seed = f32(idx) * 0.001 + u.time;
+                    p = vec3f(
+                        fract(sin(seed * 127.1) * 43758.5) * 30.0 - 15.0,
+                        fract(sin(seed * 269.5) * 43758.5) * 30.0 - 15.0,
+                        fract(sin(seed * 183.3) * 43758.5) * 45.0 + 5.0
+                    );
+                }
+
+                particles[base] = p.x;
+                particles[base + 1u] = p.y;
+                particles[base + 2u] = p.z;
+            }
+        `});
+
+        // Render shader: project 3D points with orbiting camera
+        const renderShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                dt: f32,
+                sigma: f32,
+                rho: f32,
+                beta: f32,
+                speed: f32,
+                theme: u32,
+                particleCount: u32,
+                camAngle: f32,
+                pad1: f32,
+            }
+            struct VSOut {
+                @builtin(position) pos: vec4f,
+                @location(0) color: vec3f,
+                @location(1) @interpolate(flat) center: vec2f,
+                @location(2) screenPos: vec2f,
+            }
+            @group(0) @binding(0) var<storage, read> particles: array<f32>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            fn hsl(h: f32, s: f32, l: f32) -> vec3f {
+                let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+                let hp = fract(h) * 6.0;
+                let x = c * (1.0 - abs(hp % 2.0 - 1.0));
+                var rgb: vec3f;
+                if (hp < 1.0) { rgb = vec3f(c, x, 0); }
+                else if (hp < 2.0) { rgb = vec3f(x, c, 0); }
+                else if (hp < 3.0) { rgb = vec3f(0, c, x); }
+                else if (hp < 4.0) { rgb = vec3f(0, x, c); }
+                else if (hp < 5.0) { rgb = vec3f(x, 0, c); }
+                else { rgb = vec3f(c, 0, x); }
+                return rgb + vec3f(l - c * 0.5);
+            }
+
+            @vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+                let base = ii * 4u;
+                let px = particles[base];
+                let py = particles[base + 1u];
+                let pz = particles[base + 2u];
+                let age = particles[base + 3u];
+
+                let aspect = u.resolution.x / u.resolution.y;
+
+                // Camera orbiting
+                let camAngle = u.camAngle;
+                let camDist = 80.0;
+                let camHeight = 30.0;
+                let cx = camDist * cos(camAngle);
+                let cz_cam = camDist * sin(camAngle);
+
+                // View transform (simplified look-at toward origin offset by z=25)
+                let targetZ = 25.0; // Lorenz attractor center is around z=25
+                let dx = px - cx;
+                let dy = py;
+                let dz = pz - targetZ - cz_cam;
+
+                // Rotate around Y axis
+                let rx = dx * cos(camAngle) + (pz - targetZ) * sin(camAngle) - camDist;
+                let ry = dy;
+                let rz = -dx * sin(camAngle) + (pz - targetZ) * cos(camAngle);
+
+                // Simple perspective
+                let depth = max(-rx, 1.0);
+                let fov = 1.5;
+                let sx = (ry * fov / depth) / aspect;
+                let sy = (rz * fov / depth);
+
+                // Point size based on depth
+                let pSize = 1.5 / (depth * 0.02) / u.resolution.y;
+
+                var offsets = array<vec2f, 6>(
+                    vec2f(-1, -1), vec2f(1, -1), vec2f(-1, 1),
+                    vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1)
+                );
+                let quadPos = vec2f(sx, sy) + offsets[vi] * pSize;
+
+                // Color based on z-height and theme
+                let zNorm = clamp((pz - 5.0) / 40.0, 0.0, 1.0);
+                let depthFade = 1.0 / (1.0 + depth * 0.01);
+
+                var col: vec3f;
+                if (u.theme == 0u) {
+                    // Z-Height Rainbow
+                    col = hsl(zNorm * 0.8, 0.9, 0.3 + zNorm * 0.3) * depthFade;
+                } else if (u.theme == 1u) {
+                    // Fire
+                    col = vec3f(
+                        min(zNorm * 2.5, 1.0),
+                        max(zNorm * 1.5 - 0.3, 0.0),
+                        max(zNorm * 1.0 - 0.7, 0.0) * 0.5
+                    ) * depthFade;
+                } else if (u.theme == 2u) {
+                    // Ice
+                    col = vec3f(
+                        0.3 * zNorm,
+                        0.4 + zNorm * 0.4,
+                        0.7 + zNorm * 0.3
+                    ) * depthFade;
+                } else {
+                    // Neon
+                    let hue = fract(zNorm * 0.5 + age * 0.3 + u.time * 0.02);
+                    col = hsl(hue, 1.0, 0.4 + zNorm * 0.2) * depthFade * 1.3;
+                }
+
+                var out: VSOut;
+                out.pos = vec4f(quadPos, 0, 1);
+                out.color = col;
+                out.center = vec2f(sx, sy) * u.resolution * 0.5 + u.resolution * 0.5;
+                out.screenPos = quadPos * u.resolution * 0.5 + u.resolution * 0.5;
+                return out;
+            }
+
+            @fragment fn fs(inp: VSOut) -> @location(0) vec4f {
+                let dist = length(inp.screenPos - inp.center);
+                let maxR = 2.0;
+                let alpha = exp(-dist * dist / (maxR * maxR));
+                if (alpha < 0.01) { discard; }
+                return vec4f(inp.color * alpha, alpha);
+            }
+        `});
+
+        const computeBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+        });
+        const computePipeline = device.createComputePipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
+            compute: { module: computeShader, entryPoint: 'main' },
+        });
+        const computeBG = device.createBindGroup({
+            layout: computeBGL,
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+            ],
+        });
+
+        const renderBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+                { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            ],
+        });
+        const renderPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
+            vertex: { module: renderShader, entryPoint: 'vs' },
+            fragment: {
+                module: renderShader, entryPoint: 'fs',
+                targets: [{
+                    format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                    },
+                }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+        const renderBG = device.createBindGroup({
+            layout: renderBGL,
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+            ],
+        });
+
+        let frameCount = 0, lastFPSTime = performance.now(), lastTime = 0;
+
+        function frame(time) {
+            const now = performance.now();
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+            frameCount++;
+            if (now - lastFPSTime > 500) {
+                document.getElementById('fps').textContent = Math.round(frameCount / ((now - lastFPSTime) / 1000));
+                frameCount = 0; lastFPSTime = now;
+            }
+
+            const camAngle = time * 0.0001; // slow orbit
+
+            const uniformData = new Float32Array(16);
+            const u32View = new Uint32Array(uniformData.buffer);
+            uniformData[0] = canvas.width;
+            uniformData[1] = canvas.height;
+            uniformData[2] = time / 1000;
+            uniformData[3] = dt;
+            uniformData[4] = sigma;
+            uniformData[5] = rho;
+            uniformData[6] = beta;
+            uniformData[7] = speed;
+            u32View[8] = theme;
+            u32View[9] = NUM_PARTICLES;
+            uniformData[10] = camAngle;
+            device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+            const encoder = device.createCommandEncoder();
+
+            // Multiple compute iterations per frame for faster convergence
+            const computePass = encoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBG);
+            computePass.dispatchWorkgroups(Math.ceil(NUM_PARTICLES / 256));
+            computePass.end();
+
+            const renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: ctx.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.01, g: 0.01, b: 0.02, a: 1 },
+                }],
+            });
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBG);
+            renderPass.draw(6, NUM_PARTICLES);
+            renderPass.end();
+
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(frame);
+        }
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            ctx.configure({ device, format, alphaMode: 'opaque' });
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

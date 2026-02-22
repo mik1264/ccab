@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Kaleidoscope - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">GPU Kaleidoscope</div>
+
+    <div class="controls">
+        <label>Segments: <span id="segVal">6</span></label>
+        <input type="range" id="segments" min="3" max="12" step="1" value="6">
+        <label>Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Pattern:</label>
+        <select id="pattern">
+            <option value="0">Geometric</option>
+            <option value="1">Organic</option>
+            <option value="2">Crystal</option>
+        </select>
+        <label>Color Mode:</label>
+        <select id="colorMode">
+            <option value="0">Rainbow</option>
+            <option value="1">Neon</option>
+            <option value="2">Warm</option>
+            <option value="3">Monochrome</option>
+        </select>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span>
+    </div>
+
+    <div id="error">
+        WebGPU is not supported in your browser.<br>
+        Please use Chrome 113+, Edge 113+, or Safari 18+.
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        const W = canvas.width, H = canvas.height;
+
+        let segments = 6, speed = 1.0, patternType = 0, colorMode = 0;
+        let mouseX = 0.5, mouseY = 0.5;
+
+        canvas.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX / canvas.width;
+            mouseY = e.clientY / canvas.height;
+        });
+
+        const uniformBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const computeShader = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                speed: f32,
+                mouseX: f32,
+                mouseY: f32,
+                segments: f32,
+                patternType: u32,
+                colorMode: u32,
+                aspect: f32,
+                pad1: f32,
+                pad2: f32,
+            }
+
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            const PI: f32 = 3.14159265;
+            const TAU: f32 = 6.28318530;
+
+            fn hash(p: vec2f) -> f32 {
+                var p3 = fract(vec3f(p.x, p.y, p.x) * 0.13);
+                p3 = p3 + vec3f(dot(p3, vec3f(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33)));
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            fn noise(p: vec2f) -> f32 {
+                let i = floor(p);
+                let f = fract(p);
+                let uu = f * f * (3.0 - 2.0 * f);
+                let a = hash(i);
+                let b = hash(i + vec2f(1.0, 0.0));
+                let c = hash(i + vec2f(0.0, 1.0));
+                let d = hash(i + vec2f(1.0, 1.0));
+                return mix(mix(a, b, uu.x), mix(c, d, uu.x), uu.y);
+            }
+
+            fn fbm(p: vec2f) -> f32 {
+                var val = 0.0;
+                var amp = 0.5;
+                var pp = p;
+                for (var i = 0; i < 5; i++) {
+                    val += amp * noise(pp);
+                    pp *= 2.0;
+                    amp *= 0.5;
+                }
+                return val;
+            }
+
+            fn geometric(p: vec2f, t: f32) -> f32 {
+                let px = p.x * 4.0;
+                let py = p.y * 4.0;
+                let v1 = sin(px * 3.0 + t * 2.0) * cos(py * 2.0 - t * 1.5);
+                let v2 = sin(length(p) * 8.0 - t * 3.0);
+                let v3 = cos(px * py * 2.0 + t);
+                return (v1 + v2 + v3) / 3.0;
+            }
+
+            fn organic(p: vec2f, t: f32) -> f32 {
+                let n1 = fbm(p * 3.0 + vec2f(t * 0.3, t * 0.2));
+                let n2 = fbm(p * 5.0 - vec2f(t * 0.2, t * 0.1) + vec2f(n1 * 2.0));
+                return n1 * 0.6 + n2 * 0.4;
+            }
+
+            fn crystal(p: vec2f, t: f32) -> f32 {
+                let d1 = abs(sin(p.x * 6.0 + t)) * abs(cos(p.y * 6.0 - t * 0.7));
+                let d2 = abs(sin((p.x + p.y) * 4.0 + t * 1.3));
+                let d3 = abs(cos((p.x - p.y) * 5.0 - t * 0.9));
+                return pow(d1 * d2 * d3, 0.5);
+            }
+
+            fn hsl2rgb(h: f32, s: f32, l: f32) -> vec3f {
+                let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+                let hp = fract(h) * 6.0;
+                let x = c * (1.0 - abs(hp % 2.0 - 1.0));
+                var rgb: vec3f;
+                if (hp < 1.0) { rgb = vec3f(c, x, 0.0); }
+                else if (hp < 2.0) { rgb = vec3f(x, c, 0.0); }
+                else if (hp < 3.0) { rgb = vec3f(0.0, c, x); }
+                else if (hp < 4.0) { rgb = vec3f(0.0, x, c); }
+                else if (hp < 5.0) { rgb = vec3f(x, 0.0, c); }
+                else { rgb = vec3f(c, 0.0, x); }
+                return rgb + vec3f(l - c * 0.5);
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let t = u.time * u.speed;
+
+                // Center UV coordinates
+                var uv = vec2f(
+                    (f32(id.x) / u.resolution.x - 0.5) * u.aspect,
+                    f32(id.y) / u.resolution.y - 0.5
+                );
+
+                // Offset by mouse for interactive center shift
+                let mouseOffset = vec2f((u.mouseX - 0.5) * 0.3, (u.mouseY - 0.5) * 0.3);
+                uv = uv + mouseOffset;
+
+                // Convert to polar coordinates
+                let r = length(uv);
+                var angle = atan2(uv.y, uv.x);
+
+                // Fold into kaleidoscope wedge
+                let wedge = TAU / u.segments;
+                angle = angle % wedge;
+                if (angle < 0.0) { angle = angle + wedge; }
+                // Mirror the wedge
+                if (angle > wedge * 0.5) {
+                    angle = wedge - angle;
+                }
+
+                // Reconstruct cartesian from folded polar
+                let p = vec2f(r * cos(angle), r * sin(angle));
+
+                // Add slow rotation
+                let rot = t * 0.2;
+                let rp = vec2f(
+                    p.x * cos(rot) - p.y * sin(rot),
+                    p.x * sin(rot) + p.y * cos(rot)
+                );
+
+                // Get pattern value
+                var val: f32;
+                if (u.patternType == 0u) {
+                    val = geometric(rp, t);
+                } else if (u.patternType == 1u) {
+                    val = organic(rp, t);
+                } else {
+                    val = crystal(rp, t);
+                }
+
+                // Apply color
+                var color: vec3f;
+                let v = val * 0.5 + 0.5;
+
+                if (u.colorMode == 0u) {
+                    // Rainbow
+                    let hue = fract(v + r * 0.5 + t * 0.05);
+                    color = hsl2rgb(hue, 0.8, 0.3 + v * 0.4);
+                } else if (u.colorMode == 1u) {
+                    // Neon
+                    let hue = fract(v * 0.3 + 0.5 + t * 0.03);
+                    let sat = 0.9;
+                    let lit = pow(v, 1.5) * 0.7;
+                    color = hsl2rgb(hue, sat, lit);
+                    // Add glow
+                    color = color + vec3f(0.05, 0.1, 0.2) * pow(v, 3.0);
+                } else if (u.colorMode == 2u) {
+                    // Warm
+                    let hue = fract(v * 0.15 + 0.05);
+                    color = hsl2rgb(hue, 0.7, 0.2 + v * 0.5);
+                } else {
+                    // Monochrome
+                    let bright = pow(v, 1.2);
+                    color = vec3f(bright * 0.9, bright * 0.95, bright);
+                }
+
+                // Vignette
+                let vignette = 1.0 - pow(r * 1.2, 2.0);
+                color = color * max(vignette, 0.0);
+
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let fpsC = 0, fpsT = performance.now();
+        let startTime = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const time = (now - startTime) * 0.001;
+
+            const buf = new ArrayBuffer(64);
+            const f32 = new Float32Array(buf);
+            const u32 = new Uint32Array(buf);
+            f32[0] = W; f32[1] = H;
+            f32[2] = time;
+            f32[3] = speed;
+            f32[4] = mouseX;
+            f32[5] = mouseY;
+            f32[6] = segments;
+            u32[7] = patternType;
+            u32[8] = colorMode;
+            f32[9] = W / H;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        document.getElementById('segments').addEventListener('input', (e) => {
+            segments = parseInt(e.target.value);
+            document.getElementById('segVal').textContent = segments;
+        });
+        document.getElementById('speed').addEventListener('input', (e) => {
+            speed = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = speed.toFixed(1);
+        });
+        document.getElementById('pattern').addEventListener('change', (e) => {
+            patternType = parseInt(e.target.value);
+        });
+        document.getElementById('colorMode').addEventListener('change', (e) => {
+            colorMode = parseInt(e.target.value);
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

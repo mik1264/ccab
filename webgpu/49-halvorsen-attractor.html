@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Halvorsen Attractor - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 210px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 168px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .controls button { padding: 6px 14px; background: rgba(6, 182, 212, 0.3); color: #22d3ee; border: 1px solid #22d3ee; border-radius: 4px; cursor: pointer; font-size: 12px; margin-top: 8px; width: 100%; }
+        .controls button:hover { background: rgba(6, 182, 212, 0.5); }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Halvorsen Attractor &mdash; 2M Points</div>
+
+    <div class="controls">
+        <label>Parameter a: <span id="aVal">1.40</span></label>
+        <input type="range" id="aParam" min="1.0" max="2.0" step="0.01" value="1.40">
+        <label>Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Particles: <span id="partVal">1M</span></label>
+        <input type="range" id="particles" min="500000" max="2000000" step="250000" value="1000000">
+        <label>Orbit Speed: <span id="orbitVal">0.3</span></label>
+        <input type="range" id="orbit" min="0.0" max="1.0" step="0.05" value="0.3">
+        <label>Color Theme:</label>
+        <select id="themeSelect">
+            <option value="0" selected>Aurora</option>
+            <option value="1">Inferno</option>
+            <option value="2">Ocean</option>
+            <option value="3">Monochrome</option>
+        </select>
+        <button id="resetBtn">Reset Particles</button>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Particles: <span id="countDisplay">1,000,000</span>
+    </div>
+
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth * devicePixelRatio;
+        canvas.height = window.innerHeight * devicePixelRatio;
+        const context = canvas.getContext('webgpu');
+        const presentFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: presentFormat, alphaMode: 'opaque' });
+
+        const MAX_PARTICLES = 2000000;
+        let numParticles = 1000000;
+        let aParam = 1.40, simSpeed = 1.0, orbitSpeed = 0.3, colorTheme = 0;
+
+        function createParticles(n) {
+            const data = new Float32Array(n * 4);
+            for (let i = 0; i < n; i++) {
+                // Start near origin with tiny perturbations
+                data[i * 4]     = (Math.random() - 0.5) * 2.0;
+                data[i * 4 + 1] = (Math.random() - 0.5) * 2.0;
+                data[i * 4 + 2] = (Math.random() - 0.5) * 2.0;
+                data[i * 4 + 3] = 0; // speed magnitude
+            }
+            return data;
+        }
+
+        let particleData = createParticles(MAX_PARTICLES);
+        const particleBuf = device.createBuffer({
+            size: MAX_PARTICLES * 16,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
+        });
+        device.queue.writeBuffer(particleBuf, 0, particleData);
+
+        // Uniforms: width, height, dt, a, numP, time, orbitAngle, theme
+        const uniformBuf = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Compute shader: RK4 integration of Halvorsen attractor
+        const computeShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                width: f32, height: f32, dt: f32, a: f32,
+                numP: f32, time: f32, orbitAngle: f32, theme: f32,
+                pad1: f32, pad2: f32, pad3: f32, pad4: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read_write> particles: array<vec4f>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            // Halvorsen attractor: dx/dt = -a*x - 4*y - 4*z - y*y
+            //                      dy/dt = -a*y - 4*z - 4*x - z*z
+            //                      dz/dt = -a*z - 4*x - 4*y - x*x
+            fn halvorsen(pos: vec3f, a: f32) -> vec3f {
+                return vec3f(
+                    -a * pos.x - 4.0 * pos.y - 4.0 * pos.z - pos.y * pos.y,
+                    -a * pos.y - 4.0 * pos.z - 4.0 * pos.x - pos.z * pos.z,
+                    -a * pos.z - 4.0 * pos.x - 4.0 * pos.y - pos.x * pos.x
+                );
+            }
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u32(u.numP)) { return; }
+
+                var p = particles[idx];
+                let pos = vec3f(p.x, p.y, p.z);
+                let dt = u.dt;
+                let a = u.a;
+
+                // RK4 integration
+                let k1 = halvorsen(pos, a);
+                let k2 = halvorsen(pos + k1 * dt * 0.5, a);
+                let k3 = halvorsen(pos + k2 * dt * 0.5, a);
+                let k4 = halvorsen(pos + k3 * dt, a);
+
+                let newPos = pos + (k1 + 2.0 * k2 + 2.0 * k3 + k4) * (dt / 6.0);
+
+                // Speed for coloring
+                let vel = k1;
+                let speed = length(vel);
+
+                // Reset if diverged
+                if (any(abs(newPos) > vec3f(50.0))) {
+                    let hash = f32(idx) * 0.000137 + u.time;
+                    particles[idx] = vec4f(
+                        sin(hash * 7.3) * 1.0,
+                        cos(hash * 11.7) * 1.0,
+                        sin(hash * 3.1) * 1.0,
+                        0.0
+                    );
+                    return;
+                }
+
+                particles[idx] = vec4f(newPos, speed);
+            }
+        `});
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: computeShader, entryPoint: 'main' },
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuf } },
+            ],
+        });
+
+        // Render shader: 3D perspective projection with slow orbit
+        const renderShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                width: f32, height: f32, dt: f32, a: f32,
+                numP: f32, time: f32, orbitAngle: f32, theme: f32,
+                pad1: f32, pad2: f32, pad3: f32, pad4: f32,
+            }
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) color: vec4f }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+
+            fn hue2rgb(h: f32) -> vec3f {
+                let r = abs(h * 6.0 - 3.0) - 1.0;
+                let g = 2.0 - abs(h * 6.0 - 2.0);
+                let b = 2.0 - abs(h * 6.0 - 4.0);
+                return clamp(vec3f(r, g, b), vec3f(0.0), vec3f(1.0));
+            }
+
+            @vertex
+            fn vs(@location(0) xyz: vec3f, @location(1) speed: f32) -> VSOut {
+                var out: VSOut;
+
+                // Rotate around Y axis (orbit)
+                let angle = u.orbitAngle;
+                let ca = cos(angle);
+                let sa = sin(angle);
+                let rx = xyz.x * ca - xyz.z * sa;
+                let rz = xyz.x * sa + xyz.z * ca;
+
+                // Also tilt slightly around X
+                let tilt = 0.3;
+                let ct = cos(tilt);
+                let st = sin(tilt);
+                let ry = xyz.y * ct - rz * st;
+                let rz2 = xyz.y * st + rz * ct;
+
+                // Perspective projection
+                let scale = 0.04;
+                let zOff = 40.0;
+                let perspective = zOff / max(rz2 + zOff, 5.0);
+                let px = rx * scale * perspective;
+                let py = ry * scale * perspective;
+
+                let aspect = u.width / u.height;
+                out.pos = vec4f(px / aspect, py, 0.0, 1.0);
+
+                // Color by z-position (depth) and speed
+                let t = clamp(speed * 0.03, 0.0, 1.0);
+                let zNorm = clamp((xyz.z + 15.0) / 30.0, 0.0, 1.0);
+
+                var col: vec3f;
+                if (u.theme < 0.5) {
+                    // Aurora: green -> cyan -> purple by z, brighter with speed
+                    let hue = mix(0.3, 0.8, zNorm);
+                    col = hue2rgb(hue) * (0.3 + t * 0.7);
+                } else if (u.theme < 1.5) {
+                    // Inferno: red -> yellow -> white
+                    let hue = mix(0.0, 0.15, zNorm);
+                    col = hue2rgb(hue) * (0.4 + t * 0.6);
+                    col = col + vec3f(t * 0.3);
+                } else if (u.theme < 2.5) {
+                    // Ocean: deep blue -> cyan -> white
+                    let hue = mix(0.55, 0.5, zNorm);
+                    col = hue2rgb(hue) * (0.3 + t * 0.7);
+                    col = col + vec3f(0.0, t * 0.1, t * 0.2);
+                } else {
+                    // Monochrome
+                    let bright = 0.2 + t * 0.6 + zNorm * 0.2;
+                    col = vec3f(bright);
+                }
+
+                let alpha = 0.05 + t * 0.15;
+                out.color = vec4f(col, alpha);
+
+                return out;
+            }
+
+            @fragment
+            fn fs(@location(0) color: vec4f) -> @location(0) vec4f {
+                return color;
+            }
+        `});
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: renderShader,
+                entryPoint: 'vs',
+                buffers: [{
+                    arrayStride: 16,
+                    attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                        { shaderLocation: 1, offset: 12, format: 'float32' },
+                    ],
+                }],
+            },
+            fragment: {
+                module: renderShader,
+                entryPoint: 'fs',
+                targets: [{
+                    format: presentFormat,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one' },
+                    },
+                }],
+            },
+            primitive: { topology: 'point-list' },
+        });
+
+        const renderBG = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuf } }],
+        });
+
+        function resetParticles() {
+            particleData = createParticles(numParticles);
+            device.queue.writeBuffer(particleBuf, 0, particleData.buffer, 0, numParticles * 16);
+        }
+
+        // UI handlers
+        document.getElementById('aParam').addEventListener('input', e => {
+            aParam = parseFloat(e.target.value);
+            document.getElementById('aVal').textContent = aParam.toFixed(2);
+        });
+        document.getElementById('speed').addEventListener('input', e => {
+            simSpeed = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = simSpeed.toFixed(1);
+        });
+        document.getElementById('particles').addEventListener('input', e => {
+            numParticles = parseInt(e.target.value);
+            const label = numParticles >= 1000000 ? (numParticles / 1000000).toFixed(1) + 'M' : (numParticles / 1000) + 'K';
+            document.getElementById('partVal').textContent = label;
+            document.getElementById('countDisplay').textContent = numParticles.toLocaleString();
+            resetParticles();
+        });
+        document.getElementById('orbit').addEventListener('input', e => {
+            orbitSpeed = parseFloat(e.target.value);
+            document.getElementById('orbitVal').textContent = orbitSpeed.toFixed(2);
+        });
+        document.getElementById('themeSelect').addEventListener('change', e => {
+            colorTheme = parseInt(e.target.value);
+        });
+        document.getElementById('resetBtn').addEventListener('click', resetParticles);
+
+        let time = 0, lastTime = performance.now(), frameCount = 0, fpsAccum = 0;
+        let orbitAngle = 0;
+
+        // Run several warm-up steps so the attractor shape is visible immediately
+        const warmupSteps = 200;
+        const warmupDt = 0.002;
+        for (let step = 0; step < warmupSteps; step++) {
+            const uniformData = new Float32Array(12);
+            uniformData[0] = canvas.width;
+            uniformData[1] = canvas.height;
+            uniformData[2] = warmupDt;
+            uniformData[3] = aParam;
+            uniformData[4] = numParticles;
+            uniformData[5] = step * warmupDt;
+            uniformData[6] = 0;
+            uniformData[7] = colorTheme;
+            device.queue.writeBuffer(uniformBuf, 0, uniformData);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(numParticles / 256));
+            cp.end();
+            device.queue.submit([enc.finish()]);
+        }
+
+        function render() {
+            const now = performance.now();
+            const dt = Math.min((now - lastTime) / 1000, 0.05);
+            lastTime = now;
+            time += dt * simSpeed;
+            orbitAngle += dt * orbitSpeed;
+
+            frameCount++; fpsAccum += dt;
+            if (fpsAccum >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(frameCount / fpsAccum);
+                frameCount = 0; fpsAccum = 0;
+            }
+
+            const uniformData = new Float32Array(12);
+            uniformData[0] = canvas.width;
+            uniformData[1] = canvas.height;
+            uniformData[2] = 0.002 * simSpeed; // Fixed small timestep
+            uniformData[3] = aParam;
+            uniformData[4] = numParticles;
+            uniformData[5] = time;
+            uniformData[6] = orbitAngle;
+            uniformData[7] = colorTheme;
+            device.queue.writeBuffer(uniformBuf, 0, uniformData);
+
+            const enc = device.createCommandEncoder();
+
+            // Multiple compute steps per frame for faster convergence
+            for (let i = 0; i < 4; i++) {
+                const cp = enc.beginComputePass();
+                cp.setPipeline(computePipeline);
+                cp.setBindGroup(0, computeBG);
+                cp.dispatchWorkgroups(Math.ceil(numParticles / 256));
+                cp.end();
+            }
+
+            // Render
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.01, g: 0.01, b: 0.02, a: 1 },
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, renderBG);
+            rp.setVertexBuffer(0, particleBuf);
+            rp.draw(numParticles);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+        requestAnimationFrame(render);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

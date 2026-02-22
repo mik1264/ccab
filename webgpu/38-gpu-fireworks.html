@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Fireworks - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 166px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">GPU Fireworks</div>
+
+    <div class="controls">
+        <label>Launch Rate: <span id="rateVal">2.0</span>/s</label>
+        <input type="range" id="rate" min="0.5" max="6.0" step="0.5" value="2.0">
+        <label>Particles/Shell: <span id="countVal">2000</span></label>
+        <input type="range" id="count" min="500" max="5000" step="500" value="2000">
+        <label>Gravity: <span id="gravityVal">0.4</span></label>
+        <input type="range" id="gravity" min="0.1" max="1.0" step="0.05" value="0.4">
+        <label>Sparkle: <span id="sparkleVal">0.5</span></label>
+        <input type="range" id="sparkle" min="0.0" max="1.0" step="0.1" value="0.5">
+        <label>Color Theme:</label>
+        <select id="theme">
+            <option value="0">Classic</option>
+            <option value="1">Neon</option>
+            <option value="2">Golden</option>
+            <option value="3">Patriotic</option>
+        </select>
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span> | Active: <span id="active">0</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        let launchRate = 2.0, particlesPerShell = 2000, gravity = 0.4, sparkle = 0.5, theme = 0;
+        document.getElementById('rate').oninput = e => { launchRate = +e.target.value; document.getElementById('rateVal').textContent = launchRate.toFixed(1); };
+        document.getElementById('count').oninput = e => { particlesPerShell = +e.target.value; document.getElementById('countVal').textContent = particlesPerShell; };
+        document.getElementById('gravity').oninput = e => { gravity = +e.target.value; document.getElementById('gravityVal').textContent = gravity.toFixed(2); };
+        document.getElementById('sparkle').oninput = e => { sparkle = +e.target.value; document.getElementById('sparkleVal').textContent = sparkle.toFixed(1); };
+        document.getElementById('theme').onchange = e => { theme = +e.target.value; };
+
+        // CPU-managed firework shells with GPU-rendered particles
+        // We use a fragment shader approach with accumulation for trail effect
+
+        const uniformBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Store up to 12 shell explosions, each with position, color, time, spread
+        const MAX_SHELLS = 12;
+        // 8 floats per shell: x, y, r, g, b, birthTime, spread, type
+        const shellBuffer = device.createBuffer({ size: MAX_SHELLS * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const shellData = new Float32Array(MAX_SHELLS * 8);
+
+        const shaderCode = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                gravity: f32,
+                sparkle: f32,
+                theme: u32,
+                particleCount: f32,
+                shellCount: u32,
+                fadeAlpha: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+                pad4: f32,
+                pad5: f32,
+                pad6: f32,
+                pad7: f32,
+            }
+
+            struct Shell {
+                pos: vec2f,
+                color: vec3f,
+                birthTime: f32,
+                spread: f32,
+                shellType: f32,
+            }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+            @group(0) @binding(1) var<storage, read> shells: array<f32>;
+
+            fn hash(n: f32) -> f32 {
+                return fract(sin(n) * 43758.5453);
+            }
+
+            fn hash2(n: f32) -> vec2f {
+                return vec2f(hash(n), hash(n + 127.231));
+            }
+
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                var pos = array<vec2f, 6>(
+                    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+                    vec2f(-1,1), vec2f(1,-1), vec2f(1,1)
+                );
+                return vec4f(pos[i], 0.0, 1.0);
+            }
+
+            @fragment fn fs(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
+                let uv = fragCoord.xy / u.resolution;
+                let aspect = u.resolution.x / u.resolution.y;
+                let pixelSize = 1.0 / min(u.resolution.x, u.resolution.y);
+
+                // Dark sky background with subtle gradient
+                var color = mix(vec3f(0.01, 0.01, 0.03), vec3f(0.0, 0.0, 0.01), uv.y);
+
+                let numShells = u.shellCount;
+                let numParticles = i32(u.particleCount);
+
+                // For each active shell, render its burst particles
+                for (var s = 0u; s < numShells; s++) {
+                    let base = s * 8u;
+                    let sx = shells[base];
+                    let sy = shells[base + 1u];
+                    let sr = shells[base + 2u];
+                    let sg = shells[base + 3u];
+                    let sb = shells[base + 4u];
+                    let birthTime = shells[base + 5u];
+                    let spread = shells[base + 6u];
+                    let shellType = shells[base + 7u];
+
+                    let age = u.time - birthTime;
+                    if (age < 0.0 || age > 4.0) { continue; }
+
+                    let fadeOut = 1.0 - smoothstep(1.5, 4.0, age);
+                    let shellColor = vec3f(sr, sg, sb);
+
+                    // Render particles for this shell
+                    // Use distance-based accumulation: for each pixel, check distance to many particles
+                    var brightness: f32 = 0.0;
+                    var particleColor = shellColor;
+
+                    let maxCheck = min(numParticles, 800);
+                    for (var p = 0; p < 800; p++) {
+                        if (p >= maxCheck) { break; }
+                        let fp = f32(p);
+                        let seed = fp * 1.731 + f32(s) * 17.3;
+
+                        // Random direction from shell center
+                        let angle = hash(seed) * 6.28318;
+                        let speed = (0.3 + hash(seed + 42.0) * 0.7) * spread;
+                        var vx = cos(angle) * speed;
+                        var vy = sin(angle) * speed;
+
+                        // Shell type variations
+                        if (shellType > 0.5 && shellType < 1.5) {
+                            // Ring shape
+                            let r = 0.8 + hash(seed + 10.0) * 0.4;
+                            vx = cos(angle) * speed * r;
+                            vy = sin(angle) * speed * r;
+                        } else if (shellType > 1.5) {
+                            // Willow (extra gravity, longer trails)
+                            vy *= 0.6;
+                        }
+
+                        // Physics: position with gravity and drag
+                        let drag = 0.97;
+                        let t = age;
+                        let px = sx + vx * t * pow(drag, t * 30.0);
+                        let py = sy + vy * t * pow(drag, t * 30.0) - 0.5 * u.gravity * t * t;
+
+                        // Sparkle effect
+                        let sparkleFlicker = 0.5 + 0.5 * sin(fp * 73.1 + u.time * 15.0);
+                        let sparkleFactor = mix(1.0, sparkleFlicker, u.sparkle);
+
+                        // Distance from this pixel to particle
+                        let dx = (uv.x - 0.5) * aspect - px;
+                        let dy = (uv.y - 0.5) - py;
+                        let dist = length(vec2f(dx, dy));
+
+                        let glow = exp(-dist * dist / (pixelSize * pixelSize * 25.0)) * fadeOut * sparkleFactor;
+                        brightness += glow;
+                    }
+
+                    brightness = min(brightness, 3.0);
+                    color += shellColor * brightness;
+                }
+
+                // Tone map
+                color = 1.0 - exp(-color * 1.5);
+
+                return vec4f(color, 1.0);
+            }
+        `;
+
+        const shaderModule = device.createShaderModule({ code: shaderCode });
+        const pipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: shaderModule, entryPoint: 'vs' },
+            fragment: { module: shaderModule, entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-list' }
+        });
+
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: 1, resource: { buffer: shellBuffer } }
+            ]
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            context.configure({ device, format, alphaMode: 'opaque' });
+        });
+
+        // Shell management (CPU side)
+        const activeShells = [];
+        let lastLaunch = 0;
+        const startTime = performance.now();
+
+        function getThemeColor(t) {
+            const r = Math.random;
+            if (t === 0) {
+                // Classic - random vibrant
+                const colors = [[1,0.2,0.2],[0.2,1,0.3],[0.3,0.3,1],[1,1,0.2],[1,0.5,0],[0.8,0.2,1]];
+                return colors[Math.floor(Math.random() * colors.length)];
+            } else if (t === 1) {
+                // Neon
+                const colors = [[0,1,0.9],[1,0,0.8],[0.4,0,1],[0,1,0.3],[1,0.9,0]];
+                return colors[Math.floor(Math.random() * colors.length)];
+            } else if (t === 2) {
+                // Golden
+                const g = 0.7 + Math.random() * 0.3;
+                return [1, g, g * 0.3];
+            } else {
+                // Patriotic - red white blue
+                const colors = [[1,0.2,0.2],[0.9,0.9,1],[0.2,0.3,1]];
+                return colors[Math.floor(Math.random() * colors.length)];
+            }
+        }
+
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+
+        function render() {
+            const now = performance.now();
+            const time = (now - startTime) / 1000;
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++; fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            // Launch new shells
+            if (time - lastLaunch > 1.0 / launchRate && activeShells.length < MAX_SHELLS) {
+                const col = getThemeColor(theme);
+                activeShells.push({
+                    x: (Math.random() - 0.5) * 0.6,
+                    y: 0.1 + Math.random() * 0.25,
+                    r: col[0], g: col[1], b: col[2],
+                    birthTime: time,
+                    spread: 0.15 + Math.random() * 0.15,
+                    type: Math.floor(Math.random() * 3)
+                });
+                lastLaunch = time;
+            }
+
+            // Remove expired shells
+            for (let i = activeShells.length - 1; i >= 0; i--) {
+                if (time - activeShells[i].birthTime > 4.0) {
+                    activeShells.splice(i, 1);
+                }
+            }
+
+            document.getElementById('active').textContent = activeShells.length * particlesPerShell;
+
+            // Update shell buffer
+            shellData.fill(0);
+            for (let i = 0; i < activeShells.length; i++) {
+                const s = activeShells[i];
+                const base = i * 8;
+                shellData[base] = s.x;
+                shellData[base + 1] = s.y;
+                shellData[base + 2] = s.r;
+                shellData[base + 3] = s.g;
+                shellData[base + 4] = s.b;
+                shellData[base + 5] = s.birthTime;
+                shellData[base + 6] = s.spread;
+                shellData[base + 7] = s.type;
+            }
+            device.queue.writeBuffer(shellBuffer, 0, shellData);
+
+            // Update uniforms
+            const uData = new ArrayBuffer(64);
+            const f = new Float32Array(uData);
+            const u = new Uint32Array(uData);
+            f[0] = canvas.width; f[1] = canvas.height;
+            f[2] = time; f[3] = gravity;
+            f[4] = sparkle; u[5] = theme;
+            f[6] = particlesPerShell; u[7] = activeShells.length;
+            f[8] = 0.92;
+            device.queue.writeBuffer(uniformBuffer, 0, f);
+
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    storeOp: 'store'
+                }]
+            });
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.draw(6);
+            pass.end();
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

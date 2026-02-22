@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SDF Sculpture - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 166px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">SDF Sculpture</div>
+
+    <div class="controls">
+        <label>Shape:</label>
+        <select id="shape">
+            <option value="0">Torus Knot + Sphere</option>
+            <option value="1">Gyroid Surface</option>
+            <option value="2">Twisted Pillars</option>
+            <option value="3">Organic Blob</option>
+            <option value="4">Crystal Lattice</option>
+        </select>
+        <label>Blend Factor: <span id="blendVal">0.3</span></label>
+        <input type="range" id="blend" min="0.05" max="0.8" step="0.05" value="0.3">
+        <label>Rotation Speed: <span id="rotVal">0.5</span></label>
+        <input type="range" id="rotation" min="0.0" max="2.0" step="0.1" value="0.5">
+        <label>Material:</label>
+        <select id="material">
+            <option value="0">Metallic</option>
+            <option value="1">Glowing Core</option>
+            <option value="2">Iridescent</option>
+            <option value="3">Marble</option>
+        </select>
+        <label>Light Color:</label>
+        <select id="lightColor">
+            <option value="0">White</option>
+            <option value="1">Warm</option>
+            <option value="2">Cool</option>
+            <option value="3">Sunset</option>
+        </select>
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        let shape = 0, blend = 0.3, rotation = 0.5, material = 0, lightColor = 0;
+        document.getElementById('shape').onchange = e => { shape = +e.target.value; };
+        document.getElementById('blend').oninput = e => { blend = +e.target.value; document.getElementById('blendVal').textContent = blend.toFixed(2); };
+        document.getElementById('rotation').oninput = e => { rotation = +e.target.value; document.getElementById('rotVal').textContent = rotation.toFixed(1); };
+        document.getElementById('material').onchange = e => { material = +e.target.value; };
+        document.getElementById('lightColor').onchange = e => { lightColor = +e.target.value; };
+
+        const uniformBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const shaderCode = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                blend: f32,
+                rotation: f32,
+                shape: u32,
+                material: u32,
+                lightColor: u32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+                pad4: f32,
+                pad5: f32,
+                pad6: f32,
+                pad7: f32,
+                pad8: f32,
+            }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+
+            const PI: f32 = 3.14159265;
+            const MAX_STEPS: i32 = 100;
+            const MAX_DIST: f32 = 50.0;
+            const SURF_DIST: f32 = 0.001;
+
+            fn rotX(p: vec3f, a: f32) -> vec3f {
+                let c = cos(a); let s = sin(a);
+                return vec3f(p.x, c * p.y - s * p.z, s * p.y + c * p.z);
+            }
+
+            fn rotY(p: vec3f, a: f32) -> vec3f {
+                let c = cos(a); let s = sin(a);
+                return vec3f(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+            }
+
+            fn rotZ(p: vec3f, a: f32) -> vec3f {
+                let c = cos(a); let s = sin(a);
+                return vec3f(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
+            }
+
+            fn sdSphere(p: vec3f, r: f32) -> f32 {
+                return length(p) - r;
+            }
+
+            fn sdBox(p: vec3f, b: vec3f) -> f32 {
+                let q = abs(p) - b;
+                return length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+            }
+
+            fn sdTorus(p: vec3f, t: vec2f) -> f32 {
+                let q = vec2f(length(p.xz) - t.x, p.y);
+                return length(q) - t.y;
+            }
+
+            fn sdCylinder(p: vec3f, r: f32, h: f32) -> f32 {
+                let d = abs(vec2f(length(p.xz), p.y)) - vec2f(r, h);
+                return min(max(d.x, d.y), 0.0) + length(max(d, vec2f(0.0)));
+            }
+
+            // Smooth minimum (polynomial)
+            fn smin(a: f32, b: f32, k: f32) -> f32 {
+                let h = max(k - abs(a - b), 0.0) / k;
+                return min(a, b) - h * h * k * 0.25;
+            }
+
+            // Smooth maximum
+            fn smax(a: f32, b: f32, k: f32) -> f32 {
+                return -smin(-a, -b, k);
+            }
+
+            fn hash(p: vec3f) -> f32 {
+                var p3 = fract(p * 0.1031);
+                p3 += dot(p3, p3.zyx + 31.32);
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            fn sceneSDF(p: vec3f) -> f32 {
+                let t = u.time * u.rotation;
+                let rp = rotY(rotX(p, t * 0.3), t * 0.5);
+                let k = u.blend;
+
+                if (u.shape == 0u) {
+                    // Torus Knot + Sphere blend
+                    // Approximate torus knot with twisted torus
+                    let twist = rotZ(rp, rp.y * 2.0 + t);
+                    let d1 = sdTorus(twist, vec2f(1.0, 0.35));
+                    let d2 = sdSphere(rp, 0.7);
+                    let d3 = sdBox(rotY(rp, t * 0.7), vec3f(0.4, 0.8, 0.4));
+                    return smin(smin(d1, d2, k), d3, k);
+                } else if (u.shape == 1u) {
+                    // Gyroid surface
+                    let scale = 3.0;
+                    let sp = rp * scale;
+                    let gyroid = (sin(sp.x) * cos(sp.y) + sin(sp.y) * cos(sp.z) + sin(sp.z) * cos(sp.x)) / scale;
+                    let bound = sdSphere(rp, 1.8);
+                    return smax(gyroid * 0.3, bound, 0.1);
+                } else if (u.shape == 2u) {
+                    // Twisted pillars
+                    let twist_amount = 1.5;
+                    let tp = rotY(rp, rp.y * twist_amount);
+                    let d1 = sdCylinder(tp, 0.3, 1.5);
+                    let d2 = sdCylinder(tp - vec3f(0.8, 0.0, 0.0), 0.25, 1.3);
+                    let d3 = sdCylinder(tp + vec3f(0.8, 0.0, 0.0), 0.25, 1.3);
+                    let d4 = sdTorus(rp, vec2f(0.8, 0.15));
+                    return smin(smin(d1, smin(d2, d3, k), k), d4, k);
+                } else if (u.shape == 3u) {
+                    // Organic blob
+                    let wobble = sin(rp.x * 3.0 + t) * sin(rp.y * 3.0 + t * 1.3) * sin(rp.z * 3.0 + t * 0.7) * 0.15;
+                    let d1 = sdSphere(rp, 1.0) + wobble;
+                    let d2 = sdSphere(rp - vec3f(0.5 * sin(t), 0.4 * cos(t * 1.3), 0.3 * sin(t * 0.8)), 0.5);
+                    let d3 = sdSphere(rp + vec3f(0.4 * cos(t * 0.9), 0.5 * sin(t * 1.1), 0.3 * cos(t)), 0.45);
+                    return smin(d1, smin(d2, d3, k * 1.5), k * 1.5);
+                } else {
+                    // Crystal lattice
+                    let rp2 = (rp % 1.0) - 0.5;
+                    let d1 = sdBox(rp2, vec3f(0.15));
+                    let d2 = sdCylinder(rp2, 0.06, 0.5);
+                    let d3 = sdCylinder(vec3f(rp2.y, rp2.z, rp2.x), 0.06, 0.5);
+                    let d4 = sdCylinder(vec3f(rp2.z, rp2.x, rp2.y), 0.06, 0.5);
+                    let lattice = min(d1, min(d2, min(d3, d4)));
+                    let bound = sdSphere(rp, 2.0);
+                    return max(lattice, bound);
+                }
+            }
+
+            fn getNormal(p: vec3f) -> vec3f {
+                let e = vec2f(0.001, 0.0);
+                let d = sceneSDF(p);
+                let n = vec3f(
+                    sceneSDF(p + e.xyy) - d,
+                    sceneSDF(p + e.yxy) - d,
+                    sceneSDF(p + e.yyx) - d
+                );
+                return normalize(n);
+            }
+
+            fn calcAO(p: vec3f, n: vec3f) -> f32 {
+                var occ: f32 = 0.0;
+                var sca: f32 = 1.0;
+                for (var i = 0; i < 5; i++) {
+                    let h = 0.01 + 0.12 * f32(i);
+                    let d = sceneSDF(p + n * h);
+                    occ += (h - d) * sca;
+                    sca *= 0.75;
+                }
+                return clamp(1.0 - 1.5 * occ, 0.0, 1.0);
+            }
+
+            fn softShadow(ro: vec3f, rd: vec3f, mint: f32, maxt: f32, k: f32) -> f32 {
+                var res: f32 = 1.0;
+                var t: f32 = mint;
+                for (var i = 0; i < 32; i++) {
+                    if (t > maxt) { break; }
+                    let h = sceneSDF(ro + rd * t);
+                    if (h < 0.001) { return 0.0; }
+                    res = min(res, k * h / t);
+                    t += h;
+                }
+                return clamp(res, 0.0, 1.0);
+            }
+
+            fn getLightColor() -> vec3f {
+                if (u.lightColor == 0u) { return vec3f(1.0, 0.98, 0.95); }
+                if (u.lightColor == 1u) { return vec3f(1.0, 0.85, 0.6); }
+                if (u.lightColor == 2u) { return vec3f(0.7, 0.85, 1.0); }
+                return vec3f(1.0, 0.6, 0.3); // sunset
+            }
+
+            fn getMaterial(p: vec3f, n: vec3f, rd: vec3f) -> vec3f {
+                let fresnel = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
+
+                if (u.material == 0u) {
+                    // Metallic
+                    let base = vec3f(0.7, 0.72, 0.75);
+                    return mix(base, vec3f(1.0), fresnel * 0.5);
+                } else if (u.material == 1u) {
+                    // Glowing core
+                    let dist = sceneSDF(p);
+                    let core = exp(-abs(dist) * 5.0);
+                    let glow = vec3f(0.2, 0.6, 1.0) * core * 2.0;
+                    let surface = vec3f(0.15, 0.15, 0.2);
+                    return surface + glow + vec3f(0.3, 0.5, 0.8) * fresnel;
+                } else if (u.material == 2u) {
+                    // Iridescent
+                    let angle = dot(n, rd);
+                    let hue = fract(angle * 0.5 + u.time * 0.1);
+                    let c = cos((hue * 6.28318 + vec3f(0.0, 2.094, 4.189))) * 0.5 + 0.5;
+                    return mix(c * 0.6, vec3f(1.0), fresnel * 0.4);
+                } else {
+                    // Marble
+                    let noise = sin(p.x * 5.0 + p.y * 3.0 + p.z * 7.0 + sin(p.x * 10.0) * 0.5) * 0.5 + 0.5;
+                    let base = mix(vec3f(0.9, 0.88, 0.85), vec3f(0.3, 0.28, 0.25), noise);
+                    return mix(base, vec3f(1.0), fresnel * 0.3);
+                }
+            }
+
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                var pos = array<vec2f, 6>(
+                    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+                    vec2f(-1,1), vec2f(1,-1), vec2f(1,1)
+                );
+                return vec4f(pos[i], 0.0, 1.0);
+            }
+
+            @fragment fn fs(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
+                let uv = (fragCoord.xy - u.resolution * 0.5) / min(u.resolution.x, u.resolution.y);
+
+                // Camera orbiting the sculpture
+                let t = u.time * u.rotation * 0.3;
+                let camDist = 4.0;
+                let ro = vec3f(sin(t) * camDist, 1.5 + sin(t * 0.4) * 0.5, cos(t) * camDist);
+                let target = vec3f(0.0, 0.0, 0.0);
+
+                // Camera matrix
+                let fwd = normalize(target - ro);
+                let right = normalize(cross(fwd, vec3f(0.0, 1.0, 0.0)));
+                let up = cross(right, fwd);
+                let rd = normalize(fwd * 1.5 + right * uv.x + up * uv.y);
+
+                // Raymarch
+                var totalDist: f32 = 0.0;
+                var hit = false;
+                for (var i = 0; i < MAX_STEPS; i++) {
+                    let p = ro + rd * totalDist;
+                    let d = sceneSDF(p);
+                    if (d < SURF_DIST) { hit = true; break; }
+                    if (totalDist > MAX_DIST) { break; }
+                    totalDist += d;
+                }
+
+                var color: vec3f;
+                if (hit) {
+                    let p = ro + rd * totalDist;
+                    let n = getNormal(p);
+
+                    // Lighting
+                    let lightDir = normalize(vec3f(2.0, 3.0, 1.5));
+                    let lightCol = getLightColor();
+
+                    // Diffuse
+                    let diff = max(dot(n, lightDir), 0.0);
+
+                    // Specular (Blinn-Phong)
+                    let halfDir = normalize(lightDir - rd);
+                    let spec = pow(max(dot(n, halfDir), 0.0), 32.0);
+
+                    // AO and shadows
+                    let ao = calcAO(p, n);
+                    let shadow = softShadow(p + n * 0.01, lightDir, 0.02, 5.0, 16.0);
+
+                    // Material
+                    let matColor = getMaterial(p, n, rd);
+
+                    // Combine
+                    let ambient = vec3f(0.05, 0.06, 0.1) * ao;
+                    color = matColor * (ambient + lightCol * diff * shadow * 0.8) + lightCol * spec * shadow * 0.5;
+
+                    // Reflection (single bounce)
+                    let refl = reflect(rd, n);
+                    var reflDist: f32 = 0.0;
+                    var reflHit = false;
+                    for (var j = 0; j < 40; j++) {
+                        let rp = p + n * 0.02 + refl * reflDist;
+                        let rd2 = sceneSDF(rp);
+                        if (rd2 < SURF_DIST) { reflHit = true; break; }
+                        if (reflDist > 10.0) { break; }
+                        reflDist += rd2;
+                    }
+                    if (reflHit) {
+                        let rp = p + n * 0.02 + refl * reflDist;
+                        let rn = getNormal(rp);
+                        let rdiff = max(dot(rn, lightDir), 0.0);
+                        let reflColor = getMaterial(rp, rn, refl) * rdiff * 0.3;
+                        let fresnel = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
+                        color = mix(color, reflColor, fresnel * 0.4);
+                    }
+
+                    // Fog
+                    let fog = 1.0 - exp(-totalDist * 0.05);
+                    color = mix(color, vec3f(0.02, 0.02, 0.05), fog);
+                } else {
+                    // Background gradient
+                    color = mix(vec3f(0.02, 0.02, 0.05), vec3f(0.05, 0.05, 0.12), uv.y * 0.5 + 0.5);
+                }
+
+                // Gamma correction
+                color = pow(color, vec3f(0.4545));
+
+                return vec4f(color, 1.0);
+            }
+        `;
+
+        const shaderModule = device.createShaderModule({ code: shaderCode });
+        const pipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: shaderModule, entryPoint: 'vs' },
+            fragment: { module: shaderModule, entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-list' }
+        });
+
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuffer } }]
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            context.configure({ device, format, alphaMode: 'opaque' });
+        });
+
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+        const startTime = performance.now();
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++; fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            const uBuf = new ArrayBuffer(64);
+            const uf = new Float32Array(uBuf);
+            const uu = new Uint32Array(uBuf);
+            uf[0] = canvas.width; uf[1] = canvas.height;
+            uf[2] = (now - startTime) / 1000;
+            uf[3] = blend;
+            uf[4] = rotation;
+            uu[5] = shape;
+            uu[6] = material;
+            uu[7] = lightColor;
+            device.queue.writeBuffer(uniformBuffer, 0, uf);
+
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    storeOp: 'store'
+                }]
+            });
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.draw(6);
+            pass.end();
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

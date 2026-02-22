@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chladni Standing Waves - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 210px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 168px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        .mode-info { position: fixed; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 13px; color: #22d3ee; z-index: 100; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Chladni Standing Waves</div>
+
+    <div class="controls">
+        <label>Mode Cycle:</label>
+        <select id="modeSelect">
+            <option value="0" selected>Auto Cycle</option>
+            <option value="1">(2, 3)</option>
+            <option value="2">(3, 4)</option>
+            <option value="3">(4, 5)</option>
+            <option value="4">(5, 6)</option>
+            <option value="5">(3, 7)</option>
+            <option value="6">(4, 7)</option>
+            <option value="7">(5, 8)</option>
+            <option value="8">(6, 9)</option>
+            <option value="9">(7, 10)</option>
+            <option value="10">(8, 11)</option>
+        </select>
+        <label>Transition Speed: <span id="transVal">1.0</span></label>
+        <input type="range" id="transition" min="0.2" max="3.0" step="0.1" value="1.0">
+        <label>Line Sharpness: <span id="sharpVal">8.0</span></label>
+        <input type="range" id="sharpness" min="2" max="20" step="0.5" value="8">
+        <label>Color Palette:</label>
+        <select id="colorSelect">
+            <option value="0" selected>Cyan / Dark</option>
+            <option value="1">White / Blue</option>
+            <option value="2">Fire</option>
+            <option value="3">Gold / Black</option>
+        </select>
+        <label>Boundary Shape:</label>
+        <select id="shapeSelect">
+            <option value="0" selected>Square</option>
+            <option value="1">Circle</option>
+            <option value="2">Hexagon</option>
+        </select>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Resolution: <span id="res">0x0</span>
+    </div>
+    <div class="mode-info">Mode: <span id="currentMode">(2, 3)</span></div>
+
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const W = Math.min(window.innerWidth, 1920);
+        const H = Math.min(window.innerHeight, 1080);
+        canvas.width = W; canvas.height = H;
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        document.getElementById('res').textContent = W + 'x' + H;
+
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        // Mode pairs: (n, m) for Chladni patterns
+        const modePairs = [
+            [2, 3], [3, 4], [4, 5], [5, 6], [3, 7],
+            [4, 7], [5, 8], [6, 9], [7, 10], [8, 11]
+        ];
+
+        let autoMode = true, fixedModeIdx = 0;
+        let transSpeed = 1.0, sharpness = 8.0, colorPalette = 0, boundaryShape = 0;
+
+        // Uniform: resolution(2f), time(f), sharpness(f), n1(f), m1(f), n2(f), m2(f), blend(f), palette(u), shape(u), pad(u)
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const shader = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                sharpness: f32,
+                n1: f32,
+                m1: f32,
+                n2: f32,
+                m2: f32,
+                blend: f32,
+                palette: u32,
+                shape: u32,
+                pad: u32,
+            }
+
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            const PI: f32 = 3.14159265;
+
+            // Chladni function: f(x,y) = cos(n*pi*x)*cos(m*pi*y) - cos(m*pi*x)*cos(n*pi*y)
+            fn chladni(x: f32, y: f32, n: f32, m: f32) -> f32 {
+                return cos(n * PI * x) * cos(m * PI * y) - cos(m * PI * x) * cos(n * PI * y);
+            }
+
+            // Boundary mask
+            fn boundaryMask(uv: vec2f, shape: u32) -> f32 {
+                let centered = uv * 2.0 - 1.0;
+                if (shape == 0u) {
+                    // Square - always inside
+                    return 1.0;
+                } else if (shape == 1u) {
+                    // Circle
+                    let dist = length(centered);
+                    return smoothstep(1.0, 0.98, dist);
+                } else {
+                    // Hexagon
+                    let p = abs(centered);
+                    let hex = max(p.x * 0.866 + p.y * 0.5, p.y);
+                    return smoothstep(1.0, 0.98, hex);
+                }
+            }
+
+            // Color palettes
+            fn palette0(f: f32, nodalProx: f32) -> vec3f {
+                // Cyan/Dark: bright nodal lines on dark background
+                let bg = vec3f(0.02, 0.03, 0.06);
+                let line = vec3f(0.1, 0.9, 1.0);
+                let antinode = vec3f(0.02, 0.1, 0.15) * (1.0 - abs(f));
+                return mix(antinode + bg, line, nodalProx);
+            }
+
+            fn palette1(f: f32, nodalProx: f32) -> vec3f {
+                // White/Blue
+                let bg = vec3f(0.02, 0.02, 0.08);
+                let line = vec3f(0.95, 0.95, 1.0);
+                let antinode = vec3f(0.05, 0.05, 0.3) * (1.0 - abs(f));
+                return mix(antinode + bg, line, nodalProx);
+            }
+
+            fn palette2(f: f32, nodalProx: f32) -> vec3f {
+                // Fire
+                let bg = vec3f(0.05, 0.01, 0.0);
+                let line = vec3f(1.0, 0.8, 0.2);
+                let hot = vec3f(0.5, 0.1, 0.0) * (1.0 - abs(f));
+                return mix(hot + bg, line, nodalProx);
+            }
+
+            fn palette3(f: f32, nodalProx: f32) -> vec3f {
+                // Gold/Black
+                let bg = vec3f(0.02, 0.02, 0.02);
+                let line = vec3f(1.0, 0.85, 0.4);
+                let antinode = vec3f(0.08, 0.04, 0.0) * (1.0 - abs(f));
+                return mix(antinode + bg, line, nodalProx);
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let pixelUV = vec2f(f32(id.x), f32(id.y)) / u.resolution;
+                let aspect = u.resolution.x / u.resolution.y;
+
+                // Center and maintain aspect ratio
+                var uv: vec2f;
+                if (aspect > 1.0) {
+                    uv = vec2f((pixelUV.x - 0.5) / aspect + 0.5, pixelUV.y);
+                } else {
+                    uv = vec2f(pixelUV.x, (pixelUV.y - 0.5) * aspect + 0.5);
+                }
+
+                // Map to [-1, 1] for Chladni function
+                let x = uv.x * 2.0 - 1.0;
+                let y = uv.y * 2.0 - 1.0;
+
+                // Compute Chladni pattern for both mode pairs and blend
+                let f1 = chladni(x, y, u.n1, u.m1);
+                let f2 = chladni(x, y, u.n2, u.m2);
+                let f = mix(f1, f2, u.blend);
+
+                // Nodal line proximity: where f approaches 0
+                let nodalProx = exp(-u.sharpness * f * f);
+
+                // Additional gradient by amplitude for antinodes
+                let amplitude = abs(f);
+
+                // Choose color palette
+                var color: vec3f;
+                if (u.palette == 0u) {
+                    color = palette0(f, nodalProx);
+                } else if (u.palette == 1u) {
+                    color = palette1(f, nodalProx);
+                } else if (u.palette == 2u) {
+                    color = palette2(f, nodalProx);
+                } else {
+                    color = palette3(f, nodalProx);
+                }
+
+                // Add subtle vibration animation to nodal lines
+                let vibration = sin(u.time * 3.0) * 0.1 + 0.9;
+                color = color * mix(1.0, vibration, nodalProx * 0.3);
+
+                // Add subtle glow around nodal lines
+                let glow = exp(-u.sharpness * 0.3 * f * f);
+                let glowColor = color * 0.3;
+                color = color + glowColor * glow * 0.2;
+
+                // Apply boundary mask
+                let mask = boundaryMask(uv, u.shape);
+                color = color * mask;
+
+                // Slight vignette
+                let vig = 1.0 - length(pixelUV - 0.5) * 0.4;
+                color = color * vig;
+
+                color = clamp(color, vec3f(0.0), vec3f(1.0));
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: shader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let startTime = performance.now();
+        let fpsC = 0, fpsT = performance.now();
+        let currentPairIdx = 0;
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const elapsed = (now - startTime) / 1000;
+
+            // Calculate current mode pair and blend
+            let n1, m1, n2, m2, blend;
+            if (autoMode) {
+                const cycleDuration = 4.0 / transSpeed;
+                const totalPhase = elapsed / cycleDuration;
+                const pairIdx = Math.floor(totalPhase) % modePairs.length;
+                const nextIdx = (pairIdx + 1) % modePairs.length;
+                blend = totalPhase - Math.floor(totalPhase);
+                // Smooth blend with ease-in-out
+                blend = blend * blend * (3.0 - 2.0 * blend);
+
+                n1 = modePairs[pairIdx][0];
+                m1 = modePairs[pairIdx][1];
+                n2 = modePairs[nextIdx][0];
+                m2 = modePairs[nextIdx][1];
+
+                if (pairIdx !== currentPairIdx) {
+                    currentPairIdx = pairIdx;
+                    document.getElementById('currentMode').textContent =
+                        `(${n1}, ${m1}) -> (${n2}, ${m2})`;
+                }
+            } else {
+                const pair = modePairs[fixedModeIdx];
+                n1 = pair[0]; m1 = pair[1];
+                n2 = pair[0]; m2 = pair[1];
+                blend = 0;
+                document.getElementById('currentMode').textContent = `(${n1}, ${m1})`;
+            }
+
+            const buf = new ArrayBuffer(48);
+            const f = new Float32Array(buf);
+            const ui = new Uint32Array(buf);
+            f[0] = W; f[1] = H;
+            f[2] = elapsed;
+            f[3] = sharpness;
+            f[4] = n1; f[5] = m1;
+            f[6] = n2; f[7] = m2;
+            f[8] = blend;
+            ui[9] = colorPalette;
+            ui[10] = boundaryShape;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        document.getElementById('modeSelect').addEventListener('change', (e) => {
+            const v = parseInt(e.target.value);
+            if (v === 0) {
+                autoMode = true;
+            } else {
+                autoMode = false;
+                fixedModeIdx = v - 1;
+            }
+        });
+        document.getElementById('transition').addEventListener('input', (e) => {
+            transSpeed = parseFloat(e.target.value);
+            document.getElementById('transVal').textContent = transSpeed.toFixed(1);
+        });
+        document.getElementById('sharpness').addEventListener('input', (e) => {
+            sharpness = parseFloat(e.target.value);
+            document.getElementById('sharpVal').textContent = sharpness.toFixed(1);
+        });
+        document.getElementById('colorSelect').addEventListener('change', (e) => {
+            colorPalette = parseInt(e.target.value);
+        });
+        document.getElementById('shapeSelect').addEventListener('change', (e) => {
+            boundaryShape = parseInt(e.target.value);
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

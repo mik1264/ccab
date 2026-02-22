@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gravity Wells - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; }
+        #overlay { z-index: 2; pointer-events: none; }
+        #gpuCanvas { z-index: 1; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; z-index: 100; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; z-index: 200; }
+        .hint { position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%); color: rgba(34,211,238,0.6); font-size: 12px; z-index: 100; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Gravity Wells</div>
+
+    <div class="controls">
+        <label>Bodies: <span id="bodyVal">3</span></label>
+        <input type="range" id="bodies" min="2" max="5" step="1" value="3">
+        <label>Gravity Strength: <span id="gravVal">1.0</span></label>
+        <input type="range" id="gravity" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Trail Fade: <span id="fadeVal">0.95</span></label>
+        <input type="range" id="fade" min="0.8" max="0.99" step="0.01" value="0.95">
+        <label>Time Scale: <span id="timeVal">1.0</span></label>
+        <input type="range" id="timeScale" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Particle Count:</label>
+        <select id="particleCount">
+            <option value="100000">100K</option>
+            <option value="300000" selected>300K</option>
+        </select>
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span> | Particles: <span id="pcount">300,000</span></div>
+    <div class="hint">Click anywhere to add a gravitational disturbance</div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="overlay"></canvas>
+    <canvas id="gpuCanvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: 256 * 1024 * 1024 } });
+        const gpuCanvas = document.getElementById('gpuCanvas');
+        const overlay = document.getElementById('overlay');
+        const W = window.innerWidth, H = window.innerHeight;
+        gpuCanvas.width = W; gpuCanvas.height = H;
+        overlay.width = W; overlay.height = H;
+        const ctx2d = overlay.getContext('2d');
+        const gpuCtx = gpuCanvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        gpuCtx.configure({ device, format, alphaMode: 'premultiplied' });
+
+        let numBodies = 3, gravStrength = 1.0, trailFade = 0.95, timeScale = 1.0;
+        const NUM_PARTICLES = 300000;
+        const MAX_BODIES = 8; // up to 5 gravitational bodies + up to 3 click disturbances
+
+        document.getElementById('bodies').oninput = e => { numBodies = +e.target.value; document.getElementById('bodyVal').textContent = numBodies; initBodies(); };
+        document.getElementById('gravity').oninput = e => { gravStrength = +e.target.value; document.getElementById('gravVal').textContent = gravStrength.toFixed(1); };
+        document.getElementById('fade').oninput = e => { trailFade = +e.target.value; document.getElementById('fadeVal').textContent = trailFade.toFixed(2); };
+        document.getElementById('timeScale').oninput = e => { timeScale = +e.target.value; document.getElementById('timeVal').textContent = timeScale.toFixed(1); };
+
+        // Massive bodies: x, y, vx, vy, mass (CPU-computed stable orbits)
+        let bodies = [];
+        let clickBodies = []; // temporary disturbances from clicks
+
+        function initBodies() {
+            bodies = [];
+            if (numBodies === 2) {
+                // Binary orbit
+                const r = 0.3;
+                const v = 0.4;
+                bodies.push({ x: -r, y: 0, vx: 0, vy: -v, mass: 1.0 });
+                bodies.push({ x: r, y: 0, vx: 0, vy: v, mass: 1.0 });
+            } else if (numBodies === 3) {
+                // Figure-8 three-body solution (Chenciner & Montgomery)
+                const p1 = 0.347111;
+                const p2 = 0.532728;
+                bodies.push({ x: -0.97, y: 0, vx: p1, vy: p2, mass: 1.0 });
+                bodies.push({ x: 0.97, y: 0, vx: p1, vy: p2, mass: 1.0 });
+                bodies.push({ x: 0, y: 0, vx: -2*p1, vy: -2*p2, mass: 1.0 });
+            } else if (numBodies === 4) {
+                // Square configuration
+                const r = 0.4;
+                const v = 0.35;
+                bodies.push({ x: -r, y: -r, vx: v, vy: 0, mass: 0.8 });
+                bodies.push({ x: r, y: -r, vx: 0, vy: v, mass: 0.8 });
+                bodies.push({ x: r, y: r, vx: -v, vy: 0, mass: 0.8 });
+                bodies.push({ x: -r, y: r, vx: 0, vy: -v, mass: 0.8 });
+            } else {
+                // Pentagon
+                const r = 0.4;
+                const v = 0.3;
+                for (let i = 0; i < 5; i++) {
+                    const a = (i / 5) * Math.PI * 2;
+                    const ta = a + Math.PI / 2; // tangent direction
+                    bodies.push({
+                        x: r * Math.cos(a), y: r * Math.sin(a),
+                        vx: v * Math.cos(ta), vy: v * Math.sin(ta),
+                        mass: 0.6
+                    });
+                }
+            }
+        }
+        initBodies();
+
+        // Click to add temporary disturbance
+        overlay.style.pointerEvents = 'auto';
+        overlay.addEventListener('click', e => {
+            const aspect = W / H;
+            const cx = (e.clientX / W - 0.5) * 2.0 * aspect;
+            const cy = -(e.clientY / H - 0.5) * 2.0;
+            clickBodies.push({ x: cx, y: cy, vx: 0, vy: 0, mass: 2.0, life: 3.0 });
+            if (clickBodies.length > 3) clickBodies.shift();
+        });
+
+        // Particles: x, y, vx, vy (4 floats each)
+        const FLOATS_PER = 4;
+        const particleData = new Float32Array(NUM_PARTICLES * FLOATS_PER);
+        const aspect = W / H;
+
+        for (let i = 0; i < NUM_PARTICLES; i++) {
+            const base = i * FLOATS_PER;
+            // Distribute in a disk
+            const a = Math.random() * Math.PI * 2;
+            const r = Math.sqrt(Math.random()) * 1.2;
+            particleData[base + 0] = r * Math.cos(a); // x
+            particleData[base + 1] = r * Math.sin(a); // y
+            // Give them slight orbital velocity
+            const speed = 0.1 / Math.max(r, 0.1) * 0.3;
+            particleData[base + 2] = -Math.sin(a) * speed + (Math.random() - 0.5) * 0.02;
+            particleData[base + 3] = Math.cos(a) * speed + (Math.random() - 0.5) * 0.02;
+        }
+
+        const particleBuf = device.createBuffer({ size: particleData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(particleBuf, 0, particleData);
+
+        // Body data buffer: MAX_BODIES * 5 floats (x, y, vx, vy, mass)
+        const bodyBuffer = device.createBuffer({ size: MAX_BODIES * 5 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+        // Uniforms: resolution, time, dt, gravStrength, trailFade, numBodies, particleCount
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const computeShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                dt: f32,
+                gravStrength: f32,
+                trailFade: f32,
+                numBodies: u32,
+                particleCount: u32,
+                aspect: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+            @group(0) @binding(0) var<storage, read_write> particles: array<f32>;
+            @group(0) @binding(1) var<storage, read> bodies: array<f32>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u.particleCount) { return; }
+                let base = idx * 4u;
+
+                var px = particles[base];
+                var py = particles[base + 1u];
+                var vx = particles[base + 2u];
+                var vy = particles[base + 3u];
+
+                let dt = u.dt * 0.5;
+
+                // Gravitational force from all bodies
+                var ax = 0.0;
+                var ay = 0.0;
+
+                for (var i = 0u; i < u.numBodies; i++) {
+                    let bbase = i * 5u;
+                    let bx = bodies[bbase];
+                    let by = bodies[bbase + 1u];
+                    let bmass = bodies[bbase + 4u];
+
+                    let dx = bx - px;
+                    let dy = by - py;
+                    let r2 = max(dx * dx + dy * dy, 0.0001);
+                    let r = sqrt(r2);
+                    let force = u.gravStrength * bmass / r2;
+                    ax += force * dx / r;
+                    ay += force * dy / r;
+                }
+
+                // Leapfrog integration
+                vx += ax * dt;
+                vy += ay * dt;
+
+                // Mild damping to prevent energy buildup
+                let speed = sqrt(vx * vx + vy * vy);
+                if (speed > 3.0) {
+                    vx *= 3.0 / speed;
+                    vy *= 3.0 / speed;
+                }
+
+                px += vx * dt;
+                py += vy * dt;
+
+                // Wrap around if too far
+                if (px > 2.0 * u.aspect) { px -= 4.0 * u.aspect; }
+                if (px < -2.0 * u.aspect) { px += 4.0 * u.aspect; }
+                if (py > 2.0) { py -= 4.0; }
+                if (py < -2.0) { py += 4.0; }
+
+                particles[base] = px;
+                particles[base + 1u] = py;
+                particles[base + 2u] = vx;
+                particles[base + 3u] = vy;
+            }
+        `});
+
+        const renderShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                dt: f32,
+                gravStrength: f32,
+                trailFade: f32,
+                numBodies: u32,
+                particleCount: u32,
+                aspect: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+            struct VSOut {
+                @builtin(position) pos: vec4f,
+                @location(0) color: vec3f,
+                @location(1) @interpolate(flat) center: vec2f,
+                @location(2) screenPos: vec2f,
+            }
+            @group(0) @binding(0) var<storage, read> particles: array<f32>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            @vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+                let base = ii * 4u;
+                let px = particles[base];
+                let py = particles[base + 1u];
+                let vx = particles[base + 2u];
+                let vy = particles[base + 3u];
+
+                let speed = sqrt(vx * vx + vy * vy);
+
+                // Screen position
+                let sx = px / u.aspect;
+                let sy = py;
+
+                var offsets = array<vec2f, 6>(
+                    vec2f(-1, -1), vec2f(1, -1), vec2f(-1, 1),
+                    vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1)
+                );
+                let pSize = 1.5 / u.resolution.y;
+                let quadPos = vec2f(sx, sy) + offsets[vi] * pSize;
+
+                // Color by speed: blue (slow) -> cyan -> yellow -> red (fast)
+                let sNorm = clamp(speed * 3.0, 0.0, 1.0);
+                var col: vec3f;
+                if (sNorm < 0.25) {
+                    col = mix(vec3f(0.1, 0.1, 0.6), vec3f(0.1, 0.4, 0.8), sNorm * 4.0);
+                } else if (sNorm < 0.5) {
+                    col = mix(vec3f(0.1, 0.4, 0.8), vec3f(0.1, 0.8, 0.8), (sNorm - 0.25) * 4.0);
+                } else if (sNorm < 0.75) {
+                    col = mix(vec3f(0.1, 0.8, 0.8), vec3f(0.9, 0.8, 0.1), (sNorm - 0.5) * 4.0);
+                } else {
+                    col = mix(vec3f(0.9, 0.8, 0.1), vec3f(1.0, 0.2, 0.1), (sNorm - 0.75) * 4.0);
+                }
+
+                col *= 0.5 + speed * 0.5;
+
+                var out: VSOut;
+                out.pos = vec4f(quadPos, 0, 1);
+                out.color = col;
+                out.center = vec2f(sx, sy) * u.resolution * 0.5 + u.resolution * 0.5;
+                out.screenPos = quadPos * u.resolution * 0.5 + u.resolution * 0.5;
+                return out;
+            }
+
+            @fragment fn fs(inp: VSOut) -> @location(0) vec4f {
+                let dist = length(inp.screenPos - inp.center);
+                let alpha = exp(-dist * dist / 2.0);
+                if (alpha < 0.01) { discard; }
+                return vec4f(inp.color * alpha, alpha);
+            }
+        `});
+
+        const computeBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+        });
+        const computePipeline = device.createComputePipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
+            compute: { module: computeShader, entryPoint: 'main' },
+        });
+        const computeBG = device.createBindGroup({
+            layout: computeBGL,
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: bodyBuffer } },
+                { binding: 2, resource: { buffer: uniformBuffer } },
+            ],
+        });
+
+        const renderBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+                { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            ],
+        });
+        const renderPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
+            vertex: { module: renderShader, entryPoint: 'vs' },
+            fragment: {
+                module: renderShader, entryPoint: 'fs',
+                targets: [{
+                    format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                    },
+                }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+        const renderBG = device.createBindGroup({
+            layout: renderBGL,
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+            ],
+        });
+
+        // Update massive bodies on CPU (simple n-body with softening)
+        function updateBodies(dt) {
+            const G = 0.5 * gravStrength;
+            const softening = 0.05;
+
+            for (let i = 0; i < bodies.length; i++) {
+                let ax = 0, ay = 0;
+                for (let j = 0; j < bodies.length; j++) {
+                    if (i === j) continue;
+                    const dx = bodies[j].x - bodies[i].x;
+                    const dy = bodies[j].y - bodies[i].y;
+                    const r2 = dx * dx + dy * dy + softening * softening;
+                    const r = Math.sqrt(r2);
+                    const f = G * bodies[j].mass / r2;
+                    ax += f * dx / r;
+                    ay += f * dy / r;
+                }
+                bodies[i].vx += ax * dt;
+                bodies[i].vy += ay * dt;
+            }
+            for (let i = 0; i < bodies.length; i++) {
+                bodies[i].x += bodies[i].vx * dt;
+                bodies[i].y += bodies[i].vy * dt;
+            }
+
+            // Decay click disturbances
+            for (let i = clickBodies.length - 1; i >= 0; i--) {
+                clickBodies[i].life -= dt;
+                clickBodies[i].mass *= 0.99;
+                if (clickBodies[i].life <= 0) clickBodies.splice(i, 1);
+            }
+        }
+
+        // Draw massive bodies on 2D canvas overlay
+        function drawBodies() {
+            ctx2d.clearRect(0, 0, W, H);
+
+            const allBodies = [...bodies, ...clickBodies];
+            for (let i = 0; i < allBodies.length; i++) {
+                const b = allBodies[i];
+                const sx = (b.x / aspect * 0.5 + 0.5) * W;
+                const sy = (-b.y * 0.5 + 0.5) * H;
+                const r = Math.max(8, b.mass * 15);
+
+                // Glow
+                const grad = ctx2d.createRadialGradient(sx, sy, 0, sx, sy, r * 3);
+                if (i < bodies.length) {
+                    const colors = ['#ff6b35', '#ffd166', '#06d6a0', '#118ab2', '#ef476f'];
+                    const c = colors[i % colors.length];
+                    grad.addColorStop(0, c);
+                    grad.addColorStop(0.3, c + '80');
+                    grad.addColorStop(1, c + '00');
+                } else {
+                    grad.addColorStop(0, '#ffffff');
+                    grad.addColorStop(0.3, '#22d3ee80');
+                    grad.addColorStop(1, '#22d3ee00');
+                }
+                ctx2d.fillStyle = grad;
+                ctx2d.beginPath();
+                ctx2d.arc(sx, sy, r * 3, 0, Math.PI * 2);
+                ctx2d.fill();
+
+                // Core
+                ctx2d.fillStyle = '#ffffff';
+                ctx2d.beginPath();
+                ctx2d.arc(sx, sy, r * 0.4, 0, Math.PI * 2);
+                ctx2d.fill();
+            }
+        }
+
+        let frameCount = 0, lastFPSTime = performance.now(), lastTime = 0;
+
+        function frame(time) {
+            const now = performance.now();
+            const dt = Math.min((time - lastTime) / 1000, 0.05) * timeScale;
+            lastTime = time;
+            frameCount++;
+            if (now - lastFPSTime > 500) {
+                document.getElementById('fps').textContent = Math.round(frameCount / ((now - lastFPSTime) / 1000));
+                frameCount = 0; lastFPSTime = now;
+            }
+
+            // Update bodies on CPU
+            updateBodies(dt);
+
+            // Upload body data
+            const allBodies = [...bodies, ...clickBodies];
+            const bodyData = new Float32Array(MAX_BODIES * 5);
+            for (let i = 0; i < Math.min(allBodies.length, MAX_BODIES); i++) {
+                bodyData[i * 5 + 0] = allBodies[i].x;
+                bodyData[i * 5 + 1] = allBodies[i].y;
+                bodyData[i * 5 + 2] = allBodies[i].vx;
+                bodyData[i * 5 + 3] = allBodies[i].vy;
+                bodyData[i * 5 + 4] = allBodies[i].mass;
+            }
+            device.queue.writeBuffer(bodyBuffer, 0, bodyData);
+
+            // Uniforms
+            const uniformData = new Float32Array(12);
+            const u32View = new Uint32Array(uniformData.buffer);
+            uniformData[0] = W;
+            uniformData[1] = H;
+            uniformData[2] = time / 1000;
+            uniformData[3] = dt;
+            uniformData[4] = gravStrength;
+            uniformData[5] = trailFade;
+            u32View[6] = Math.min(allBodies.length, MAX_BODIES);
+            u32View[7] = NUM_PARTICLES;
+            uniformData[8] = aspect;
+            device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+            const encoder = device.createCommandEncoder();
+
+            const computePass = encoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBG);
+            computePass.dispatchWorkgroups(Math.ceil(NUM_PARTICLES / 256));
+            computePass.end();
+
+            const renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: gpuCtx.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.01, g: 0.01, b: 0.03, a: 1 },
+                }],
+            });
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBG);
+            renderPass.draw(6, NUM_PARTICLES);
+            renderPass.end();
+
+            device.queue.submit([encoder.finish()]);
+
+            // Draw bodies on overlay
+            drawBodies();
+
+            requestAnimationFrame(frame);
+        }
+
+        window.addEventListener('resize', () => {
+            // Resize requires reloading to reinitialize buffers
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Voronoi - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Neon Voronoi</div>
+
+    <div class="controls">
+        <label>Seed Count: <span id="seedVal">50</span></label>
+        <input type="range" id="seedCount" min="10" max="80" step="5" value="50">
+        <label>Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Glow Width: <span id="glowVal">2.0</span></label>
+        <input type="range" id="glowWidth" min="0.5" max="6.0" step="0.5" value="2.0">
+        <label>Visual Mode:</label>
+        <select id="modeSelect">
+            <option value="0">Neon Cells</option>
+            <option value="1">Borders Only</option>
+            <option value="2">Distance Field</option>
+            <option value="3">Heat Map</option>
+        </select>
+        <label>Color Theme:</label>
+        <select id="themeSelect">
+            <option value="0">Cyber Neon</option>
+            <option value="1">Synthwave</option>
+            <option value="2">Toxic</option>
+            <option value="3">Ice</option>
+        </select>
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        const W = canvas.width, H = canvas.height;
+        const MAX_SEEDS = 80;
+        let seedCount = 50, speed = 1.0, glowWidth = 2.0, visualMode = 0, colorTheme = 0;
+
+        // Seed data: x, y, freqX, freqY, phaseX, phaseY, ampX, ampY (8 floats each)
+        const seedData = new Float32Array(MAX_SEEDS * 8);
+        function initSeeds() {
+            for (let i = 0; i < MAX_SEEDS; i++) {
+                const b = i * 8;
+                seedData[b + 0] = Math.random(); // x
+                seedData[b + 1] = Math.random(); // y
+                // Lissajous parameters
+                seedData[b + 2] = 0.3 + Math.random() * 0.7; // freqX
+                seedData[b + 3] = 0.3 + Math.random() * 0.7; // freqY
+                seedData[b + 4] = Math.random() * Math.PI * 2; // phaseX
+                seedData[b + 5] = Math.random() * Math.PI * 2; // phaseY
+                seedData[b + 6] = 0.05 + Math.random() * 0.15; // ampX
+                seedData[b + 7] = 0.05 + Math.random() * 0.15; // ampY
+            }
+        }
+        initSeeds();
+
+        const seedBuffer = device.createBuffer({ size: seedData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(seedBuffer, 0, seedData);
+
+        // Animated positions buffer (just x,y pairs sent each frame)
+        const posData = new Float32Array(MAX_SEEDS * 2);
+        const posBuffer = device.createBuffer({ size: posData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const shaderCode = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                seedCount: u32,
+                glowWidth: f32,
+                visualMode: u32,
+                colorTheme: u32,
+                aspect: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+                pad4: f32,
+            }
+
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+            @group(0) @binding(2) var<storage, read> positions: array<f32>;
+
+            fn hsl2rgb(h: f32, s: f32, l: f32) -> vec3f {
+                let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+                let x = c * (1.0 - abs((h * 6.0) % 2.0 - 1.0));
+                let m = l - c * 0.5;
+                let hi = u32(h * 6.0) % 6u;
+                var rgb: vec3f;
+                if (hi == 0u) { rgb = vec3f(c, x, 0.0); }
+                else if (hi == 1u) { rgb = vec3f(x, c, 0.0); }
+                else if (hi == 2u) { rgb = vec3f(0.0, c, x); }
+                else if (hi == 3u) { rgb = vec3f(0.0, x, c); }
+                else if (hi == 4u) { rgb = vec3f(x, 0.0, c); }
+                else { rgb = vec3f(c, 0.0, x); }
+                return rgb + vec3f(m);
+            }
+
+            fn getNeonColor(seedIdx: u32) -> vec3f {
+                let hue = f32(seedIdx) / f32(u.seedCount);
+                if (u.colorTheme == 0u) {
+                    // Cyber neon: cyan, magenta, yellow
+                    let h = fract(hue * 3.0) * 0.33;
+                    let mapped = select(select(h + 0.5, h + 0.15, h < 0.22), h + 0.83, h < 0.11);
+                    return hsl2rgb(fract(mapped + u.time * 0.02), 1.0, 0.6);
+                } else if (u.colorTheme == 1u) {
+                    // Synthwave: pink, purple, blue
+                    let h = fract(hue * 0.3 + 0.75);
+                    return hsl2rgb(h, 0.9, 0.55);
+                } else if (u.colorTheme == 2u) {
+                    // Toxic: green, yellow-green
+                    let h = fract(hue * 0.15 + 0.25);
+                    return hsl2rgb(h, 1.0, 0.5);
+                } else {
+                    // Ice: cyan, blue, white
+                    let h = fract(hue * 0.15 + 0.5);
+                    return hsl2rgb(h, 0.7, 0.65);
+                }
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let uv = vec2f(f32(id.x) / u.resolution.x, f32(id.y) / u.resolution.y);
+                let aspect = u.aspect;
+
+                // Find F1 and F2 distances
+                var f1Dist: f32 = 1e10;
+                var f2Dist: f32 = 1e10;
+                var f1Idx: u32 = 0u;
+
+                for (var i = 0u; i < u.seedCount; i++) {
+                    let sx = positions[i * 2u];
+                    let sy = positions[i * 2u + 1u];
+                    let dx = (uv.x - sx) * aspect;
+                    let dy = uv.y - sy;
+                    let d = dx * dx + dy * dy;
+                    if (d < f1Dist) {
+                        f2Dist = f1Dist;
+                        f1Dist = d;
+                        f1Idx = i;
+                    } else if (d < f2Dist) {
+                        f2Dist = d;
+                    }
+                }
+
+                let f1 = sqrt(f1Dist);
+                let f2 = sqrt(f2Dist);
+                let border = f2 - f1;
+                let bw = u.glowWidth / max(u.resolution.x, u.resolution.y);
+
+                let cellColor = getNeonColor(f1Idx);
+                var col = vec3f(0.0);
+
+                if (u.visualMode == 0u) {
+                    // Neon cells: dark interiors, glowing borders
+                    let borderGlow = exp(-border * border / (bw * bw * 2.0));
+                    let innerGlow = exp(-f1 * f1 / (bw * bw * 8.0)) * 0.15;
+
+                    col = cellColor * 0.08; // dim cell fill
+                    col += cellColor * borderGlow * 1.5; // bright border
+                    col += cellColor * innerGlow; // subtle glow near seed
+
+                    // Multi-layer glow: outer halo
+                    let outerGlow = exp(-border * border / (bw * bw * 8.0)) * 0.3;
+                    col += cellColor * outerGlow;
+                } else if (u.visualMode == 1u) {
+                    // Borders only
+                    let borderGlow = exp(-border * border / (bw * bw * 1.5));
+                    let outerHalo = exp(-border * border / (bw * bw * 6.0)) * 0.4;
+                    col = cellColor * borderGlow * 2.0 + cellColor * outerHalo;
+                } else if (u.visualMode == 2u) {
+                    // Distance field: F2-F1 colored
+                    let df = border / 0.12;
+                    col = cellColor * df * 0.8;
+                    // Add border glow
+                    let glow = exp(-border * border / (bw * bw * 3.0));
+                    col += vec3f(1.0) * glow * 0.5;
+                } else {
+                    // Heat map
+                    let heat = f1 * 8.0;
+                    let h = fract(0.7 - heat * 0.5);
+                    let heatCol = hsl2rgb(h, 1.0, 0.5);
+                    col = heatCol * (0.3 + 0.7 * smoothstep(0.0, 0.05, f1));
+                    let borderGlow = exp(-border * border / (bw * bw * 2.0));
+                    col += vec3f(1.0, 1.0, 0.8) * borderGlow * 0.8;
+                }
+
+                // Global pulse
+                let pulse = 1.0 + 0.05 * sin(u.time * 2.0);
+                col *= pulse;
+
+                col = clamp(col, vec3f(0.0), vec3f(1.0));
+                textureStore(outTex, vec2u(id.x, id.y), vec4f(col, 1.0));
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const bindGroupLayout = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+            ],
+        });
+        const pipeline = device.createComputePipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+            compute: { module: device.createShaderModule({ code: shaderCode }), entryPoint: 'main' },
+        });
+        const bindGroup = device.createBindGroup({
+            layout: bindGroupLayout,
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+                { binding: 2, resource: { buffer: posBuffer } },
+            ],
+        });
+
+        // Blit pipeline
+        const blitShader = device.createShaderModule({ code: `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var pos = array<vec2f, 6>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(-1,1), vec2f(1,-1), vec2f(1,1));
+                var out: VSOut;
+                out.pos = vec4f(pos[i], 0, 1);
+                out.uv = pos[i] * 0.5 + 0.5;
+                out.uv.y = 1.0 - out.uv.y;
+                return out;
+            }
+            @fragment fn fs(inp: VSOut) -> @location(0) vec4f {
+                return textureSample(tex, samp, inp.uv);
+            }
+        `});
+        const blitBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+            ],
+        });
+        const blitPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [blitBGL] }),
+            vertex: { module: blitShader, entryPoint: 'vs' },
+            fragment: { module: blitShader, entryPoint: 'fs', targets: [{ format }] },
+        });
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        const blitBG = device.createBindGroup({
+            layout: blitBGL,
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler },
+            ],
+        });
+
+        let fpsC = 0, fpsT = performance.now();
+
+        function updatePositions(time) {
+            const t = time * speed;
+            for (let i = 0; i < MAX_SEEDS; i++) {
+                const b = i * 8;
+                const cx = seedData[b + 0];
+                const cy = seedData[b + 1];
+                const fx = seedData[b + 2];
+                const fy = seedData[b + 3];
+                const px = seedData[b + 4];
+                const py = seedData[b + 5];
+                const ax = seedData[b + 6];
+                const ay = seedData[b + 7];
+                // Lissajous path around center
+                posData[i * 2] = cx + Math.sin(t * fx + px) * ax;
+                posData[i * 2 + 1] = cy + Math.cos(t * fy + py) * ay;
+                // Clamp to [0,1]
+                posData[i * 2] = Math.max(0, Math.min(1, posData[i * 2]));
+                posData[i * 2 + 1] = Math.max(0, Math.min(1, posData[i * 2 + 1]));
+            }
+            device.queue.writeBuffer(posBuffer, 0, posData);
+        }
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const time = now * 0.001;
+            updatePositions(time);
+
+            const uData = new Float32Array(12);
+            const uInt = new Uint32Array(uData.buffer);
+            uData[0] = W; uData[1] = H;
+            uData[2] = time;
+            uInt[3] = seedCount;
+            uData[4] = glowWidth;
+            uInt[5] = visualMode;
+            uInt[6] = colorTheme;
+            uData[7] = W / H;
+            device.queue.writeBuffer(uniformBuffer, 0, uData);
+
+            const encoder = device.createCommandEncoder();
+            const cp = encoder.beginComputePass();
+            cp.setPipeline(pipeline);
+            cp.setBindGroup(0, bindGroup);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = encoder.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+            });
+            rp.setPipeline(blitPipeline);
+            rp.setBindGroup(0, blitBG);
+            rp.draw(6);
+            rp.end();
+            device.queue.submit([encoder.finish()]);
+        }
+
+        document.getElementById('seedCount').oninput = e => { seedCount = +e.target.value; document.getElementById('seedVal').textContent = seedCount; };
+        document.getElementById('speed').oninput = e => { speed = +e.target.value; document.getElementById('speedVal').textContent = speed.toFixed(1); };
+        document.getElementById('glowWidth').oninput = e => { glowWidth = +e.target.value; document.getElementById('glowVal').textContent = glowWidth.toFixed(1); };
+        document.getElementById('modeSelect').onchange = e => { visualMode = +e.target.value; };
+        document.getElementById('themeSelect').onchange = e => { colorTheme = +e.target.value; };
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

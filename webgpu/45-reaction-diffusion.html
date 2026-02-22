@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Turing Patterns - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); cursor: crosshair; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 220px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 170px; }
+        .controls select { width: 175px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #333; padding: 4px; border-radius: 4px; }
+        .controls button { margin: 3px 2px; padding: 5px 10px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+        .controls button:hover { background: #67e8f9; }
+        .preset-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+        .preset-row button { flex: 0 0 auto; font-size: 10px; padding: 4px 8px; }
+        .btn-row { display: flex; gap: 6px; margin-top: 10px; }
+        .btn-row button { flex: 1; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title-overlay { position: fixed; top: 70px; left: 20px; z-index: 90; }
+        .title-overlay h1 { font-size: 1.4rem; color: #22d3ee; margin: 0 0 4px 0; }
+        .title-overlay p { font-size: 0.85rem; color: #888; margin: 0; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .info { font-size: 10px; color: #666; margin-top: 8px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title-overlay">
+        <h1>Turing Patterns</h1>
+        <p>Gray-Scott reaction-diffusion system</p>
+    </div>
+    <div class="controls">
+        <label>Presets:</label>
+        <div class="preset-row">
+            <button onclick="window.applyPreset('spots')">Spots</button>
+            <button onclick="window.applyPreset('stripes')">Stripes</button>
+            <button onclick="window.applyPreset('worms')">Worms</button>
+            <button onclick="window.applyPreset('coral')">Coral</button>
+            <button onclick="window.applyPreset('mitosis')">Mitosis</button>
+            <button onclick="window.applyPreset('mazes')">Mazes</button>
+        </div>
+        <label>Feed Rate (F): <span id="feedVal">0.055</span></label>
+        <input type="range" id="feed" min="0.010" max="0.100" step="0.001" value="0.055">
+        <label>Kill Rate (K): <span id="killVal">0.062</span></label>
+        <input type="range" id="kill" min="0.040" max="0.075" step="0.001" value="0.062">
+        <label>Speed: <span id="speedVal">10</span> steps/frame</label>
+        <input type="range" id="speed" min="1" max="40" step="1" value="10">
+        <label>Palette:</label>
+        <select id="palette">
+            <option value="0">Viridis</option>
+            <option value="1">Magma</option>
+            <option value="2">Cyanotype</option>
+            <option value="3">Bioluminescent</option>
+        </select>
+        <div class="btn-row">
+            <button onclick="window.resetSim()">Reset</button>
+            <button onclick="window.togglePause()"><span id="pauseLabel">Pause</span></button>
+        </div>
+        <div class="info">Click anywhere to seed new patterns</div>
+    </div>
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Step: <span id="step">0</span> | Grid: 512x512
+    </div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const GRID = 512;
+        const displaySize = Math.min(window.innerWidth, window.innerHeight) * 0.88;
+        canvas.width = GRID; canvas.height = GRID;
+        canvas.style.width = displaySize + 'px'; canvas.style.height = displaySize + 'px';
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        const presets = {
+            spots:   { F: 0.055, K: 0.062 },
+            stripes: { F: 0.062, K: 0.061 },
+            worms:   { F: 0.078, K: 0.061 },
+            coral:   { F: 0.060, K: 0.062 },
+            mitosis: { F: 0.028, K: 0.062 },
+            mazes:   { F: 0.029, K: 0.057 }
+        };
+
+        let feedRate = 0.055, killRate = 0.062;
+        let stepsPerFrame = 10, paused = false, palette = 0;
+        let stepCount = 0;
+
+        // Two chemical buffers for ping-pong (each pixel: u, v as rg32float)
+        const chemTextures = [0, 1].map(() => device.createTexture({
+            size: [GRID, GRID], format: 'rg32float',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST
+        }));
+
+        const renderTexture = device.createTexture({
+            size: [GRID, GRID], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+        const sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+
+        const uniformBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        function initGrid(texIdx) {
+            const data = new Float32Array(GRID * GRID * 2);
+            for (let i = 0; i < GRID * GRID; i++) {
+                data[i * 2] = 1.0;
+                data[i * 2 + 1] = 0.0;
+            }
+            // Seed random circular perturbations
+            const numSeeds = 18 + Math.floor(Math.random() * 12);
+            for (let s = 0; s < numSeeds; s++) {
+                const cx = 60 + Math.floor(Math.random() * (GRID - 120));
+                const cy = 60 + Math.floor(Math.random() * (GRID - 120));
+                const radius = 4 + Math.floor(Math.random() * 8);
+                for (let dy = -radius; dy <= radius; dy++) {
+                    for (let dx = -radius; dx <= radius; dx++) {
+                        if (dx * dx + dy * dy > radius * radius) continue;
+                        const px = cx + dx;
+                        const py = cy + dy;
+                        if (px >= 0 && px < GRID && py >= 0 && py < GRID) {
+                            const idx = (py * GRID + px) * 2;
+                            data[idx] = 0.5 + Math.random() * 0.1;
+                            data[idx + 1] = 0.25 + Math.random() * 0.1;
+                        }
+                    }
+                }
+            }
+            device.queue.writeTexture({ texture: chemTextures[texIdx] }, data,
+                { bytesPerRow: GRID * 8 }, { width: GRID, height: GRID });
+        }
+        initGrid(0); initGrid(1);
+
+        // Gray-Scott compute shader
+        const computeShader = `
+            @group(0) @binding(0) var chemIn: texture_2d<f32>;
+            @group(0) @binding(1) var chemOut: texture_storage_2d<rg32float, write>;
+            @group(0) @binding(2) var<uniform> params: vec4f;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let size = textureDimensions(chemIn);
+                if (gid.x >= size.x || gid.y >= size.y) { return; }
+
+                let x = i32(gid.x);
+                let y = i32(gid.y);
+                let w = i32(size.x);
+                let h = i32(size.y);
+                let F = params.x;
+                let K = params.y;
+                let DA = 1.0;
+                let DB = 0.5;
+                let dt = 1.0;
+
+                let cur = textureLoad(chemIn, vec2i(x, y), 0).rg;
+                let A = cur.r;
+                let B = cur.g;
+
+                // 9-point Laplacian stencil
+                let cL = textureLoad(chemIn, vec2i((x - 1 + w) % w, y), 0).rg;
+                let cR = textureLoad(chemIn, vec2i((x + 1) % w, y), 0).rg;
+                let cU = textureLoad(chemIn, vec2i(x, (y - 1 + h) % h), 0).rg;
+                let cD = textureLoad(chemIn, vec2i(x, (y + 1) % h), 0).rg;
+                let cUL = textureLoad(chemIn, vec2i((x - 1 + w) % w, (y - 1 + h) % h), 0).rg;
+                let cUR = textureLoad(chemIn, vec2i((x + 1) % w, (y - 1 + h) % h), 0).rg;
+                let cDL = textureLoad(chemIn, vec2i((x - 1 + w) % w, (y + 1) % h), 0).rg;
+                let cDR = textureLoad(chemIn, vec2i((x + 1) % w, (y + 1) % h), 0).rg;
+
+                let lapA = (cL.r + cR.r + cU.r + cD.r) * 0.2
+                         + (cUL.r + cUR.r + cDL.r + cDR.r) * 0.05 - A;
+                let lapB = (cL.g + cR.g + cU.g + cD.g) * 0.2
+                         + (cUL.g + cUR.g + cDL.g + cDR.g) * 0.05 - B;
+
+                let ABB = A * B * B;
+                let newA = A + (DA * lapA - ABB + F * (1.0 - A)) * dt;
+                let newB = B + (DB * lapB + ABB - (K + F) * B) * dt;
+
+                textureStore(chemOut, vec2i(gid.xy), vec4f(
+                    clamp(newA, 0.0, 1.0),
+                    clamp(newB, 0.0, 1.0),
+                    0.0, 0.0
+                ));
+            }
+        `;
+
+        // Visualization shader with 4 palettes
+        const vizShader = `
+            @group(0) @binding(0) var chemTex: texture_2d<f32>;
+            @group(0) @binding(1) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(2) var<uniform> params: vec4f;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let size = textureDimensions(chemTex);
+                if (gid.x >= size.x || gid.y >= size.y) { return; }
+
+                let chem = textureLoad(chemTex, vec2i(gid.xy), 0).rg;
+                let B = chem.g;
+                let t = clamp(B * 3.0, 0.0, 1.0);
+                let palette = i32(params.z);
+                var color: vec3f;
+
+                if (palette == 0) {
+                    // Viridis-inspired
+                    let c0 = vec3f(0.267, 0.004, 0.329);
+                    let c1 = vec3f(0.282, 0.140, 0.458);
+                    let c2 = vec3f(0.127, 0.566, 0.551);
+                    let c3 = vec3f(0.369, 0.789, 0.383);
+                    let c4 = vec3f(0.993, 0.906, 0.144);
+                    if (t < 0.25) { color = mix(c0, c1, t * 4.0); }
+                    else if (t < 0.5) { color = mix(c1, c2, (t - 0.25) * 4.0); }
+                    else if (t < 0.75) { color = mix(c2, c3, (t - 0.5) * 4.0); }
+                    else { color = mix(c3, c4, (t - 0.75) * 4.0); }
+                } else if (palette == 1) {
+                    // Magma-inspired
+                    let c0 = vec3f(0.001, 0.0, 0.014);
+                    let c1 = vec3f(0.329, 0.071, 0.478);
+                    let c2 = vec3f(0.716, 0.215, 0.475);
+                    let c3 = vec3f(0.987, 0.535, 0.275);
+                    let c4 = vec3f(0.988, 0.998, 0.645);
+                    if (t < 0.25) { color = mix(c0, c1, t * 4.0); }
+                    else if (t < 0.5) { color = mix(c1, c2, (t - 0.25) * 4.0); }
+                    else if (t < 0.75) { color = mix(c2, c3, (t - 0.5) * 4.0); }
+                    else { color = mix(c3, c4, (t - 0.75) * 4.0); }
+                } else if (palette == 2) {
+                    // Cyanotype
+                    let c0 = vec3f(0.0, 0.02, 0.06);
+                    let c1 = vec3f(0.0, 0.15, 0.35);
+                    let c2 = vec3f(0.1, 0.4, 0.6);
+                    let c3 = vec3f(0.6, 0.85, 0.95);
+                    if (t < 0.33) { color = mix(c0, c1, t * 3.0); }
+                    else if (t < 0.66) { color = mix(c1, c2, (t - 0.33) * 3.0); }
+                    else { color = mix(c2, c3, (t - 0.66) * 3.0); }
+                } else {
+                    // Bioluminescent
+                    let c0 = vec3f(0.0, 0.0, 0.02);
+                    let c1 = vec3f(0.0, 0.15, 0.3);
+                    let c2 = vec3f(0.0, 0.5, 0.3);
+                    let c3 = vec3f(0.2, 1.0, 0.6);
+                    let c4 = vec3f(0.5, 1.0, 0.9);
+                    if (t < 0.25) { color = mix(c0, c1, t * 4.0); }
+                    else if (t < 0.5) { color = mix(c1, c2, (t - 0.25) * 4.0); }
+                    else if (t < 0.75) { color = mix(c2, c3, (t - 0.5) * 4.0); }
+                    else { color = mix(c3, c4, (t - 0.75) * 4.0); }
+                }
+
+                // Subtle gradient based on A for depth
+                let A = chem.r;
+                color *= (1.0 + (1.0 - A) * 0.1);
+
+                textureStore(outTex, vec2i(gid.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        // Display shader
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+                var p = array<vec2f, 4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f, 4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VO; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const compModule = device.createShaderModule({ code: computeShader });
+        const compPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: compModule, entryPoint: 'main' }
+        });
+
+        const vizModule = device.createShaderModule({ code: vizShader });
+        const vizPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: vizModule, entryPoint: 'main' }
+        });
+
+        const dispModule = device.createShaderModule({ code: displayShader });
+        const dispPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: dispModule, entryPoint: 'vs' },
+            fragment: { module: dispModule, entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const compBindGroups = [
+            device.createBindGroup({
+                layout: compPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: chemTextures[0].createView() },
+                    { binding: 1, resource: chemTextures[1].createView() },
+                    { binding: 2, resource: { buffer: uniformBuffer } }
+                ]
+            }),
+            device.createBindGroup({
+                layout: compPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: chemTextures[1].createView() },
+                    { binding: 1, resource: chemTextures[0].createView() },
+                    { binding: 2, resource: { buffer: uniformBuffer } }
+                ]
+            })
+        ];
+
+        const vizBindGroups = [0, 1].map(i =>
+            device.createBindGroup({
+                layout: vizPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: chemTextures[i].createView() },
+                    { binding: 1, resource: renderTexture.createView() },
+                    { binding: 2, resource: { buffer: uniformBuffer } }
+                ]
+            })
+        );
+
+        const dispBindGroup = device.createBindGroup({
+            layout: dispPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: renderTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        // Click to seed perturbation
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const sx = (e.clientX - rect.left) / rect.width;
+            const sy = (e.clientY - rect.top) / rect.height;
+            seedPerturbation(Math.floor(sx * GRID), Math.floor(sy * GRID));
+        });
+
+        function seedPerturbation(cx, cy) {
+            const radius = 10;
+            const diam = radius * 2;
+            const data = new Float32Array(diam * diam * 2);
+            for (let dy = 0; dy < diam; dy++) {
+                for (let dx = 0; dx < diam; dx++) {
+                    const dist = Math.hypot(dx - radius, dy - radius) / radius;
+                    if (dist < 1.0) {
+                        data[(dy * diam + dx) * 2] = 0.5 + Math.random() * 0.1;
+                        data[(dy * diam + dx) * 2 + 1] = 0.25 + Math.random() * 0.1;
+                    } else {
+                        data[(dy * diam + dx) * 2] = 1.0;
+                        data[(dy * diam + dx) * 2 + 1] = 0.0;
+                    }
+                }
+            }
+            const ox = Math.max(0, Math.min(cx - radius, GRID - diam));
+            const oy = Math.max(0, Math.min(cy - radius, GRID - diam));
+            device.queue.writeTexture(
+                { texture: chemTextures[frame % 2], origin: { x: ox, y: oy } },
+                data, { bytesPerRow: diam * 8 }, { width: diam, height: diam }
+            );
+        }
+
+        window.resetSim = () => {
+            initGrid(0); initGrid(1);
+            frame = 0; stepCount = 0;
+        };
+        window.togglePause = () => {
+            paused = !paused;
+            document.getElementById('pauseLabel').textContent = paused ? 'Resume' : 'Pause';
+        };
+        window.applyPreset = (name) => {
+            const p = presets[name];
+            feedRate = p.F; killRate = p.K;
+            document.getElementById('feed').value = p.F;
+            document.getElementById('kill').value = p.K;
+            document.getElementById('feedVal').textContent = p.F.toFixed(3);
+            document.getElementById('killVal').textContent = p.K.toFixed(3);
+            window.resetSim();
+        };
+
+        document.getElementById('feed').addEventListener('input', (e) => {
+            feedRate = parseFloat(e.target.value);
+            document.getElementById('feedVal').textContent = feedRate.toFixed(3);
+        });
+        document.getElementById('kill').addEventListener('input', (e) => {
+            killRate = parseFloat(e.target.value);
+            document.getElementById('killVal').textContent = killRate.toFixed(3);
+        });
+        document.getElementById('speed').addEventListener('input', (e) => {
+            stepsPerFrame = parseInt(e.target.value);
+            document.getElementById('speedVal').textContent = stepsPerFrame;
+        });
+        document.getElementById('palette').addEventListener('change', (e) => {
+            palette = parseInt(e.target.value);
+        });
+
+        let frame = 0;
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+        const WG = Math.ceil(GRID / 16);
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++; fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            device.queue.writeBuffer(uniformBuffer, 0, new Float32Array([feedRate, killRate, palette, 0]));
+
+            const encoder = device.createCommandEncoder();
+
+            if (!paused) {
+                for (let s = 0; s < stepsPerFrame; s++) {
+                    const cp = encoder.beginComputePass();
+                    cp.setPipeline(compPipeline);
+                    cp.setBindGroup(0, compBindGroups[frame % 2]);
+                    cp.dispatchWorkgroups(WG, WG);
+                    cp.end();
+                    frame++;
+                    stepCount++;
+                }
+            }
+            document.getElementById('step').textContent = stepCount.toLocaleString();
+
+            const vp = encoder.beginComputePass();
+            vp.setPipeline(vizPipeline);
+            vp.setBindGroup(0, vizBindGroups[frame % 2]);
+            vp.dispatchWorkgroups(WG, WG);
+            vp.end();
+
+            const rp = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: ctx.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store'
+                }]
+            });
+            rp.setPipeline(dispPipeline);
+            rp.setBindGroup(0, dispBindGroup);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

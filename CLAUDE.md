@@ -309,6 +309,58 @@ Reusable JavaScript utilities that can be included in any demo:
 ### Template Documentation
 - `templates/README.md` - Complete guide to using demo templates (400+ lines)
 
+## Review & Refinement Workflow
+
+Each multi-demo gallery has a `review.html` companion page at `<gallery>/review.html`. This provides an iframe-based side-by-side tool to rate every demo as Good / Okay / Bad and export a JSON report. The report is then fed back to Claude Code to drive the next refinement cycle.
+
+### Review Gallery Structure
+
+Each `review.html` has a `DEMOS` array at the top of its `<script>` block:
+
+```javascript
+const DEMOS = [
+  ['file-key-without-ext', 'Display Name', isNew],
+  // isNew=true shows a badge; set false for existing demos, true for replacements
+];
+```
+
+The `STORAGE_KEY` constant (e.g. `'webgpu-review-v1'`) keys localStorage so ratings persist across page reloads.
+
+### Refinement Cycle
+
+1. **Review**: Open `<gallery>/review.html`, rate all demos, click "Export Report" → JSON
+2. **Triage**: Identify demos rated Bad (delete them), keep Good/Okay
+3. **Replace**: For each deleted demo, create a new higher-quality demo with the same slot number
+4. **Reorder** (optional): User can ask to move Good demos to top of gallery index
+5. **Update indexes**: After creating/deleting files, update:
+   - `<gallery>/index.html` — card entries, demo count in `<p class="demo-count">`
+   - `<gallery>/review.html` — DEMOS array filenames/names, initial progress text
+   - `index.html` (root) — gallery card icon number and `<div class="gallery-count">` text
+6. **Commit & push**
+
+### Agent Swarm Pattern for Bulk Creation
+
+When replacing many demos at once (e.g. 20+), use TeamCreate + parallel background agents:
+
+```
+TeamCreate "gallery-refine-N" →
+  Task agent-a (5 files) [run_in_background, bypassPermissions]
+  Task agent-b (5 files) [run_in_background, bypassPermissions]
+  ...
+→ Monitor via Glob (count files) →
+→ SendMessage shutdown to each agent →
+→ TeamDelete
+```
+
+Each agent should be given: exact filenames, display titles, technology constraints (e.g. WebGPU fragment shader preferred over compute shader), and the design system variables.
+
+### WebGPU-Specific Notes
+
+- **Prefer fragment shaders over compute shaders** — complex compute shaders often fail due to WGSL type errors
+- Fragment shader pattern: fullscreen quad via `@vertex fn vs(@builtin(vertex_index) i: u32)` outputting 6 positions for 2 triangles covering the screen
+- Dark background `#0a0a0f`, cyan accent `#06B6D4`
+- Keep WGSL simple: avoid complex struct layouts, prefer `f32` arithmetic
+
 ## Development Workflow
 
 ### Testing Changes Locally

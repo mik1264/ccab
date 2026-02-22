@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hexagonal Automaton - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .controls button { margin-top: 8px; padding: 6px 12px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; width: 100%; }
+        .controls button:hover { background: #06b6d4; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .rule-info { margin-top: 6px; font-size: 10px; color: #888; line-height: 1.4; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Hexagonal Automaton</div>
+
+    <div class="controls">
+        <label>Rule:</label>
+        <select id="rule">
+            <option value="0">Snowflake Growth</option>
+            <option value="1">Hex Life (B2/S34)</option>
+            <option value="2">Totalistic Waves</option>
+            <option value="3">Spiral Growth</option>
+        </select>
+        <div class="rule-info" id="ruleInfo">Crystal-like growth from center seed</div>
+        <label>Speed: <span id="speedVal">5</span> steps/frame</label>
+        <input type="range" id="speed" min="1" max="20" step="1" value="5">
+        <label>Color Theme:</label>
+        <select id="theme">
+            <option value="0">Frost</option>
+            <option value="1">Magma</option>
+            <option value="2">Forest</option>
+            <option value="3">Neon</option>
+        </select>
+        <button id="resetBtn">Reset with Random Seed</button>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Gen: <span id="gen">0</span> | Rule: <span id="ruleName">Snowflake</span>
+    </div>
+
+    <div id="error">
+        WebGPU is not supported in your browser.<br>
+        Please use Chrome 113+, Edge 113+, or Safari 18+.
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        const DISP_W = canvas.width, DISP_H = canvas.height;
+        // Grid dimensions for hex automaton
+        const GRID_W = 512;
+        const GRID_H = 512;
+
+        let rule = 0, stepsPerFrame = 5, theme = 0;
+        let generation = 0;
+        let autoSwitch = true;
+        let lastSwitchTime = 0;
+
+        const ruleDescriptions = [
+            'Crystal-like growth from center seed',
+            'Hex variant of Life: birth on 2, survive on 3-4',
+            'Multi-state totalistic with wave propagation',
+            'Spiral arms emerge from stochastic growth'
+        ];
+        const ruleNames = ['Snowflake', 'Hex Life', 'Totalistic', 'Spiral'];
+
+        // Uniform buffer
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Grid buffers: each cell stores a u32 state (0=dead, 1+=alive states for multi-state rules)
+        const gridSize = GRID_W * GRID_H * 4;
+        const gridBufA = device.createBuffer({ size: gridSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const gridBufB = device.createBuffer({ size: gridSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+        const outTexture = device.createTexture({
+            size: [DISP_W, DISP_H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        function initGrid(ruleType) {
+            const data = new Uint32Array(GRID_W * GRID_H);
+            const cx = Math.floor(GRID_W / 2);
+            const cy = Math.floor(GRID_H / 2);
+
+            if (ruleType === 0) {
+                // Snowflake: single seed at center
+                data[cy * GRID_W + cx] = 1;
+            } else if (ruleType === 1) {
+                // Hex Life: random sparse fill
+                for (let i = 0; i < data.length; i++) {
+                    data[i] = Math.random() < 0.15 ? 1 : 0;
+                }
+            } else if (ruleType === 2) {
+                // Totalistic waves: small cluster
+                for (let dy = -3; dy <= 3; dy++) {
+                    for (let dx = -3; dx <= 3; dx++) {
+                        if (dx * dx + dy * dy < 10) {
+                            data[(cy + dy) * GRID_W + (cx + dx)] = Math.floor(Math.random() * 4) + 1;
+                        }
+                    }
+                }
+            } else {
+                // Spiral: random sparse with center seed
+                data[cy * GRID_W + cx] = 1;
+                for (let i = 0; i < data.length; i++) {
+                    if (Math.random() < 0.02) data[i] = 1;
+                }
+            }
+
+            device.queue.writeBuffer(gridBufA, 0, data);
+            device.queue.writeBuffer(gridBufB, 0, new Uint32Array(GRID_W * GRID_H));
+            generation = 0;
+        }
+
+        initGrid(rule);
+
+        // === CA Step shader ===
+        const stepShader = `
+            struct Uniforms {
+                gridW: u32,
+                gridH: u32,
+                rule: u32,
+                theme: u32,
+                dispW: u32,
+                dispH: u32,
+                generation: u32,
+                pad: u32,
+                time: f32,
+                pad2: f32,
+                pad3: f32,
+                pad4: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read> gridIn: array<u32>;
+            @group(0) @binding(1) var<storage, read_write> gridOut: array<u32>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            fn getCell(x: i32, y: i32) -> u32 {
+                let wx = ((x % i32(u.gridW)) + i32(u.gridW)) % i32(u.gridW);
+                let wy = ((y % i32(u.gridH)) + i32(u.gridH)) % i32(u.gridH);
+                return gridIn[u32(wy) * u.gridW + u32(wx)];
+            }
+
+            // Hex neighbors: offset coordinates (even/odd row difference)
+            fn countAliveNeighbors(x: i32, y: i32) -> u32 {
+                var count = 0u;
+                let even = (y & 1) == 0;
+                // 6 hex neighbors using offset coordinates
+                if (even) {
+                    count += min(getCell(x-1, y), 1u);
+                    count += min(getCell(x+1, y), 1u);
+                    count += min(getCell(x-1, y-1), 1u);
+                    count += min(getCell(x, y-1), 1u);
+                    count += min(getCell(x-1, y+1), 1u);
+                    count += min(getCell(x, y+1), 1u);
+                } else {
+                    count += min(getCell(x-1, y), 1u);
+                    count += min(getCell(x+1, y), 1u);
+                    count += min(getCell(x, y-1), 1u);
+                    count += min(getCell(x+1, y-1), 1u);
+                    count += min(getCell(x, y+1), 1u);
+                    count += min(getCell(x+1, y+1), 1u);
+                }
+                return count;
+            }
+
+            fn sumNeighborStates(x: i32, y: i32) -> u32 {
+                var total = 0u;
+                let even = (y & 1) == 0;
+                if (even) {
+                    total += getCell(x-1, y);
+                    total += getCell(x+1, y);
+                    total += getCell(x-1, y-1);
+                    total += getCell(x, y-1);
+                    total += getCell(x-1, y+1);
+                    total += getCell(x, y+1);
+                } else {
+                    total += getCell(x-1, y);
+                    total += getCell(x+1, y);
+                    total += getCell(x, y-1);
+                    total += getCell(x+1, y-1);
+                    total += getCell(x, y+1);
+                    total += getCell(x+1, y+1);
+                }
+                return total;
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.gridW || id.y >= u.gridH) { return; }
+                let x = i32(id.x);
+                let y = i32(id.y);
+                let i = id.y * u.gridW + id.x;
+                let state = gridIn[i];
+                let alive = countAliveNeighbors(x, y);
+                var newState = 0u;
+
+                if (u.rule == 0u) {
+                    // Snowflake growth: born if exactly 1 neighbor alive, stay alive forever
+                    if (state > 0u) {
+                        newState = state + 1u; // age
+                    } else if (alive == 1u) {
+                        newState = 1u;
+                    }
+                } else if (u.rule == 1u) {
+                    // Hex Life B2/S34
+                    if (state > 0u) {
+                        if (alive == 3u || alive == 4u) {
+                            newState = min(state + 1u, 255u);
+                        }
+                    } else {
+                        if (alive == 2u) {
+                            newState = 1u;
+                        }
+                    }
+                } else if (u.rule == 2u) {
+                    // Totalistic multi-state waves (max state = 5)
+                    let total = sumNeighborStates(x, y);
+                    if (state == 0u) {
+                        if (total >= 3u && total <= 6u) {
+                            newState = 1u;
+                        }
+                    } else if (state < 5u) {
+                        newState = state + 1u;
+                    } else {
+                        // Die after reaching max state, creating waves
+                        newState = 0u;
+                    }
+                } else {
+                    // Spiral growth
+                    if (state > 0u) {
+                        if (alive >= 1u && alive <= 4u) {
+                            newState = min(state + 1u, 200u);
+                        }
+                    } else {
+                        if (alive == 1u || alive == 2u) {
+                            newState = 1u;
+                        }
+                    }
+                }
+
+                gridOut[i] = newState;
+            }
+        `;
+
+        // === Render shader: convert grid to display texture with hex rendering ===
+        const renderShader = `
+            struct Uniforms {
+                gridW: u32,
+                gridH: u32,
+                rule: u32,
+                theme: u32,
+                dispW: u32,
+                dispH: u32,
+                generation: u32,
+                pad: u32,
+                time: f32,
+                pad2: f32,
+                pad3: f32,
+                pad4: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read> grid: array<u32>;
+            @group(0) @binding(1) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            fn hsl2rgb(h: f32, s: f32, l: f32) -> vec3f {
+                let c = (1.0 - abs(2.0 * l - 1.0)) * s;
+                let hp = fract(h) * 6.0;
+                let x = c * (1.0 - abs(hp % 2.0 - 1.0));
+                var rgb: vec3f;
+                if (hp < 1.0) { rgb = vec3f(c, x, 0.0); }
+                else if (hp < 2.0) { rgb = vec3f(x, c, 0.0); }
+                else if (hp < 3.0) { rgb = vec3f(0.0, c, x); }
+                else if (hp < 4.0) { rgb = vec3f(0.0, x, c); }
+                else if (hp < 5.0) { rgb = vec3f(x, 0.0, c); }
+                else { rgb = vec3f(c, 0.0, x); }
+                return rgb + vec3f(l - c * 0.5);
+            }
+
+            fn stateToColor(state: u32, t: f32) -> vec3f {
+                if (state == 0u) { return vec3f(0.02, 0.02, 0.04); }
+
+                let age = f32(state);
+                let norm = clamp(age / 50.0, 0.0, 1.0);
+
+                if (u.theme == 0u) {
+                    // Frost: white -> ice blue -> deep blue
+                    let hue = 0.55 + norm * 0.1;
+                    let sat = 0.3 + norm * 0.5;
+                    let lit = 0.8 - norm * 0.4;
+                    return hsl2rgb(hue, sat, lit);
+                } else if (u.theme == 1u) {
+                    // Magma: white -> yellow -> red -> dark red
+                    let hue = fract(0.1 - norm * 0.12);
+                    let sat = 0.8 + norm * 0.2;
+                    let lit = 0.7 - norm * 0.35;
+                    return hsl2rgb(hue, sat, lit);
+                } else if (u.theme == 2u) {
+                    // Forest: bright green -> dark green -> brown
+                    let hue = 0.3 - norm * 0.1;
+                    let sat = 0.7;
+                    let lit = 0.6 - norm * 0.35;
+                    return hsl2rgb(hue, sat, lit);
+                } else {
+                    // Neon: cycling rainbow based on age
+                    let hue = fract(norm * 2.0 + t * 0.05);
+                    return hsl2rgb(hue, 0.9, 0.3 + (1.0 - norm) * 0.3);
+                }
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.dispW || id.y >= u.dispH) { return; }
+
+                // Map pixel to hex grid coordinate
+                let cellW = f32(u.dispW) / f32(u.gridW);
+                let cellH = f32(u.dispH) / f32(u.gridH);
+
+                let px = f32(id.x);
+                let py = f32(id.y);
+
+                // Simple grid mapping (hex visual handled by color gradients)
+                let gx = u32(px / cellW);
+                let gy = u32(py / cellH);
+
+                // Local position within cell for hex shaping
+                let lx = (px / cellW - f32(gx)) - 0.5;
+                let ly = (py / cellH - f32(gy)) - 0.5;
+
+                // Hex-like distance from cell center for smooth rendering
+                let hexDist = max(abs(lx), abs(ly) * 0.866 + abs(lx) * 0.5);
+
+                if (gx < u.gridW && gy < u.gridH) {
+                    let state = grid[gy * u.gridW + gx];
+                    var color = stateToColor(state, u.time);
+
+                    // Add hex cell edge darkening
+                    let edge = smoothstep(0.42, 0.5, hexDist);
+                    color = color * (1.0 - edge * 0.3);
+
+                    // Add subtle glow for newly born cells
+                    if (state > 0u && state < 5u) {
+                        color = color + vec3f(0.1, 0.1, 0.15) * (1.0 - f32(state) / 5.0);
+                    }
+
+                    textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+                } else {
+                    textureStore(outTex, vec2i(id.xy), vec4f(0.02, 0.02, 0.04, 1.0));
+                }
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        // Pipelines
+        const stepPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: stepShader }), entryPoint: 'main' }
+        });
+
+        const renderPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        // Bind groups for ping-pong
+        const stepBG_AtoB = device.createBindGroup({
+            layout: stepPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: gridBufA } },
+                { binding: 1, resource: { buffer: gridBufB } },
+                { binding: 2, resource: { buffer: uniformBuffer } }
+            ]
+        });
+        const stepBG_BtoA = device.createBindGroup({
+            layout: stepPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: gridBufB } },
+                { binding: 1, resource: { buffer: gridBufA } },
+                { binding: 2, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        // Render reads from A (after even steps) or B (after odd steps)
+        const renderBG_A = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: gridBufA } },
+                { binding: 1, resource: outTexture.createView() },
+                { binding: 2, resource: { buffer: uniformBuffer } }
+            ]
+        });
+        const renderBG_B = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: gridBufB } },
+                { binding: 1, resource: outTexture.createView() },
+                { binding: 2, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let fpsC = 0, fpsT = performance.now();
+        let startTime = performance.now();
+        let pingpong = 0; // 0 = current data in A, 1 = current data in B
+
+        function resetSim() {
+            initGrid(rule);
+            pingpong = 0;
+            generation = 0;
+            lastSwitchTime = performance.now();
+        }
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            // Auto-cycle rules every 30 seconds
+            if (autoSwitch && now - lastSwitchTime > 30000) {
+                rule = (rule + 1) % 4;
+                document.getElementById('rule').value = rule;
+                document.getElementById('ruleInfo').textContent = ruleDescriptions[rule];
+                document.getElementById('ruleName').textContent = ruleNames[rule];
+                resetSim();
+            }
+
+            const time = (now - startTime) * 0.001;
+
+            const buf = new ArrayBuffer(48);
+            const u32 = new Uint32Array(buf);
+            const f32 = new Float32Array(buf);
+            u32[0] = GRID_W;
+            u32[1] = GRID_H;
+            u32[2] = rule;
+            u32[3] = theme;
+            u32[4] = DISP_W;
+            u32[5] = DISP_H;
+            u32[6] = generation;
+            f32[8] = time;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const simWG = [Math.ceil(GRID_W / 8), Math.ceil(GRID_H / 8)];
+
+            // Run multiple CA steps per frame
+            for (let s = 0; s < stepsPerFrame; s++) {
+                const pass = enc.beginComputePass();
+                pass.setPipeline(stepPipeline);
+                if (pingpong === 0) {
+                    pass.setBindGroup(0, stepBG_AtoB);
+                } else {
+                    pass.setBindGroup(0, stepBG_BtoA);
+                }
+                pass.dispatchWorkgroups(simWG[0], simWG[1]);
+                pass.end();
+                pingpong = 1 - pingpong;
+                generation++;
+            }
+
+            // Render current grid to texture
+            const renderPass = enc.beginComputePass();
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, pingpong === 0 ? renderBG_A : renderBG_B);
+            renderPass.dispatchWorkgroups(Math.ceil(DISP_W / 8), Math.ceil(DISP_H / 8));
+            renderPass.end();
+
+            // Display
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+
+            document.getElementById('gen').textContent = generation;
+        }
+
+        document.getElementById('rule').addEventListener('change', (e) => {
+            rule = parseInt(e.target.value);
+            document.getElementById('ruleInfo').textContent = ruleDescriptions[rule];
+            document.getElementById('ruleName').textContent = ruleNames[rule];
+            resetSim();
+            autoSwitch = false; // disable auto-switch when user selects manually
+        });
+        document.getElementById('speed').addEventListener('input', (e) => {
+            stepsPerFrame = parseInt(e.target.value);
+            document.getElementById('speedVal').textContent = stepsPerFrame;
+        });
+        document.getElementById('theme').addEventListener('change', (e) => {
+            theme = parseInt(e.target.value);
+        });
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            resetSim();
+        });
+
+        lastSwitchTime = performance.now();
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

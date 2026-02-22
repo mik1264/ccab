@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snowflake Crystal Growth - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls button { width: 170px; padding: 6px; margin-top: 8px; background: rgba(6, 182, 212, 0.3); color: #22d3ee; border: 1px solid #22d3ee; border-radius: 4px; cursor: pointer; }
+        .controls button:hover { background: rgba(6, 182, 212, 0.5); }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Snowflake Crystal Growth</div>
+
+    <div class="controls">
+        <label>Vapor Density (&beta;): <span id="betaVal">0.40</span></label>
+        <input type="range" id="beta" min="0.2" max="0.8" step="0.01" value="0.40">
+        <label>Growth Threshold: <span id="threshVal">1.0</span></label>
+        <input type="range" id="thresh" min="0.3" max="2.0" step="0.05" value="1.0">
+        <label>Diffusion Rate: <span id="diffVal">0.50</span></label>
+        <input type="range" id="diff" min="0.1" max="0.9" step="0.05" value="0.50">
+        <label>Speed: <span id="speedVal">5</span> steps/frame</label>
+        <input type="range" id="speed" min="1" max="20" step="1" value="5">
+        <button id="resetBtn">Reset Snowflake</button>
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span> | Step: <span id="step">0</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        let vaporBeta = 0.40, growthThresh = 1.0, diffRate = 0.50, stepsPerFrame = 5;
+        let stepCount = 0;
+
+        document.getElementById('beta').oninput = e => { vaporBeta = +e.target.value; document.getElementById('betaVal').textContent = vaporBeta.toFixed(2); };
+        document.getElementById('thresh').oninput = e => { growthThresh = +e.target.value; document.getElementById('threshVal').textContent = growthThresh.toFixed(2); };
+        document.getElementById('diff').oninput = e => { diffRate = +e.target.value; document.getElementById('diffVal').textContent = diffRate.toFixed(2); };
+        document.getElementById('speed').oninput = e => { stepsPerFrame = +e.target.value; document.getElementById('speedVal').textContent = stepsPerFrame; };
+
+        // Grid size for the snowflake simulation (hex grid approximated on square grid)
+        const GRID = 512;
+
+        // Two buffers for ping-pong: each cell has (diffusive water, frozen amount, frozen flag)
+        // We'll use 4 floats per cell: u (diffusive), v (non-diffusive/crystal), frozen (0/1), neighborCount
+        function createGridBuffer() {
+            const data = new Float32Array(GRID * GRID * 4);
+            // Initialize with uniform vapor
+            for (let y = 0; y < GRID; y++) {
+                for (let x = 0; x < GRID; x++) {
+                    const idx = (y * GRID + x) * 4;
+                    data[idx + 0] = vaporBeta; // diffusive water
+                    data[idx + 1] = 0.0;       // crystal mass
+                    data[idx + 2] = 0.0;       // frozen flag
+                    data[idx + 3] = 0.0;       // unused
+                }
+            }
+            // Seed center
+            const cx = Math.floor(GRID / 2), cy = Math.floor(GRID / 2);
+            const cidx = (cy * GRID + cx) * 4;
+            data[cidx + 0] = 0.0;
+            data[cidx + 1] = 1.0;
+            data[cidx + 2] = 1.0;
+            return data;
+        }
+
+        let gridData = createGridBuffer();
+        const gridBufA = device.createBuffer({ size: gridData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const gridBufB = device.createBuffer({ size: gridData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(gridBufA, 0, gridData);
+        device.queue.writeBuffer(gridBufB, 0, gridData);
+
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Compute shader: Reiter's snowflake model (simplified)
+        // On a hex grid (using offset coordinates), each cell has 6 neighbors
+        // Diffusion step + freezing step
+        const computeCode = `
+            struct Uniforms {
+                gridSize: u32,
+                vaporBeta: f32,
+                growthThresh: f32,
+                diffRate: f32,
+                time: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+                resolution: vec2f,
+                pad4: f32,
+                pad5: f32,
+            }
+            @group(0) @binding(0) var<storage, read> gridIn: array<f32>;
+            @group(0) @binding(1) var<storage, read_write> gridOut: array<f32>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            fn getCell(x: i32, y: i32) -> vec4f {
+                let gx = ((x % i32(u.gridSize)) + i32(u.gridSize)) % i32(u.gridSize);
+                let gy = ((y % i32(u.gridSize)) + i32(u.gridSize)) % i32(u.gridSize);
+                let idx = u32(gy) * u.gridSize + u32(gx);
+                let base = idx * 4u;
+                return vec4f(gridIn[base], gridIn[base + 1u], gridIn[base + 2u], gridIn[base + 3u]);
+            }
+
+            fn isFrozen(x: i32, y: i32) -> bool {
+                return getCell(x, y).z > 0.5;
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let x = i32(gid.x);
+                let y = i32(gid.y);
+                if (gid.x >= u.gridSize || gid.y >= u.gridSize) { return; }
+
+                let idx = gid.y * u.gridSize + gid.x;
+                let base = idx * 4u;
+
+                let cell = getCell(x, y);
+                let uVal = cell.x;  // diffusive water
+                let vVal = cell.y;  // crystal mass
+                let frozen = cell.z;
+
+                // If already frozen, keep as is
+                if (frozen > 0.5) {
+                    gridOut[base] = 0.0;
+                    gridOut[base + 1u] = vVal;
+                    gridOut[base + 2u] = 1.0;
+                    gridOut[base + 3u] = 0.0;
+                    return;
+                }
+
+                // Hex neighbors (using offset coordinates)
+                // Even rows: (x-1,y), (x+1,y), (x-1,y-1), (x,y-1), (x-1,y+1), (x,y+1)
+                // Odd rows:  (x-1,y), (x+1,y), (x,y-1), (x+1,y-1), (x,y+1), (x+1,y+1)
+                let isEven = (y & 1) == 0;
+                var n0: vec4f; var n1: vec4f; var n2: vec4f;
+                var n3: vec4f; var n4: vec4f; var n5: vec4f;
+
+                if (isEven) {
+                    n0 = getCell(x - 1, y);
+                    n1 = getCell(x + 1, y);
+                    n2 = getCell(x - 1, y - 1);
+                    n3 = getCell(x, y - 1);
+                    n4 = getCell(x - 1, y + 1);
+                    n5 = getCell(x, y + 1);
+                } else {
+                    n0 = getCell(x - 1, y);
+                    n1 = getCell(x + 1, y);
+                    n2 = getCell(x, y - 1);
+                    n3 = getCell(x + 1, y - 1);
+                    n4 = getCell(x, y + 1);
+                    n5 = getCell(x + 1, y + 1);
+                }
+
+                // Count frozen neighbors
+                var frozenNeighbors = 0u;
+                if (n0.z > 0.5) { frozenNeighbors++; }
+                if (n1.z > 0.5) { frozenNeighbors++; }
+                if (n2.z > 0.5) { frozenNeighbors++; }
+                if (n3.z > 0.5) { frozenNeighbors++; }
+                if (n4.z > 0.5) { frozenNeighbors++; }
+                if (n5.z > 0.5) { frozenNeighbors++; }
+
+                let isReceptive = frozenNeighbors > 0u;
+
+                // Diffusion: average with non-frozen neighbors
+                var sumU = 0.0;
+                var countN = 0.0;
+                if (n0.z < 0.5) { sumU += n0.x; countN += 1.0; }
+                if (n1.z < 0.5) { sumU += n1.x; countN += 1.0; }
+                if (n2.z < 0.5) { sumU += n2.x; countN += 1.0; }
+                if (n3.z < 0.5) { sumU += n3.x; countN += 1.0; }
+                if (n4.z < 0.5) { sumU += n4.x; countN += 1.0; }
+                if (n5.z < 0.5) { sumU += n5.x; countN += 1.0; }
+
+                var newU = uVal;
+                if (countN > 0.0) {
+                    let avgN = sumU / countN;
+                    newU = uVal + u.diffRate * (avgN - uVal);
+                }
+
+                var newV = vVal;
+                var newFrozen = 0.0;
+
+                // Receptive sites can accumulate and freeze
+                if (isReceptive) {
+                    newV = vVal + newU * 0.1; // accumulate some vapor
+                    newU = newU * 0.9;
+                    if (newV >= u.growthThresh) {
+                        newFrozen = 1.0;
+                        newU = 0.0;
+                    }
+                }
+
+                gridOut[base] = newU;
+                gridOut[base + 1u] = newV;
+                gridOut[base + 2u] = newFrozen;
+                gridOut[base + 3u] = f32(frozenNeighbors);
+            }
+        `;
+
+        // Render shader: display the grid
+        const renderCode = `
+            struct Uniforms {
+                gridSize: u32,
+                vaporBeta: f32,
+                growthThresh: f32,
+                diffRate: f32,
+                time: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+                resolution: vec2f,
+                pad4: f32,
+                pad5: f32,
+            }
+            @group(0) @binding(0) var<storage, read> grid: array<f32>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,6>(
+                    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+                    vec2f(-1,1), vec2f(1,-1), vec2f(1,1)
+                );
+                var o: VSOut;
+                o.pos = vec4f(p[i], 0, 1);
+                o.uv = p[i] * 0.5 + 0.5;
+                return o;
+            }
+
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                let aspect = u.resolution.x / u.resolution.y;
+                // Center and scale UV to show the snowflake
+                var p = (uv - 0.5) * vec2f(aspect, 1.0);
+
+                // Map to grid coordinates (show center portion)
+                let scale = 0.7;
+                let gx = i32((p.x / scale + 0.5) * f32(u.gridSize));
+                let gy = i32((p.y / scale + 0.5) * f32(u.gridSize));
+
+                if (gx < 0 || gx >= i32(u.gridSize) || gy < 0 || gy >= i32(u.gridSize)) {
+                    // Dark background outside grid
+                    return vec4f(0.02, 0.03, 0.08, 1.0);
+                }
+
+                let idx = u32(gy) * u.gridSize + u32(gx);
+                let base = idx * 4u;
+                let uVal = grid[base];
+                let vVal = grid[base + 1u];
+                let frozen = grid[base + 2u];
+                let neighbors = grid[base + 3u];
+
+                var color: vec3f;
+
+                if (frozen > 0.5) {
+                    // Crystal: ice blue gradient based on crystal mass and edge detection
+                    let mass = clamp(vVal, 0.0, 2.0);
+                    let edgeFactor = clamp(6.0 - neighbors, 0.0, 6.0) / 6.0;
+
+                    // Core: bright white-blue, edges: glowing cyan
+                    let core = vec3f(0.7, 0.85, 1.0) * (0.6 + mass * 0.3);
+                    let edge = vec3f(0.2, 0.7, 1.0) * edgeFactor * 0.8;
+                    let glow = vec3f(0.1, 0.4, 0.8) * pow(edgeFactor, 2.0) * 0.5;
+
+                    color = core + edge + glow;
+
+                    // Sparkle effect
+                    let sparkle = sin(f32(gx) * 7.3 + f32(gy) * 11.7 + u.time * 3.0);
+                    if (sparkle > 0.95) {
+                        color += vec3f(0.3, 0.3, 0.5);
+                    }
+                } else {
+                    // Background: show vapor density as subtle blue
+                    let v = clamp(uVal / max(u.vaporBeta * 2.0, 0.01), 0.0, 1.0);
+                    color = vec3f(0.02, 0.03 + v * 0.04, 0.08 + v * 0.06);
+                }
+
+                return vec4f(color, 1.0);
+            }
+        `;
+
+        const computeModule = device.createShaderModule({ code: computeCode });
+        const renderModule = device.createShaderModule({ code: renderCode });
+
+        // Compute pipeline with ping-pong
+        const computeBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+        });
+        const computePipeline = device.createComputePipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
+            compute: { module: computeModule, entryPoint: 'main' },
+        });
+
+        const computeBGs = [
+            device.createBindGroup({
+                layout: computeBGL,
+                entries: [
+                    { binding: 0, resource: { buffer: gridBufA } },
+                    { binding: 1, resource: { buffer: gridBufB } },
+                    { binding: 2, resource: { buffer: uniformBuffer } },
+                ],
+            }),
+            device.createBindGroup({
+                layout: computeBGL,
+                entries: [
+                    { binding: 0, resource: { buffer: gridBufB } },
+                    { binding: 1, resource: { buffer: gridBufA } },
+                    { binding: 2, resource: { buffer: uniformBuffer } },
+                ],
+            }),
+        ];
+
+        // Render pipeline
+        const renderBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            ],
+        });
+        const renderPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
+            vertex: { module: renderModule, entryPoint: 'vs' },
+            fragment: { module: renderModule, entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        const renderBGs = [
+            device.createBindGroup({
+                layout: renderBGL,
+                entries: [
+                    { binding: 0, resource: { buffer: gridBufA } },
+                    { binding: 1, resource: { buffer: uniformBuffer } },
+                ],
+            }),
+            device.createBindGroup({
+                layout: renderBGL,
+                entries: [
+                    { binding: 0, resource: { buffer: gridBufB } },
+                    { binding: 1, resource: { buffer: uniformBuffer } },
+                ],
+            }),
+        ];
+
+        let pingPong = 0;
+
+        document.getElementById('resetBtn').onclick = () => {
+            gridData = createGridBuffer();
+            device.queue.writeBuffer(gridBufA, 0, gridData);
+            device.queue.writeBuffer(gridBufB, 0, gridData);
+            stepCount = 0;
+            pingPong = 0;
+        };
+
+        let frameC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            frameC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(frameC / ((now - fpsT) / 1000));
+                frameC = 0; fpsT = now;
+            }
+
+            const uniformData = new Float32Array(12);
+            const u32View = new Uint32Array(uniformData.buffer);
+            u32View[0] = GRID;
+            uniformData[1] = vaporBeta;
+            uniformData[2] = growthThresh;
+            uniformData[3] = diffRate;
+            uniformData[4] = now * 0.001;
+            uniformData[8] = canvas.width;
+            uniformData[9] = canvas.height;
+            device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+            const encoder = device.createCommandEncoder();
+
+            // Run multiple simulation steps per frame
+            for (let s = 0; s < stepsPerFrame; s++) {
+                const cp = encoder.beginComputePass();
+                cp.setPipeline(computePipeline);
+                cp.setBindGroup(0, computeBGs[pingPong]);
+                cp.dispatchWorkgroups(Math.ceil(GRID / 16), Math.ceil(GRID / 16));
+                cp.end();
+                pingPong = 1 - pingPong;
+                stepCount++;
+            }
+
+            document.getElementById('step').textContent = stepCount;
+
+            // Render from whichever buffer was last written to
+            const readIdx = pingPong; // after flip, pingPong points to the buffer that was last written
+            const rp = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: ctx.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.02, g: 0.03, b: 0.08, a: 1 },
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, renderBGs[readIdx]);
+            rp.draw(6);
+            rp.end();
+
+            device.queue.submit([encoder.finish()]);
+        }
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            ctx.configure({ device, format, alphaMode: 'opaque' });
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

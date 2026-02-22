@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Relativistic Wormhole - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Relativistic Wormhole</div>
+
+    <div class="controls">
+        <label>Wormhole Radius: <span id="radiusVal">1.0</span></label>
+        <input type="range" id="radius" min="0.3" max="2.5" step="0.1" value="1.0">
+        <label>Throat Length: <span id="throatVal">1.5</span></label>
+        <input type="range" id="throat" min="0.5" max="4.0" step="0.1" value="1.5">
+        <label>Star Density: <span id="starVal">0.7</span></label>
+        <input type="range" id="starDensity" min="0.2" max="1.5" step="0.1" value="0.7">
+        <label>Camera Speed: <span id="camSpeedVal">0.3</span></label>
+        <input type="range" id="camSpeed" min="0.0" max="1.0" step="0.05" value="0.3">
+        <label>Lens Strength: <span id="lensVal">1.0</span></label>
+        <input type="range" id="lens" min="0.0" max="2.0" step="0.1" value="1.0">
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const W = Math.min(window.innerWidth, 1280);
+        const H = Math.min(window.innerHeight, 900);
+        canvas.width = W; canvas.height = H;
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        canvas.style.position = 'absolute';
+        canvas.style.left = '0'; canvas.style.top = '0';
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        let wormholeRadius = 1.0, throatLength = 1.5, starDensity = 0.7, camSpeed = 0.3, lensStrength = 1.0;
+
+        const uniformBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const shaderCode = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                wormholeRadius: f32,
+                throatLength: f32,
+                starDensity: f32,
+                camSpeed: f32,
+                lensStrength: f32,
+                aspect: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            fn hash21(p: vec2f) -> f32 {
+                var p3 = fract(vec3f(p.x, p.y, p.x) * 0.1031);
+                p3 = p3 + dot(p3, vec3f(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            fn hash31(p: vec3f) -> f32 {
+                var p3 = fract(p * 0.1031);
+                p3 = p3 + dot(p3, vec3f(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            // Procedural starfield: returns brightness for a given direction
+            fn starfield(rd: vec3f, offset: f32) -> vec3f {
+                var col = vec3f(0.0);
+                let density = u.starDensity;
+
+                // Grid-based stars at multiple scales
+                for (var scale = 0; scale < 3; scale++) {
+                    let s = 80.0 + f32(scale) * 60.0;
+                    let gridDir = rd * s + vec3f(offset * 100.0);
+                    let cell = floor(gridDir);
+                    let frac = fract(gridDir);
+
+                    let h = hash31(cell + vec3f(offset));
+                    if (h < 0.06 * density) {
+                        let starPos = vec3f(hash31(cell + vec3f(1.0, 0.0, 0.0) + vec3f(offset)),
+                                           hash31(cell + vec3f(0.0, 1.0, 0.0) + vec3f(offset)),
+                                           hash31(cell + vec3f(0.0, 0.0, 1.0) + vec3f(offset)));
+                        let d = length(frac - starPos);
+                        let brightness = smoothstep(0.15, 0.0, d) * (0.5 + 0.5 * hash31(cell + vec3f(7.7) + vec3f(offset)));
+
+                        // Star color temperature
+                        let temp = hash31(cell + vec3f(3.3) + vec3f(offset));
+                        var starCol: vec3f;
+                        if (temp < 0.3) {
+                            starCol = vec3f(0.7, 0.8, 1.0); // Blue
+                        } else if (temp < 0.7) {
+                            starCol = vec3f(1.0, 1.0, 0.95); // White
+                        } else {
+                            starCol = vec3f(1.0, 0.85, 0.6); // Warm
+                        }
+                        col += starCol * brightness;
+                    }
+                }
+
+                return col;
+            }
+
+            // Ellis wormhole embedding: maps (r, theta) to the proper radial coordinate
+            // l(r) = r for |r| > throat, smooth transition through throat
+            fn wormholeMap(camZ: f32, rd: vec3f) -> vec3f {
+                let radius = u.wormholeRadius;
+                let throat = u.throatLength;
+                let lens = u.lensStrength;
+
+                // Ray in cylindrical coords relative to wormhole axis (z-axis)
+                let rho = length(rd.xy); // transverse component
+                let rdz = rd.z;          // axial component
+
+                // Distance from camera to wormhole center
+                let dist = abs(camZ);
+
+                // Gravitational lensing: bend rays toward/away from throat
+                let influence = radius * 2.0 / (dist * dist / (radius * radius) + 1.0);
+                let bendFactor = lens * influence * rho;
+
+                // Deflect ray direction
+                var newRd = rd;
+                let sign_z = select(-1.0, 1.0, camZ > 0.0);
+                newRd = vec3f(rd.x * (1.0 + bendFactor * 0.3),
+                              rd.y * (1.0 + bendFactor * 0.3),
+                              rd.z - sign_z * bendFactor * 0.5);
+                newRd = normalize(newRd);
+
+                // If ray passes through throat region, flip to other universe
+                if (camZ > -throat * 0.5 && camZ < throat * 0.5) {
+                    // Inside throat: strong distortion
+                    let throatFactor = 1.0 - abs(camZ) / (throat * 0.5);
+                    newRd = vec3f(newRd.x * (1.0 + throatFactor * lens * 0.5),
+                                  newRd.y * (1.0 + throatFactor * lens * 0.5),
+                                  newRd.z);
+                }
+
+                return newRd;
+            }
+
+            // Accretion disk: ring around the wormhole throat
+            fn accretionDisk(ro: vec3f, rd: vec3f) -> vec4f {
+                let radius = u.wormholeRadius;
+                var col = vec4f(0.0);
+
+                // Disk lies in the z=0 plane
+                if (abs(rd.y) < 0.001) { return col; }
+
+                // Intersect with y=0 plane (disk plane)
+                let t = -ro.y / rd.y;
+                if (t < 0.0) { return col; }
+
+                let hitPos = ro + rd * t;
+                let r = length(vec2f(hitPos.x, hitPos.z));
+
+                // Disk from radius*1.2 to radius*3.5
+                let innerR = radius * 1.2;
+                let outerR = radius * 3.5;
+
+                if (r > innerR && r < outerR) {
+                    let normR = (r - innerR) / (outerR - innerR);
+
+                    // Ring pattern
+                    let ringPattern = sin(r * 15.0 - u.time * 2.0) * 0.3 + 0.7;
+                    let angle = atan2(hitPos.z, hitPos.x);
+                    let spiral = sin(angle * 3.0 - r * 5.0 + u.time * 1.5) * 0.2 + 0.8;
+
+                    let brightness = (1.0 - normR * normR) * ringPattern * spiral;
+
+                    // Hot inner edge (blue-white) to cooler outer edge (orange-red)
+                    var diskCol: vec3f;
+                    if (normR < 0.3) {
+                        diskCol = mix(vec3f(0.8, 0.9, 1.0), vec3f(1.0, 0.7, 0.3), normR / 0.3);
+                    } else {
+                        diskCol = mix(vec3f(1.0, 0.7, 0.3), vec3f(0.8, 0.2, 0.05), (normR - 0.3) / 0.7);
+                    }
+
+                    let alpha = brightness * smoothstep(outerR, outerR * 0.8, r) * smoothstep(innerR, innerR * 1.3, r);
+                    col = vec4f(diskCol * brightness * 1.5, alpha);
+                }
+
+                return col;
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let uv = vec2f(
+                    (2.0 * f32(id.x) / u.resolution.x - 1.0) * u.aspect,
+                    1.0 - 2.0 * f32(id.y) / u.resolution.y
+                );
+
+                let t = u.time;
+
+                // Camera flies along z-axis through the wormhole
+                let cycleLen = u.throatLength * 6.0;
+                let camZ = (t * u.camSpeed * 2.0) % cycleLen - cycleLen * 0.5;
+
+                // Camera with slight wobble
+                let camPos = vec3f(sin(t * 0.15) * 0.3, cos(t * 0.12) * 0.3, camZ);
+                let lookAt = vec3f(sin(t * 0.08) * 0.1, cos(t * 0.1) * 0.1, camZ + 2.0);
+                let fwd = normalize(lookAt - camPos);
+                let right = normalize(cross(fwd, vec3f(0.0, 1.0, 0.0)));
+                let up = cross(right, fwd);
+
+                var rd = normalize(fwd + right * uv.x * 0.8 + up * uv.y * 0.8);
+
+                // Apply wormhole lensing
+                rd = wormholeMap(camZ, rd);
+
+                // Which universe are we looking into?
+                let side = select(0.0, 1.0, rd.z > 0.0);
+
+                // Starfield from the appropriate side
+                var color = starfield(rd, side);
+
+                // Second universe starfield (visible through throat)
+                let otherSide = 1.0 - side;
+                let throatInfluence = u.wormholeRadius / (length(vec2f(uv.x, uv.y)) + u.wormholeRadius);
+                let otherStars = starfield(-rd, otherSide + 2.0);
+                color += otherStars * throatInfluence * 0.5 * u.lensStrength;
+
+                // Accretion disk
+                let disk = accretionDisk(camPos, rd);
+                color = mix(color, disk.xyz, disk.w);
+
+                // Accretion disk glow around the throat
+                let rhoScreen = length(uv);
+                let throatDist = abs(camZ) / max(u.throatLength, 0.1);
+                let glowR = u.wormholeRadius * (0.3 + 0.2 * sin(t * 0.5));
+                let diskGlow = exp(-pow((rhoScreen - glowR) / 0.3, 2.0)) * 0.4;
+                let glowCol = vec3f(0.4, 0.6, 1.0) * diskGlow * smoothstep(2.0, 0.0, throatDist);
+                color += glowCol;
+
+                // Wormhole throat glow (bright ring at the throat edge)
+                let throatRing = exp(-pow(rhoScreen / (u.wormholeRadius * 0.5) - 1.0, 2.0) * 8.0);
+                let proximity = smoothstep(u.throatLength, 0.0, abs(camZ));
+                color += vec3f(0.2, 0.5, 1.0) * throatRing * proximity * 0.6;
+
+                // Gravitational redshift/blueshift near throat
+                let shiftAmount = proximity * 0.15;
+                color = vec3f(color.r + shiftAmount * 0.3, color.g, color.b + shiftAmount * 0.5);
+
+                // Vignette
+                let vign = 1.0 - 0.3 * dot(uv / u.aspect, uv);
+                color *= max(vign, 0.0);
+
+                // Tone mapping
+                color = color / (color + vec3f(1.0));
+                color = pow(color, vec3f(1.0 / 2.2));
+
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: shaderCode }), entryPoint: 'main' }
+        });
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } }
+            ]
+        });
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let startTime = performance.now();
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const time = (now - startTime) * 0.001;
+            const buf = new ArrayBuffer(64);
+            const f32 = new Float32Array(buf);
+            f32[0] = W; f32[1] = H;
+            f32[2] = time;
+            f32[3] = wormholeRadius;
+            f32[4] = throatLength;
+            f32[5] = starDensity;
+            f32[6] = camSpeed;
+            f32[7] = lensStrength;
+            f32[8] = W / H;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        document.getElementById('radius').addEventListener('input', e => { wormholeRadius = parseFloat(e.target.value); document.getElementById('radiusVal').textContent = wormholeRadius.toFixed(1); });
+        document.getElementById('throat').addEventListener('input', e => { throatLength = parseFloat(e.target.value); document.getElementById('throatVal').textContent = throatLength.toFixed(1); });
+        document.getElementById('starDensity').addEventListener('input', e => { starDensity = parseFloat(e.target.value); document.getElementById('starVal').textContent = starDensity.toFixed(1); });
+        document.getElementById('camSpeed').addEventListener('input', e => { camSpeed = parseFloat(e.target.value); document.getElementById('camSpeedVal').textContent = camSpeed.toFixed(2); });
+        document.getElementById('lens').addEventListener('input', e => { lensStrength = parseFloat(e.target.value); document.getElementById('lensVal').textContent = lensStrength.toFixed(1); });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

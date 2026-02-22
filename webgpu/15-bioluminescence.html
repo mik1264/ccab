@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bioluminescent Ocean - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Bioluminescent Ocean</div>
+
+    <div class="controls">
+        <label>Wave Intensity: <span id="waveVal">1.0</span></label>
+        <input type="range" id="wave" min="0.1" max="3.0" step="0.1" value="1.0">
+        <label>Glow Radius: <span id="glowVal">1.0</span></label>
+        <input type="range" id="glow" min="0.3" max="3.0" step="0.1" value="1.0">
+        <label>Flash Threshold: <span id="flashVal">0.5</span></label>
+        <input type="range" id="flash" min="0.1" max="1.5" step="0.05" value="0.5">
+        <label>Color Shift: <span id="colorVal">0.0</span></label>
+        <input type="range" id="colorShift" min="-0.3" max="0.3" step="0.01" value="0.0">
+        <label>Particle Count:</label>
+        <select id="particleCount">
+            <option value="100000">100K</option>
+            <option value="250000">250K</option>
+            <option value="500000" selected>500K</option>
+        </select>
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span> | Particles: <span id="pcount">500,000</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: 256 * 1024 * 1024 } });
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const ctx = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        ctx.configure({ device, format, alphaMode: 'opaque' });
+
+        let waveIntensity = 1.0, glowRadius = 1.0, flashThreshold = 0.5, colorShift = 0.0;
+        let NUM_PARTICLES = 500000;
+
+        document.getElementById('wave').oninput = e => { waveIntensity = +e.target.value; document.getElementById('waveVal').textContent = waveIntensity.toFixed(1); };
+        document.getElementById('glow').oninput = e => { glowRadius = +e.target.value; document.getElementById('glowVal').textContent = glowRadius.toFixed(1); };
+        document.getElementById('flash').oninput = e => { flashThreshold = +e.target.value; document.getElementById('flashVal').textContent = flashThreshold.toFixed(2); };
+        document.getElementById('colorShift').oninput = e => { colorShift = +e.target.value; document.getElementById('colorVal').textContent = colorShift.toFixed(2); };
+        document.getElementById('particleCount').onchange = e => {
+            // Note: changing particle count requires page reload for buffer reallocation
+            const v = +e.target.value;
+            document.getElementById('pcount').textContent = v.toLocaleString();
+        };
+
+        // Each particle: x, y, vx, vy, life, brightness, phase, size (8 floats)
+        const FLOATS_PER = 8;
+        const particleData = new Float32Array(NUM_PARTICLES * FLOATS_PER);
+
+        for (let i = 0; i < NUM_PARTICLES; i++) {
+            const base = i * FLOATS_PER;
+            particleData[base + 0] = (Math.random() - 0.5) * 2.2; // x
+            particleData[base + 1] = (Math.random() - 0.5) * 2.2; // y
+            particleData[base + 2] = (Math.random() - 0.5) * 0.01; // vx
+            particleData[base + 3] = (Math.random() - 0.5) * 0.01; // vy
+            particleData[base + 4] = Math.random(); // life (0-1)
+            particleData[base + 5] = 0.1 + Math.random() * 0.5; // brightness
+            particleData[base + 6] = Math.random() * 6.28; // phase
+            particleData[base + 7] = 0.5 + Math.random() * 1.5; // size
+        }
+
+        const particleBuf = device.createBuffer({ size: particleData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(particleBuf, 0, particleData);
+
+        const uniformBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Compute shader: update particles
+        const computeShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                dt: f32,
+                waveIntensity: f32,
+                glowRadius: f32,
+                flashThreshold: f32,
+                colorShift: f32,
+                particleCount: u32,
+                pad1: u32,
+                pad2: u32,
+                pad3: u32,
+            }
+            @group(0) @binding(0) var<storage, read_write> particles: array<f32>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            fn hash(n: f32) -> f32 {
+                return fract(sin(n) * 43758.5453);
+            }
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u.particleCount) { return; }
+                let base = idx * 8u;
+
+                var px = particles[base + 0u];
+                var py = particles[base + 1u];
+                var vx = particles[base + 2u];
+                var vy = particles[base + 3u];
+                var life = particles[base + 4u];
+                var brightness = particles[base + 5u];
+                let phase = particles[base + 6u];
+                let size = particles[base + 7u];
+
+                let t = u.time;
+                let dt = u.dt;
+
+                // Wave-driven velocity field
+                let waveX = sin(py * 3.0 + t * 0.8) * 0.15 * u.waveIntensity
+                          + sin(py * 7.0 - t * 1.2) * 0.05 * u.waveIntensity;
+                let waveY = cos(px * 4.0 + t * 0.6) * 0.08 * u.waveIntensity
+                          + sin(px * 2.0 + py * 3.0 + t * 0.4) * 0.04 * u.waveIntensity;
+
+                // Apply wave forces with damping
+                vx = vx * 0.98 + waveX * dt;
+                vy = vy * 0.98 + waveY * dt;
+
+                // Add gentle upward drift (buoyancy)
+                vy += 0.002 * dt;
+
+                // Update position
+                px += vx * dt * 30.0;
+                py += vy * dt * 30.0;
+
+                // Calculate speed for flash detection
+                let spd = sqrt(vx * vx + vy * vy);
+
+                // Flash: brightness pulse when speed exceeds threshold
+                if (spd > u.flashThreshold * 0.05) {
+                    brightness = min(brightness + dt * 3.0, 2.0);
+                } else {
+                    brightness = max(brightness - dt * 0.8, 0.1 + sin(phase + t * 2.0) * 0.15);
+                }
+
+                // Fade life
+                life -= dt * 0.15;
+
+                // Respawn if dead or out of bounds
+                if (life <= 0.0 || px < -1.2 || px > 1.2 || py < -1.2 || py > 1.2) {
+                    let seed = f32(idx) * 0.001 + t;
+                    px = hash(seed) * 2.4 - 1.2;
+                    py = hash(seed + 1.0) * 2.4 - 1.2;
+                    vx = (hash(seed + 2.0) - 0.5) * 0.01;
+                    vy = (hash(seed + 3.0) - 0.5) * 0.01;
+                    life = 0.5 + hash(seed + 4.0) * 0.5;
+                    brightness = 0.1 + hash(seed + 5.0) * 0.3;
+                }
+
+                particles[base + 0u] = px;
+                particles[base + 1u] = py;
+                particles[base + 2u] = vx;
+                particles[base + 3u] = vy;
+                particles[base + 4u] = life;
+                particles[base + 5u] = brightness;
+            }
+        `});
+
+        // Render shader: point sprites with additive blending
+        const renderShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                dt: f32,
+                waveIntensity: f32,
+                glowRadius: f32,
+                flashThreshold: f32,
+                colorShift: f32,
+                particleCount: u32,
+                pad1: u32,
+                pad2: u32,
+                pad3: u32,
+            }
+            struct VSOut {
+                @builtin(position) pos: vec4f,
+                @location(0) color: vec3f,
+                @location(1) @interpolate(flat) center: vec2f,
+                @location(2) screenPos: vec2f,
+                @location(3) @interpolate(flat) radius: f32,
+            }
+            @group(0) @binding(0) var<storage, read> particles: array<f32>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            @vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VSOut {
+                let base = ii * 8u;
+                let px = particles[base + 0u];
+                let py = particles[base + 1u];
+                let life = particles[base + 4u];
+                let brightness = particles[base + 5u];
+                let phase = particles[base + 6u];
+                let size = particles[base + 7u];
+
+                let aspect = u.resolution.x / u.resolution.y;
+
+                // Quad offsets
+                var offsets = array<vec2f, 6>(
+                    vec2f(-1, -1), vec2f(1, -1), vec2f(-1, 1),
+                    vec2f(-1, 1), vec2f(1, -1), vec2f(1, 1)
+                );
+
+                let pSize = size * u.glowRadius * 3.0 / u.resolution.y;
+                let quadPos = vec2f(px / aspect, py) + offsets[vi] * pSize;
+
+                // Bioluminescent color: blue-cyan-green with shift
+                let hue = 0.55 + u.colorShift + sin(phase + u.time * 0.3) * 0.05;
+                let glow = brightness * life;
+
+                // HSL to RGB inline
+                let h6 = fract(hue) * 6.0;
+                let c = 0.9;
+                let x = c * (1.0 - abs(h6 % 2.0 - 1.0));
+                var rgb: vec3f;
+                if (h6 < 1.0) { rgb = vec3f(c, x, 0); }
+                else if (h6 < 2.0) { rgb = vec3f(x, c, 0); }
+                else if (h6 < 3.0) { rgb = vec3f(0, c, x); }
+                else if (h6 < 4.0) { rgb = vec3f(0, x, c); }
+                else if (h6 < 5.0) { rgb = vec3f(x, 0, c); }
+                else { rgb = vec3f(c, 0, x); }
+                rgb += vec3f(0.3);
+
+                let col = rgb * glow;
+
+                var out: VSOut;
+                out.pos = vec4f(quadPos, 0, 1);
+                out.color = col;
+                out.center = vec2f(px / aspect, py) * u.resolution * 0.5 + u.resolution * 0.5;
+                out.screenPos = quadPos * u.resolution * 0.5 + u.resolution * 0.5;
+                out.radius = pSize * u.resolution.y * 0.5;
+                return out;
+            }
+
+            @fragment fn fs(inp: VSOut) -> @location(0) vec4f {
+                let dist = length(inp.screenPos - inp.center);
+                let r = inp.radius;
+                let alpha = exp(-dist * dist / (r * r * 0.3));
+                if (alpha < 0.005) { discard; }
+                return vec4f(inp.color * alpha, alpha);
+            }
+        `});
+
+        const computeBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+        });
+        const computePipeline = device.createComputePipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [computeBGL] }),
+            compute: { module: computeShader, entryPoint: 'main' },
+        });
+        const computeBG = device.createBindGroup({
+            layout: computeBGL,
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+            ],
+        });
+
+        const renderBGL = device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+                { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+            ],
+        });
+        const renderPipeline = device.createRenderPipeline({
+            layout: device.createPipelineLayout({ bindGroupLayouts: [renderBGL] }),
+            vertex: { module: renderShader, entryPoint: 'vs' },
+            fragment: {
+                module: renderShader, entryPoint: 'fs',
+                targets: [{
+                    format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                    },
+                }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+        const renderBG = device.createBindGroup({
+            layout: renderBGL,
+            entries: [
+                { binding: 0, resource: { buffer: particleBuf } },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+            ],
+        });
+
+        let frameCount = 0, lastFPSTime = performance.now(), lastTime = 0;
+
+        function frame(time) {
+            const now = performance.now();
+            const dt = Math.min((time - lastTime) / 1000, 0.05);
+            lastTime = time;
+            frameCount++;
+            if (now - lastFPSTime > 500) {
+                document.getElementById('fps').textContent = Math.round(frameCount / ((now - lastFPSTime) / 1000));
+                frameCount = 0; lastFPSTime = now;
+            }
+
+            const uniformData = new Float32Array(16);
+            const u32View = new Uint32Array(uniformData.buffer);
+            uniformData[0] = canvas.width;
+            uniformData[1] = canvas.height;
+            uniformData[2] = time / 1000;
+            uniformData[3] = dt;
+            uniformData[4] = waveIntensity;
+            uniformData[5] = glowRadius;
+            uniformData[6] = flashThreshold;
+            uniformData[7] = colorShift;
+            u32View[8] = NUM_PARTICLES;
+            device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+            const encoder = device.createCommandEncoder();
+
+            const computePass = encoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBG);
+            computePass.dispatchWorkgroups(Math.ceil(NUM_PARTICLES / 256));
+            computePass.end();
+
+            const renderPass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: ctx.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.0, g: 0.01, b: 0.04, a: 1 },
+                }],
+            });
+            renderPass.setPipeline(renderPipeline);
+            renderPass.setBindGroup(0, renderBG);
+            renderPass.draw(6, NUM_PARTICLES);
+            renderPass.end();
+
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(frame);
+        }
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+            ctx.configure({ device, format, alphaMode: 'opaque' });
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

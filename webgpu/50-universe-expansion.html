@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Universe Expansion - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 210px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 168px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .controls button { padding: 6px 14px; background: rgba(6, 182, 212, 0.3); color: #22d3ee; border: 1px solid #22d3ee; border-radius: 4px; cursor: pointer; font-size: 12px; margin-top: 8px; width: 100%; }
+        .controls button:hover { background: rgba(6, 182, 212, 0.5); }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        .time-display { position: fixed; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 13px; color: #22d3ee; z-index: 100; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Universe Expansion</div>
+
+    <div class="controls">
+        <label>Hubble Constant: <span id="hubbleVal">70</span></label>
+        <input type="range" id="hubble" min="20" max="150" step="5" value="70">
+        <label>Time Scale: <span id="timeVal">1.0</span></label>
+        <input type="range" id="timeScale" min="0.1" max="5.0" step="0.1" value="1.0">
+        <label>Clustering: <span id="clusterVal">0.5</span></label>
+        <input type="range" id="cluster" min="0.1" max="1.0" step="0.05" value="0.5">
+        <label>Particles: <span id="partVal">500K</span></label>
+        <input type="range" id="particles" min="100000" max="500000" step="50000" value="500000">
+        <label>Color Mode:</label>
+        <select id="colorSelect">
+            <option value="0" selected>Redshift</option>
+            <option value="1">Temperature</option>
+            <option value="2">Galaxy Type</option>
+            <option value="3">Deep Field</option>
+        </select>
+        <button id="resetBtn">New Big Bang</button>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Galaxies: <span id="countDisplay">500,000</span>
+    </div>
+    <div class="time-display">Cosmic Age: <span id="cosmicAge">0.0</span> Gyr</div>
+
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth * devicePixelRatio;
+        canvas.height = window.innerHeight * devicePixelRatio;
+        const context = canvas.getContext('webgpu');
+        const presentFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: presentFormat, alphaMode: 'opaque' });
+
+        const MAX_PARTICLES = 500000;
+        let numParticles = 500000;
+        let hubbleConst = 70, timeScale = 1.0, clusterStrength = 0.5, colorMode = 0;
+
+        // Generate initial clustered distribution (filaments and voids)
+        function createGalaxies(n, clustering) {
+            const data = new Float32Array(n * 4);
+            // Create a few cluster centers for filament-like structure
+            const numClusters = 30;
+            const clusterCenters = [];
+            for (let c = 0; c < numClusters; c++) {
+                clusterCenters.push([
+                    (Math.random() - 0.5) * 10,
+                    (Math.random() - 0.5) * 10,
+                    (Math.random() - 0.5) * 10
+                ]);
+            }
+
+            for (let i = 0; i < n; i++) {
+                let x, y, z;
+                if (Math.random() < clustering) {
+                    // Clustered: pick a random cluster center and offset
+                    const c = clusterCenters[Math.floor(Math.random() * numClusters)];
+                    const spread = 2.0 * (1.0 - clustering) + 0.5;
+                    x = c[0] + (Math.random() - 0.5) * spread;
+                    y = c[1] + (Math.random() - 0.5) * spread;
+                    z = c[2] + (Math.random() - 0.5) * spread;
+                    // Add filament connections between nearby clusters
+                    if (Math.random() < 0.3) {
+                        const c2 = clusterCenters[Math.floor(Math.random() * numClusters)];
+                        const t = Math.random();
+                        x = c[0] * (1 - t) + c2[0] * t + (Math.random() - 0.5) * 0.5;
+                        y = c[1] * (1 - t) + c2[1] * t + (Math.random() - 0.5) * 0.5;
+                        z = c[2] * (1 - t) + c2[2] * t + (Math.random() - 0.5) * 0.5;
+                    }
+                } else {
+                    // Uniform background
+                    x = (Math.random() - 0.5) * 12;
+                    y = (Math.random() - 0.5) * 12;
+                    z = (Math.random() - 0.5) * 12;
+                }
+
+                data[i * 4]     = x;
+                data[i * 4 + 1] = y;
+                data[i * 4 + 2] = z;
+                data[i * 4 + 3] = Math.random(); // galaxy type/brightness seed
+            }
+            return data;
+        }
+
+        let particleData = createGalaxies(MAX_PARTICLES, clusterStrength);
+
+        // We need two buffers: initial positions (constant) and current positions (updated by compute)
+        const initialBuf = device.createBuffer({
+            size: MAX_PARTICLES * 16,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        const currentBuf = device.createBuffer({
+            size: MAX_PARTICLES * 16,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
+        });
+        device.queue.writeBuffer(initialBuf, 0, particleData);
+        device.queue.writeBuffer(currentBuf, 0, particleData);
+
+        // Uniforms: width, height, hubble, scaleFactor, numP, time, colorMode, pad
+        const uniformBuf = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Compute shader: Hubble expansion - velocity = H * distance from origin
+        // Rather than integrating velocity, we use the scale factor approach:
+        // position(t) = initialPosition * a(t), where a(t) is the scale factor
+        const computeShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                width: f32, height: f32, hubble: f32, scaleFactor: f32,
+                numP: f32, time: f32, colorMode: f32, pad: f32,
+                pad2: f32, pad3: f32, pad4: f32, pad5: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read> initial: array<vec4f>;
+            @group(0) @binding(1) var<storage, read_write> current: array<vec4f>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u32(u.numP)) { return; }
+
+                let init = initial[idx];
+                let pos = vec3f(init.x, init.y, init.z);
+
+                // Scale factor: a(t) = exp(H * t) for exponential expansion
+                // Or use a(t) = 1 + H*t for linear Hubble expansion
+                let a = u.scaleFactor;
+
+                // Apply expansion
+                let newPos = pos * a;
+
+                // Compute recession velocity for coloring
+                let dist = length(newPos);
+                let velocity = u.hubble * dist * 0.01; // Hubble's law: v = H*d
+
+                current[idx] = vec4f(newPos, velocity);
+            }
+        `});
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: computeShader, entryPoint: 'main' },
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: initialBuf } },
+                { binding: 1, resource: { buffer: currentBuf } },
+                { binding: 2, resource: { buffer: uniformBuf } },
+            ],
+        });
+
+        // Render: point-list with 3D projection, color by recession velocity
+        const renderShader = device.createShaderModule({ code: `
+            struct Uniforms {
+                width: f32, height: f32, hubble: f32, scaleFactor: f32,
+                numP: f32, time: f32, colorMode: f32, pad: f32,
+                pad2: f32, pad3: f32, pad4: f32, pad5: f32,
+            }
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) color: vec4f }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+
+            @vertex
+            fn vs(@location(0) xyz: vec3f, @location(1) velocity: f32) -> VSOut {
+                var out: VSOut;
+
+                // Slow auto-rotation
+                let angle = u.time * 0.05;
+                let ca = cos(angle);
+                let sa = sin(angle);
+                let rx = xyz.x * ca - xyz.z * sa;
+                let rz = xyz.x * sa + xyz.z * ca;
+
+                // Perspective projection — camera at origin looking outward
+                let scale = 0.06 / max(u.scaleFactor * 0.3, 0.5);
+                let zOff = 20.0;
+                let depth = rz + zOff;
+                let perspective = zOff / max(depth, 2.0);
+                let px = rx * scale * perspective;
+                let py = xyz.y * scale * perspective;
+
+                let aspect = u.width / u.height;
+                out.pos = vec4f(px / aspect, py, 0.0, 1.0);
+
+                // Cull particles behind camera
+                if (depth < 1.0) {
+                    out.pos = vec4f(10.0, 10.0, 10.0, 1.0); // off-screen
+                }
+
+                // Color by recession velocity (redshift)
+                let v = clamp(velocity * 0.5, 0.0, 1.0);
+                let dist = length(xyz);
+                let distNorm = clamp(dist / (u.scaleFactor * 8.0), 0.0, 1.0);
+
+                var col: vec3f;
+                if (u.colorMode < 0.5) {
+                    // Redshift: blue (nearby/slow) -> white -> red (distant/fast)
+                    let r = smoothstep(0.0, 0.5, v) * 0.8 + 0.2;
+                    let g = 1.0 - abs(v - 0.5) * 1.5;
+                    let b = (1.0 - smoothstep(0.3, 0.8, v)) * 0.8 + 0.1;
+                    col = vec3f(r, max(g, 0.0), b);
+                } else if (u.colorMode < 1.5) {
+                    // Temperature: hot white -> cool red
+                    let temp = 1.0 - v;
+                    col = vec3f(0.3 + temp * 0.7, 0.2 + temp * 0.6, 0.15 + temp * 0.85);
+                } else if (u.colorMode < 2.5) {
+                    // Galaxy type: spirals (blue), ellipticals (gold), irregulars (white)
+                    let seed = fract(velocity * 17.3 + f32(0u));
+                    if (seed < 0.33) {
+                        col = vec3f(0.4, 0.6, 1.0); // Spiral - blue
+                    } else if (seed < 0.66) {
+                        col = vec3f(1.0, 0.8, 0.3); // Elliptical - gold
+                    } else {
+                        col = vec3f(0.9, 0.9, 0.95); // Irregular - white
+                    }
+                    col = col * (0.5 + v * 0.5);
+                } else {
+                    // Deep field: dim distant, bright nearby, purple-blue tint
+                    let bright = max(1.0 - distNorm * 0.8, 0.15);
+                    col = vec3f(0.6 + v * 0.4, 0.5 + v * 0.3, 0.9) * bright;
+                }
+
+                // Depth dimming
+                let depthDim = clamp(perspective * 0.8, 0.1, 1.0);
+                col = col * depthDim;
+
+                let alpha = 0.1 + (1.0 - distNorm) * 0.3;
+                out.color = vec4f(col, alpha);
+
+                return out;
+            }
+
+            @fragment
+            fn fs(@location(0) color: vec4f) -> @location(0) vec4f {
+                return color;
+            }
+        `});
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: renderShader,
+                entryPoint: 'vs',
+                buffers: [{
+                    arrayStride: 16,
+                    attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                        { shaderLocation: 1, offset: 12, format: 'float32' },
+                    ],
+                }],
+            },
+            fragment: {
+                module: renderShader,
+                entryPoint: 'fs',
+                targets: [{
+                    format: presentFormat,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one' },
+                    },
+                }],
+            },
+            primitive: { topology: 'point-list' },
+        });
+
+        const renderBG = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuf } }],
+        });
+
+        function resetUniverse() {
+            particleData = createGalaxies(numParticles, clusterStrength);
+            device.queue.writeBuffer(initialBuf, 0, particleData.buffer, 0, numParticles * 16);
+            device.queue.writeBuffer(currentBuf, 0, particleData.buffer, 0, numParticles * 16);
+            cosmicTime = 0;
+        }
+
+        // UI handlers
+        document.getElementById('hubble').addEventListener('input', e => {
+            hubbleConst = parseInt(e.target.value);
+            document.getElementById('hubbleVal').textContent = hubbleConst;
+        });
+        document.getElementById('timeScale').addEventListener('input', e => {
+            timeScale = parseFloat(e.target.value);
+            document.getElementById('timeVal').textContent = timeScale.toFixed(1);
+        });
+        document.getElementById('cluster').addEventListener('input', e => {
+            clusterStrength = parseFloat(e.target.value);
+            document.getElementById('clusterVal').textContent = clusterStrength.toFixed(2);
+        });
+        document.getElementById('particles').addEventListener('input', e => {
+            numParticles = parseInt(e.target.value);
+            const label = numParticles >= 1000000 ? (numParticles / 1000000).toFixed(1) + 'M' : (numParticles / 1000) + 'K';
+            document.getElementById('partVal').textContent = label;
+            document.getElementById('countDisplay').textContent = numParticles.toLocaleString();
+            resetUniverse();
+        });
+        document.getElementById('colorSelect').addEventListener('change', e => {
+            colorMode = parseInt(e.target.value);
+        });
+        document.getElementById('resetBtn').addEventListener('click', resetUniverse);
+
+        let time = 0, lastTime = performance.now(), frameCount = 0, fpsAccum = 0;
+        let cosmicTime = 0;
+        const cycleLength = 30.0; // seconds per expansion cycle
+
+        function render() {
+            const now = performance.now();
+            const dt = Math.min((now - lastTime) / 1000, 0.05);
+            lastTime = now;
+            time += dt;
+            cosmicTime += dt * timeScale;
+
+            frameCount++; fpsAccum += dt;
+            if (fpsAccum >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(frameCount / fpsAccum);
+                frameCount = 0; fpsAccum = 0;
+            }
+
+            // Scale factor grows over time, resets periodically
+            const cyclePhase = (cosmicTime % cycleLength) / cycleLength;
+            // Exponential expansion: a = exp(H * t) normalized
+            const H_normalized = hubbleConst / 70.0;
+            const scaleFactor = 1.0 + Math.exp(cyclePhase * 3.0 * H_normalized) - 1.0;
+
+            // Display cosmic age (map cycle to 0-14 Gyr)
+            const cosmicAge = cyclePhase * 13.8;
+            document.getElementById('cosmicAge').textContent = cosmicAge.toFixed(1);
+
+            // Auto-reset when expansion gets too large
+            if (scaleFactor > 15.0) {
+                resetUniverse();
+            }
+
+            const uniformData = new Float32Array(12);
+            uniformData[0] = canvas.width;
+            uniformData[1] = canvas.height;
+            uniformData[2] = hubbleConst;
+            uniformData[3] = scaleFactor;
+            uniformData[4] = numParticles;
+            uniformData[5] = time;
+            uniformData[6] = colorMode;
+            device.queue.writeBuffer(uniformBuf, 0, uniformData);
+
+            const enc = device.createCommandEncoder();
+
+            // Compute expansion
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(numParticles / 256));
+            cp.end();
+
+            // Render
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.005, g: 0.005, b: 0.015, a: 1 },
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, renderBG);
+            rp.setVertexBuffer(0, currentBuf);
+            rp.draw(numParticles);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+        requestAnimationFrame(render);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

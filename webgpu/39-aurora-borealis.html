@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aurora Borealis - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 166px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Aurora Borealis</div>
+
+    <div class="controls">
+        <label>Intensity: <span id="intensityVal">1.0</span></label>
+        <input type="range" id="intensity" min="0.2" max="2.0" step="0.1" value="1.0">
+        <label>Wave Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="speed" min="0.2" max="3.0" step="0.1" value="1.0">
+        <label>Curtain Count: <span id="curtainVal">6</span></label>
+        <input type="range" id="curtains" min="3" max="10" step="1" value="6">
+        <label>Color Mode:</label>
+        <select id="colorMode">
+            <option value="0">Green Aurora</option>
+            <option value="1">Full Spectrum</option>
+            <option value="2">Solar Storm</option>
+            <option value="3">Polar Night</option>
+        </select>
+        <label>Star Density: <span id="starVal">1.0</span></label>
+        <input type="range" id="stars" min="0.0" max="2.0" step="0.1" value="1.0">
+    </div>
+
+    <div class="stats">FPS: <span id="fps">0</span></div>
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        let intensity = 1.0, speed = 1.0, curtainCount = 6, colorMode = 0, starDensity = 1.0;
+        document.getElementById('intensity').oninput = e => { intensity = +e.target.value; document.getElementById('intensityVal').textContent = intensity.toFixed(1); };
+        document.getElementById('speed').oninput = e => { speed = +e.target.value; document.getElementById('speedVal').textContent = speed.toFixed(1); };
+        document.getElementById('curtains').oninput = e => { curtainCount = +e.target.value; document.getElementById('curtainVal').textContent = curtainCount; };
+        document.getElementById('colorMode').onchange = e => { colorMode = +e.target.value; };
+        document.getElementById('stars').oninput = e => { starDensity = +e.target.value; document.getElementById('starVal').textContent = starDensity.toFixed(1); };
+
+        const uniformData = new Float32Array(12);
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const shaderCode = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                intensity: f32,
+                speed: f32,
+                curtainCount: f32,
+                colorMode: u32,
+                starDensity: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+                pad4: f32,
+            }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+
+            fn hash21(p: vec2f) -> f32 {
+                var p3 = fract(vec3f(p.x * 0.1031, p.y * 0.1030, p.x * 0.0973));
+                p3 += dot(p3, vec3f(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            fn noise(p: vec2f) -> f32 {
+                let i = floor(p);
+                let f = fract(p);
+                let ux = f.x * f.x * (3.0 - 2.0 * f.x);
+                let uy = f.y * f.y * (3.0 - 2.0 * f.y);
+                let a = hash21(i);
+                let b = hash21(i + vec2f(1.0, 0.0));
+                let c = hash21(i + vec2f(0.0, 1.0));
+                let d = hash21(i + vec2f(1.0, 1.0));
+                return mix(mix(a, b, ux), mix(c, d, ux), uy);
+            }
+
+            fn fbm(p: vec2f) -> f32 {
+                var val: f32 = 0.0;
+                var amp: f32 = 0.5;
+                var pos = p;
+                for (var i = 0; i < 5; i++) {
+                    val += amp * noise(pos);
+                    pos *= 2.0;
+                    amp *= 0.5;
+                }
+                return val;
+            }
+
+            fn auroraColor(t: f32, layer: f32) -> vec3f {
+                if (u.colorMode == 0u) {
+                    // Green aurora - classic
+                    let green = vec3f(0.1, 0.9, 0.3);
+                    let cyan = vec3f(0.1, 0.7, 0.6);
+                    let purple = vec3f(0.3, 0.1, 0.5);
+                    let s = fract(layer * 0.3 + 0.2);
+                    if (s < 0.5) { return mix(green, cyan, s * 2.0); }
+                    return mix(cyan, purple, (s - 0.5) * 2.0);
+                } else if (u.colorMode == 1u) {
+                    // Full spectrum
+                    let hue = fract(layer * 0.15 + t * 0.05);
+                    let c = cos((hue * 6.28318 + vec3f(0.0, 2.094, 4.189))) * 0.5 + 0.5;
+                    return c;
+                } else if (u.colorMode == 2u) {
+                    // Solar storm - intense reds/magentas
+                    let red = vec3f(0.9, 0.1, 0.1);
+                    let magenta = vec3f(0.8, 0.1, 0.5);
+                    let yellow = vec3f(0.9, 0.7, 0.1);
+                    let s = fract(layer * 0.25);
+                    if (s < 0.5) { return mix(red, magenta, s * 2.0); }
+                    return mix(magenta, yellow, (s - 0.5) * 2.0);
+                } else {
+                    // Polar night - deep blues and teals
+                    let blue = vec3f(0.1, 0.2, 0.8);
+                    let teal = vec3f(0.0, 0.6, 0.5);
+                    let white = vec3f(0.6, 0.7, 0.9);
+                    let s = fract(layer * 0.2);
+                    if (s < 0.5) { return mix(blue, teal, s * 2.0); }
+                    return mix(teal, white, (s - 0.5) * 2.0);
+                }
+            }
+
+            fn mountain(x: f32) -> f32 {
+                let base = 0.08 + 0.04 * sin(x * 1.5) + 0.02 * sin(x * 4.3 + 1.0);
+                let detail = 0.015 * sin(x * 12.0 + 3.0) + 0.008 * sin(x * 25.0);
+                let peaks = 0.06 * max(0.0, sin(x * 2.1 - 0.5)) * max(0.0, sin(x * 0.7 + 2.0));
+                return base + detail + peaks;
+            }
+
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+                var pos = array<vec2f, 6>(
+                    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+                    vec2f(-1,1), vec2f(1,-1), vec2f(1,1)
+                );
+                return vec4f(pos[i], 0.0, 1.0);
+            }
+
+            @fragment fn fs(@builtin(position) fragCoord: vec4f) -> @location(0) vec4f {
+                let uv = fragCoord.xy / u.resolution;
+                let aspect = u.resolution.x / u.resolution.y;
+                let t = u.time * u.speed * 0.3;
+
+                // Night sky gradient
+                var color = mix(vec3f(0.0, 0.0, 0.02), vec3f(0.02, 0.02, 0.08), uv.y);
+
+                // Stars
+                let starCoord = fragCoord.xy * 0.5;
+                let starCell = floor(starCoord / 8.0);
+                let starHash = hash21(starCell);
+                if (starHash > 1.0 - 0.03 * u.starDensity) {
+                    let starPos = (starCell + 0.5) * 8.0;
+                    let d = length(fragCoord.xy - starPos);
+                    let twinkle = 0.5 + 0.5 * sin(t * 3.0 + starHash * 50.0);
+                    let brightness = smoothstep(2.5, 0.0, d) * twinkle * starHash;
+                    color += vec3f(brightness * 0.8, brightness * 0.85, brightness);
+                }
+
+                // Aurora curtains
+                let numCurtains = i32(u.curtainCount);
+                for (var i = 0; i < 10; i++) {
+                    if (i >= numCurtains) { break; }
+
+                    let fi = f32(i);
+                    let layerDepth = 0.3 + fi * 0.08;
+                    let layerSpeed = 0.5 + fi * 0.12;
+
+                    // Curtain wave - combination of sine waves at different frequencies
+                    let xScaled = uv.x * aspect;
+                    let wave1 = sin(xScaled * (2.0 + fi * 0.5) + t * layerSpeed + fi * 1.7) * 0.08;
+                    let wave2 = sin(xScaled * (4.0 + fi * 0.3) + t * layerSpeed * 0.7 + fi * 2.3) * 0.04;
+                    let wave3 = sin(xScaled * (7.0 + fi * 0.2) + t * layerSpeed * 1.3) * 0.02;
+
+                    let noiseOffset = fbm(vec2f(xScaled * 1.5 + t * 0.2 + fi * 3.0, fi * 2.0)) * 0.1;
+
+                    let curtainCenter = 0.55 + layerDepth + wave1 + wave2 + wave3 + noiseOffset;
+
+                    // Vertical extent with breathing
+                    let breath = 0.5 + 0.5 * sin(t * 0.5 + fi * 0.9);
+                    let curtainHeight = (0.15 + 0.08 * breath) * u.intensity;
+
+                    // Distance from curtain center
+                    let dy = uv.y - curtainCenter;
+                    let curtainMask = exp(-dy * dy / (curtainHeight * curtainHeight * 0.02));
+
+                    // Vertical falloff - brighter at bottom, fade at top
+                    let vertFade = smoothstep(curtainCenter + curtainHeight * 0.8, curtainCenter, uv.y)
+                                 * smoothstep(curtainCenter - curtainHeight * 1.5, curtainCenter - curtainHeight * 0.3, uv.y);
+
+                    // Horizontal variation using noise
+                    let hVar = fbm(vec2f(xScaled * 3.0 + t * 0.3 + fi * 5.0, t * 0.1)) * 0.6 + 0.4;
+
+                    let curtainAlpha = curtainMask * vertFade * hVar * u.intensity * (0.3 + 0.15 * breath);
+
+                    // Color for this curtain layer
+                    let aColor = auroraColor(t, fi);
+
+                    // Additive blending
+                    color += aColor * curtainAlpha;
+                }
+
+                // Slight glow near horizon
+                let horizonGlow = exp(-pow((uv.y - 0.12) / 0.15, 2.0)) * 0.05 * u.intensity;
+                color += vec3f(0.05, 0.15, 0.1) * horizonGlow;
+
+                // Mountain silhouette
+                let mx = uv.x * 6.28318 * aspect;
+                let mh = mountain(mx);
+                if (uv.y < mh) {
+                    color = vec3f(0.01, 0.01, 0.02);
+                    // Slight edge highlight from aurora light
+                    let edgeDist = mh - uv.y;
+                    if (edgeDist < 0.005) {
+                        color += vec3f(0.02, 0.06, 0.03) * u.intensity * (1.0 - edgeDist / 0.005);
+                    }
+                }
+
+                // Tone mapping
+                color = color / (color + vec3f(1.0));
+
+                return vec4f(color, 1.0);
+            }
+        `;
+
+        const shaderModule = device.createShaderModule({ code: shaderCode });
+
+        const pipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: shaderModule, entryPoint: 'vs' },
+            fragment: { module: shaderModule, entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-list' }
+        });
+
+        const bindGroup = device.createBindGroup({
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuffer } }]
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            context.configure({ device, format, alphaMode: 'opaque' });
+        });
+
+        let lastTime = performance.now(), fpsFrames = 0, fpsTime = 0;
+        const startTime = performance.now();
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++; fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            uniformData[0] = canvas.width;
+            uniformData[1] = canvas.height;
+            uniformData[2] = (now - startTime) / 1000;
+            uniformData[3] = intensity;
+            uniformData[4] = speed;
+            uniformData[5] = curtainCount;
+            uniformData[6] = colorMode;  // will be reinterpreted as u32
+            uniformData[7] = starDensity;
+            // Write colorMode as u32 at byte offset 24
+            const view = new DataView(uniformData.buffer);
+            view.setUint32(24, colorMode, true);
+            device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    storeOp: 'store'
+                }]
+            });
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.draw(6);
+            pass.end();
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

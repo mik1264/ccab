@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neon Circuit Board - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 160px; }
+        .controls select { width: 168px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&larr; Back to WebGPU Gallery</a>
+    <div class="title">Neon Circuit Board</div>
+
+    <div class="controls">
+        <label>Zoom: <span id="zoomVal">8.0</span></label>
+        <input type="range" id="zoom" min="3" max="20" step="0.5" value="8">
+        <label>Pulse Speed: <span id="pulseVal">1.0</span></label>
+        <input type="range" id="pulse" min="0.2" max="3.0" step="0.1" value="1.0">
+        <label>Trace Density: <span id="densityVal">0.6</span></label>
+        <input type="range" id="density" min="0.3" max="0.9" step="0.05" value="0.6">
+        <label>Glow Width: <span id="glowVal">1.5</span></label>
+        <input type="range" id="glow" min="0.5" max="4.0" step="0.1" value="1.5">
+        <label>Color Theme:</label>
+        <select id="themeSelect">
+            <option value="0">PCB Green</option>
+            <option value="1" selected>Neon Blue</option>
+            <option value="2">Sci-Fi</option>
+            <option value="3">Amber</option>
+        </select>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Resolution: <span id="res">0x0</span>
+    </div>
+
+    <div id="error">WebGPU is not supported in your browser.<br>Please use Chrome 113+, Edge 113+, or Safari 18+.</div>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        if (!navigator.gpu) { document.getElementById('error').style.display = 'block'; throw new Error('WebGPU not supported'); }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const canvas = document.getElementById('canvas');
+        const W = Math.min(window.innerWidth, 1920);
+        const H = Math.min(window.innerHeight, 1080);
+        canvas.width = W; canvas.height = H;
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        document.getElementById('res').textContent = W + 'x' + H;
+
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        let zoomLevel = 8.0, pulseSpeed = 1.0, traceDensity = 0.6, glowWidth = 1.5, colorTheme = 1;
+
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const shader = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                zoom: f32,
+                pulseSpeed: f32,
+                density: f32,
+                glowWidth: f32,
+                theme: u32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+                pad4: f32,
+            }
+
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            // Hash functions for procedural generation
+            fn hash21(p: vec2f) -> f32 {
+                var p3 = fract(vec3f(p.x, p.y, p.x) * 0.1031);
+                p3 = p3 + dot(p3, vec3f(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            fn hash22(p: vec2f) -> vec2f {
+                let n = vec2f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)));
+                return fract(sin(n) * 43758.5453);
+            }
+
+            // Get trace direction for a grid cell
+            // Returns: 0=horizontal, 1=vertical, 2=corner-TR, 3=corner-TL, 4=T-junction, 5=cross, 6=empty
+            fn getCellType(cell: vec2f) -> u32 {
+                let h = hash21(cell);
+                if (h > u.density) { return 6u; }
+                let h2 = hash21(cell + vec2f(73.1, 91.7));
+                if (h2 < 0.25) { return 0u; }
+                if (h2 < 0.50) { return 1u; }
+                if (h2 < 0.60) { return 2u; }
+                if (h2 < 0.70) { return 3u; }
+                if (h2 < 0.82) { return 4u; }
+                return 5u;
+            }
+
+            // Distance to trace segment within cell
+            fn traceDistance(localUV: vec2f, cellType: u32) -> f32 {
+                let p = localUV;
+                var d: f32 = 100.0;
+                let lineW = 0.06;
+
+                if (cellType == 0u) {
+                    // Horizontal line
+                    d = abs(p.y - 0.5);
+                } else if (cellType == 1u) {
+                    // Vertical line
+                    d = abs(p.x - 0.5);
+                } else if (cellType == 2u) {
+                    // Corner: bottom-left to top (L-shape)
+                    let dH = abs(p.y - 0.5); // horizontal segment left half
+                    let dV = abs(p.x - 0.5); // vertical segment top half
+                    if (p.x < 0.5 && p.y > 0.4 && p.y < 0.6) {
+                        d = min(d, dH);
+                    }
+                    if (p.y > 0.5 && p.x > 0.4 && p.x < 0.6) {
+                        d = min(d, dV);
+                    }
+                    // Corner joint
+                    d = min(d, length(p - vec2f(0.5, 0.5)) * 1.5);
+                    if (p.x < 0.5) { d = min(d, dH); }
+                    if (p.y > 0.5) { d = min(d, dV); }
+                } else if (cellType == 3u) {
+                    // Corner: right to top
+                    let dH = abs(p.y - 0.5);
+                    let dV = abs(p.x - 0.5);
+                    if (p.x > 0.5) { d = min(d, dH); }
+                    if (p.y > 0.5) { d = min(d, dV); }
+                    d = min(d, length(p - vec2f(0.5, 0.5)) * 1.5);
+                } else if (cellType == 4u) {
+                    // T-junction: horizontal + vertical going up
+                    d = min(d, abs(p.y - 0.5));
+                    if (p.y > 0.5) { d = min(d, abs(p.x - 0.5)); }
+                } else if (cellType == 5u) {
+                    // Cross
+                    d = min(abs(p.x - 0.5), abs(p.y - 0.5));
+                }
+
+                return d;
+            }
+
+            // Pulse traveling along traces
+            fn pulseBrightness(cell: vec2f, localUV: vec2f, t: f32) -> f32 {
+                let h = hash22(cell + vec2f(17.3, 29.1));
+                // Multiple pulses with different phases
+                let phase1 = h.x * 6.28;
+                let phase2 = h.y * 6.28;
+                let speed1 = (h.x * 0.5 + 0.5) * u.pulseSpeed;
+                let speed2 = (h.y * 0.3 + 0.7) * u.pulseSpeed;
+
+                // Pulse moves along the main axis of the cell
+                let cellType = getCellType(cell);
+                var coord: f32 = localUV.x;
+                if (cellType == 1u) { coord = localUV.y; }
+
+                let pulse1 = exp(-8.0 * pow(fract(coord - t * speed1 + phase1) - 0.5, 2.0));
+                let pulse2 = exp(-12.0 * pow(fract(coord + t * speed2 + phase2) - 0.3, 2.0));
+
+                return pulse1 * 0.8 + pulse2 * 0.5;
+            }
+
+            // Color themes
+            fn getTraceColor(theme: u32) -> vec3f {
+                if (theme == 0u) { return vec3f(0.1, 0.6, 0.15); }  // PCB green traces
+                if (theme == 1u) { return vec3f(0.0, 0.7, 0.9); }   // Neon blue
+                if (theme == 2u) { return vec3f(0.6, 0.1, 0.9); }   // Sci-fi purple
+                return vec3f(0.9, 0.6, 0.1);                          // Amber
+            }
+
+            fn getPulseColor(theme: u32) -> vec3f {
+                if (theme == 0u) { return vec3f(0.4, 1.0, 0.2); }   // Green pulses
+                if (theme == 1u) { return vec3f(0.2, 1.0, 0.9); }   // Cyan pulses
+                if (theme == 2u) { return vec3f(1.0, 0.3, 0.8); }   // Pink pulses
+                return vec3f(1.0, 0.9, 0.3);                          // Yellow pulses
+            }
+
+            fn getBgColor(theme: u32) -> vec3f {
+                if (theme == 0u) { return vec3f(0.01, 0.04, 0.02); } // Dark green PCB
+                if (theme == 1u) { return vec3f(0.01, 0.01, 0.04); } // Dark blue
+                if (theme == 2u) { return vec3f(0.02, 0.01, 0.04); } // Dark purple
+                return vec3f(0.04, 0.02, 0.01);                       // Dark brown
+            }
+
+            fn getSubstrateColor(theme: u32) -> vec3f {
+                if (theme == 0u) { return vec3f(0.02, 0.08, 0.03); }
+                if (theme == 1u) { return vec3f(0.02, 0.03, 0.08); }
+                if (theme == 2u) { return vec3f(0.04, 0.02, 0.08); }
+                return vec3f(0.08, 0.04, 0.02);
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let uv = vec2f(f32(id.x), f32(id.y)) / u.resolution;
+                let aspect = u.resolution.x / u.resolution.y;
+
+                // Scale and offset for zooming
+                let scaled = vec2f(uv.x * aspect * u.zoom, uv.y * u.zoom);
+
+                // Grid cell
+                let cell = floor(scaled);
+                let frac = fract(scaled);
+
+                let cellType = getCellType(cell);
+                let t = u.time;
+
+                var color = getBgColor(u.theme);
+
+                // Substrate grid lines (very subtle)
+                let gridLine = min(
+                    smoothstep(0.02, 0.0, frac.x) + smoothstep(0.98, 1.0, frac.x),
+                    1.0
+                ) + min(
+                    smoothstep(0.02, 0.0, frac.y) + smoothstep(0.98, 1.0, frac.y),
+                    1.0
+                );
+                color = mix(color, getSubstrateColor(u.theme), gridLine * 0.3);
+
+                // Check current cell and neighbors for traces
+                var totalGlow: f32 = 0.0;
+                var totalPulse: f32 = 0.0;
+                let traceCol = getTraceColor(u.theme);
+                let pulseCol = getPulseColor(u.theme);
+
+                for (var dy = -1; dy <= 1; dy++) {
+                    for (var dx = -1; dx <= 1; dx++) {
+                        let nc = cell + vec2f(f32(dx), f32(dy));
+                        let nType = getCellType(nc);
+                        if (nType >= 6u) { continue; }
+
+                        let nFrac = frac - vec2f(f32(dx), f32(dy));
+                        let dist = traceDistance(nFrac, nType);
+
+                        let lineThick = 0.08;
+                        let glowR = u.glowWidth * 0.1;
+
+                        // Sharp trace line
+                        let traceLine = smoothstep(lineThick, lineThick * 0.5, dist);
+                        // Wider glow
+                        let glow = exp(-dist * dist / (glowR * glowR));
+
+                        // Pulse effect
+                        let pulse = pulseBrightness(nc, nFrac, t);
+
+                        totalGlow = max(totalGlow, glow);
+                        totalPulse = max(totalPulse, traceLine * pulse);
+
+                        // Draw solid trace
+                        if (traceLine > 0.01) {
+                            color = mix(color, traceCol * 0.4, traceLine * 0.8);
+                        }
+                    }
+                }
+
+                // Apply glow
+                color = color + traceCol * totalGlow * 0.15;
+
+                // Apply pulses (bright data signals)
+                color = color + pulseCol * totalPulse * 1.5;
+
+                // Add bright pulse glow bloom
+                color = color + pulseCol * totalPulse * totalGlow * 0.5;
+
+                // Via pads (solder points at intersections)
+                let cellH = hash21(cell + vec2f(41.7, 83.3));
+                if (cellType == 5u || (cellType == 4u && cellH > 0.5)) {
+                    let padDist = length(frac - vec2f(0.5, 0.5));
+                    let pad = smoothstep(0.15, 0.08, padDist);
+                    let padRing = smoothstep(0.16, 0.14, padDist) - smoothstep(0.12, 0.10, padDist);
+                    color = mix(color, traceCol * 0.6, pad * 0.7);
+                    color = color + traceCol * padRing * 0.5;
+                    // Center hole
+                    let hole = smoothstep(0.06, 0.04, padDist);
+                    color = mix(color, getBgColor(u.theme) * 0.5, hole * 0.8);
+                }
+
+                // IC chip pads scattered
+                let chipH = hash21(cell * 3.7 + vec2f(11.1, 7.7));
+                if (chipH > 0.92 && cellType < 6u) {
+                    let chipDist = max(abs(frac.x - 0.5), abs(frac.y - 0.5));
+                    let chip = smoothstep(0.35, 0.30, chipDist);
+                    let chipEdge = smoothstep(0.36, 0.34, chipDist) - smoothstep(0.32, 0.30, chipDist);
+                    color = mix(color, vec3f(0.05, 0.05, 0.08), chip * 0.8);
+                    color = color + traceCol * chipEdge * 0.4;
+                    // Pin dots on chip edges
+                    let pinX = fract(frac.x * 4.0);
+                    let pinY = fract(frac.y * 4.0);
+                    if (chipDist > 0.25 && chipDist < 0.35) {
+                        let pinDot = smoothstep(0.3, 0.2, length(vec2f(pinX, pinY) - vec2f(0.5, 0.5)));
+                        color = color + traceCol * pinDot * 0.3;
+                    }
+                }
+
+                // Vignette
+                let vig = 1.0 - length(uv - vec2f(0.5)) * 0.7;
+                color = color * vig;
+
+                color = clamp(color, vec3f(0.0), vec3f(1.0));
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: shader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } },
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let startTime = performance.now();
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const elapsed = (now - startTime) / 1000;
+
+            const buf = new ArrayBuffer(48);
+            const f = new Float32Array(buf);
+            const ui = new Uint32Array(buf);
+            f[0] = W; f[1] = H;
+            f[2] = elapsed;
+            f[3] = zoomLevel;
+            f[4] = pulseSpeed;
+            f[5] = traceDensity;
+            f[6] = glowWidth;
+            ui[7] = colorTheme;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        document.getElementById('zoom').addEventListener('input', (e) => {
+            zoomLevel = parseFloat(e.target.value);
+            document.getElementById('zoomVal').textContent = zoomLevel.toFixed(1);
+        });
+        document.getElementById('pulse').addEventListener('input', (e) => {
+            pulseSpeed = parseFloat(e.target.value);
+            document.getElementById('pulseVal').textContent = pulseSpeed.toFixed(1);
+        });
+        document.getElementById('density').addEventListener('input', (e) => {
+            traceDensity = parseFloat(e.target.value);
+            document.getElementById('densityVal').textContent = traceDensity.toFixed(2);
+        });
+        document.getElementById('glow').addEventListener('input', (e) => {
+            glowWidth = parseFloat(e.target.value);
+            document.getElementById('glowVal').textContent = glowWidth.toFixed(1);
+        });
+        document.getElementById('themeSelect').addEventListener('change', (e) => {
+            colorTheme = parseInt(e.target.value);
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>
