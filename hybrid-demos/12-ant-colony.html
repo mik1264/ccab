@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ant Colony + Pheromone Legend - CCAB</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root{--sage:#8A9A5B;--moss:#606C38;--earth:#DDA15E;--cream:#FEFAE0;--terracotta:#BC6C25;--dark-moss:#3d4423}
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{overflow:hidden;font-family:'Nunito',sans-serif;background:#0a0e1a;color:#e8e6e1}
+        .back-link{position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:var(--earth);text-decoration:none;border-radius:6px;font-size:14px;font-family:'Nunito',sans-serif;z-index:999;transition:all 0.3s ease}
+        .back-link:hover{background:rgba(221,161,94,0.2);transform:translateX(-4px)}
+        #fps-counter{position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.7);color:var(--earth);padding:8px 12px;border-radius:6px;font-family:'Courier New',monospace;font-size:14px;z-index:999}
+        .fps-good{color:#10b981}.fps-medium{color:#fbbf24}.fps-poor{color:#e11d48}
+        #hybrid-container{position:relative;width:100vw;height:100vh}
+        #canvas{position:absolute;top:0;left:0;width:100%;height:100%;z-index:0}
+        #svg-overlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none}
+        .interactive{pointer-events:all;cursor:pointer}
+        #loading{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:1000}
+        .spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,0.1);border-top-color:var(--earth);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1rem}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        #error{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(225,29,72,0.9);color:white;padding:2rem;border-radius:12px;text-align:center;max-width:400px;z-index:1001}
+        #error h2{font-family:'Lora',serif;margin:0 0 1rem 0}
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Loading demo...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <linearGradient id="pheromoneGrad" x1="0" y1="1" x2="0" y2="0">
+                    <stop offset="0%" stop-color="#0a0e1a"/>
+                    <stop offset="25%" stop-color="#1a0040"/>
+                    <stop offset="50%" stop-color="#6600aa"/>
+                    <stop offset="75%" stop-color="#ff6600"/>
+                    <stop offset="100%" stop-color="#ffdd00"/>
+                </linearGradient>
+            </defs>
+        </svg>
+    </div>
+
+    <script>
+        window.addEventListener('error',function(e){showError('Runtime Error: '+e.message);});
+        function showError(m){document.getElementById('loading').style.display='none';document.getElementById('error').style.display='block';document.getElementById('error-message').textContent=m;}
+        function hideLoading(){document.getElementById('loading').style.display='none';}
+        class FPSCounter{constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}update(){this.frames++;var n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}}
+
+        try {
+            var canvas = document.getElementById('canvas');
+            var ctx = canvas.getContext('2d');
+            var svg = document.getElementById('svg-overlay');
+            var svgNS = 'http://www.w3.org/2000/svg';
+            var fpsCounter = new FPSCounter();
+            var W, H;
+
+            var NUM_ANTS = 1000;
+            var gw, gh;
+            var pheromone;
+            var ants = [];
+            var evapRate = 0.01;
+            var foodFound = 0;
+            var foodSources = [];
+            var nestX, nestY;
+
+            function initSim() {
+                gw = Math.floor(W / 4);
+                gh = Math.floor(H / 4);
+                pheromone = new Float32Array(gw * gh);
+
+                nestX = gw * 0.2; nestY = gh * 0.5;
+
+                foodSources = [
+                    { x: gw * 0.7, y: gh * 0.3, r: 8, amount: 500 },
+                    { x: gw * 0.8, y: gh * 0.7, r: 6, amount: 300 },
+                    { x: gw * 0.5, y: gh * 0.8, r: 7, amount: 400 }
+                ];
+
+                ants = [];
+                for (var i = 0; i < NUM_ANTS; i++) {
+                    ants.push({
+                        x: nestX + (Math.random() - 0.5) * 6,
+                        y: nestY + (Math.random() - 0.5) * 6,
+                        dir: Math.random() * Math.PI * 2,
+                        hasFood: false,
+                        speed: 0.8 + Math.random() * 0.4
+                    });
+                }
+                foodFound = 0;
+            }
+
+            function sensePhero(x, y, dir, offset) {
+                var angle = dir + offset;
+                var sx = Math.floor(x + Math.cos(angle) * 3);
+                var sy = Math.floor(y + Math.sin(angle) * 3);
+                if (sx < 0 || sx >= gw || sy < 0 || sy >= gh) return 0;
+                return pheromone[sy * gw + sx];
+            }
+
+            function createEl(tag, attrs) {
+                var el = document.createElementNS(svgNS, tag);
+                for (var k in attrs) el.setAttribute(k, attrs[k]);
+                return el;
+            }
+
+            // SVG panel
+            var panelW2 = 200;
+            var panel = createEl('g', {});
+            svg.appendChild(panel);
+            var panelBg = createEl('rect', { rx: '12', fill: 'rgba(0,0,0,0.75)', stroke: 'rgba(221,161,94,0.3)', 'stroke-width': '1' });
+            panel.appendChild(panelBg);
+            var panelTitle = createEl('text', { fill: '#DDA15E', 'font-family': 'Lora, serif', 'font-size': '14', 'text-anchor': 'middle' });
+            panelTitle.textContent = 'Ant Colony';
+            panel.appendChild(panelTitle);
+
+            // Pheromone legend
+            var legendBar = createEl('rect', { fill: 'url(#pheromoneGrad)', stroke: 'rgba(255,255,255,0.2)', 'stroke-width': '1', rx: '3' });
+            panel.appendChild(legendBar);
+            var legendLow = createEl('text', { fill: 'rgba(255,255,255,0.5)', 'font-family': 'Nunito, sans-serif', 'font-size': '10' });
+            legendLow.textContent = 'Low';
+            panel.appendChild(legendLow);
+            var legendHigh = createEl('text', { fill: 'rgba(255,255,255,0.5)', 'font-family': 'Nunito, sans-serif', 'font-size': '10' });
+            legendHigh.textContent = 'High';
+            panel.appendChild(legendHigh);
+            var legendLabel = createEl('text', { fill: 'rgba(255,255,255,0.6)', 'font-family': 'Nunito, sans-serif', 'font-size': '11' });
+            legendLabel.textContent = 'Pheromone Concentration';
+            panel.appendChild(legendLabel);
+
+            // Stats
+            var foodText = createEl('text', { fill: '#10b981', 'font-family': 'Courier New, monospace', 'font-size': '13' });
+            panel.appendChild(foodText);
+            var effText = createEl('text', { fill: '#fbbf24', 'font-family': 'Courier New, monospace', 'font-size': '12' });
+            panel.appendChild(effText);
+
+            // Evaporation slider
+            var sliderFO = createEl('foreignObject', { class: 'interactive' });
+            panel.appendChild(sliderFO);
+            var sliderDiv = document.createElement('div');
+            sliderDiv.style.cssText = 'font-family:Nunito,sans-serif;font-size:12px;color:#e8e6e1;padding:5px;';
+            sliderFO.appendChild(sliderDiv);
+
+            var evapRow = document.createElement('div');
+            evapRow.style.cssText = 'display:flex;align-items:center;gap:5px;';
+            var evapLbl = document.createElement('span');
+            evapLbl.style.cssText = 'width:80px;color:#DDA15E;font-size:11px;';
+            evapLbl.textContent = 'Evaporation';
+            var evapInp = document.createElement('input');
+            evapInp.type = 'range'; evapInp.min = 0.001; evapInp.max = 0.05; evapInp.step = 0.001; evapInp.value = 0.01;
+            evapInp.style.cssText = 'flex:1;accent-color:#DDA15E;height:3px;';
+            var evapVal = document.createElement('span');
+            evapVal.style.cssText = 'width:35px;text-align:right;font-size:10px;';
+            evapVal.textContent = '0.010';
+            evapInp.addEventListener('input', function() {
+                evapRate = parseFloat(evapInp.value);
+                evapVal.textContent = evapRate.toFixed(3);
+            });
+            evapRow.appendChild(evapLbl); evapRow.appendChild(evapInp); evapRow.appendChild(evapVal);
+            sliderDiv.appendChild(evapRow);
+
+            // Click info
+            var clickInfo = createEl('text', { fill: 'rgba(255,255,255,0.4)', 'font-family': 'Nunito, sans-serif', 'font-size': '11' });
+            clickInfo.textContent = 'Click to add/remove food';
+            panel.appendChild(clickInfo);
+
+            // Click to add food
+            canvas.style.pointerEvents = 'all';
+            canvas.addEventListener('click', function(e) {
+                var gx = Math.floor(e.clientX / 4);
+                var gy = Math.floor(e.clientY / 4);
+
+                // Check if clicking on existing food to remove
+                for (var i = foodSources.length - 1; i >= 0; i--) {
+                    var f = foodSources[i];
+                    var dx = gx - f.x, dy = gy - f.y;
+                    if (dx*dx + dy*dy < f.r * f.r) {
+                        foodSources.splice(i, 1);
+                        return;
+                    }
+                }
+
+                foodSources.push({ x: gx, y: gy, r: 5 + Math.random() * 5, amount: 200 + Math.random() * 300 });
+            });
+
+            function resize() {
+                W = window.innerWidth; H = window.innerHeight;
+                canvas.width = W; canvas.height = H;
+                svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+                svg.setAttribute('width', W); svg.setAttribute('height', H);
+
+                var px = W - panelW2 - 15, py = 50, ph = 340;
+                panelBg.setAttribute('x', px); panelBg.setAttribute('y', py);
+                panelBg.setAttribute('width', panelW2); panelBg.setAttribute('height', ph);
+                panelTitle.setAttribute('x', px + panelW2/2); panelTitle.setAttribute('y', py + 22);
+
+                legendBar.setAttribute('x', px + 15); legendBar.setAttribute('y', py + 35);
+                legendBar.setAttribute('width', 20); legendBar.setAttribute('height', 100);
+                legendLow.setAttribute('x', px + 40); legendLow.setAttribute('y', py + 135);
+                legendHigh.setAttribute('x', px + 40); legendHigh.setAttribute('y', py + 45);
+                legendLabel.setAttribute('x', px + 15); legendLabel.setAttribute('y', py + 155);
+
+                foodText.setAttribute('x', px + 15); foodText.setAttribute('y', py + 180);
+                effText.setAttribute('x', px + 15); effText.setAttribute('y', py + 200);
+
+                sliderFO.setAttribute('x', px + 5); sliderFO.setAttribute('y', py + 210);
+                sliderFO.setAttribute('width', panelW2 - 10); sliderFO.setAttribute('height', 40);
+
+                clickInfo.setAttribute('x', px + 15); clickInfo.setAttribute('y', py + ph - 15);
+
+                initSim();
+            }
+            var rt; window.addEventListener('resize', function() { clearTimeout(rt); rt = setTimeout(resize, 100); });
+            resize();
+
+            var stepCount = 0;
+
+            function animate() {
+                fpsCounter.update();
+                stepCount++;
+
+                // Evaporate pheromone
+                var evapMul = 1 - evapRate;
+                for (var i = 0; i < pheromone.length; i++) {
+                    pheromone[i] *= evapMul;
+                }
+
+                // Update ants
+                for (var i = 0; i < NUM_ANTS; i++) {
+                    var a = ants[i];
+
+                    // Sense pheromone in 3 directions
+                    var left = sensePhero(a.x, a.y, a.dir, -0.5);
+                    var center = sensePhero(a.x, a.y, a.dir, 0);
+                    var right = sensePhero(a.x, a.y, a.dir, 0.5);
+
+                    // Turn toward strongest pheromone (when searching for food)
+                    if (!a.hasFood) {
+                        if (center >= left && center >= right) {
+                            // go straight
+                        } else if (left > right) {
+                            a.dir -= 0.3;
+                        } else {
+                            a.dir += 0.3;
+                        }
+                    } else {
+                        // Return to nest - head toward nest
+                        var toNestX = nestX - a.x;
+                        var toNestY = nestY - a.y;
+                        var toNestAngle = Math.atan2(toNestY, toNestX);
+                        var diff = toNestAngle - a.dir;
+                        while (diff > Math.PI) diff -= Math.PI * 2;
+                        while (diff < -Math.PI) diff += Math.PI * 2;
+                        a.dir += diff * 0.15;
+                    }
+
+                    // Random wiggle
+                    a.dir += (Math.random() - 0.5) * 0.4;
+
+                    a.x += Math.cos(a.dir) * a.speed;
+                    a.y += Math.sin(a.dir) * a.speed;
+
+                    // Bounce off walls
+                    if (a.x < 0) { a.x = 0; a.dir = Math.PI - a.dir; }
+                    if (a.x >= gw) { a.x = gw - 1; a.dir = Math.PI - a.dir; }
+                    if (a.y < 0) { a.y = 0; a.dir = -a.dir; }
+                    if (a.y >= gh) { a.y = gh - 1; a.dir = -a.dir; }
+
+                    var gx = Math.floor(a.x), gy = Math.floor(a.y);
+
+                    // Check food
+                    if (!a.hasFood) {
+                        for (var f = 0; f < foodSources.length; f++) {
+                            var food = foodSources[f];
+                            var dx = a.x - food.x, dy = a.y - food.y;
+                            if (dx*dx + dy*dy < food.r * food.r && food.amount > 0) {
+                                a.hasFood = true;
+                                a.dir += Math.PI; // Turn around
+                                food.amount--;
+                                foodFound++;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Check nest
+                    if (a.hasFood) {
+                        var dx = a.x - nestX, dy = a.y - nestY;
+                        if (dx*dx + dy*dy < 25) {
+                            a.hasFood = false;
+                            a.dir += Math.PI;
+                        }
+                        // Deposit pheromone
+                        if (gx >= 0 && gx < gw && gy >= 0 && gy < gh) {
+                            pheromone[gy * gw + gx] = Math.min(pheromone[gy * gw + gx] + 2, 10);
+                        }
+                    }
+                }
+
+                // Render pheromone heatmap
+                var imgData = ctx.createImageData(W, H);
+                var data = imgData.data;
+
+                for (var py = 0; py < H; py++) {
+                    var gy2 = Math.floor(py / 4);
+                    if (gy2 >= gh) gy2 = gh - 1;
+                    for (var px = 0; px < W; px++) {
+                        var gx2 = Math.floor(px / 4);
+                        if (gx2 >= gw) gx2 = gw - 1;
+                        var v = Math.min(pheromone[gy2 * gw + gx2] / 5, 1);
+                        var idx = (py * W + px) * 4;
+                        // Dark purple to yellow
+                        data[idx] = Math.floor(v * 200 + 10);
+                        data[idx + 1] = Math.floor(v * v * 100);
+                        data[idx + 2] = Math.floor(v * 50 + (1 - v) * 26);
+                        data[idx + 3] = 255;
+                    }
+                }
+
+                ctx.putImageData(imgData, 0, 0);
+
+                // Draw food sources
+                for (var f = 0; f < foodSources.length; f++) {
+                    var food = foodSources[f];
+                    if (food.amount <= 0) continue;
+                    ctx.fillStyle = '#10b981';
+                    ctx.beginPath();
+                    ctx.arc(food.x * 4, food.y * 4, food.r * 4, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.fillStyle = 'white';
+                    ctx.font = '10px Nunito';
+                    ctx.fillText(food.amount, food.x * 4 - 10, food.y * 4 + 4);
+                }
+
+                // Draw nest
+                ctx.fillStyle = '#DDA15E';
+                ctx.beginPath();
+                ctx.arc(nestX * 4, nestY * 4, 20, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = '#0a0e1a';
+                ctx.font = '10px Nunito';
+                ctx.textAlign = 'center';
+                ctx.fillText('NEST', nestX * 4, nestY * 4 + 4);
+                ctx.textAlign = 'left';
+
+                // Draw ants
+                for (var i = 0; i < NUM_ANTS; i++) {
+                    var a = ants[i];
+                    ctx.fillStyle = a.hasFood ? '#ffdd00' : '#ffffff';
+                    ctx.fillRect(a.x * 4 - 1, a.y * 4 - 1, 2, 2);
+                }
+
+                // Update stats
+                if (stepCount % 30 === 0) {
+                    foodText.textContent = 'Food found: ' + foodFound;
+                    var totalFood = 0;
+                    for (var f = 0; f < foodSources.length; f++) totalFood += foodSources[f].amount;
+                    var eff = totalFood > 0 ? (foodFound / (foodFound + totalFood) * 100).toFixed(1) : '100';
+                    effText.textContent = 'Efficiency: ' + eff + '%';
+                }
+
+                requestAnimationFrame(animate);
+            }
+
+            hideLoading();
+            animate();
+        } catch(e) { showError('Init Error: ' + e.message); }
+    </script>
+</body>
+</html>

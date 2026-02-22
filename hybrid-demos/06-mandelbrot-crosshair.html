@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mandelbrot + Coordinate Crosshair - CCAB</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root{--sage:#8A9A5B;--moss:#606C38;--earth:#DDA15E;--cream:#FEFAE0;--terracotta:#BC6C25;--dark-moss:#3d4423}
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{overflow:hidden;font-family:'Nunito',sans-serif;background:#0a0e1a;color:#e8e6e1}
+        .back-link{position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:var(--earth);text-decoration:none;border-radius:6px;font-size:14px;font-family:'Nunito',sans-serif;z-index:999;transition:all 0.3s ease}
+        .back-link:hover{background:rgba(221,161,94,0.2);transform:translateX(-4px)}
+        #fps-counter{position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.7);color:var(--earth);padding:8px 12px;border-radius:6px;font-family:'Courier New',monospace;font-size:14px;z-index:999}
+        .fps-good{color:#10b981}.fps-medium{color:#fbbf24}.fps-poor{color:#e11d48}
+        #hybrid-container{position:relative;width:100vw;height:100vh}
+        #canvas{position:absolute;top:0;left:0;width:100%;height:100%;z-index:0}
+        #svg-overlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none}
+        .interactive{pointer-events:all;cursor:pointer}
+        #loading{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:1000}
+        .spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,0.1);border-top-color:var(--earth);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1rem}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        #error{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(225,29,72,0.9);color:white;padding:2rem;border-radius:12px;text-align:center;max-width:400px;z-index:1001}
+        #error h2{font-family:'Lora',serif;margin:0 0 1rem 0}
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Rendering Mandelbrot...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+
+    <script>
+        window.addEventListener('error',function(e){showError('Runtime Error: '+e.message);});
+        function showError(m){document.getElementById('loading').style.display='none';document.getElementById('error').style.display='block';document.getElementById('error-message').textContent=m;}
+        function hideLoading(){document.getElementById('loading').style.display='none';}
+        class FPSCounter{constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}update(){this.frames++;var n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}}
+
+        try {
+            var canvas = document.getElementById('canvas');
+            var ctx = canvas.getContext('2d');
+            var svg = document.getElementById('svg-overlay');
+            var svgNS = 'http://www.w3.org/2000/svg';
+            var fpsCounter = new FPSCounter();
+            var W, H;
+
+            // View
+            var centerX = -0.5, centerY = 0;
+            var zoom = 3; // width in complex plane
+            var maxIter = 200;
+            var needsRedraw = true;
+            var mouseX = 0, mouseY = 0;
+
+            // Color palette index
+            var paletteIdx = 0;
+            var palettes = [
+                function(t) { // Classic
+                    var r = Math.floor(9*(1-t)*t*t*t*255);
+                    var g = Math.floor(15*(1-t)*(1-t)*t*t*255);
+                    var b = Math.floor(8.5*(1-t)*(1-t)*(1-t)*t*255);
+                    return [r, g, b];
+                },
+                function(t) { // Fire
+                    return [Math.floor(t*255), Math.floor(t*t*200), Math.floor(t*t*t*150)];
+                },
+                function(t) { // Ocean
+                    var h = 200 + t * 160;
+                    return hsl2rgb(h, 0.8, 0.3 + t * 0.4);
+                },
+                function(t) { // Neon
+                    var h = t * 360;
+                    return hsl2rgb(h, 1.0, 0.5);
+                }
+            ];
+            var paletteNames = ['Classic', 'Fire', 'Ocean', 'Neon'];
+
+            function hsl2rgb(h, s, l) {
+                h = h % 360; if (h < 0) h += 360;
+                var c = (1 - Math.abs(2*l-1)) * s;
+                var x = c * (1 - Math.abs((h/60)%2 - 1));
+                var m = l - c/2;
+                var r,g,b;
+                if (h<60){r=c;g=x;b=0;}else if(h<120){r=x;g=c;b=0;}else if(h<180){r=0;g=c;b=x;}
+                else if(h<240){r=0;g=x;b=c;}else if(h<300){r=x;g=0;b=c;}else{r=c;g=0;b=x;}
+                return [Math.floor((r+m)*255),Math.floor((g+m)*255),Math.floor((b+m)*255)];
+            }
+
+            function createEl(tag, attrs) {
+                var el = document.createElementNS(svgNS, tag);
+                for (var k in attrs) el.setAttribute(k, attrs[k]);
+                return el;
+            }
+
+            // SVG crosshair
+            var crossH = createEl('line', { stroke: 'rgba(221,161,94,0.4)', 'stroke-width': '1', 'stroke-dasharray': '4,4' });
+            var crossV = createEl('line', { stroke: 'rgba(221,161,94,0.4)', 'stroke-width': '1', 'stroke-dasharray': '4,4' });
+            svg.appendChild(crossH); svg.appendChild(crossV);
+
+            // Tooltip
+            var tooltipG = createEl('g', {});
+            svg.appendChild(tooltipG);
+            var tooltipBg = createEl('rect', { rx: '8', fill: 'rgba(0,0,0,0.85)', stroke: 'rgba(221,161,94,0.4)', 'stroke-width': '1' });
+            tooltipG.appendChild(tooltipBg);
+
+            var tooltipLines = [];
+            for (var i = 0; i < 4; i++) {
+                var t = createEl('text', { fill: i === 3 ? '#10b981' : '#e8e6e1', 'font-family': 'Courier New, monospace', 'font-size': '12' });
+                tooltipG.appendChild(t);
+                tooltipLines.push(t);
+            }
+
+            // Zoom display
+            var zoomText = createEl('text', { fill: 'rgba(221,161,94,0.8)', 'font-family': 'Courier New, monospace', 'font-size': '13' });
+            svg.appendChild(zoomText);
+
+            // Palette buttons
+            var palBtnGroup = createEl('g', { class: 'interactive' });
+            svg.appendChild(palBtnGroup);
+            var palBtns = [];
+
+            for (var i = 0; i < paletteNames.length; i++) {
+                var bg = createEl('g', { style: 'cursor:pointer' });
+                bg.classList.add('interactive');
+                var r = createEl('rect', { width: '65', height: '24', rx: '5', fill: i === 0 ? 'rgba(221,161,94,0.4)' : 'rgba(255,255,255,0.1)', stroke: 'rgba(221,161,94,0.4)', 'stroke-width': '1' });
+                var t = createEl('text', { x: '32.5', y: '16', 'text-anchor': 'middle', fill: '#DDA15E', 'font-family': 'Nunito, sans-serif', 'font-size': '11' });
+                t.textContent = paletteNames[i];
+                bg.appendChild(r); bg.appendChild(t);
+                palBtnGroup.appendChild(bg);
+                palBtns.push({ g: bg, rect: r });
+                (function(idx) {
+                    bg.addEventListener('click', function() {
+                        paletteIdx = idx;
+                        needsRedraw = true;
+                        for (var j = 0; j < palBtns.length; j++) {
+                            palBtns[j].rect.setAttribute('fill', j === idx ? 'rgba(221,161,94,0.4)' : 'rgba(255,255,255,0.1)');
+                        }
+                    });
+                })(i);
+            }
+
+            // Mouse interaction on canvas
+            var isDragging = false, dragStartX, dragStartY, dragCX, dragCY;
+
+            canvas.style.pointerEvents = 'all';
+            canvas.style.cursor = 'crosshair';
+
+            canvas.addEventListener('mousedown', function(e) {
+                isDragging = true;
+                dragStartX = e.clientX; dragStartY = e.clientY;
+                dragCX = centerX; dragCY = centerY;
+            });
+
+            canvas.addEventListener('mousemove', function(e) {
+                mouseX = e.clientX; mouseY = e.clientY;
+                if (isDragging) {
+                    var dx = (e.clientX - dragStartX) / W * zoom;
+                    var dy = (e.clientY - dragStartY) / H * zoom * (H / W);
+                    centerX = dragCX - dx;
+                    centerY = dragCY - dy;
+                    needsRedraw = true;
+                }
+                updateCrosshair();
+            });
+
+            canvas.addEventListener('mouseup', function() { isDragging = false; });
+            canvas.addEventListener('mouseleave', function() { isDragging = false; });
+
+            canvas.addEventListener('wheel', function(e) {
+                e.preventDefault();
+                var zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+                // Zoom toward cursor
+                var re = centerX + (mouseX / W - 0.5) * zoom;
+                var im = centerY + (mouseY / H - 0.5) * zoom * (H / W);
+                zoom *= zoomFactor;
+                centerX = re - (mouseX / W - 0.5) * zoom;
+                centerY = im - (mouseY / H - 0.5) * zoom * (H / W);
+                maxIter = Math.min(1000, Math.max(200, Math.floor(200 + 50 * Math.log2(3 / zoom))));
+                needsRedraw = true;
+                updateCrosshair();
+            }, { passive: false });
+
+            function screenToComplex(sx, sy) {
+                var re = centerX + (sx / W - 0.5) * zoom;
+                var im = centerY + (sy / H - 0.5) * zoom * (H / W);
+                return [re, im];
+            }
+
+            function mandelbrot(cr, ci) {
+                var zr = 0, zi = 0, zr2 = 0, zi2 = 0;
+                var i;
+                for (i = 0; i < maxIter; i++) {
+                    zi = 2 * zr * zi + ci;
+                    zr = zr2 - zi2 + cr;
+                    zr2 = zr * zr; zi2 = zi * zi;
+                    if (zr2 + zi2 > 4) break;
+                }
+                if (i === maxIter) return -1;
+                // Smooth coloring
+                return i + 1 - Math.log(Math.log(Math.sqrt(zr2 + zi2))) / Math.log(2);
+            }
+
+            function updateCrosshair() {
+                crossH.setAttribute('x1', 0); crossH.setAttribute('x2', W);
+                crossH.setAttribute('y1', mouseY); crossH.setAttribute('y2', mouseY);
+                crossV.setAttribute('x1', mouseX); crossV.setAttribute('x2', mouseX);
+                crossV.setAttribute('y1', 0); crossV.setAttribute('y2', H);
+
+                var c = screenToComplex(mouseX, mouseY);
+                var iter = mandelbrot(c[0], c[1]);
+
+                tooltipLines[0].textContent = 'Re: ' + c[0].toFixed(10);
+                tooltipLines[1].textContent = 'Im: ' + c[1].toFixed(10);
+                tooltipLines[2].textContent = 'Iter: ' + (iter < 0 ? maxIter : Math.floor(iter));
+                tooltipLines[3].textContent = iter < 0 ? 'In set: Yes' : 'In set: No';
+
+                var tx = mouseX + 20, ty = mouseY - 80;
+                if (tx + 200 > W) tx = mouseX - 210;
+                if (ty < 10) ty = mouseY + 20;
+
+                tooltipBg.setAttribute('x', tx); tooltipBg.setAttribute('y', ty);
+                tooltipBg.setAttribute('width', 195); tooltipBg.setAttribute('height', 80);
+
+                for (var i = 0; i < tooltipLines.length; i++) {
+                    tooltipLines[i].setAttribute('x', tx + 10);
+                    tooltipLines[i].setAttribute('y', ty + 18 + i * 17);
+                }
+
+                zoomText.textContent = 'Zoom: ' + (3 / zoom).toExponential(2) + 'x | Iter: ' + maxIter;
+            }
+
+            function renderMandelbrot() {
+                var imgData = ctx.createImageData(W, H);
+                var data = imgData.data;
+                var aspectRatio = H / W;
+                var palette = palettes[paletteIdx];
+
+                for (var py = 0; py < H; py++) {
+                    var ci = centerY + (py / H - 0.5) * zoom * aspectRatio;
+                    for (var px = 0; px < W; px++) {
+                        var cr = centerX + (px / W - 0.5) * zoom;
+                        var iter = mandelbrot(cr, ci);
+                        var idx = (py * W + px) * 4;
+                        if (iter < 0) {
+                            data[idx] = 0; data[idx+1] = 0; data[idx+2] = 0;
+                        } else {
+                            var t = (iter % 50) / 50;
+                            var c = palette(t);
+                            data[idx] = c[0]; data[idx+1] = c[1]; data[idx+2] = c[2];
+                        }
+                        data[idx+3] = 255;
+                    }
+                }
+                ctx.putImageData(imgData, 0, 0);
+            }
+
+            function resize() {
+                W = window.innerWidth; H = window.innerHeight;
+                canvas.width = W; canvas.height = H;
+                svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+                svg.setAttribute('width', W); svg.setAttribute('height', H);
+
+                zoomText.setAttribute('x', 10); zoomText.setAttribute('y', H - 15);
+
+                for (var i = 0; i < palBtns.length; i++) {
+                    palBtns[i].g.setAttribute('transform', 'translate(' + (10 + i * 72) + ',' + (H - 50) + ')');
+                }
+
+                needsRedraw = true;
+            }
+            var rt; window.addEventListener('resize', function() { clearTimeout(rt); rt = setTimeout(resize, 100); });
+            resize();
+
+            function animate() {
+                fpsCounter.update();
+                if (needsRedraw) {
+                    renderMandelbrot();
+                    needsRedraw = false;
+                    updateCrosshair();
+                }
+                requestAnimationFrame(animate);
+            }
+
+            hideLoading();
+            animate();
+        } catch(e) { showError('Init Error: ' + e.message); }
+    </script>
+</body>
+</html>

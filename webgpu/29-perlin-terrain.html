@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Perlin Noise Terrain Flythrough - WebGPU</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600;700&family=Nunito:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #FEFAE0 0%, #F4F1DE 50%, #EDE8D5 100%);
+            color: #3d4423;
+            font-family: 'Nunito', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls {
+            position: fixed; top: 20px; left: 20px;
+            background: rgba(255,255,255,0.75);
+            backdrop-filter: blur(12px);
+            padding: 20px; border-radius: 16px;
+            border: 1px solid rgba(138,154,91,0.3);
+            z-index: 100; min-width: 240px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+        }
+        h1 { font-family: 'Lora', serif; font-size: 1.2em; color: #606C38; margin-bottom: 12px; }
+        .slider-group { margin-bottom: 10px; }
+        .slider-group label {
+            display: flex; justify-content: space-between;
+            margin-bottom: 3px; font-size: 0.82em; color: #606C38;
+        }
+        .slider-group input[type="range"] {
+            width: 100%; height: 6px; -webkit-appearance: none;
+            background: #d4d4aa; border-radius: 3px; outline: none;
+        }
+        .slider-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 16px; height: 16px;
+            background: #8A9A5B; border-radius: 50%; cursor: pointer;
+        }
+        .checkbox-row {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 0.85em; color: #606C38; margin-bottom: 10px;
+        }
+        .checkbox-row input { accent-color: #8A9A5B; width: 16px; height: 16px; }
+        .stats {
+            margin-top: 10px; padding-top: 10px;
+            border-top: 1px solid rgba(138,154,91,0.2);
+            font-size: 0.82em; color: #606C38;
+        }
+        .stats div { margin-bottom: 2px; }
+        .back-link {
+            position: fixed; top: 20px; right: 20px;
+            color: #606C38; text-decoration: none;
+            font-family: 'Nunito', sans-serif; font-size: 0.9em; z-index: 100;
+            background: rgba(255,255,255,0.7); backdrop-filter: blur(8px);
+            padding: 8px 16px; border-radius: 10px;
+            border: 1px solid rgba(138,154,91,0.3); transition: all 0.2s;
+        }
+        .back-link:hover { background: rgba(138,154,91,0.2); }
+        .error-msg {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            background: rgba(188,108,37,0.95); color: #fff; padding: 30px;
+            border-radius: 16px; text-align: center; max-width: 420px;
+            font-family: 'Nunito', sans-serif;
+        }
+        .error-msg h2 { font-family: 'Lora', serif; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <h1>Perlin Terrain</h1>
+        <div class="slider-group">
+            <label>Octaves <span id="octVal">4</span></label>
+            <input type="range" id="octaves" min="1" max="8" step="1" value="4">
+        </div>
+        <div class="slider-group">
+            <label>Persistence <span id="persVal">0.5</span></label>
+            <input type="range" id="persistence" min="0.1" max="0.9" step="0.05" value="0.5">
+        </div>
+        <div class="slider-group">
+            <label>Lacunarity <span id="lacVal">2.0</span></label>
+            <input type="range" id="lacunarity" min="1.0" max="4.0" step="0.1" value="2.0">
+        </div>
+        <div class="slider-group">
+            <label>Height Scale <span id="heightVal">0.4</span></label>
+            <input type="range" id="heightScale" min="0.1" max="1.0" step="0.05" value="0.4">
+        </div>
+        <div class="checkbox-row">
+            <input type="checkbox" id="wireframe">
+            <label for="wireframe">Wireframe Overlay</label>
+        </div>
+        <div class="stats">
+            <div>FPS: <span id="fps">0</span></div>
+        </div>
+    </div>
+    <a href="index.html" class="back-link">&#8592; Back to Gallery</a>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+
+        if (!navigator.gpu) {
+            document.body.innerHTML = '<div class="error-msg"><h2>WebGPU Not Supported</h2><p>Your browser does not support WebGPU. Try Chrome 113+ or Edge 113+.</p></div>';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) throw new Error('No adapter');
+        const device = await adapter.requestDevice();
+        const ctxGPU = canvas.getContext('webgpu');
+        const presentFormat = navigator.gpu.getPreferredCanvasFormat();
+
+        function resize() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            ctxGPU.configure({ device, format: presentFormat, alphaMode: 'opaque' });
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Terrain mesh grid
+        const GRID = 128;
+        const VERTS = (GRID + 1) * (GRID + 1);
+        const TRIS = GRID * GRID * 2;
+
+        // Generate index buffer for triangle mesh
+        const indices = new Uint32Array(TRIS * 3);
+        let ii = 0;
+        for (let z = 0; z < GRID; z++) {
+            for (let x = 0; x < GRID; x++) {
+                const tl = z * (GRID + 1) + x;
+                const tr = tl + 1;
+                const bl = tl + (GRID + 1);
+                const br = bl + 1;
+                indices[ii++] = tl; indices[ii++] = bl; indices[ii++] = tr;
+                indices[ii++] = tr; indices[ii++] = bl; indices[ii++] = br;
+            }
+        }
+
+        // Line index buffer for wireframe
+        const wireIndices = new Uint32Array(GRID * GRID * 4 * 2);
+        let wi = 0;
+        for (let z = 0; z < GRID; z++) {
+            for (let x = 0; x < GRID; x++) {
+                const tl = z * (GRID + 1) + x;
+                wireIndices[wi++] = tl; wireIndices[wi++] = tl + 1;
+                wireIndices[wi++] = tl; wireIndices[wi++] = tl + (GRID + 1);
+            }
+        }
+
+        const indexBuf = device.createBuffer({ size: indices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(indexBuf, 0, indices);
+        const wireIndexBuf = device.createBuffer({ size: wireIndices.byteLength, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(wireIndexBuf, 0, wireIndices);
+
+        // Vertex buffer: pos(x,y,z) + normal(nx,ny,nz) = 6 floats per vertex
+        const vertBuf = device.createBuffer({ size: VERTS * 6 * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.STORAGE });
+
+        // Uniforms: mat4 MVP(16), octaves, persistence, lacunarity, heightScale, time, wireframe, pad, pad (24 floats total = 96 bytes)
+        // We'll use 128 bytes to keep aligned
+        const uniformBuf = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        let octaves = 4, persistence = 0.5, lacunarity = 2.0, heightScale = 0.4, showWire = false;
+
+        // Shader with Perlin noise in WGSL
+        const shader = device.createShaderModule({ code: `
+            struct Uniforms {
+                mvp: mat4x4f,
+                octaves: f32,
+                persistence: f32,
+                lacunarity: f32,
+                heightScale: f32,
+                time: f32,
+                wireframe: f32,
+                gridSize: f32,
+                pad: f32,
+            }
+
+            struct Vertex { @location(0) pos: vec3f, @location(1) normal: vec3f }
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) worldPos: vec3f, @location(1) normal: vec3f, @location(2) height: f32 }
+
+            @group(0) @binding(0) var<uniform> u: Uniforms;
+
+            // Simple hash-based gradient noise (simplex-like)
+            fn hash2(p: vec2f) -> vec2f {
+                var p2 = vec2f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)));
+                return fract(sin(p2) * 43758.5453) * 2.0 - 1.0;
+            }
+
+            fn noise(p: vec2f) -> f32 {
+                let i = floor(p);
+                let f = fract(p);
+                let u = f * f * (3.0 - 2.0 * f);
+
+                let a = dot(hash2(i + vec2f(0,0)), f - vec2f(0,0));
+                let b = dot(hash2(i + vec2f(1,0)), f - vec2f(1,0));
+                let c = dot(hash2(i + vec2f(0,1)), f - vec2f(0,1));
+                let d = dot(hash2(i + vec2f(1,1)), f - vec2f(1,1));
+
+                return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+            }
+
+            fn fbm(p: vec2f) -> f32 {
+                var val = 0.0;
+                var amp = 1.0;
+                var freq = 1.0;
+                var total = 0.0;
+                for (var i = 0; i < 8; i++) {
+                    if (f32(i) >= u.octaves) { break; }
+                    val += noise(p * freq) * amp;
+                    total += amp;
+                    amp *= u.persistence;
+                    freq *= u.lacunarity;
+                }
+                return val / total;
+            }
+
+            fn terrainColor(h: f32) -> vec3f {
+                // water → sand → green → rock → snow
+                if (h < 0.0) { return vec3f(0.2, 0.35, 0.6); } // water
+                if (h < 0.08) { return vec3f(0.76, 0.70, 0.50); } // sand
+                if (h < 0.4) {
+                    let t = (h - 0.08) / 0.32;
+                    return mix(vec3f(0.376, 0.55, 0.22), vec3f(0.25, 0.40, 0.15), t);
+                }
+                if (h < 0.7) {
+                    let t = (h - 0.4) / 0.3;
+                    return mix(vec3f(0.45, 0.40, 0.35), vec3f(0.55, 0.50, 0.45), t);
+                }
+                let t = clamp((h - 0.7) / 0.3, 0.0, 1.0);
+                return mix(vec3f(0.55, 0.50, 0.45), vec3f(0.95, 0.95, 0.95), t);
+            }
+
+            @vertex
+            fn vs(@location(0) pos: vec3f, @location(1) normal: vec3f) -> VSOut {
+                var out: VSOut;
+                // Apply terrain height from noise
+                let terrainPos = vec2f(pos.x, pos.z) * 3.0 + vec2f(0.0, u.time * 0.3);
+                let h = fbm(terrainPos) * u.heightScale;
+                let worldPos = vec3f(pos.x, max(h, -0.02), pos.z);
+
+                out.pos = u.mvp * vec4f(worldPos, 1.0);
+                out.worldPos = worldPos;
+                out.height = h / u.heightScale;
+
+                // Compute normal via finite differences
+                let eps = 0.01;
+                let hL = fbm(terrainPos + vec2f(-eps, 0.0)) * u.heightScale;
+                let hR = fbm(terrainPos + vec2f(eps, 0.0)) * u.heightScale;
+                let hD = fbm(terrainPos + vec2f(0.0, -eps)) * u.heightScale;
+                let hU = fbm(terrainPos + vec2f(0.0, eps)) * u.heightScale;
+                out.normal = normalize(vec3f(hL - hR, 2.0 * eps, hD - hU));
+
+                return out;
+            }
+
+            @fragment
+            fn fs(in: VSOut) -> @location(0) vec4f {
+                let h01 = clamp(in.height * 0.5 + 0.5, 0.0, 1.0);
+                var color = terrainColor(h01);
+
+                // Simple directional lighting
+                let lightDir = normalize(vec3f(0.5, 0.8, 0.3));
+                let diff = max(dot(in.normal, lightDir), 0.0);
+                let ambient = 0.3;
+                color = color * (ambient + diff * 0.7);
+
+                // Fog
+                let fogDist = clamp(-in.worldPos.z * 0.5, 0.0, 1.0);
+                let fogColor = vec3f(0.82, 0.85, 0.78);
+                color = mix(color, fogColor, fogDist * 0.6);
+
+                return vec4f(color, 1.0);
+            }
+
+            @fragment
+            fn fsWire(in: VSOut) -> @location(0) vec4f {
+                return vec4f(0.3, 0.35, 0.2, 0.5);
+            }
+        `});
+
+        // Vertex positions: grid on XZ plane, centered
+        const vertData = new Float32Array(VERTS * 6);
+        for (let z = 0; z <= GRID; z++) {
+            for (let x = 0; x <= GRID; x++) {
+                const i = (z * (GRID + 1) + x) * 6;
+                vertData[i] = (x / GRID) * 2.0 - 1.0;
+                vertData[i + 1] = 0;
+                vertData[i + 2] = (z / GRID) * 2.0 - 1.0;
+                vertData[i + 3] = 0; vertData[i + 4] = 1; vertData[i + 5] = 0;
+            }
+        }
+        const staticVertBuf = device.createBuffer({ size: vertData.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(staticVertBuf, 0, vertData);
+
+        const vertexLayout = {
+            arrayStride: 24,
+            attributes: [
+                { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                { shaderLocation: 1, offset: 12, format: 'float32x3' },
+            ],
+        };
+
+        const depthTex = device.createTexture({
+            size: [canvas.width, canvas.height],
+            format: 'depth24plus',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+
+        const fillPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: shader, entryPoint: 'vs', buffers: [vertexLayout] },
+            fragment: { module: shader, entryPoint: 'fs', targets: [{ format: presentFormat }] },
+            primitive: { topology: 'triangle-list', cullMode: 'none' },
+            depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+        });
+
+        const wirePipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: shader, entryPoint: 'vs', buffers: [vertexLayout] },
+            fragment: { module: shader, entryPoint: 'fsWire', targets: [{
+                format: presentFormat,
+                blend: {
+                    color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+                    alpha: { srcFactor: 'one', dstFactor: 'one' },
+                },
+            }] },
+            primitive: { topology: 'line-list' },
+            depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less-equal' },
+        });
+
+        const fillBG = device.createBindGroup({
+            layout: fillPipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuf } }],
+        });
+        const wireBG = device.createBindGroup({
+            layout: wirePipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: uniformBuf } }],
+        });
+
+        // Simple perspective + view matrix
+        function mat4Perspective(fov, aspect, near, far) {
+            const f = 1.0 / Math.tan(fov / 2);
+            const nf = 1 / (near - far);
+            return new Float32Array([
+                f / aspect, 0, 0, 0,
+                0, f, 0, 0,
+                0, 0, (far + near) * nf, -1,
+                0, 0, 2 * far * near * nf, 0
+            ]);
+        }
+
+        function mat4LookAt(eye, center, up) {
+            const z = normalize3([eye[0]-center[0], eye[1]-center[1], eye[2]-center[2]]);
+            const x = normalize3(cross3(up, z));
+            const y = cross3(z, x);
+            return new Float32Array([
+                x[0], y[0], z[0], 0,
+                x[1], y[1], z[1], 0,
+                x[2], y[2], z[2], 0,
+                -dot3(x,eye), -dot3(y,eye), -dot3(z,eye), 1
+            ]);
+        }
+
+        function normalize3(v) { const l=Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]); return [v[0]/l,v[1]/l,v[2]/l]; }
+        function cross3(a,b) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+        function dot3(a,b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+
+        function mat4Mul(a, b) {
+            const r = new Float32Array(16);
+            for (let i = 0; i < 4; i++)
+                for (let j = 0; j < 4; j++)
+                    r[j*4+i] = a[i]*b[j*4]+a[4+i]*b[j*4+1]+a[8+i]*b[j*4+2]+a[12+i]*b[j*4+3];
+            return r;
+        }
+
+        // UI
+        document.getElementById('octaves').addEventListener('input', e => {
+            octaves = parseInt(e.target.value);
+            document.getElementById('octVal').textContent = octaves;
+        });
+        document.getElementById('persistence').addEventListener('input', e => {
+            persistence = parseFloat(e.target.value);
+            document.getElementById('persVal').textContent = persistence.toFixed(2);
+        });
+        document.getElementById('lacunarity').addEventListener('input', e => {
+            lacunarity = parseFloat(e.target.value);
+            document.getElementById('lacVal').textContent = lacunarity.toFixed(1);
+        });
+        document.getElementById('heightScale').addEventListener('input', e => {
+            heightScale = parseFloat(e.target.value);
+            document.getElementById('heightVal').textContent = heightScale.toFixed(2);
+        });
+        document.getElementById('wireframe').addEventListener('change', e => {
+            showWire = e.target.checked;
+        });
+
+        let time = 0;
+        let lastTime = performance.now(), frameCount = 0, fpsAccum = 0;
+
+        let currentDepthTex = depthTex;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            time += dt;
+            frameCount++; fpsAccum += dt;
+            if (fpsAccum >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(frameCount / fpsAccum);
+                frameCount = 0; fpsAccum = 0;
+            }
+
+            // Rebuild depth texture if canvas resized
+            if (currentDepthTex.width !== canvas.width || currentDepthTex.height !== canvas.height) {
+                currentDepthTex.destroy();
+                currentDepthTex = device.createTexture({
+                    size: [canvas.width, canvas.height],
+                    format: 'depth24plus',
+                    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+                });
+            }
+
+            const aspect = canvas.width / canvas.height;
+            const proj = mat4Perspective(Math.PI / 3, aspect, 0.01, 100);
+            const view = mat4LookAt([0, 0.5, 1.2], [0, 0.1, 0], [0, 1, 0]);
+            const mvp = mat4Mul(proj, view);
+
+            const uniformArr = new Float32Array(32);
+            uniformArr.set(mvp, 0);
+            uniformArr[16] = octaves;
+            uniformArr[17] = persistence;
+            uniformArr[18] = lacunarity;
+            uniformArr[19] = heightScale;
+            uniformArr[20] = time;
+            uniformArr[21] = showWire ? 1 : 0;
+            uniformArr[22] = GRID;
+            device.queue.writeBuffer(uniformBuf, 0, uniformArr);
+
+            const enc = device.createCommandEncoder();
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: ctxGPU.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.82, g: 0.85, b: 0.78, a: 1 },
+                }],
+                depthStencilAttachment: {
+                    view: currentDepthTex.createView(),
+                    depthLoadOp: 'clear', depthStoreOp: 'store', depthClearValue: 1.0,
+                },
+            });
+
+            rp.setPipeline(fillPipeline);
+            rp.setBindGroup(0, fillBG);
+            rp.setVertexBuffer(0, staticVertBuf);
+            rp.setIndexBuffer(indexBuf, 'uint32');
+            rp.drawIndexed(TRIS * 3);
+
+            if (showWire) {
+                rp.setPipeline(wirePipeline);
+                rp.setBindGroup(0, wireBG);
+                rp.setVertexBuffer(0, staticVertBuf);
+                rp.setIndexBuffer(wireIndexBuf, 'uint32');
+                rp.drawIndexed(wi);
+            }
+
+            rp.end();
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+</body>
+</html>

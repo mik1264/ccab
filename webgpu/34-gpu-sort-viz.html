@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Bitonic Sort Visualization - WebGPU</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600;700&family=Nunito:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #FEFAE0 0%, #F4F1DE 50%, #EDE8D5 100%);
+            color: #3d4423;
+            font-family: 'Nunito', sans-serif;
+            overflow: hidden;
+        }
+        .main { display: flex; height: 100vh; }
+        .canvas-area { flex: 1; position: relative; }
+        canvas { display: block; width: 100%; height: 100%; }
+        .controls {
+            position: fixed; top: 20px; left: 20px;
+            background: rgba(255,255,255,0.8);
+            backdrop-filter: blur(12px);
+            padding: 18px; border-radius: 16px;
+            border: 1px solid rgba(138,154,91,0.3);
+            z-index: 100; min-width: 260px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+        }
+        h1 { font-family: 'Lora', serif; font-size: 1.2em; color: #606C38; margin-bottom: 12px; }
+        .modes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+        .mode-btn {
+            padding: 5px 10px;
+            background: rgba(138,154,91,0.15);
+            border: 1px solid rgba(138,154,91,0.3);
+            border-radius: 8px; color: #606C38;
+            font-size: 0.78em; cursor: pointer;
+            font-family: 'Nunito', sans-serif; transition: all 0.2s;
+        }
+        .mode-btn:hover, .mode-btn.active {
+            background: #8A9A5B; color: #fff; border-color: #8A9A5B;
+        }
+        .btn-row { display: flex; gap: 6px; margin-bottom: 10px; }
+        .btn {
+            flex: 1; padding: 7px; border: none; border-radius: 8px;
+            background: #8A9A5B; color: #fff; cursor: pointer;
+            font-family: 'Nunito', sans-serif; font-weight: 600;
+            font-size: 0.82em; transition: all 0.2s;
+        }
+        .btn:hover { background: #606C38; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .stats {
+            margin-top: 10px; padding-top: 10px;
+            border-top: 1px solid rgba(138,154,91,0.2);
+            font-size: 0.82em; color: #606C38;
+        }
+        .stats div { margin-bottom: 2px; }
+        .highlight { color: #BC6C25; font-weight: 600; }
+        .cpu-panel {
+            position: fixed; bottom: 20px; left: 20px;
+            background: rgba(255,255,255,0.75);
+            backdrop-filter: blur(12px);
+            padding: 14px; border-radius: 12px;
+            border: 1px solid rgba(138,154,91,0.3);
+            z-index: 100; min-width: 200px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+            font-size: 0.82em; color: #606C38;
+        }
+        .cpu-panel h3 { font-family: 'Lora', serif; font-size: 0.95em; margin-bottom: 6px; }
+        .cpu-canvas {
+            width: 200px; height: 80px;
+            border: 1px solid rgba(138,154,91,0.2);
+            border-radius: 6px;
+        }
+        .back-link {
+            position: fixed; top: 20px; right: 20px;
+            color: #606C38; text-decoration: none;
+            font-family: 'Nunito', sans-serif; font-size: 0.9em; z-index: 100;
+            background: rgba(255,255,255,0.7); backdrop-filter: blur(8px);
+            padding: 8px 16px; border-radius: 10px;
+            border: 1px solid rgba(138,154,91,0.3); transition: all 0.2s;
+        }
+        .back-link:hover { background: rgba(138,154,91,0.2); }
+        .error-msg {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            background: rgba(188,108,37,0.95); color: #fff; padding: 30px;
+            border-radius: 16px; text-align: center; max-width: 420px;
+            font-family: 'Nunito', sans-serif;
+        }
+        .error-msg h2 { font-family: 'Lora', serif; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <h1>GPU Bitonic Sort</h1>
+        <div class="modes">
+            <button class="mode-btn" data-n="1024">1K</button>
+            <button class="mode-btn active" data-n="4096">4K</button>
+            <button class="mode-btn" data-n="16384">16K</button>
+            <button class="mode-btn" data-n="65536">64K</button>
+        </div>
+        <div class="btn-row">
+            <button class="btn" id="shuffleBtn">Shuffle</button>
+            <button class="btn" id="sortBtn">Sort (Full Speed)</button>
+            <button class="btn" id="stepBtn">Step</button>
+        </div>
+        <div class="stats">
+            <div>Elements: <span id="elemCount">4,096</span></div>
+            <div>Step: <span id="stepNum">0</span> / <span id="totalSteps">0</span></div>
+            <div>Comparisons: <span id="comparisons" class="highlight">0</span></div>
+            <div>Elapsed: <span id="elapsed" class="highlight">0</span> ms</div>
+            <div>Status: <span id="status">Shuffled</span></div>
+            <div>FPS: <span id="fps">0</span></div>
+        </div>
+    </div>
+
+    <div class="cpu-panel">
+        <h3>CPU Bubble Sort (256 elements)</h3>
+        <canvas id="cpuCanvas" class="cpu-canvas" width="200" height="80"></canvas>
+        <div>Step: <span id="cpuStep">0</span></div>
+    </div>
+
+    <a href="index.html" class="back-link">&#8592; Back to Gallery</a>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+
+        if (!navigator.gpu) {
+            document.body.innerHTML = '<div class="error-msg"><h2>WebGPU Not Supported</h2><p>Your browser does not support WebGPU. Try Chrome 113+ or Edge 113+.</p></div>';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) throw new Error('No adapter');
+        const device = await adapter.requestDevice();
+        const ctxGPU = canvas.getContext('webgpu');
+        const presentFormat = navigator.gpu.getPreferredCanvasFormat();
+
+        function resize() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            ctxGPU.configure({ device, format: presentFormat, alphaMode: 'opaque' });
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        let N = 4096;
+        let sorting = false;
+        let stepMode = false;
+        let currentStep = 0;
+        let totalSteps = 0;
+        let comparisons = 0;
+        let sortStartTime = 0;
+
+        // Compute total bitonic sort steps
+        function computeTotalSteps(n) {
+            let steps = 0;
+            for (let k = 2; k <= n; k *= 2) {
+                for (let j = k / 2; j >= 1; j /= 2) {
+                    steps++;
+                }
+            }
+            return steps;
+        }
+
+        // Generate shuffled array
+        let data = new Float32Array(N);
+        function shuffle() {
+            for (let i = 0; i < N; i++) data[i] = i / N;
+            // Fisher-Yates
+            for (let i = N - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [data[i], data[j]] = [data[j], data[i]];
+            }
+        }
+        shuffle();
+
+        const MAX_N = 65536;
+        const dataBuf = device.createBuffer({
+            size: MAX_N * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
+        });
+        device.queue.writeBuffer(dataBuf, 0, data);
+
+        const paramBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // Bitonic sort compute shader
+        const sortShader = device.createShaderModule({ code: `
+            @group(0) @binding(0) var<storage, read_write> arr: array<f32>;
+            @group(0) @binding(1) var<uniform> params: vec4u; // k, j, N, pad
+
+            @compute @workgroup_size(256)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let i = gid.x;
+                let n = params.z;
+                if (i >= n) { return; }
+
+                let k = params.x;
+                let j = params.y;
+
+                let ixj = i ^ j;
+
+                if (ixj > i) {
+                    let goUp = ((i & k) == 0u);
+                    let ai = arr[i];
+                    let aj = arr[ixj];
+                    if ((goUp && ai > aj) || (!goUp && ai < aj)) {
+                        arr[i] = aj;
+                        arr[ixj] = ai;
+                    }
+                }
+            }
+        `});
+
+        const sortPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: sortShader, entryPoint: 'main' },
+        });
+
+        const sortBG = device.createBindGroup({
+            layout: sortPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: dataBuf } },
+                { binding: 1, resource: { buffer: paramBuf } },
+            ],
+        });
+
+        // Build step sequence
+        let stepSequence = [];
+        function buildStepSequence(n) {
+            stepSequence = [];
+            for (let k = 2; k <= n; k *= 2) {
+                for (let j = k / 2; j >= 1; j /= 2) {
+                    stepSequence.push({ k, j });
+                }
+            }
+            totalSteps = stepSequence.length;
+            document.getElementById('totalSteps').textContent = totalSteps;
+        }
+        buildStepSequence(N);
+
+        function doStep() {
+            if (currentStep >= totalSteps) {
+                sorting = false;
+                document.getElementById('status').textContent = 'Sorted!';
+                document.getElementById('elapsed').textContent = (performance.now() - sortStartTime).toFixed(1);
+                return;
+            }
+            const s = stepSequence[currentStep];
+            const params = new Uint32Array([s.k, s.j, N, 0]);
+            device.queue.writeBuffer(paramBuf, 0, params);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(sortPipeline);
+            cp.setBindGroup(0, sortBG);
+            cp.dispatchWorkgroups(Math.ceil(N / 256));
+            cp.end();
+            device.queue.submit([enc.finish()]);
+
+            comparisons += N / 2;
+            currentStep++;
+            document.getElementById('stepNum').textContent = currentStep;
+            document.getElementById('comparisons').textContent = comparisons.toLocaleString();
+        }
+
+        // Render: draw array as vertical lines
+        const renderShader = device.createShaderModule({ code: `
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) val: f32 }
+
+            @group(0) @binding(0) var<storage, read> arr: array<f32>;
+
+            struct RenderParams { width: f32, height: f32, n: f32, pad: f32 }
+            @group(0) @binding(1) var<uniform> rp: RenderParams;
+
+            @vertex
+            fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+                // Each element draws 2 triangles (a vertical bar)
+                // 6 vertices per bar: vi / 6 = bar index, vi % 6 = vertex within bar
+                let barIdx = vi / 6u;
+                let vertIdx = vi % 6u;
+                let n = u32(rp.n);
+                let val = arr[barIdx];
+
+                let barWidth = 2.0 / f32(n);
+                let x0 = -1.0 + f32(barIdx) * barWidth;
+                let x1 = x0 + barWidth * 0.9;
+                let y0 = -1.0;
+                let y1 = -1.0 + val * 2.0;
+
+                var x = 0.0;
+                var y = 0.0;
+                if (vertIdx == 0u) { x = x0; y = y0; }
+                else if (vertIdx == 1u) { x = x1; y = y0; }
+                else if (vertIdx == 2u) { x = x0; y = y1; }
+                else if (vertIdx == 3u) { x = x0; y = y1; }
+                else if (vertIdx == 4u) { x = x1; y = y0; }
+                else { x = x1; y = y1; }
+
+                var out: VSOut;
+                out.pos = vec4f(x, y, 0, 1);
+                out.val = val;
+                return out;
+            }
+
+            @fragment
+            fn fs(in: VSOut) -> @location(0) vec4f {
+                let v = in.val;
+                // Color from moss to earth
+                let r = mix(0.376, 0.867, v);
+                let g = mix(0.424, 0.632, v);
+                let b = mix(0.220, 0.369, v);
+                return vec4f(r, g, b, 1.0);
+            }
+        `});
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: renderShader, entryPoint: 'vs' },
+            fragment: { module: renderShader, entryPoint: 'fs', targets: [{ format: presentFormat }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        const renderUniformData = new Float32Array([canvas.width, canvas.height, N, 0]);
+        const renderUniformBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(renderUniformBuf, 0, renderUniformData);
+
+        const renderBG = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: dataBuf } },
+                { binding: 1, resource: { buffer: renderUniformBuf } },
+            ],
+        });
+
+        // CPU bubble sort panel
+        const cpuN = 256;
+        const cpuArr = new Float32Array(cpuN);
+        let cpuI = 0, cpuJ = 0, cpuStep = 0, cpuDone = false;
+        function cpuShuffle() {
+            for (let i = 0; i < cpuN; i++) cpuArr[i] = i / cpuN;
+            for (let i = cpuN - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [cpuArr[i], cpuArr[j]] = [cpuArr[j], cpuArr[i]];
+            }
+            cpuI = 0; cpuJ = 0; cpuStep = 0; cpuDone = false;
+        }
+        cpuShuffle();
+
+        function cpuBubbleStep() {
+            if (cpuDone) return;
+            // Do a few comparisons per frame for visibility
+            for (let s = 0; s < 10; s++) {
+                if (cpuArr[cpuJ] > cpuArr[cpuJ + 1]) {
+                    [cpuArr[cpuJ], cpuArr[cpuJ + 1]] = [cpuArr[cpuJ + 1], cpuArr[cpuJ]];
+                }
+                cpuJ++;
+                if (cpuJ >= cpuN - 1 - cpuI) {
+                    cpuJ = 0;
+                    cpuI++;
+                    if (cpuI >= cpuN - 1) { cpuDone = true; break; }
+                }
+                cpuStep++;
+            }
+            document.getElementById('cpuStep').textContent = cpuStep;
+        }
+
+        function drawCpuArray() {
+            const cc = document.getElementById('cpuCanvas');
+            const ctx = cc.getContext('2d');
+            ctx.fillStyle = '#FEFAE0';
+            ctx.fillRect(0, 0, 200, 80);
+            const bw = 200 / cpuN;
+            for (let i = 0; i < cpuN; i++) {
+                const v = cpuArr[i];
+                const r = Math.floor(96 + v * 120);
+                const g = Math.floor(108 + v * 80);
+                const b = Math.floor(56 + v * 40);
+                ctx.fillStyle = `rgb(${r},${g},${b})`;
+                ctx.fillRect(i * bw, 80 - v * 78, Math.ceil(bw), v * 78);
+            }
+        }
+
+        // UI
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                N = parseInt(btn.dataset.n);
+                data = new Float32Array(N);
+                shuffle();
+                device.queue.writeBuffer(dataBuf, 0, data);
+                buildStepSequence(N);
+                currentStep = 0; comparisons = 0; sorting = false;
+                document.getElementById('elemCount').textContent = N.toLocaleString();
+                document.getElementById('stepNum').textContent = '0';
+                document.getElementById('comparisons').textContent = '0';
+                document.getElementById('elapsed').textContent = '0';
+                document.getElementById('status').textContent = 'Shuffled';
+                renderUniformData[2] = N;
+                device.queue.writeBuffer(renderUniformBuf, 0, renderUniformData);
+            });
+        });
+
+        document.getElementById('shuffleBtn').addEventListener('click', () => {
+            shuffle();
+            device.queue.writeBuffer(dataBuf, 0, data);
+            currentStep = 0; comparisons = 0; sorting = false;
+            document.getElementById('stepNum').textContent = '0';
+            document.getElementById('comparisons').textContent = '0';
+            document.getElementById('elapsed').textContent = '0';
+            document.getElementById('status').textContent = 'Shuffled';
+            cpuShuffle();
+        });
+
+        document.getElementById('sortBtn').addEventListener('click', () => {
+            if (currentStep >= totalSteps) {
+                shuffle();
+                device.queue.writeBuffer(dataBuf, 0, data);
+                currentStep = 0; comparisons = 0;
+                cpuShuffle();
+            }
+            sorting = true; stepMode = false;
+            sortStartTime = performance.now();
+            document.getElementById('status').textContent = 'Sorting...';
+        });
+
+        document.getElementById('stepBtn').addEventListener('click', () => {
+            if (currentStep >= totalSteps) return;
+            if (!sorting) sortStartTime = performance.now();
+            sorting = true; stepMode = true;
+            document.getElementById('status').textContent = 'Stepping...';
+        });
+
+        let lastTime = performance.now(), frameCount = 0, fpsAccum = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            frameCount++; fpsAccum += dt;
+            if (fpsAccum >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(frameCount / fpsAccum);
+                frameCount = 0; fpsAccum = 0;
+            }
+
+            if (sorting) {
+                if (stepMode) {
+                    doStep();
+                    sorting = false;
+                } else {
+                    // Run multiple steps per frame
+                    const stepsThisFrame = Math.min(10, totalSteps - currentStep);
+                    for (let i = 0; i < stepsThisFrame; i++) {
+                        doStep();
+                    }
+                }
+                if (currentStep >= totalSteps) {
+                    document.getElementById('elapsed').textContent = (performance.now() - sortStartTime).toFixed(1);
+                }
+            }
+
+            // CPU sort step
+            if (sorting && !cpuDone) cpuBubbleStep();
+            drawCpuArray();
+
+            renderUniformData[0] = canvas.width;
+            renderUniformData[1] = canvas.height;
+            device.queue.writeBuffer(renderUniformBuf, 0, renderUniformData);
+
+            const enc = device.createCommandEncoder();
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: ctxGPU.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.996, g: 0.98, b: 0.878, a: 1 },
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, renderBG);
+            rp.draw(N * 6);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+</body>
+</html>

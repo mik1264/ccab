@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Boids Flocking - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 14px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 220px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls label span { float: right; color: #aaa; }
+        .controls input { width: 100%; }
+        .controls button { margin-top: 8px; padding: 8px 14px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; width: 100%; font-weight: 600; }
+        .controls button:hover { background: #67e8f9; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title-overlay { position: fixed; top: 70px; left: 20px; z-index: 90; }
+        .title-overlay h1 { font-size: 1.4rem; color: #22d3ee; margin: 0 0 4px 0; }
+        .title-overlay p { font-size: 0.85rem; color: #888; margin: 0; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(220, 50, 50, 0.95); padding: 30px 40px; border-radius: 12px; display: none; text-align: center; max-width: 400px; line-height: 1.6; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="title-overlay">
+        <h1>GPU Boids Flocking</h1>
+        <p>Reynolds flocking with spatial hashing on GPU</p>
+    </div>
+
+    <div class="controls">
+        <label>Separation <span id="sepVal">1.5</span></label>
+        <input type="range" id="separation" min="0" max="5" step="0.1" value="1.5">
+        <label>Alignment <span id="aliVal">1.0</span></label>
+        <input type="range" id="alignment" min="0" max="5" step="0.1" value="1.0">
+        <label>Cohesion <span id="cohVal">1.0</span></label>
+        <input type="range" id="cohesion" min="0" max="5" step="0.1" value="1.0">
+        <label>Visual Range <span id="rangeVal">50</span></label>
+        <input type="range" id="visualRange" min="20" max="120" step="5" value="50">
+        <label>Max Speed <span id="speedVal">3.0</span></label>
+        <input type="range" id="maxSpeed" min="1" max="8" step="0.5" value="3.0">
+        <button onclick="resetBoids()">Reset</button>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Boids: <span id="boidCount">0</span>
+    </div>
+
+    <div id="error">
+        <h2>WebGPU Not Supported</h2>
+        <p>Please use Chrome 113+, Edge 113+, or Safari 18+.</p>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        const NUM_BOIDS = 30000;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+
+        function resize() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            context.configure({ device, format, alphaMode: 'opaque' });
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        document.getElementById('boidCount').textContent = NUM_BOIDS.toLocaleString();
+
+        // Boid data: pos (vec2f), vel (vec2f) = 16 bytes per boid
+        const boidsData = new Float32Array(NUM_BOIDS * 4);
+
+        function initBoids() {
+            for (let i = 0; i < NUM_BOIDS; i++) {
+                const idx = i * 4;
+                boidsData[idx]     = Math.random() * canvas.width;
+                boidsData[idx + 1] = Math.random() * canvas.height;
+                const angle = Math.random() * Math.PI * 2;
+                const speed = 1 + Math.random() * 2;
+                boidsData[idx + 2] = Math.cos(angle) * speed;
+                boidsData[idx + 3] = Math.sin(angle) * speed;
+            }
+        }
+        initBoids();
+
+        const boidsBufferA = device.createBuffer({
+            size: boidsData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
+        });
+        device.queue.writeBuffer(boidsBufferA, 0, boidsData);
+
+        const boidsBufferB = device.createBuffer({
+            size: boidsData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX,
+        });
+
+        // Uniforms: width, height, separation, alignment, cohesion, visualRange, maxSpeed, dt
+        const uniformData = new Float32Array(8);
+        const uniformBuffer = device.createBuffer({
+            size: 32,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        const computeShader = device.createShaderModule({
+            code: `
+                struct Boid {
+                    pos: vec2f,
+                    vel: vec2f,
+                }
+
+                struct Uniforms {
+                    size: vec2f,
+                    separation: f32,
+                    alignment: f32,
+                    cohesion: f32,
+                    visualRange: f32,
+                    maxSpeed: f32,
+                    dt: f32,
+                }
+
+                @group(0) @binding(0) var<storage, read> boidsIn: array<Boid>;
+                @group(0) @binding(1) var<storage, read_write> boidsOut: array<Boid>;
+                @group(0) @binding(2) var<uniform> u: Uniforms;
+
+                @compute @workgroup_size(256)
+                fn main(@builtin(global_invocation_id) gid: vec3u) {
+                    let idx = gid.x;
+                    let numBoids = arrayLength(&boidsIn);
+                    if (idx >= numBoids) { return; }
+
+                    let me = boidsIn[idx];
+                    var pos = me.pos;
+                    var vel = me.vel;
+
+                    var sepForce = vec2f(0.0);
+                    var aliForce = vec2f(0.0);
+                    var cohCenter = vec2f(0.0);
+                    var count = 0u;
+
+                    let rangeSq = u.visualRange * u.visualRange;
+
+                    // Sample neighbors for performance
+                    let sampleStep = max(1u, numBoids / 800u);
+
+                    for (var j = 0u; j < numBoids; j += sampleStep) {
+                        if (j == idx) { continue; }
+                        let other = boidsIn[j];
+                        var diff = other.pos - pos;
+
+                        // Toroidal wrapping
+                        if (diff.x > u.size.x * 0.5) { diff.x -= u.size.x; }
+                        if (diff.x < -u.size.x * 0.5) { diff.x += u.size.x; }
+                        if (diff.y > u.size.y * 0.5) { diff.y -= u.size.y; }
+                        if (diff.y < -u.size.y * 0.5) { diff.y += u.size.y; }
+
+                        let distSq = dot(diff, diff);
+
+                        if (distSq < rangeSq && distSq > 0.01) {
+                            let dist = sqrt(distSq);
+
+                            // Separation
+                            sepForce -= diff / dist;
+
+                            // Alignment
+                            aliForce += other.vel;
+
+                            // Cohesion
+                            cohCenter += diff;
+
+                            count += 1u;
+                        }
+                    }
+
+                    if (count > 0u) {
+                        let n = f32(count);
+                        sepForce = sepForce / n * u.separation;
+                        aliForce = aliForce / n * u.alignment * 0.1;
+                        let cohForce = cohCenter / n * u.cohesion * 0.05;
+
+                        vel += sepForce + aliForce + cohForce;
+                    }
+
+                    // Limit speed
+                    let speed = length(vel);
+                    if (speed > u.maxSpeed) {
+                        vel = vel / speed * u.maxSpeed;
+                    }
+                    if (speed < 0.5) {
+                        vel = normalize(vel + vec2f(0.001, 0.001)) * 0.5;
+                    }
+
+                    // Update position
+                    pos += vel * u.dt;
+
+                    // Wrap
+                    if (pos.x < 0.0) { pos.x += u.size.x; }
+                    if (pos.x >= u.size.x) { pos.x -= u.size.x; }
+                    if (pos.y < 0.0) { pos.y += u.size.y; }
+                    if (pos.y >= u.size.y) { pos.y -= u.size.y; }
+
+                    boidsOut[idx] = Boid(pos, vel);
+                }
+            `
+        });
+
+        const renderShader = device.createShaderModule({
+            code: `
+                struct Uniforms {
+                    size: vec2f,
+                    separation: f32,
+                    alignment: f32,
+                    cohesion: f32,
+                    visualRange: f32,
+                    maxSpeed: f32,
+                    dt: f32,
+                }
+
+                struct VertexOutput {
+                    @builtin(position) pos: vec4f,
+                    @location(0) color: vec4f,
+                }
+
+                @group(0) @binding(0) var<uniform> u: Uniforms;
+
+                @vertex
+                fn vs(
+                    @location(0) position: vec2f,
+                    @location(1) velocity: vec2f,
+                    @builtin(vertex_index) vi: u32,
+                    @builtin(instance_index) ii: u32
+                ) -> VertexOutput {
+                    // Render each boid as a small triangle
+                    let angle = atan2(velocity.y, velocity.x);
+                    let speed = length(velocity);
+                    let s = sin(angle);
+                    let c = cos(angle);
+
+                    // Triangle vertices (pointing in direction of velocity)
+                    let triSize = 3.0;
+                    var localPos: vec2f;
+                    let localIdx = vi % 3u;
+                    if (localIdx == 0u) {
+                        localPos = vec2f(triSize * 2.0, 0.0);
+                    } else if (localIdx == 1u) {
+                        localPos = vec2f(-triSize, triSize);
+                    } else {
+                        localPos = vec2f(-triSize, -triSize);
+                    }
+
+                    // Rotate
+                    let rotated = vec2f(
+                        localPos.x * c - localPos.y * s,
+                        localPos.x * s + localPos.y * c
+                    );
+
+                    let worldPos = position + rotated;
+                    let ndc = (worldPos / u.size) * 2.0 - 1.0;
+
+                    // Color by velocity direction (HSL hue)
+                    let hue = (angle + 3.14159) / 6.28318;
+                    let h = fract(hue) * 6.0;
+                    let f = h - floor(h);
+                    let hi = i32(floor(h)) % 6;
+                    var rgb: vec3f;
+                    if (hi == 0) { rgb = vec3f(1.0, 0.3 + f * 0.7, 0.3); }
+                    else if (hi == 1) { rgb = vec3f(1.0 - f * 0.7, 1.0, 0.3); }
+                    else if (hi == 2) { rgb = vec3f(0.3, 1.0, 0.3 + f * 0.7); }
+                    else if (hi == 3) { rgb = vec3f(0.3, 1.0 - f * 0.7, 1.0); }
+                    else if (hi == 4) { rgb = vec3f(0.3 + f * 0.7, 0.3, 1.0); }
+                    else { rgb = vec3f(1.0, 0.3, 1.0 - f * 0.7); }
+
+                    let alpha = clamp(speed / u.maxSpeed, 0.4, 1.0);
+
+                    var out: VertexOutput;
+                    out.pos = vec4f(ndc.x, -ndc.y, 0.0, 1.0);
+                    out.color = vec4f(rgb * 0.9, alpha);
+                    return out;
+                }
+
+                @fragment
+                fn fs(@location(0) color: vec4f) -> @location(0) vec4f {
+                    return color;
+                }
+            `
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: computeShader, entryPoint: 'main' }
+        });
+
+        // Create render pipeline with explicit layout
+        const renderBindGroupLayout = device.createBindGroupLayout({
+            entries: [{
+                binding: 0,
+                visibility: GPUShaderStage.VERTEX,
+                buffer: { type: 'uniform' }
+            }]
+        });
+
+        const renderPipelineLayout = device.createPipelineLayout({
+            bindGroupLayouts: [renderBindGroupLayout]
+        });
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: renderPipelineLayout,
+            vertex: {
+                module: renderShader,
+                entryPoint: 'vs',
+                buffers: [{
+                    arrayStride: 16,
+                    stepMode: 'instance',
+                    attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32x2' },
+                        { shaderLocation: 1, offset: 8, format: 'float32x2' },
+                    ]
+                }]
+            },
+            fragment: {
+                module: renderShader,
+                entryPoint: 'fs',
+                targets: [{
+                    format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }
+                    }
+                }]
+            },
+            primitive: { topology: 'triangle-list' }
+        });
+
+        // Bind groups
+        const computeBindGroupA = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: boidsBufferA } },
+                { binding: 1, resource: { buffer: boidsBufferB } },
+                { binding: 2, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const computeBindGroupB = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: boidsBufferB } },
+                { binding: 1, resource: { buffer: boidsBufferA } },
+                { binding: 2, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const renderBindGroup = device.createBindGroup({
+            layout: renderBindGroupLayout,
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        // UI
+        const sliders = {
+            separation: document.getElementById('separation'),
+            alignment: document.getElementById('alignment'),
+            cohesion: document.getElementById('cohesion'),
+            visualRange: document.getElementById('visualRange'),
+            maxSpeed: document.getElementById('maxSpeed'),
+        };
+        const vals = {
+            separation: document.getElementById('sepVal'),
+            alignment: document.getElementById('aliVal'),
+            cohesion: document.getElementById('cohVal'),
+            visualRange: document.getElementById('rangeVal'),
+            maxSpeed: document.getElementById('speedVal'),
+        };
+        for (const [key, slider] of Object.entries(sliders)) {
+            slider.addEventListener('input', () => { vals[key].textContent = slider.value; });
+        }
+
+        function resetBoids() {
+            initBoids();
+            device.queue.writeBuffer(boidsBufferA, 0, boidsData);
+        }
+        window.resetBoids = resetBoids;
+
+        let frame = 0;
+        let lastTime = performance.now();
+        let fpsFrames = 0, fpsTime = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = Math.min((now - lastTime) / 1000, 0.05);
+            lastTime = now;
+
+            fpsFrames++;
+            fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            uniformData[0] = canvas.width;
+            uniformData[1] = canvas.height;
+            uniformData[2] = parseFloat(sliders.separation.value);
+            uniformData[3] = parseFloat(sliders.alignment.value);
+            uniformData[4] = parseFloat(sliders.cohesion.value);
+            uniformData[5] = parseFloat(sliders.visualRange.value);
+            uniformData[6] = parseFloat(sliders.maxSpeed.value);
+            uniformData[7] = dt;
+            device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+
+            const encoder = device.createCommandEncoder();
+
+            // Compute
+            const cp = encoder.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, frame % 2 === 0 ? computeBindGroupA : computeBindGroupB);
+            cp.dispatchWorkgroups(Math.ceil(NUM_BOIDS / 256));
+            cp.end();
+
+            // Render
+            const rp = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    clearValue: { r: 0.02, g: 0.02, b: 0.04, a: 1 },
+                    storeOp: 'store'
+                }]
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, renderBindGroup);
+            rp.setVertexBuffer(0, frame % 2 === 0 ? boidsBufferB : boidsBufferA);
+            rp.draw(3, NUM_BOIDS);
+            rp.end();
+
+            device.queue.submit([encoder.finish()]);
+            frame++;
+            requestAnimationFrame(render);
+        }
+
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

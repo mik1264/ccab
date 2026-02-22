@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reaction-Diffusion + Parameter Sliders - CCAB</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root{--sage:#8A9A5B;--moss:#606C38;--earth:#DDA15E;--cream:#FEFAE0;--terracotta:#BC6C25;--dark-moss:#3d4423}
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{overflow:hidden;font-family:'Nunito',sans-serif;background:#0a0e1a;color:#e8e6e1}
+        .back-link{position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:var(--earth);text-decoration:none;border-radius:6px;font-size:14px;font-family:'Nunito',sans-serif;z-index:999;transition:all 0.3s ease}
+        .back-link:hover{background:rgba(221,161,94,0.2);transform:translateX(-4px)}
+        #fps-counter{position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.7);color:var(--earth);padding:8px 12px;border-radius:6px;font-family:'Courier New',monospace;font-size:14px;z-index:999}
+        .fps-good{color:#10b981}.fps-medium{color:#fbbf24}.fps-poor{color:#e11d48}
+        #hybrid-container{position:relative;width:100vw;height:100vh}
+        #canvas{position:absolute;top:0;left:0;width:100%;height:100%;z-index:0}
+        #svg-overlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none}
+        .interactive{pointer-events:all;cursor:pointer}
+        #loading{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:1000}
+        .spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,0.1);border-top-color:var(--earth);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1rem}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        #error{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(225,29,72,0.9);color:white;padding:2rem;border-radius:12px;text-align:center;max-width:400px;z-index:1001}
+        #error h2{font-family:'Lora',serif;margin:0 0 1rem 0}
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Loading demo...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+
+    <script>
+        window.addEventListener('error',function(e){showError('Runtime Error: '+e.message);});
+        function showError(m){document.getElementById('loading').style.display='none';document.getElementById('error').style.display='block';document.getElementById('error-message').textContent=m;}
+        function hideLoading(){document.getElementById('loading').style.display='none';}
+        class FPSCounter{constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}update(){this.frames++;var n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}}
+
+        try {
+            var canvas = document.getElementById('canvas');
+            var ctx = canvas.getContext('2d');
+            var svg = document.getElementById('svg-overlay');
+            var svgNS = 'http://www.w3.org/2000/svg';
+            var fpsCounter = new FPSCounter();
+            var W, H;
+
+            // Gray-Scott parameters
+            var F = 0.055, k = 0.062, Du = 1.0, Dv = 0.5;
+            var running = true;
+
+            // Grid
+            var gw, gh;
+            var gridA, gridB, nextA, nextB;
+
+            function initGrid() {
+                gw = Math.min(Math.floor(W / 2), 400);
+                gh = Math.min(Math.floor(H / 2), 300);
+                var size = gw * gh;
+                gridA = new Float32Array(size);
+                gridB = new Float32Array(size);
+                nextA = new Float32Array(size);
+                nextB = new Float32Array(size);
+
+                // Fill with A=1, B=0
+                for (var i = 0; i < size; i++) { gridA[i] = 1; gridB[i] = 0; }
+
+                // Seed some B in center
+                var cx = Math.floor(gw / 2), cy = Math.floor(gh / 2);
+                for (var dy = -10; dy <= 10; dy++) {
+                    for (var dx = -10; dx <= 10; dx++) {
+                        var x = cx + dx, y = cy + dy;
+                        if (x >= 0 && x < gw && y >= 0 && y < gh) {
+                            gridB[y * gw + x] = 1;
+                            gridA[y * gw + x] = 0;
+                        }
+                    }
+                }
+                // A few random seeds
+                for (var s = 0; s < 5; s++) {
+                    var sx = Math.floor(Math.random() * (gw - 20)) + 10;
+                    var sy = Math.floor(Math.random() * (gh - 20)) + 10;
+                    for (var dy = -5; dy <= 5; dy++) {
+                        for (var dx = -5; dx <= 5; dx++) {
+                            var idx = (sy + dy) * gw + (sx + dx);
+                            gridB[idx] = 1; gridA[idx] = 0;
+                        }
+                    }
+                }
+            }
+
+            function step() {
+                for (var y = 1; y < gh - 1; y++) {
+                    for (var x = 1; x < gw - 1; x++) {
+                        var i = y * gw + x;
+                        var a = gridA[i], b = gridB[i];
+
+                        // Laplacian
+                        var lapA = gridA[i - 1] + gridA[i + 1] + gridA[i - gw] + gridA[i + gw] - 4 * a;
+                        var lapB = gridB[i - 1] + gridB[i + 1] + gridB[i - gw] + gridB[i + gw] - 4 * b;
+
+                        var abb = a * b * b;
+                        nextA[i] = a + Du * lapA - abb + F * (1 - a);
+                        nextB[i] = b + Dv * lapB + abb - (F + k) * b;
+
+                        nextA[i] = Math.max(0, Math.min(1, nextA[i]));
+                        nextB[i] = Math.max(0, Math.min(1, nextB[i]));
+                    }
+                }
+                var tmp = gridA; gridA = nextA; nextA = tmp;
+                tmp = gridB; gridB = nextB; nextB = tmp;
+            }
+
+            // Mouse paint
+            var isLeftDown = false, isRightDown = false;
+            canvas.style.pointerEvents = 'all';
+            canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+            canvas.addEventListener('mousedown', function(e) {
+                if (e.button === 0) isLeftDown = true;
+                if (e.button === 2) isRightDown = true;
+                paintAt(e.clientX, e.clientY, e.button === 2);
+            });
+            canvas.addEventListener('mouseup', function(e) {
+                if (e.button === 0) isLeftDown = false;
+                if (e.button === 2) isRightDown = false;
+            });
+            canvas.addEventListener('mousemove', function(e) {
+                if (isLeftDown) paintAt(e.clientX, e.clientY, false);
+                if (isRightDown) paintAt(e.clientX, e.clientY, true);
+            });
+
+            function paintAt(px, py, erase) {
+                var gx = Math.floor(px / W * gw);
+                var gy = Math.floor(py / H * gh);
+                var r = 3;
+                for (var dy = -r; dy <= r; dy++) {
+                    for (var dx = -r; dx <= r; dx++) {
+                        var x = gx + dx, y = gy + dy;
+                        if (x >= 0 && x < gw && y >= 0 && y < gh) {
+                            var i = y * gw + x;
+                            if (erase) {
+                                gridB[i] = 0; gridA[i] = 1;
+                            } else {
+                                gridB[i] = 1; gridA[i] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+
+            function createEl(tag, attrs) {
+                var el = document.createElementNS(svgNS, tag);
+                for (var k in attrs) el.setAttribute(k, attrs[k]);
+                return el;
+            }
+
+            // SVG panel
+            var panelW2 = 240;
+            var panel = createEl('g', {});
+            svg.appendChild(panel);
+            var panelBg = createEl('rect', { rx: '12', fill: 'rgba(0,0,0,0.75)', stroke: 'rgba(221,161,94,0.3)', 'stroke-width': '1' });
+            panel.appendChild(panelBg);
+            var panelTitle = createEl('text', { fill: '#DDA15E', 'font-family': 'Lora, serif', 'font-size': '14', 'text-anchor': 'middle' });
+            panelTitle.textContent = 'Gray-Scott Parameters';
+            panel.appendChild(panelTitle);
+
+            // Presets
+            var presets = [
+                { name: 'Coral', F: 0.055, k: 0.062 },
+                { name: 'Mitosis', F: 0.028, k: 0.062 },
+                { name: 'Worms', F: 0.078, k: 0.061 },
+                { name: 'Fingerprints', F: 0.035, k: 0.065 },
+                { name: 'Spirals', F: 0.014, k: 0.045 }
+            ];
+
+            var presetGroup = createEl('g', {});
+            panel.appendChild(presetGroup);
+            var presetBtns = [];
+
+            presets.forEach(function(p, i) {
+                var g = createEl('g', { style: 'cursor:pointer' });
+                g.classList.add('interactive');
+                var r = createEl('rect', { height: '24', rx: '5', fill: i === 0 ? 'rgba(221,161,94,0.4)' : 'rgba(255,255,255,0.1)', stroke: 'rgba(221,161,94,0.4)', 'stroke-width': '1' });
+                var t = createEl('text', { y: '16', 'text-anchor': 'middle', fill: '#DDA15E', 'font-family': 'Nunito, sans-serif', 'font-size': '11' });
+                t.textContent = p.name;
+                g.appendChild(r); g.appendChild(t);
+                presetGroup.appendChild(g);
+                presetBtns.push({ g: g, rect: r });
+
+                g.addEventListener('click', function() {
+                    F = p.F; k = p.k;
+                    sliderInputs.F.value = F; sliderDisplays.F.textContent = F.toFixed(4);
+                    sliderInputs.k.value = k; sliderDisplays.k.textContent = k.toFixed(4);
+                    for (var j = 0; j < presetBtns.length; j++) {
+                        presetBtns[j].rect.setAttribute('fill', j === i ? 'rgba(221,161,94,0.4)' : 'rgba(255,255,255,0.1)');
+                    }
+                    initGrid();
+                });
+            });
+
+            // Sliders
+            var sliderFO = createEl('foreignObject', { class: 'interactive' });
+            panel.appendChild(sliderFO);
+            var sliderDiv = document.createElement('div');
+            sliderDiv.style.cssText = 'font-family:Nunito,sans-serif;font-size:12px;color:#e8e6e1;padding:5px;';
+            sliderFO.appendChild(sliderDiv);
+
+            var sliderInputs = {}, sliderDisplays = {};
+            var sliderDefs = [
+                { label: 'F (feed)', key: 'F', min: 0.01, max: 0.1, step: 0.001, val: F },
+                { label: 'k (kill)', key: 'k', min: 0.03, max: 0.07, step: 0.001, val: k },
+                { label: 'Du', key: 'Du', min: 0.1, max: 2, step: 0.05, val: Du },
+                { label: 'Dv', key: 'Dv', min: 0.1, max: 1, step: 0.05, val: Dv }
+            ];
+
+            sliderDefs.forEach(function(sd) {
+                var row = document.createElement('div');
+                row.style.cssText = 'margin-bottom:5px;display:flex;align-items:center;gap:5px;';
+                var lbl = document.createElement('span');
+                lbl.style.cssText = 'width:55px;color:#DDA15E;font-size:11px;';
+                lbl.textContent = sd.label;
+                var inp = document.createElement('input');
+                inp.type = 'range'; inp.min = sd.min; inp.max = sd.max; inp.step = sd.step; inp.value = sd.val;
+                inp.style.cssText = 'flex:1;accent-color:#DDA15E;height:3px;';
+                var val = document.createElement('span');
+                val.style.cssText = 'width:40px;text-align:right;font-size:10px;';
+                val.textContent = sd.val.toFixed(sd.key === 'F' || sd.key === 'k' ? 4 : 2);
+                sliderInputs[sd.key] = inp;
+                sliderDisplays[sd.key] = val;
+                inp.addEventListener('input', function() {
+                    var v = parseFloat(inp.value);
+                    val.textContent = v.toFixed(sd.key === 'F' || sd.key === 'k' ? 4 : 2);
+                    if (sd.key === 'F') F = v;
+                    if (sd.key === 'k') k = v;
+                    if (sd.key === 'Du') Du = v;
+                    if (sd.key === 'Dv') Dv = v;
+                });
+                row.appendChild(lbl); row.appendChild(inp); row.appendChild(val);
+                sliderDiv.appendChild(row);
+            });
+
+            // Pause button
+            var pauseG = createEl('g', { class: 'interactive', style: 'cursor:pointer' });
+            pauseG.classList.add('interactive');
+            var pauseR = createEl('rect', { width: '100', height: '28', rx: '6', fill: 'rgba(16,185,129,0.4)', stroke: 'rgba(16,185,129,0.6)', 'stroke-width': '1' });
+            var pauseT = createEl('text', { x: '50', y: '18', 'text-anchor': 'middle', fill: '#10b981', 'font-family': 'Nunito, sans-serif', 'font-size': '12' });
+            pauseT.textContent = 'Running';
+            pauseG.appendChild(pauseR); pauseG.appendChild(pauseT);
+            panel.appendChild(pauseG);
+            pauseG.addEventListener('click', function() {
+                running = !running;
+                pauseT.textContent = running ? 'Running' : 'Paused';
+                pauseR.setAttribute('fill', running ? 'rgba(16,185,129,0.4)' : 'rgba(225,29,72,0.4)');
+                pauseR.setAttribute('stroke', running ? 'rgba(16,185,129,0.6)' : 'rgba(225,29,72,0.6)');
+                pauseT.setAttribute('fill', running ? '#10b981' : '#e11d48');
+            });
+
+            // Info label
+            var infoLabel = createEl('text', { fill: 'rgba(255,255,255,0.4)', 'font-family': 'Nunito, sans-serif', 'font-size': '12' });
+            infoLabel.textContent = 'Left-click: paint | Right-click: erase';
+            svg.appendChild(infoLabel);
+
+            function resize() {
+                W = window.innerWidth; H = window.innerHeight;
+                canvas.width = W; canvas.height = H;
+                svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+                svg.setAttribute('width', W); svg.setAttribute('height', H);
+
+                var px = W - panelW2 - 20, py = 50, ph = 380;
+                panelBg.setAttribute('x', px); panelBg.setAttribute('y', py);
+                panelBg.setAttribute('width', panelW2); panelBg.setAttribute('height', ph);
+                panelTitle.setAttribute('x', px + panelW2/2); panelTitle.setAttribute('y', py + 25);
+
+                // Presets layout
+                var bw = 85, bx = px + 10;
+                for (var i = 0; i < presetBtns.length; i++) {
+                    var row = Math.floor(i / 2);
+                    var col = i % 2;
+                    presetBtns[i].g.setAttribute('transform', 'translate(' + (bx + col * (bw + 10)) + ',' + (py + 40 + row * 32) + ')');
+                    presetBtns[i].rect.setAttribute('width', bw);
+                    var t = presetBtns[i].g.querySelector('text');
+                    t.setAttribute('x', bw / 2);
+                }
+
+                sliderFO.setAttribute('x', px + 5); sliderFO.setAttribute('y', py + 135);
+                sliderFO.setAttribute('width', panelW2 - 10); sliderFO.setAttribute('height', 140);
+
+                pauseG.setAttribute('transform', 'translate(' + (px + panelW2/2 - 50) + ',' + (py + ph - 40) + ')');
+
+                infoLabel.setAttribute('x', 10); infoLabel.setAttribute('y', H - 15);
+
+                initGrid();
+            }
+            var rt; window.addEventListener('resize', function() { clearTimeout(rt); rt = setTimeout(resize, 100); });
+            resize();
+
+            function animate() {
+                fpsCounter.update();
+
+                if (running) {
+                    for (var s = 0; s < 5; s++) step();
+                }
+
+                // Render
+                var imgData = ctx.createImageData(W, H);
+                var data = imgData.data;
+                var cellW = W / gw, cellH = H / gh;
+
+                for (var y = 0; y < gh; y++) {
+                    var py0 = Math.floor(y * cellH);
+                    var py1 = Math.floor((y + 1) * cellH);
+                    for (var x = 0; x < gw; x++) {
+                        var b = gridB[y * gw + x];
+                        var a = gridA[y * gw + x];
+                        var r = Math.floor((1 - a) * 50 + b * 200);
+                        var g = Math.floor(b * 150);
+                        var bl = Math.floor((1 - b) * 100 + a * 50);
+
+                        var px0 = Math.floor(x * cellW);
+                        var px1 = Math.floor((x + 1) * cellW);
+                        for (var py2 = py0; py2 < py1 && py2 < H; py2++) {
+                            for (var px2 = px0; px2 < px1 && px2 < W; px2++) {
+                                var idx = (py2 * W + px2) * 4;
+                                data[idx] = r; data[idx+1] = g; data[idx+2] = bl; data[idx+3] = 255;
+                            }
+                        }
+                    }
+                }
+                ctx.putImageData(imgData, 0, 0);
+
+                requestAnimationFrame(animate);
+            }
+
+            hideLoading();
+            animate();
+        } catch(e) { showError('Init Error: ' + e.message); }
+    </script>
+</body>
+</html>

@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Image Convolution - WebGPU</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600;700&family=Nunito:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #FEFAE0 0%, #F4F1DE 50%, #EDE8D5 100%);
+            color: #3d4423;
+            font-family: 'Nunito', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls {
+            position: fixed; top: 20px; left: 20px;
+            background: rgba(255,255,255,0.8);
+            backdrop-filter: blur(12px);
+            padding: 20px; border-radius: 16px;
+            border: 1px solid rgba(138,154,91,0.3);
+            z-index: 100; min-width: 280px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+            max-height: 90vh; overflow-y: auto;
+        }
+        h1 { font-family: 'Lora', serif; font-size: 1.2em; color: #606C38; margin-bottom: 12px; }
+        .modes { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+        .mode-btn {
+            padding: 4px 9px;
+            background: rgba(138,154,91,0.15);
+            border: 1px solid rgba(138,154,91,0.3);
+            border-radius: 8px; color: #606C38;
+            font-size: 0.75em; cursor: pointer;
+            font-family: 'Nunito', sans-serif; transition: all 0.2s;
+        }
+        .mode-btn:hover, .mode-btn.active {
+            background: #8A9A5B; color: #fff; border-color: #8A9A5B;
+        }
+        .kernel-display {
+            background: rgba(138,154,91,0.08);
+            border-radius: 8px; padding: 10px;
+            margin-bottom: 12px; font-family: monospace;
+            font-size: 0.75em; text-align: center;
+            color: #606C38; line-height: 1.4;
+        }
+        .slider-group { margin-bottom: 10px; }
+        .slider-group label {
+            display: flex; justify-content: space-between;
+            margin-bottom: 3px; font-size: 0.82em; color: #606C38;
+        }
+        .slider-group input[type="range"] {
+            width: 100%; height: 6px; -webkit-appearance: none;
+            background: #d4d4aa; border-radius: 3px; outline: none;
+        }
+        .slider-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 16px; height: 16px;
+            background: #8A9A5B; border-radius: 50%; cursor: pointer;
+        }
+        .checkbox-row {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 0.85em; color: #606C38; margin-bottom: 10px;
+        }
+        .checkbox-row input { accent-color: #8A9A5B; width: 16px; height: 16px; }
+        .stats {
+            margin-top: 10px; padding-top: 10px;
+            border-top: 1px solid rgba(138,154,91,0.2);
+            font-size: 0.82em; color: #606C38;
+        }
+        .cam-msg {
+            background: rgba(188,108,37,0.1);
+            border: 1px solid rgba(188,108,37,0.3);
+            border-radius: 8px; padding: 10px;
+            font-size: 0.82em; color: #BC6C25;
+            margin-bottom: 10px; text-align: center;
+        }
+        .back-link {
+            position: fixed; top: 20px; right: 20px;
+            color: #606C38; text-decoration: none;
+            font-family: 'Nunito', sans-serif; font-size: 0.9em; z-index: 100;
+            background: rgba(255,255,255,0.7); backdrop-filter: blur(8px);
+            padding: 8px 16px; border-radius: 10px;
+            border: 1px solid rgba(138,154,91,0.3); transition: all 0.2s;
+        }
+        .back-link:hover { background: rgba(138,154,91,0.2); }
+        .error-msg {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            background: rgba(188,108,37,0.95); color: #fff; padding: 30px;
+            border-radius: 16px; text-align: center; max-width: 420px;
+            font-family: 'Nunito', sans-serif;
+        }
+        .error-msg h2 { font-family: 'Lora', serif; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <h1>Convolution Filters</h1>
+        <div id="camMsg" class="cam-msg" style="display:none;">Waiting for webcam...</div>
+        <div class="modes">
+            <button class="mode-btn active" data-kernel="identity">Identity</button>
+            <button class="mode-btn" data-kernel="blur3">Blur 3x3</button>
+            <button class="mode-btn" data-kernel="blur5">Blur 5x5</button>
+            <button class="mode-btn" data-kernel="sharpen">Sharpen</button>
+            <button class="mode-btn" data-kernel="emboss">Emboss</button>
+            <button class="mode-btn" data-kernel="sobelX">Sobel X</button>
+            <button class="mode-btn" data-kernel="sobelY">Sobel Y</button>
+            <button class="mode-btn" data-kernel="laplacian">Laplacian</button>
+            <button class="mode-btn" data-kernel="box">Box Filter</button>
+        </div>
+        <div class="kernel-display" id="kernelDisplay">
+            [0  0  0]<br>[0  1  0]<br>[0  0  0]
+        </div>
+        <div class="slider-group" id="boxRadiusGroup" style="display:none;">
+            <label>Box Radius <span id="boxRadVal">2</span></label>
+            <input type="range" id="boxRadius" min="1" max="10" step="1" value="2">
+        </div>
+        <div class="checkbox-row">
+            <input type="checkbox" id="showOriginal">
+            <label for="showOriginal">Show Original</label>
+        </div>
+        <div class="stats">
+            <div>FPS: <span id="fps">0</span></div>
+        </div>
+    </div>
+    <a href="index.html" class="back-link">&#8592; Back to Gallery</a>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+
+        if (!navigator.gpu) {
+            document.body.innerHTML = '<div class="error-msg"><h2>WebGPU Not Supported</h2><p>Your browser does not support WebGPU. Try Chrome 113+ or Edge 113+.</p></div>';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) throw new Error('No adapter');
+        const device = await adapter.requestDevice();
+        const ctxGPU = canvas.getContext('webgpu');
+        const presentFormat = navigator.gpu.getPreferredCanvasFormat();
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            ctxGPU.configure({ device, format: presentFormat, alphaMode: 'opaque' });
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        // Kernel presets (5x5 max, stored as 25 values)
+        const KERNELS = {
+            identity: { size: 3, data: [0,0,0, 0,1,0, 0,0,0] },
+            blur3: { size: 3, data: [1,1,1, 1,1,1, 1,1,1].map(v=>v/9) },
+            blur5: { size: 5, data: [1,1,1,1,1, 1,1,1,1,1, 1,1,1,1,1, 1,1,1,1,1, 1,1,1,1,1].map(v=>v/25) },
+            sharpen: { size: 3, data: [0,-1,0, -1,5,-1, 0,-1,0] },
+            emboss: { size: 3, data: [-2,-1,0, -1,1,1, 0,1,2] },
+            sobelX: { size: 3, data: [-1,0,1, -2,0,2, -1,0,1] },
+            sobelY: { size: 3, data: [-1,-2,-1, 0,0,0, 1,2,1] },
+            laplacian: { size: 3, data: [0,1,0, 1,-4,1, 0,1,0] },
+            box: { size: 3, data: [1,1,1, 1,1,1, 1,1,1].map(v=>v/9) },
+        };
+
+        let currentKernel = 'identity';
+        let boxRadius = 2;
+        let showOriginal = false;
+
+        function displayKernel(name) {
+            const k = KERNELS[name];
+            const s = k.size;
+            let html = '';
+            for (let r = 0; r < s; r++) {
+                html += '[';
+                for (let c = 0; c < s; c++) {
+                    const val = k.data[r * s + c];
+                    html += val.toFixed(2).padStart(6, ' ');
+                }
+                html += ']';
+                if (r < s - 1) html += '<br>';
+            }
+            document.getElementById('kernelDisplay').innerHTML = html;
+        }
+        displayKernel('identity');
+
+        // Webcam setup
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.playsInline = true;
+        let videoReady = false;
+        let VW = 640, VH = 480;
+
+        // Try to get webcam, fallback to generated pattern
+        let usePattern = false;
+        const camMsg = document.getElementById('camMsg');
+
+        try {
+            camMsg.style.display = 'block';
+            camMsg.textContent = 'Requesting webcam access...';
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+            video.srcObject = stream;
+            await video.play();
+            VW = video.videoWidth || 640;
+            VH = video.videoHeight || 480;
+            videoReady = true;
+            camMsg.style.display = 'none';
+        } catch (e) {
+            camMsg.textContent = 'No webcam. Using procedural pattern.';
+            usePattern = true;
+        }
+
+        // Source texture (updated each frame from video or pattern)
+        const srcTex = device.createTexture({
+            size: [VW, VH],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+
+        // Output texture from compute
+        const outTex = device.createTexture({
+            size: [VW, VH],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        });
+
+        // Kernel buffer (25 floats + size + pad)
+        const kernelBufData = new Float32Array(28); // 25 kernel values + size + boxRadius + showOriginal
+        const kernelBuf = device.createBuffer({ size: kernelBufData.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        function updateKernelBuffer() {
+            const k = KERNELS[currentKernel];
+            kernelBufData.fill(0);
+            // Pad kernel to 5x5
+            const s = k.size;
+            const offset = Math.floor((5 - s) / 2);
+            for (let r = 0; r < s; r++) {
+                for (let c = 0; c < s; c++) {
+                    kernelBufData[(r + offset) * 5 + (c + offset)] = k.data[r * s + c];
+                }
+            }
+            kernelBufData[25] = k.size;
+            kernelBufData[26] = currentKernel === 'box' ? boxRadius : 0;
+            kernelBufData[27] = showOriginal ? 1 : 0;
+            device.queue.writeBuffer(kernelBuf, 0, kernelBufData);
+        }
+        updateKernelBuffer();
+
+        // Compute shader: apply convolution
+        const computeShader = device.createShaderModule({ code: `
+            @group(0) @binding(0) var srcTexture: texture_2d<f32>;
+            @group(0) @binding(1) var outputTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(2) var srcSampler: sampler;
+            struct KernelUniforms {
+                kernel: array<vec4f, 7>,  // 25 floats packed + 3 params = 28 floats = 7 vec4f
+            }
+            @group(0) @binding(3) var<uniform> ku: KernelUniforms;
+
+            fn getKernelVal(r: i32, c: i32) -> f32 {
+                let idx = r * 5 + c;
+                let vec_idx = idx / 4;
+                let comp = idx % 4;
+                let v = ku.kernel[vec_idx];
+                if (comp == 0) { return v.x; }
+                if (comp == 1) { return v.y; }
+                if (comp == 2) { return v.z; }
+                return v.w;
+            }
+
+            fn getParam(idx: i32) -> f32 {
+                // params are at indices 25, 26, 27 = kernel[6].y, kernel[6].z, kernel[6].w
+                let i = 25 + idx;
+                let vec_idx = i / 4;
+                let comp = i % 4;
+                let v = ku.kernel[vec_idx];
+                if (comp == 0) { return v.x; }
+                if (comp == 1) { return v.y; }
+                if (comp == 2) { return v.z; }
+                return v.w;
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let dims = textureDimensions(srcTexture);
+                let x = i32(gid.x);
+                let y = i32(gid.y);
+                if (x >= i32(dims.x) || y >= i32(dims.y)) { return; }
+
+                let showOrig = getParam(2);
+                if (showOrig > 0.5) {
+                    let c = textureLoad(srcTexture, vec2u(u32(x), u32(y)), 0);
+                    textureStore(outputTex, vec2u(u32(x), u32(y)), c);
+                    return;
+                }
+
+                let boxR = i32(getParam(1));
+
+                var color = vec3f(0.0);
+
+                if (boxR > 0) {
+                    // Box filter with variable radius
+                    var sum = vec3f(0.0);
+                    var count = 0.0;
+                    for (var dy = -boxR; dy <= boxR; dy++) {
+                        for (var dx = -boxR; dx <= boxR; dx++) {
+                            let sx = clamp(x + dx, 0, i32(dims.x) - 1);
+                            let sy = clamp(y + dy, 0, i32(dims.y) - 1);
+                            sum += textureLoad(srcTexture, vec2u(u32(sx), u32(sy)), 0).rgb;
+                            count += 1.0;
+                        }
+                    }
+                    color = sum / count;
+                } else {
+                    // 5x5 kernel convolution
+                    for (var ky = 0; ky < 5; ky++) {
+                        for (var kx = 0; kx < 5; kx++) {
+                            let kv = getKernelVal(ky, kx);
+                            if (abs(kv) < 0.0001) { continue; }
+                            let sx = clamp(x + kx - 2, 0, i32(dims.x) - 1);
+                            let sy = clamp(y + ky - 2, 0, i32(dims.y) - 1);
+                            color += textureLoad(srcTexture, vec2u(u32(sx), u32(sy)), 0).rgb * kv;
+                        }
+                    }
+                }
+
+                color = clamp(color, vec3f(0.0), vec3f(1.0));
+                textureStore(outputTex, vec2u(u32(x), u32(y)), vec4f(color, 1.0));
+            }
+        `});
+
+        const computePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: computeShader, entryPoint: 'main' } });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: srcTex.createView() },
+                { binding: 1, resource: outTex.createView() },
+                { binding: 2, resource: sampler },
+                { binding: 3, resource: { buffer: kernelBuf } },
+            ],
+        });
+
+        // Render fullscreen quad showing output texture
+        const renderShader = device.createShaderModule({ code: `
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+
+            @vertex
+            fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+                var pos = array<vec2f, 6>(
+                    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+                    vec2f(-1,1), vec2f(1,-1), vec2f(1,1)
+                );
+                var out: VSOut;
+                out.pos = vec4f(pos[vi], 0, 1);
+                out.uv = vec2f(pos[vi].x * 0.5 + 0.5, 0.5 - pos[vi].y * 0.5);
+                return out;
+            }
+
+            @fragment
+            fn fs(in: VSOut) -> @location(0) vec4f {
+                return textureSample(tex, samp, in.uv);
+            }
+        `});
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: renderShader, entryPoint: 'vs' },
+            fragment: { module: renderShader, entryPoint: 'fs', targets: [{ format: presentFormat }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        const renderBG = device.createBindGroup({
+            layout: renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTex.createView() },
+                { binding: 1, resource: sampler },
+            ],
+        });
+
+        // Pattern fallback: generate a colorful test image
+        const patternCanvas = document.createElement('canvas');
+        patternCanvas.width = VW;
+        patternCanvas.height = VH;
+        const patternCtx = patternCanvas.getContext('2d');
+
+        function drawPattern(t) {
+            patternCtx.fillStyle = '#FEFAE0';
+            patternCtx.fillRect(0, 0, VW, VH);
+            for (let i = 0; i < 20; i++) {
+                const x = VW / 2 + Math.cos(t * 0.5 + i * 0.5) * VW * 0.3;
+                const y = VH / 2 + Math.sin(t * 0.7 + i * 0.7) * VH * 0.3;
+                const r = 30 + Math.sin(t + i) * 20;
+                const hue = (i * 18 + t * 20) % 360;
+                patternCtx.beginPath();
+                patternCtx.arc(x, y, r, 0, Math.PI * 2);
+                patternCtx.fillStyle = `hsl(${hue}, 70%, 50%)`;
+                patternCtx.fill();
+            }
+            // Add some text
+            patternCtx.font = '48px Lora, serif';
+            patternCtx.fillStyle = '#606C38';
+            patternCtx.textAlign = 'center';
+            patternCtx.fillText('Convolution Demo', VW / 2, VH / 2);
+        }
+
+        // UI
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentKernel = btn.dataset.kernel;
+                displayKernel(currentKernel);
+                document.getElementById('boxRadiusGroup').style.display = currentKernel === 'box' ? 'block' : 'none';
+                updateKernelBuffer();
+            });
+        });
+        document.getElementById('boxRadius').addEventListener('input', e => {
+            boxRadius = parseInt(e.target.value);
+            document.getElementById('boxRadVal').textContent = boxRadius;
+            if (currentKernel === 'box') updateKernelBuffer();
+        });
+        document.getElementById('showOriginal').addEventListener('change', e => {
+            showOriginal = e.target.checked;
+            updateKernelBuffer();
+        });
+
+        let time = 0, lastTime = performance.now(), frameCount = 0, fpsAccum = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            time += dt;
+            frameCount++; fpsAccum += dt;
+            if (fpsAccum >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(frameCount / fpsAccum);
+                frameCount = 0; fpsAccum = 0;
+            }
+
+            // Upload frame to srcTex
+            if (videoReady && !usePattern) {
+                device.queue.copyExternalImageToTexture(
+                    { source: video },
+                    { texture: srcTex },
+                    [VW, VH]
+                );
+            } else {
+                drawPattern(time);
+                const imgData = patternCtx.getImageData(0, 0, VW, VH);
+                device.queue.writeTexture(
+                    { texture: srcTex },
+                    imgData.data,
+                    { bytesPerRow: VW * 4 },
+                    [VW, VH]
+                );
+            }
+
+            const enc = device.createCommandEncoder();
+
+            // Compute convolution
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(VW / 16), Math.ceil(VH / 16));
+            cp.end();
+
+            // Render output
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: ctxGPU.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.996, g: 0.98, b: 0.878, a: 1 },
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, renderBG);
+            rp.draw(6);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+</body>
+</html>

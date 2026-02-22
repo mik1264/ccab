@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural City - Hybrid Canvas+SVG</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --sage:#8A9A5B; --moss:#606C38; --earth:#DDA15E; --cream:#FEFAE0; --terracotta:#BC6C25; --dark-moss:#3d4423; }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { overflow:hidden; font-family:'Nunito',sans-serif; background:#0a0e1a; color:#e8e6e1; }
+        .back-link { position:fixed; top:10px; left:10px; padding:8px 16px; background:rgba(0,0,0,0.7); color:var(--earth); text-decoration:none; border-radius:6px; font-size:14px; font-family:'Nunito',sans-serif; z-index:999; transition:all 0.3s ease; }
+        .back-link:hover { background:rgba(221,161,94,0.2); transform:translateX(-4px); }
+        #fps-counter { position:fixed; top:10px; right:10px; background:rgba(0,0,0,0.7); color:var(--earth); padding:8px 12px; border-radius:6px; font-family:'Courier New',monospace; font-size:14px; z-index:999; }
+        .fps-good{color:#10b981} .fps-medium{color:#fbbf24} .fps-poor{color:#e11d48}
+        #hybrid-container { position:relative; width:100vw; height:100vh; }
+        #canvas { position:absolute; top:0; left:0; width:100%; height:100%; z-index:0; }
+        #svg-overlay { position:absolute; top:0; left:0; width:100%; height:100%; z-index:1; pointer-events:none; }
+        .interactive { pointer-events:all; cursor:pointer; }
+        .svg-label { font-family:'Nunito',sans-serif; font-size:12px; fill:rgba(255,255,255,0.8); pointer-events:none; }
+        .svg-title { font-family:'Lora',serif; font-size:16px; fill:var(--earth); pointer-events:none; }
+        #loading { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; z-index:1000; }
+        .spinner { width:50px; height:50px; border:4px solid rgba(255,255,255,0.1); border-top-color:var(--earth); border-radius:50%; animation:spin 1s linear infinite; margin:0 auto 1rem; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        #error { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(225,29,72,0.9); color:white; padding:2rem; border-radius:12px; text-align:center; max-width:400px; z-index:1001; }
+        #error h2 { font-family:'Lora',serif; margin:0 0 1rem 0; }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Loading demo...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"><defs></defs></svg>
+    </div>
+    <script>
+    window.addEventListener('error', (e) => { showError('Runtime Error: ' + e.message); });
+    function showError(m) { document.getElementById('loading').style.display='none'; document.getElementById('error').style.display='block'; document.getElementById('error-message').textContent=m; }
+    function hideLoading() { document.getElementById('loading').style.display='none'; }
+
+    class FPSCounter {
+        constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}
+        update(){this.frames++;const n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}
+    }
+
+    try {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const svgEl = document.getElementById('svg-overlay');
+        const ns = 'http://www.w3.org/2000/svg';
+        const fpsCounter = new FPSCounter();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        let W, H;
+
+        let seed = 12345;
+        let viewMode = 'zones'; // zones | grayscale | wireframe
+        let buildings = [];
+        let blocks = [];
+        let hoveredBuilding = null;
+        let mouseX = 0, mouseY = 0;
+
+        // Seeded random
+        function seededRandom() {
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+            return seed / 0x7fffffff;
+        }
+
+        const zoneColors = {
+            residential: { fill: 'rgba(100, 160, 100, 0.6)', stroke: '#4a8a4a', label: 'Residential' },
+            commercial: { fill: 'rgba(100, 100, 200, 0.6)', stroke: '#5555cc', label: 'Commercial' },
+            industrial: { fill: 'rgba(200, 120, 80, 0.6)', stroke: '#cc7744', label: 'Industrial' },
+            park: { fill: 'rgba(60, 180, 60, 0.4)', stroke: '#2a8a2a', label: 'Park' }
+        };
+
+        function generateCity() {
+            blocks = [];
+            buildings = [];
+            const ROAD_W = 8;
+            const margin = 30;
+
+            // Recursive subdivision
+            function subdivide(x, y, w, h, depth) {
+                if (w < 60 || h < 60 || depth > 5) {
+                    // Classify zone
+                    const r = seededRandom();
+                    let zone;
+                    if (r < 0.4) zone = 'residential';
+                    else if (r < 0.65) zone = 'commercial';
+                    else if (r < 0.8) zone = 'industrial';
+                    else zone = 'park';
+
+                    blocks.push({ x, y, w, h, zone });
+
+                    // Generate buildings in block
+                    if (zone !== 'park') {
+                        const padding = 4;
+                        const bx = x + padding, by = y + padding;
+                        const bw = w - padding * 2, bh = h - padding * 2;
+                        const density = zone === 'commercial' ? 0.8 : zone === 'industrial' ? 0.6 : 0.5;
+                        const maxFloors = zone === 'commercial' ? 25 : zone === 'industrial' ? 8 : 12;
+                        const minFloors = zone === 'commercial' ? 5 : zone === 'industrial' ? 2 : 1;
+
+                        // Place buildings in a grid within block
+                        const cols = Math.max(1, Math.floor(bw / 20));
+                        const rows = Math.max(1, Math.floor(bh / 20));
+                        for (let r = 0; r < rows; r++) {
+                            for (let c = 0; c < cols; c++) {
+                                if (seededRandom() > density) continue;
+                                const cellW = bw / cols, cellH = bh / rows;
+                                const bldgW = cellW * (0.5 + seededRandom() * 0.4);
+                                const bldgH = cellH * (0.5 + seededRandom() * 0.4);
+                                const floors = Math.floor(minFloors + seededRandom() * (maxFloors - minFloors));
+                                buildings.push({
+                                    x: bx + c * cellW + (cellW - bldgW) / 2,
+                                    y: by + r * cellH + (cellH - bldgH) / 2,
+                                    w: bldgW,
+                                    h: bldgH,
+                                    floors: floors,
+                                    zone: zone
+                                });
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Split
+                if (w > h || (w === h && seededRandom() > 0.5)) {
+                    const split = w * (0.3 + seededRandom() * 0.4);
+                    subdivide(x, y, split - ROAD_W / 2, h, depth + 1);
+                    subdivide(x + split + ROAD_W / 2, y, w - split - ROAD_W / 2, h, depth + 1);
+                } else {
+                    const split = h * (0.3 + seededRandom() * 0.4);
+                    subdivide(x, y, w, split - ROAD_W / 2, depth + 1);
+                    subdivide(x, y + split + ROAD_W / 2, w, h - split - ROAD_W / 2, depth + 1);
+                }
+            }
+
+            subdivide(margin, margin + 40, W - margin * 2, H - margin * 2 - 40, 0);
+        }
+
+        function drawCity() {
+            ctx.clearRect(0, 0, W, H);
+            ctx.fillStyle = '#0a0e1a';
+            ctx.fillRect(0, 0, W, H);
+
+            // Roads (background)
+            ctx.fillStyle = '#1a1e2e';
+            ctx.fillRect(0, 0, W, H);
+
+            // Draw blocks
+            for (const b of blocks) {
+                if (viewMode === 'zones') {
+                    ctx.fillStyle = zoneColors[b.zone].fill;
+                } else if (viewMode === 'grayscale') {
+                    ctx.fillStyle = 'rgba(100, 100, 100, 0.4)';
+                } else {
+                    ctx.fillStyle = 'transparent';
+                }
+                ctx.fillRect(b.x, b.y, b.w, b.h);
+
+                if (viewMode === 'wireframe') {
+                    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+                    ctx.lineWidth = 0.5;
+                    ctx.strokeRect(b.x, b.y, b.w, b.h);
+                }
+            }
+
+            // Draw buildings
+            for (const b of buildings) {
+                const isHovered = b === hoveredBuilding;
+                const intensity = Math.min(b.floors / 25, 1);
+
+                if (viewMode === 'zones') {
+                    const hue = b.zone === 'residential' ? 120 : b.zone === 'commercial' ? 230 : 25;
+                    ctx.fillStyle = `hsla(${hue}, 50%, ${25 + intensity * 35}%, 0.9)`;
+                } else if (viewMode === 'grayscale') {
+                    const v = 30 + intensity * 60;
+                    ctx.fillStyle = `rgba(${v}, ${v}, ${v}, 0.9)`;
+                } else {
+                    ctx.fillStyle = 'transparent';
+                }
+                ctx.fillRect(b.x, b.y, b.w, b.h);
+
+                // Outline
+                ctx.strokeStyle = isHovered ? '#DDA15E' : (viewMode === 'wireframe' ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.3)');
+                ctx.lineWidth = isHovered ? 2 : 0.5;
+                ctx.strokeRect(b.x, b.y, b.w, b.h);
+
+                // Windows (for taller buildings)
+                if (viewMode !== 'wireframe' && b.floors > 3 && b.w > 8 && b.h > 8) {
+                    ctx.fillStyle = 'rgba(255, 220, 100, 0.3)';
+                    const winCols = Math.floor(b.w / 4);
+                    const winRows = Math.min(Math.floor(b.h / 4), b.floors);
+                    for (let wr = 0; wr < winRows; wr++) {
+                        for (let wc = 0; wc < winCols; wc++) {
+                            if (seededRandom() > 0.6) continue;
+                            ctx.fillRect(b.x + 2 + wc * 4, b.y + 2 + wr * 4, 2, 2);
+                        }
+                    }
+                }
+            }
+
+            // Parks (draw trees)
+            for (const b of blocks) {
+                if (b.zone === 'park') {
+                    const treeCols = Math.floor(b.w / 15);
+                    const treeRows = Math.floor(b.h / 15);
+                    for (let r = 0; r < treeRows; r++) {
+                        for (let c = 0; c < treeCols; c++) {
+                            const tx = b.x + 8 + c * 15;
+                            const ty = b.y + 8 + r * 15;
+                            ctx.beginPath();
+                            ctx.arc(tx, ty, 4, 0, Math.PI * 2);
+                            ctx.fillStyle = `rgba(${40 + Math.floor(seededRandom() * 40)}, ${120 + Math.floor(seededRandom() * 60)}, 40, 0.7)`;
+                            ctx.fill();
+                        }
+                    }
+                }
+            }
+        }
+
+        function createUI() {
+            svgEl.innerHTML = '';
+            const d = document.createElementNS(ns, 'defs'); svgEl.appendChild(d);
+
+            const title = document.createElementNS(ns, 'text');
+            title.setAttribute('class', 'svg-title');
+            title.setAttribute('x', W / 2); title.setAttribute('y', 28);
+            title.setAttribute('text-anchor', 'middle');
+            title.textContent = 'Procedural City Generator';
+            svgEl.appendChild(title);
+
+            // Popup for hovered building
+            const popupG = document.createElementNS(ns, 'g');
+            popupG.setAttribute('id', 'building-popup');
+            popupG.setAttribute('style', 'display:none');
+            const popBg = document.createElementNS(ns, 'rect');
+            popBg.setAttribute('width', 150); popBg.setAttribute('height', 65);
+            popBg.setAttribute('rx', 6); popBg.setAttribute('fill', 'rgba(0,0,0,0.85)');
+            popBg.setAttribute('stroke', 'rgba(221,161,94,0.4)'); popBg.setAttribute('stroke-width', 1);
+            popupG.appendChild(popBg);
+            const popT1 = document.createElementNS(ns, 'text');
+            popT1.setAttribute('id', 'pop-zone'); popT1.setAttribute('x', 10); popT1.setAttribute('y', 18);
+            popT1.setAttribute('fill', '#DDA15E'); popT1.setAttribute('font-size', '11px'); popT1.setAttribute('font-family', 'Nunito');
+            popupG.appendChild(popT1);
+            const popT2 = document.createElementNS(ns, 'text');
+            popT2.setAttribute('id', 'pop-floors'); popT2.setAttribute('x', 10); popT2.setAttribute('y', 35);
+            popT2.setAttribute('fill', '#e8e6e1'); popT2.setAttribute('font-size', '11px'); popT2.setAttribute('font-family', 'Nunito');
+            popupG.appendChild(popT2);
+            const popT3 = document.createElementNS(ns, 'text');
+            popT3.setAttribute('id', 'pop-density'); popT3.setAttribute('x', 10); popT3.setAttribute('y', 52);
+            popT3.setAttribute('fill', '#e8e6e1'); popT3.setAttribute('font-size', '11px'); popT3.setAttribute('font-family', 'Nunito');
+            popupG.appendChild(popT3);
+            svgEl.appendChild(popupG);
+
+            // Zone legend
+            const legendG = document.createElementNS(ns, 'g');
+            legendG.setAttribute('transform', `translate(${W - 170}, 50)`);
+            const legBg = document.createElementNS(ns, 'rect');
+            legBg.setAttribute('width', 160); legBg.setAttribute('height', 110);
+            legBg.setAttribute('rx', 6); legBg.setAttribute('fill', 'rgba(0,0,0,0.7)');
+            legendG.appendChild(legBg);
+            const legTitle = document.createElementNS(ns, 'text');
+            legTitle.setAttribute('x', 10); legTitle.setAttribute('y', 20);
+            legTitle.setAttribute('fill', '#DDA15E'); legTitle.setAttribute('font-size', '12px'); legTitle.setAttribute('font-family', 'Nunito');
+            legTitle.textContent = 'Zone Legend';
+            legendG.appendChild(legTitle);
+            const zones = ['residential', 'commercial', 'industrial', 'park'];
+            zones.forEach((z, i) => {
+                const rect = document.createElementNS(ns, 'rect');
+                rect.setAttribute('x', 10); rect.setAttribute('y', 30 + i * 20);
+                rect.setAttribute('width', 14); rect.setAttribute('height', 14); rect.setAttribute('rx', 2);
+                rect.setAttribute('fill', zoneColors[z].fill);
+                legendG.appendChild(rect);
+                const txt = document.createElementNS(ns, 'text');
+                txt.setAttribute('x', 30); txt.setAttribute('y', 42 + i * 20);
+                txt.setAttribute('fill', '#e8e6e1'); txt.setAttribute('font-size', '11px'); txt.setAttribute('font-family', 'Nunito');
+                txt.textContent = zoneColors[z].label;
+                legendG.appendChild(txt);
+            });
+            svgEl.appendChild(legendG);
+
+            // Stats
+            const statsText = document.createElementNS(ns, 'text');
+            statsText.setAttribute('id', 'stats-text');
+            statsText.setAttribute('class', 'svg-label');
+            statsText.setAttribute('x', W / 2); statsText.setAttribute('y', 48);
+            statsText.setAttribute('text-anchor', 'middle');
+            statsText.setAttribute('fill', 'rgba(255,255,255,0.5)');
+            svgEl.appendChild(statsText);
+
+            // Controls
+            const fo = document.createElementNS(ns, 'foreignObject');
+            fo.setAttribute('x', 10); fo.setAttribute('y', H - 55);
+            fo.setAttribute('width', 400); fo.setAttribute('height', 48);
+            fo.setAttribute('class', 'interactive');
+            fo.innerHTML = `
+                <div xmlns="http://www.w3.org/1999/xhtml" style="background:rgba(0,0,0,0.75);padding:8px 14px;border-radius:10px;font-family:Nunito,sans-serif;font-size:12px;display:flex;gap:8px;align-items:center;">
+                    <button id="regen-btn" style="padding:4px 12px;border:1px solid #DDA15E;background:rgba(0,0,0,0.5);color:#DDA15E;border-radius:4px;cursor:pointer;font-size:12px;">Randomize Seed</button>
+                    <span style="color:#aaa;">View:</span>
+                    <button class="view-btn" data-view="zones" style="padding:3px 10px;border:1px solid #DDA15E;background:rgba(0,0,0,0.5);color:#DDA15E;border-radius:4px;cursor:pointer;font-size:11px;">Zones</button>
+                    <button class="view-btn" data-view="grayscale" style="padding:3px 10px;border:1px solid #666;background:rgba(0,0,0,0.5);color:#aaa;border-radius:4px;cursor:pointer;font-size:11px;">Grayscale</button>
+                    <button class="view-btn" data-view="wireframe" style="padding:3px 10px;border:1px solid #666;background:rgba(0,0,0,0.5);color:#aaa;border-radius:4px;cursor:pointer;font-size:11px;">Wireframe</button>
+                </div>
+            `;
+            svgEl.appendChild(fo);
+        }
+
+        function bindUI() {
+            document.getElementById('regen-btn').addEventListener('click', function() {
+                seed = Math.floor(Math.random() * 100000);
+                generateCity();
+                // Reset seeded random for windows
+                var saveSeed = seed;
+                drawCity();
+                seed = saveSeed;
+            });
+            document.querySelectorAll('.view-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    viewMode = this.dataset.view;
+                    document.querySelectorAll('.view-btn').forEach(b => { b.style.color = '#aaa'; b.style.borderColor = '#666'; });
+                    this.style.color = '#DDA15E'; this.style.borderColor = '#DDA15E';
+                    var saveSeed = seed;
+                    drawCity();
+                    seed = saveSeed;
+                });
+            });
+        }
+
+        canvas.addEventListener('mousemove', function(e) {
+            mouseX = e.clientX; mouseY = e.clientY;
+            hoveredBuilding = null;
+            for (const b of buildings) {
+                if (mouseX >= b.x && mouseX <= b.x + b.w && mouseY >= b.y && mouseY <= b.y + b.h) {
+                    hoveredBuilding = b; break;
+                }
+            }
+        });
+
+        function updateSVG() {
+            const popup = document.getElementById('building-popup');
+            if (popup && hoveredBuilding) {
+                popup.style.display = 'block';
+                popup.setAttribute('transform', `translate(${mouseX + 15}, ${mouseY - 35})`);
+                document.getElementById('pop-zone').textContent = 'Zone: ' + zoneColors[hoveredBuilding.zone].label;
+                document.getElementById('pop-floors').textContent = 'Floors: ' + hoveredBuilding.floors;
+                document.getElementById('pop-density').textContent = 'Size: ' + Math.round(hoveredBuilding.w) + 'x' + Math.round(hoveredBuilding.h);
+            } else if (popup) {
+                popup.style.display = 'none';
+            }
+
+            const stats = document.getElementById('stats-text');
+            if (stats) {
+                const parkBlocks = blocks.filter(b => b.zone === 'park').length;
+                const totalBlocks = blocks.length;
+                const parkPct = totalBlocks > 0 ? ((parkBlocks / totalBlocks) * 100).toFixed(0) : 0;
+                stats.textContent = `Buildings: ${buildings.length} | Blocks: ${totalBlocks} | Parks: ${parkPct}%`;
+            }
+        }
+
+        function resize() {
+            const rect = canvas.getBoundingClientRect();
+            W = rect.width; H = rect.height;
+            canvas.width = W * dpr; canvas.height = H * dpr;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
+            svgEl.setAttribute('width', W); svgEl.setAttribute('height', H);
+            generateCity();
+            createUI(); bindUI();
+            var saveSeed = seed;
+            drawCity();
+            seed = saveSeed;
+        }
+
+        let resizeTimeout;
+        window.addEventListener('resize', () => { clearTimeout(resizeTimeout); resizeTimeout = setTimeout(resize, 150); });
+        resize();
+
+        // Only redraw when needed (hover detection)
+        function animate() {
+            fpsCounter.update();
+            updateSVG();
+            requestAnimationFrame(animate);
+        }
+        hideLoading();
+        animate();
+    } catch (err) { showError('Init Error: ' + err.message); }
+    </script>
+</body>
+</html>

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SDF Raymarcher - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 180px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls select { width: 160px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .controls input[type=range] { width: 150px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title">SDF Raymarcher</div>
+
+    <div class="controls">
+        <label>Scene:</label>
+        <select id="sceneSelect">
+            <option value="0">Mandelbulb Fractal</option>
+            <option value="1">CSG Primitives</option>
+            <option value="2">Infinite Repetition</option>
+        </select>
+        <label>Max Steps: <span id="stepsVal">128</span></label>
+        <input type="range" id="maxSteps" min="32" max="256" step="16" value="128">
+        <label>AO Strength: <span id="aoVal">1.0</span></label>
+        <input type="range" id="aoStrength" min="0" max="2" step="0.1" value="1.0">
+        <label>Shadow Softness: <span id="shadowVal">16.0</span></label>
+        <input type="range" id="shadowSoft" min="2" max="64" step="2" value="16">
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Resolution: <span id="res">0x0</span>
+    </div>
+
+    <div id="error">
+        WebGPU is not supported in your browser.<br>
+        Please use Chrome 113+, Edge 113+, or Safari 18+.
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        const W = Math.min(window.innerWidth, 1024);
+        const H = Math.min(window.innerHeight, 768);
+        canvas.width = W;
+        canvas.height = H;
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        canvas.style.position = 'absolute';
+        canvas.style.left = '0'; canvas.style.top = '0';
+        document.getElementById('res').textContent = W + 'x' + H;
+
+        let sceneId = 0, maxSteps = 128, aoStrength = 1.0, shadowSoft = 16.0;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const fmt = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: fmt, alphaMode: 'opaque' });
+
+        const uniformBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const shader = `
+            struct Uniforms {
+                resolution: vec2f,
+                time: f32,
+                sceneId: u32,
+                maxSteps: u32,
+                aoStrength: f32,
+                shadowSoft: f32,
+                pad: f32,
+            }
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            // SDF Primitives
+            fn sdSphere(p: vec3f, r: f32) -> f32 { return length(p) - r; }
+            fn sdBox(p: vec3f, b: vec3f) -> f32 { let q = abs(p) - b; return length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0); }
+            fn sdCylinder(p: vec3f, r: f32, h: f32) -> f32 { let d = vec2f(length(p.xz) - r, abs(p.y) - h); return min(max(d.x, d.y), 0.0) + length(max(d, vec2f(0.0))); }
+            fn sdTorus(p: vec3f, t: vec2f) -> f32 { let q = vec2f(length(p.xz) - t.x, p.y); return length(q) - t.y; }
+
+            // Operations
+            fn opSmoothUnion(d1: f32, d2: f32, k: f32) -> f32 { let h = clamp(0.5 + 0.5 * (d2 - d1) / k, 0.0, 1.0); return mix(d2, d1, h) - k * h * (1.0 - h); }
+            fn opSmoothSubtract(d1: f32, d2: f32, k: f32) -> f32 { let h = clamp(0.5 - 0.5 * (d2 + d1) / k, 0.0, 1.0); return mix(d2, -d1, h) + k * h * (1.0 - h); }
+
+            // Mandelbulb
+            fn mandelbulb(pos: vec3f, power: f32) -> f32 {
+                var z = pos;
+                var dr: f32 = 1.0;
+                var r: f32 = 0.0;
+
+                for (var i = 0; i < 8; i++) {
+                    r = length(z);
+                    if (r > 2.0) { break; }
+
+                    let theta = acos(z.z / r) * power;
+                    let phi = atan2(z.y, z.x) * power;
+                    let zr = pow(r, power);
+
+                    dr = pow(r, power - 1.0) * power * dr + 1.0;
+
+                    z = zr * vec3f(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta)) + pos;
+                }
+                return 0.5 * log(r) * r / dr;
+            }
+
+            fn sceneSDF(p: vec3f) -> f32 {
+                if (u.sceneId == 0u) {
+                    // Mandelbulb
+                    return mandelbulb(p, 8.0);
+                } else if (u.sceneId == 1u) {
+                    // CSG primitives
+                    let t = u.time * 0.3;
+                    let sphere = sdSphere(p - vec3f(0.0, 0.5 * sin(t), 0.0), 0.8);
+                    let box1 = sdBox(p, vec3f(0.6));
+                    let cyl = sdCylinder(p, 0.4, 1.0);
+                    let torus = sdTorus(p - vec3f(0.0, 0.0, 0.0), vec2f(1.2, 0.25));
+                    let base = opSmoothSubtract(sphere, box1, 0.1);
+                    let combined = opSmoothUnion(base, torus, 0.2);
+                    let floor = p.y + 1.5;
+                    return min(combined, floor);
+                } else {
+                    // Infinite repetition
+                    let rep = vec3f(4.0, 4.0, 4.0);
+                    let q = p - rep * round(p / rep);
+                    let t = u.time * 0.5;
+                    let sphere = sdSphere(q, 0.4 + 0.1 * sin(t + p.x + p.z));
+                    let box1 = sdBox(q, vec3f(0.3 + 0.05 * cos(t * 1.3)));
+                    return opSmoothUnion(sphere, box1, 0.2);
+                }
+            }
+
+            fn calcNormal(p: vec3f) -> vec3f {
+                let e = vec2f(0.001, 0.0);
+                return normalize(vec3f(
+                    sceneSDF(p + e.xyy) - sceneSDF(p - e.xyy),
+                    sceneSDF(p + e.yxy) - sceneSDF(p - e.yxy),
+                    sceneSDF(p + e.yyx) - sceneSDF(p - e.yyx)
+                ));
+            }
+
+            fn calcAO(pos: vec3f, nor: vec3f) -> f32 {
+                var occ: f32 = 0.0;
+                var sca: f32 = 1.0;
+                for (var i = 0; i < 5; i++) {
+                    let h = 0.01 + 0.12 * f32(i) / 4.0;
+                    let d = sceneSDF(pos + h * nor);
+                    occ += (h - d) * sca;
+                    sca *= 0.95;
+                }
+                return clamp(1.0 - u.aoStrength * occ, 0.0, 1.0);
+            }
+
+            fn softShadow(ro: vec3f, rd: vec3f, mint: f32, maxt: f32) -> f32 {
+                var res: f32 = 1.0;
+                var t = mint;
+                for (var i = 0; i < 48; i++) {
+                    let h = sceneSDF(ro + rd * t);
+                    if (h < 0.001) { return 0.0; }
+                    res = min(res, u.shadowSoft * h / t);
+                    t += h;
+                    if (t > maxt) { break; }
+                }
+                return clamp(res, 0.0, 1.0);
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                let aspect = u.resolution.x / u.resolution.y;
+                let uv = vec2f(
+                    (2.0 * f32(id.x) / u.resolution.x - 1.0) * aspect,
+                    1.0 - 2.0 * f32(id.y) / u.resolution.y
+                );
+
+                // Camera
+                let t = u.time * 0.2;
+                var camDist: f32;
+                var camTarget: vec3f;
+
+                if (u.sceneId == 0u) {
+                    camDist = 2.5;
+                    camTarget = vec3f(0.0);
+                } else if (u.sceneId == 1u) {
+                    camDist = 4.0;
+                    camTarget = vec3f(0.0, 0.0, 0.0);
+                } else {
+                    camDist = 6.0;
+                    camTarget = vec3f(sin(t * 2.0) * 3.0, cos(t) * 2.0, cos(t * 2.0) * 3.0);
+                }
+
+                let camPos = camTarget + vec3f(sin(t) * camDist, camDist * 0.5 + sin(t * 0.7) * 0.5, cos(t) * camDist);
+                let camDir = normalize(camTarget - camPos);
+                let camRight = normalize(cross(camDir, vec3f(0.0, 1.0, 0.0)));
+                let camUp = cross(camRight, camDir);
+
+                let rd = normalize(camDir + camRight * uv.x * 0.8 + camUp * uv.y * 0.8);
+                var ro = camPos;
+
+                // Raymarch
+                var totalDist: f32 = 0.0;
+                var hit = false;
+                let ms = i32(u.maxSteps);
+
+                for (var i = 0; i < 256; i++) {
+                    if (i >= ms) { break; }
+                    let d = sceneSDF(ro + rd * totalDist);
+                    if (d < 0.0005) { hit = true; break; }
+                    if (totalDist > 50.0) { break; }
+                    totalDist += d;
+                }
+
+                var color = vec3f(0.02, 0.02, 0.05);
+
+                if (hit) {
+                    let pos = ro + rd * totalDist;
+                    let nor = calcNormal(pos);
+
+                    // Lighting
+                    let lightDir = normalize(vec3f(0.6, 0.8, -0.4));
+                    let diff = max(dot(nor, lightDir), 0.0);
+                    let spec = pow(max(dot(reflect(-lightDir, nor), -rd), 0.0), 32.0);
+                    let ao = calcAO(pos, nor);
+                    let shadow = softShadow(pos + nor * 0.01, lightDir, 0.02, 10.0);
+
+                    // Rim light
+                    let rim = pow(1.0 - max(dot(nor, -rd), 0.0), 3.0);
+
+                    // Material color based on normal
+                    var mat: vec3f;
+                    if (u.sceneId == 0u) {
+                        // Mandelbulb: gradient based on position
+                        mat = vec3f(0.5 + 0.5 * sin(pos.x * 3.0 + 1.0), 0.5 + 0.5 * sin(pos.y * 3.0 + 2.0), 0.5 + 0.5 * sin(pos.z * 3.0 + 3.0)) * 0.6 + 0.2;
+                    } else if (u.sceneId == 1u) {
+                        mat = vec3f(0.6, 0.65, 0.7);
+                        if (pos.y < -1.49) { mat = vec3f(0.3, 0.35, 0.4); }
+                    } else {
+                        mat = vec3f(0.4 + 0.3 * sin(pos.x), 0.4 + 0.3 * sin(pos.y + 1.0), 0.4 + 0.3 * sin(pos.z + 2.0));
+                    }
+
+                    color = mat * (diff * shadow * 0.7 + 0.15) * ao + spec * shadow * 0.4 + rim * vec3f(0.1, 0.15, 0.25) * 0.5;
+
+                    // Fog
+                    let fog = 1.0 - exp(-totalDist * 0.05);
+                    color = mix(color, vec3f(0.02, 0.02, 0.05), fog);
+                }
+
+                // Gamma
+                color = pow(color, vec3f(1.0 / 2.2));
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: shader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format: fmt }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let startTime = performance.now();
+        let lastTime = performance.now();
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            lastTime = now;
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const buf = new ArrayBuffer(48);
+            const f32 = new Float32Array(buf);
+            const u32 = new Uint32Array(buf);
+            f32[0] = W; f32[1] = H;
+            f32[2] = (now - startTime) / 1000;
+            u32[3] = sceneId;
+            u32[4] = maxSteps;
+            f32[5] = aoStrength;
+            f32[6] = shadowSoft;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        document.getElementById('sceneSelect').addEventListener('change', (e) => {
+            sceneId = parseInt(e.target.value);
+        });
+        document.getElementById('maxSteps').addEventListener('input', (e) => {
+            maxSteps = parseInt(e.target.value);
+            document.getElementById('stepsVal').textContent = maxSteps;
+        });
+        document.getElementById('aoStrength').addEventListener('input', (e) => {
+            aoStrength = parseFloat(e.target.value);
+            document.getElementById('aoVal').textContent = aoStrength.toFixed(1);
+        });
+        document.getElementById('shadowSoft').addEventListener('input', (e) => {
+            shadowSoft = parseFloat(e.target.value);
+            document.getElementById('shadowVal').textContent = shadowSoft.toFixed(1);
+        });
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

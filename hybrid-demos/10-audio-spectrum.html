@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Spectrum + Note Labels - CCAB</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root{--sage:#8A9A5B;--moss:#606C38;--earth:#DDA15E;--cream:#FEFAE0;--terracotta:#BC6C25;--dark-moss:#3d4423}
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{overflow:hidden;font-family:'Nunito',sans-serif;background:#0a0e1a;color:#e8e6e1}
+        .back-link{position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:var(--earth);text-decoration:none;border-radius:6px;font-size:14px;font-family:'Nunito',sans-serif;z-index:999;transition:all 0.3s ease}
+        .back-link:hover{background:rgba(221,161,94,0.2);transform:translateX(-4px)}
+        #fps-counter{position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.7);color:var(--earth);padding:8px 12px;border-radius:6px;font-family:'Courier New',monospace;font-size:14px;z-index:999}
+        .fps-good{color:#10b981}.fps-medium{color:#fbbf24}.fps-poor{color:#e11d48}
+        #hybrid-container{position:relative;width:100vw;height:100vh}
+        #canvas{position:absolute;top:0;left:0;width:100%;height:100%;z-index:0}
+        #svg-overlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none}
+        .interactive{pointer-events:all;cursor:pointer}
+        #loading{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:1000}
+        .spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,0.1);border-top-color:var(--earth);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1rem}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        #error{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(225,29,72,0.9);color:white;padding:2rem;border-radius:12px;text-align:center;max-width:400px;z-index:1001}
+        #error h2{font-family:'Lora',serif;margin:0 0 1rem 0}
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Click anywhere to start audio...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+
+    <script>
+        window.addEventListener('error',function(e){showError('Runtime Error: '+e.message);});
+        function showError(m){document.getElementById('loading').style.display='none';document.getElementById('error').style.display='block';document.getElementById('error-message').textContent=m;}
+        function hideLoading(){document.getElementById('loading').style.display='none';}
+        class FPSCounter{constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}update(){this.frames++;var n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}}
+
+        try {
+            var canvas = document.getElementById('canvas');
+            var ctx2 = canvas.getContext('2d');
+            var svg = document.getElementById('svg-overlay');
+            var svgNS = 'http://www.w3.org/2000/svg';
+            var fpsCounter = new FPSCounter();
+            var W, H;
+
+            var audioCtx, analyser, dataArray, oscillators = [];
+            var started = false;
+
+            // Note names and frequencies
+            var noteNames = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+            function noteFreq(note, octave) {
+                var n = (octave - 4) * 12 + noteNames.indexOf(note) - 9;
+                return 440 * Math.pow(2, n / 12);
+            }
+
+            function freqToNote(freq) {
+                if (freq <= 0) return '--';
+                var n = 12 * Math.log2(freq / 440) + 69;
+                var noteIdx = Math.round(n) % 12;
+                if (noteIdx < 0) noteIdx += 12;
+                var octave = Math.floor(Math.round(n) / 12) - 1;
+                return noteNames[noteIdx] + octave;
+            }
+
+            // Generate note labels for x-axis
+            var majorNotes = [];
+            for (var oct = 0; oct <= 8; oct++) {
+                ['C','E','A'].forEach(function(n) {
+                    var f = noteFreq(n, oct);
+                    if (f > 20 && f < 20000) {
+                        majorNotes.push({ name: n + oct, freq: f });
+                    }
+                });
+            }
+
+            function createEl(tag, attrs) {
+                var el = document.createElementNS(svgNS, tag);
+                for (var k in attrs) el.setAttribute(k, attrs[k]);
+                return el;
+            }
+
+            // SVG note labels
+            var noteLabelsG = createEl('g', {});
+            svg.appendChild(noteLabelsG);
+
+            // Cursor frequency display
+            var cursorLine = createEl('line', { stroke: 'rgba(221,161,94,0.5)', 'stroke-width': '1', 'stroke-dasharray': '3,3' });
+            svg.appendChild(cursorLine);
+            var cursorText = createEl('text', { fill: '#DDA15E', 'font-family': 'Courier New, monospace', 'font-size': '12' });
+            svg.appendChild(cursorText);
+
+            // Dominant frequency display
+            var domFreqText = createEl('text', { fill: '#10b981', 'font-family': 'Courier New, monospace', 'font-size': '14' });
+            svg.appendChild(domFreqText);
+
+            // Chord buttons panel
+            var btnPanel = createEl('g', {});
+            svg.appendChild(btnPanel);
+            var panelBg = createEl('rect', { rx: '10', fill: 'rgba(0,0,0,0.75)', stroke: 'rgba(221,161,94,0.3)', 'stroke-width': '1' });
+            btnPanel.appendChild(panelBg);
+            var panelTitle = createEl('text', { fill: '#DDA15E', 'font-family': 'Lora, serif', 'font-size': '13' });
+            panelTitle.textContent = 'Play Chords';
+            btnPanel.appendChild(panelTitle);
+
+            var chords = [
+                { name: 'C Major', notes: [['C',4],['E',4],['G',4]] },
+                { name: 'A Minor', notes: [['A',3],['C',4],['E',4]] },
+                { name: 'G Major', notes: [['G',3],['B',3],['D',4]] },
+                { name: 'F Major', notes: [['F',3],['A',3],['C',4]] },
+                { name: 'D Minor', notes: [['D',4],['F',4],['A',4]] },
+                { name: 'Stop', notes: [] }
+            ];
+
+            var chordBtns = [];
+            chords.forEach(function(chord, i) {
+                var g = createEl('g', { style: 'cursor:pointer' });
+                g.classList.add('interactive');
+                var r = createEl('rect', { width: '90', height: '26', rx: '5', fill: chord.name === 'Stop' ? 'rgba(225,29,72,0.3)' : 'rgba(255,255,255,0.1)', stroke: chord.name === 'Stop' ? 'rgba(225,29,72,0.5)' : 'rgba(221,161,94,0.4)', 'stroke-width': '1' });
+                var t = createEl('text', { x: '45', y: '17', 'text-anchor': 'middle', fill: chord.name === 'Stop' ? '#e11d48' : '#DDA15E', 'font-family': 'Nunito, sans-serif', 'font-size': '11' });
+                t.textContent = chord.name;
+                g.appendChild(r); g.appendChild(t);
+                btnPanel.appendChild(g);
+                chordBtns.push(g);
+
+                g.addEventListener('click', function() {
+                    if (!started) startAudio();
+                    // Stop all oscillators
+                    oscillators.forEach(function(o) { o.stop(); });
+                    oscillators = [];
+                    // Start new chord
+                    chord.notes.forEach(function(n) {
+                        var osc = audioCtx.createOscillator();
+                        var gain = audioCtx.createGain();
+                        osc.type = 'sine';
+                        osc.frequency.value = noteFreq(n[0], n[1]);
+                        gain.gain.value = 0.15;
+                        osc.connect(gain);
+                        gain.connect(analyser);
+                        analyser.connect(audioCtx.destination);
+                        osc.start();
+                        oscillators.push(osc);
+                    });
+                });
+            });
+
+            var mouseFreq = 0;
+            canvas.style.pointerEvents = 'all';
+            canvas.addEventListener('mousemove', function(e) {
+                // Log scale: map x position to frequency
+                var minF = 20, maxF = 20000;
+                var t = e.clientX / W;
+                mouseFreq = minF * Math.pow(maxF / minF, t);
+
+                cursorLine.setAttribute('x1', e.clientX);
+                cursorLine.setAttribute('x2', e.clientX);
+                cursorLine.setAttribute('y1', 0);
+                cursorLine.setAttribute('y2', H);
+                cursorText.setAttribute('x', e.clientX + 5);
+                cursorText.setAttribute('y', 60);
+                cursorText.textContent = Math.round(mouseFreq) + ' Hz (' + freqToNote(mouseFreq) + ')';
+            });
+
+            canvas.addEventListener('click', function() {
+                if (!started) startAudio();
+            });
+
+            function startAudio() {
+                if (started) return;
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 2048;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+                // Play a test chord to start
+                var testNotes = [['C',4],['E',4],['G',4]];
+                testNotes.forEach(function(n) {
+                    var osc = audioCtx.createOscillator();
+                    var gain = audioCtx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = noteFreq(n[0], n[1]);
+                    gain.gain.value = 0.12;
+                    osc.connect(gain);
+                    gain.connect(analyser);
+                    analyser.connect(audioCtx.destination);
+                    osc.start();
+                    oscillators.push(osc);
+                });
+
+                started = true;
+                hideLoading();
+            }
+
+            function freqToX(freq) {
+                var minF = 20, maxF = 20000;
+                return (Math.log(freq / minF) / Math.log(maxF / minF)) * W;
+            }
+
+            function resize() {
+                W = window.innerWidth; H = window.innerHeight;
+                canvas.width = W; canvas.height = H;
+                svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+                svg.setAttribute('width', W); svg.setAttribute('height', H);
+
+                // Update note labels
+                while (noteLabelsG.firstChild) noteLabelsG.removeChild(noteLabelsG.firstChild);
+                majorNotes.forEach(function(n) {
+                    var x = freqToX(n.freq);
+                    if (x > 5 && x < W - 20) {
+                        var line = createEl('line', { x1: x, x2: x, y1: H - 50, y2: H - 40, stroke: 'rgba(255,255,255,0.3)', 'stroke-width': '1' });
+                        var text = createEl('text', { x: x, y: H - 30, fill: 'rgba(255,255,255,0.5)', 'font-family': 'Nunito, sans-serif', 'font-size': '9', 'text-anchor': 'middle' });
+                        text.textContent = n.name;
+                        noteLabelsG.appendChild(line);
+                        noteLabelsG.appendChild(text);
+                    }
+                });
+
+                domFreqText.setAttribute('x', W / 2);
+                domFreqText.setAttribute('y', 45);
+                domFreqText.setAttribute('text-anchor', 'middle');
+
+                // Chord buttons
+                var bx = W - 220, by = 50;
+                panelBg.setAttribute('x', bx); panelBg.setAttribute('y', by);
+                panelBg.setAttribute('width', 200); panelBg.setAttribute('height', 220);
+                panelTitle.setAttribute('x', bx + 15); panelTitle.setAttribute('y', by + 22);
+
+                chordBtns.forEach(function(g, i) {
+                    var row = Math.floor(i / 2), col = i % 2;
+                    g.setAttribute('transform', 'translate(' + (bx + 8 + col * 96) + ',' + (by + 35 + row * 34) + ')');
+                });
+            }
+            var rt; window.addEventListener('resize', function() { clearTimeout(rt); rt = setTimeout(resize, 100); });
+            resize();
+
+            function animate() {
+                fpsCounter.update();
+
+                ctx2.fillStyle = '#0a0e1a';
+                ctx2.fillRect(0, 0, W, H);
+
+                if (started && analyser) {
+                    analyser.getByteFrequencyData(dataArray);
+
+                    var barCount = dataArray.length;
+                    var sampleRate = audioCtx.sampleRate;
+                    var binWidth = sampleRate / analyser.fftSize;
+                    var barH = H - 70;
+
+                    // Find dominant frequency
+                    var maxVal = 0, maxBin = 0;
+                    for (var i = 1; i < barCount; i++) {
+                        if (dataArray[i] > maxVal) {
+                            maxVal = dataArray[i]; maxBin = i;
+                        }
+                    }
+                    var domFreq = maxBin * binWidth;
+                    domFreqText.textContent = 'Dominant: ' + Math.round(domFreq) + ' Hz (' + freqToNote(domFreq) + ')';
+
+                    // Draw bars with log frequency scale
+                    for (var i = 1; i < barCount; i++) {
+                        var freq = i * binWidth;
+                        if (freq < 20 || freq > 20000) continue;
+                        var x = freqToX(freq);
+                        var nextX = freqToX((i + 1) * binWidth);
+                        var bw = Math.max(1, nextX - x);
+                        var val = dataArray[i] / 255;
+                        var h = val * barH;
+
+                        // Color gradient
+                        var hue = 30 + val * 280;
+                        ctx2.fillStyle = 'hsla(' + hue + ',80%,' + (30 + val * 30) + '%,0.9)';
+                        ctx2.fillRect(x, barH - h + 50, bw, h);
+                    }
+                } else {
+                    // Placeholder text
+                    ctx2.fillStyle = 'rgba(255,255,255,0.3)';
+                    ctx2.font = '20px Lora, serif';
+                    ctx2.textAlign = 'center';
+                    ctx2.fillText('Click anywhere to start audio', W / 2, H / 2);
+                }
+
+                requestAnimationFrame(animate);
+            }
+
+            animate();
+        } catch(e) { showError('Init Error: ' + e.message); }
+    </script>
+</body>
+</html>

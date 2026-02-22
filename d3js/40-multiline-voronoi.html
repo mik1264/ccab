@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Line Time Series with Voronoi - CCAB</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --sage: #8A9A5B; --moss: #606C38; --earth: #DDA15E;
+            --cream: #FEFAE0; --terracotta: #BC6C25; --dark-moss: #3d4423;
+        }
+        body {
+            font-family: 'Nunito', sans-serif;
+            background: linear-gradient(135deg, #FEFAE0 0%, #F4F1DE 50%, #EDE8D5 100%);
+            color: var(--dark-moss); min-height: 100vh;
+        }
+        .back-link {
+            position: fixed; top: 20px; left: 20px; z-index: 1000;
+            color: var(--terracotta); text-decoration: none; font-weight: 600;
+            padding: 8px 16px; background: rgba(255,255,255,0.7);
+            border-radius: 20px; backdrop-filter: blur(10px);
+            transition: all 0.3s ease; font-size: 0.9rem;
+        }
+        .back-link:hover { background: rgba(255,255,255,0.95); transform: translateX(-3px); }
+        .container { max-width: 1100px; margin: 0 auto; padding: 80px 20px 40px; }
+        h1 { font-family: 'Lora', serif; text-align: center; color: var(--moss); font-size: 2rem; margin-bottom: 0.5rem; }
+        .subtitle { text-align: center; color: var(--sage); margin-bottom: 1.5rem; }
+        .chart-container {
+            background: rgba(255,255,255,0.65); backdrop-filter: blur(10px);
+            border-radius: 20px; padding: 24px;
+            box-shadow: 0 8px 32px rgba(96,108,56,0.1);
+        }
+        .controls { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 1rem; }
+        .btn {
+            font-family: 'Nunito', sans-serif; font-size: 0.85rem;
+            padding: 8px 18px; border-radius: 20px; border: 2px solid var(--sage);
+            background: rgba(255,255,255,0.6); color: var(--moss); cursor: pointer;
+            font-weight: 600; transition: all 0.3s ease;
+        }
+        .btn:hover, .btn.active { background: var(--sage); color: white; }
+        .tooltip {
+            position: absolute; pointer-events: none; background: rgba(61,68,35,0.92);
+            color: var(--cream); padding: 10px 14px; border-radius: 10px;
+            font-size: 0.8rem; line-height: 1.5; z-index: 100;
+        }
+        svg text { font-family: 'Nunito', sans-serif; }
+        .pinned-list {
+            display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
+            margin-top: 10px; font-size: 0.8rem;
+        }
+        .pinned-tag {
+            padding: 3px 10px; border-radius: 12px; cursor: pointer;
+            color: white; font-weight: 600; font-size: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">&#8592; Back to Gallery</a>
+    <div class="container">
+        <h1>Multi-Line Time Series with Voronoi</h1>
+        <p class="subtitle">20 time series — hover for nearest line detection, click to pin</p>
+        <div class="controls">
+            <button class="btn active" id="linearBtn">Linear Scale</button>
+            <button class="btn" id="logBtn">Log Scale</button>
+            <button class="btn" id="clearPins">Clear Pinned</button>
+        </div>
+        <div class="chart-container">
+            <div id="chart"></div>
+            <div class="pinned-list" id="pinnedList"></div>
+        </div>
+    </div>
+    <div class="tooltip" id="tooltip" style="display:none;"></div>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script>
+    (function() {
+        // Generate 20 random-walk time series (52 weekly points)
+        const seriesNames = [
+            "Alpha Corp","Beta Inc","Gamma Ltd","Delta SA","Epsilon Co",
+            "Zeta Tech","Eta Bio","Theta Fin","Iota Pharma","Kappa Energy",
+            "Lambda AI","Mu Retail","Nu Health","Xi Media","Omicron Auto",
+            "Pi Foods","Rho Aero","Sigma Chem","Tau Mining","Upsilon Tel"
+        ];
+
+        const colors = d3.scaleOrdinal(d3.schemeCategory10);
+        const weeks = 52;
+
+        function genSeries(start, vol) {
+            const pts = [];
+            let price = start;
+            for (let w = 0; w < weeks; w++) {
+                price *= (1 + (Math.random() - 0.48) * vol);
+                price = Math.max(1, price);
+                pts.push({ week: w, value: +price.toFixed(2) });
+            }
+            return pts;
+        }
+
+        const series = seriesNames.map((name, i) => ({
+            name: name,
+            data: genSeries(50 + Math.random() * 150, 0.06 + Math.random() * 0.06),
+            color: colors(i)
+        }));
+
+        const margin = { top: 20, right: 100, bottom: 50, left: 60 };
+        const width = Math.min(1050, window.innerWidth - 80) - margin.left - margin.right;
+        const height = 460 - margin.top - margin.bottom;
+
+        const svgEl = d3.select("#chart").append("svg")
+            .attr("width", width + margin.left + margin.right)
+            .attr("height", height + margin.top + margin.bottom);
+        const svg = svgEl.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+        const tooltip = d3.select("#tooltip");
+        const pinned = new Set();
+        let useLog = false;
+
+        function draw() {
+            svg.selectAll("*").remove();
+
+            const x = d3.scaleLinear().domain([0, weeks - 1]).range([0, width]);
+            const allValues = series.flatMap(s => s.data.map(d => d.value));
+            const y = useLog
+                ? d3.scaleLog().domain([d3.min(allValues) * 0.9, d3.max(allValues) * 1.1]).range([height, 0])
+                : d3.scaleLinear().domain([d3.min(allValues) * 0.9, d3.max(allValues) * 1.1]).range([height, 0]);
+
+            // Axes
+            svg.append("g").attr("transform", `translate(0,${height})`)
+                .call(d3.axisBottom(x).ticks(12).tickFormat(d => `W${d + 1}`))
+                .selectAll("text").style("fill", "var(--moss)").style("font-size", "10px");
+            svg.append("g").call(d3.axisLeft(y).ticks(8).tickFormat(d => `$${d.toFixed(0)}`))
+                .selectAll("text").style("fill", "var(--moss)").style("font-size", "10px");
+            svg.selectAll(".domain, .tick line").style("stroke", "#b5b89a");
+
+            // Grid
+            svg.append("g").call(d3.axisLeft(y).ticks(8).tickSize(-width).tickFormat(""))
+                .selectAll("line").style("stroke", "#e8e5d8").style("stroke-dasharray", "2,3");
+
+            // Lines
+            const line = d3.line().x(d => x(d.week)).y(d => y(d.value)).curve(d3.curveMonotoneX);
+
+            const paths = {};
+            series.forEach(s => {
+                paths[s.name] = svg.append("path")
+                    .datum(s.data).attr("fill", "none")
+                    .attr("stroke", s.color)
+                    .attr("stroke-width", pinned.has(s.name) ? 3 : 1.2)
+                    .attr("stroke-opacity", pinned.has(s.name) ? 1 : 0.4)
+                    .attr("d", line);
+            });
+
+            // End labels for pinned
+            series.forEach(s => {
+                if (pinned.has(s.name)) {
+                    const last = s.data[s.data.length - 1];
+                    svg.append("text").attr("x", x(last.week) + 5).attr("y", y(last.value))
+                        .attr("dominant-baseline", "middle")
+                        .style("font-size", "10px").style("fill", s.color).style("font-weight", "600")
+                        .text(s.name.split(" ")[0]);
+                }
+            });
+
+            // Voronoi for nearest-series detection
+            const allPoints = [];
+            series.forEach(s => {
+                s.data.forEach(d => {
+                    allPoints.push({ week: d.week, value: d.value, series: s });
+                });
+            });
+
+            const delaunay = d3.Delaunay.from(allPoints, d => x(d.week), d => y(d.value));
+
+            // Hover overlay
+            const hoverLine = svg.append("line")
+                .attr("stroke", "var(--sage)").attr("stroke-width", 1)
+                .attr("stroke-dasharray", "4,3").style("display", "none")
+                .attr("y1", 0).attr("y2", height);
+
+            const hoverDot = svg.append("circle")
+                .attr("r", 5).attr("fill", "none").attr("stroke-width", 2)
+                .style("display", "none");
+
+            svg.append("rect")
+                .attr("width", width).attr("height", height)
+                .attr("fill", "transparent")
+                .on("mousemove", function(event) {
+                    const [mx, my] = d3.pointer(event);
+                    const idx = delaunay.find(mx, my);
+                    if (idx === -1) return;
+                    const pt = allPoints[idx];
+
+                    // Highlight nearest series
+                    series.forEach(s => {
+                        paths[s.name]
+                            .attr("stroke-width", s.name === pt.series.name ? 3.5 : (pinned.has(s.name) ? 3 : 1))
+                            .attr("stroke-opacity", s.name === pt.series.name ? 1 : (pinned.has(s.name) ? 0.8 : 0.15));
+                    });
+
+                    hoverLine.style("display", null)
+                        .attr("x1", x(pt.week)).attr("x2", x(pt.week));
+                    hoverDot.style("display", null)
+                        .attr("cx", x(pt.week)).attr("cy", y(pt.value))
+                        .attr("stroke", pt.series.color);
+
+                    tooltip.style("display", "block").html(
+                        `<strong>${pt.series.name}</strong><br>Week ${pt.week + 1}: $${pt.value.toFixed(2)}`
+                    ).style("left", (event.pageX + 14) + "px").style("top", (event.pageY - 14) + "px");
+                })
+                .on("mouseout", function() {
+                    series.forEach(s => {
+                        paths[s.name]
+                            .attr("stroke-width", pinned.has(s.name) ? 3 : 1.2)
+                            .attr("stroke-opacity", pinned.has(s.name) ? 1 : 0.4);
+                    });
+                    hoverLine.style("display", "none");
+                    hoverDot.style("display", "none");
+                    tooltip.style("display", "none");
+                })
+                .on("click", function(event) {
+                    const [mx, my] = d3.pointer(event);
+                    const idx = delaunay.find(mx, my);
+                    if (idx === -1) return;
+                    const name = allPoints[idx].series.name;
+                    if (pinned.has(name)) pinned.delete(name); else pinned.add(name);
+                    draw();
+                    updatePinnedList();
+                });
+        }
+
+        function updatePinnedList() {
+            const list = d3.select("#pinnedList");
+            list.html("");
+            pinned.forEach(name => {
+                const s = series.find(s => s.name === name);
+                list.append("span").attr("class", "pinned-tag")
+                    .style("background", s.color)
+                    .text(name)
+                    .on("click", () => { pinned.delete(name); draw(); updatePinnedList(); });
+            });
+        }
+
+        draw();
+
+        d3.select("#linearBtn").on("click", function() {
+            useLog = false;
+            d3.select(this).classed("active", true);
+            d3.select("#logBtn").classed("active", false);
+            draw();
+        });
+        d3.select("#logBtn").on("click", function() {
+            useLog = true;
+            d3.select(this).classed("active", true);
+            d3.select("#linearBtn").classed("active", false);
+            draw();
+        });
+        d3.select("#clearPins").on("click", function() {
+            pinned.clear();
+            draw();
+            updatePinnedList();
+        });
+    })();
+    </script>
+</body>
+</html>

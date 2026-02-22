@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Galaxy Collision - Hybrid Canvas+SVG</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --sage:#8A9A5B; --moss:#606C38; --earth:#DDA15E; --cream:#FEFAE0; --terracotta:#BC6C25; --dark-moss:#3d4423; }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { overflow:hidden; font-family:'Nunito',sans-serif; background:#020510; color:#e8e6e1; }
+        .back-link { position:fixed; top:10px; left:10px; padding:8px 16px; background:rgba(0,0,0,0.7); color:var(--earth); text-decoration:none; border-radius:6px; font-size:14px; font-family:'Nunito',sans-serif; z-index:999; transition:all 0.3s ease; }
+        .back-link:hover { background:rgba(221,161,94,0.2); transform:translateX(-4px); }
+        #fps-counter { position:fixed; top:10px; right:10px; background:rgba(0,0,0,0.7); color:var(--earth); padding:8px 12px; border-radius:6px; font-family:'Courier New',monospace; font-size:14px; z-index:999; }
+        .fps-good{color:#10b981} .fps-medium{color:#fbbf24} .fps-poor{color:#e11d48}
+        #hybrid-container { position:relative; width:100vw; height:100vh; }
+        #canvas { position:absolute; top:0; left:0; width:100%; height:100%; z-index:0; }
+        #svg-overlay { position:absolute; top:0; left:0; width:100%; height:100%; z-index:1; pointer-events:none; }
+        .interactive { pointer-events:all; cursor:pointer; }
+        .svg-label { font-family:'Nunito',sans-serif; font-size:12px; fill:rgba(255,255,255,0.8); pointer-events:none; }
+        .svg-title { font-family:'Lora',serif; font-size:16px; fill:var(--earth); pointer-events:none; }
+        #loading { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; z-index:1000; }
+        .spinner { width:50px; height:50px; border:4px solid rgba(255,255,255,0.1); border-top-color:var(--earth); border-radius:50%; animation:spin 1s linear infinite; margin:0 auto 1rem; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        #error { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(225,29,72,0.9); color:white; padding:2rem; border-radius:12px; text-align:center; max-width:400px; z-index:1001; }
+        #error h2 { font-family:'Lora',serif; margin:0 0 1rem 0; }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Loading demo...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"><defs></defs></svg>
+    </div>
+    <script>
+    window.addEventListener('error', (e) => { showError('Runtime Error: ' + e.message); });
+    function showError(m) { document.getElementById('loading').style.display='none'; document.getElementById('error').style.display='block'; document.getElementById('error-message').textContent=m; }
+    function hideLoading() { document.getElementById('loading').style.display='none'; }
+
+    class FPSCounter {
+        constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}
+        update(){this.frames++;const n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}
+    }
+
+    try {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const svg = document.getElementById('svg-overlay');
+        const ns = 'http://www.w3.org/2000/svg';
+        const fpsCounter = new FPSCounter();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        let W, H;
+
+        const G = 0.8;
+        const SOFTENING = 10;
+        const N_PER_GALAXY = 200;
+        let particles = [];
+        let running = true;
+        let speed = 1;
+        let simTime = 0;
+        let trailCanvas, trailCtx;
+
+        function initGalaxy(cx, cy, vx, vy, n, hue) {
+            const result = [];
+            for (let i = 0; i < n; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const r = 20 + Math.random() * 100;
+                const orbitalSpeed = Math.sqrt(G * n * 0.05 / r);
+                result.push({
+                    x: cx + Math.cos(angle) * r,
+                    y: cy + Math.sin(angle) * r,
+                    vx: vx + (-Math.sin(angle)) * orbitalSpeed + (Math.random() - 0.5) * 0.3,
+                    vy: vy + Math.cos(angle) * orbitalSpeed + (Math.random() - 0.5) * 0.3,
+                    mass: 0.5 + Math.random() * 1.5,
+                    hue: hue + (Math.random() - 0.5) * 30,
+                    size: 1 + Math.random() * 1.5
+                });
+            }
+            // Central massive body
+            result.push({ x: cx, y: cy, vx: vx, vy: vy, mass: 50, hue: hue, size: 3 });
+            return result;
+        }
+
+        function resetSim() {
+            const cx = W / 2, cy = H / 2;
+            particles = [
+                ...initGalaxy(cx - 180, cy - 60, 0.5, 0.2, N_PER_GALAXY, 220),
+                ...initGalaxy(cx + 180, cy + 60, -0.5, -0.2, N_PER_GALAXY, 30)
+            ];
+            simTime = 0;
+            if (trailCtx) trailCtx.clearRect(0, 0, trailCanvas.width, trailCanvas.height);
+        }
+
+        function simulate(dt) {
+            for (let i = 0; i < particles.length; i++) {
+                let ax = 0, ay = 0;
+                const pi = particles[i];
+                for (let j = 0; j < particles.length; j++) {
+                    if (i === j) continue;
+                    const pj = particles[j];
+                    const dx = pj.x - pi.x, dy = pj.y - pi.y;
+                    const dist2 = dx * dx + dy * dy + SOFTENING * SOFTENING;
+                    const inv = pj.mass / (dist2 * Math.sqrt(dist2));
+                    ax += dx * inv * G;
+                    ay += dy * inv * G;
+                }
+                pi.vx += ax * dt;
+                pi.vy += ay * dt;
+            }
+            for (const p of particles) {
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+            }
+            simTime += dt;
+        }
+
+        function getCOM(start, end) {
+            let mx = 0, my = 0, tm = 0;
+            for (let i = start; i < end && i < particles.length; i++) {
+                mx += particles[i].x * particles[i].mass;
+                my += particles[i].y * particles[i].mass;
+                tm += particles[i].mass;
+            }
+            return { x: mx / tm, y: my / tm };
+        }
+
+        function draw() {
+            // Fade trail
+            trailCtx.fillStyle = 'rgba(2, 5, 16, 0.05)';
+            trailCtx.fillRect(0, 0, W, H);
+            for (const p of particles) {
+                trailCtx.beginPath();
+                trailCtx.arc(p.x, p.y, p.size * 0.5, 0, Math.PI * 2);
+                trailCtx.fillStyle = `hsla(${p.hue}, 80%, 60%, 0.4)`;
+                trailCtx.fill();
+            }
+
+            ctx.clearRect(0, 0, W, H);
+            ctx.fillStyle = '#020510';
+            ctx.fillRect(0, 0, W, H);
+            ctx.drawImage(trailCanvas, 0, 0);
+
+            for (const p of particles) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fillStyle = `hsla(${p.hue}, 80%, 65%, 0.9)`;
+                ctx.fill();
+            }
+        }
+
+        function createUI() {
+            svg.innerHTML = '';
+            const d = document.createElementNS(ns, 'defs'); svg.appendChild(d);
+
+            const title = document.createElementNS(ns, 'text');
+            title.setAttribute('class', 'svg-title');
+            title.setAttribute('x', W / 2); title.setAttribute('y', 28);
+            title.setAttribute('text-anchor', 'middle');
+            title.textContent = 'Galaxy Collision Simulation';
+            svg.appendChild(title);
+
+            // Scale bar
+            const sbG = document.createElementNS(ns, 'g');
+            sbG.setAttribute('transform', `translate(${W - 160}, ${H - 40})`);
+            const sbLine = document.createElementNS(ns, 'line');
+            sbLine.setAttribute('x1', 0); sbLine.setAttribute('y1', 0);
+            sbLine.setAttribute('x2', 100); sbLine.setAttribute('y2', 0);
+            sbLine.setAttribute('stroke', 'rgba(255,255,255,0.6)'); sbLine.setAttribute('stroke-width', 2);
+            sbG.appendChild(sbLine);
+            const sbText = document.createElementNS(ns, 'text');
+            sbText.setAttribute('x', 50); sbText.setAttribute('y', -8);
+            sbText.setAttribute('text-anchor', 'middle');
+            sbText.setAttribute('class', 'svg-label');
+            sbText.textContent = '10 kpc';
+            sbG.appendChild(sbText);
+            svg.appendChild(sbG);
+
+            // Time display
+            const timeText = document.createElementNS(ns, 'text');
+            timeText.setAttribute('id', 'time-display');
+            timeText.setAttribute('class', 'svg-label');
+            timeText.setAttribute('x', W - 150); timeText.setAttribute('y', 30);
+            timeText.setAttribute('fill', '#DDA15E');
+            timeText.textContent = 'T = 0 Myr';
+            svg.appendChild(timeText);
+
+            // COM indicators
+            const com1 = document.createElementNS(ns, 'circle');
+            com1.setAttribute('id', 'com1'); com1.setAttribute('r', 5);
+            com1.setAttribute('fill', 'none'); com1.setAttribute('stroke', 'rgba(100,150,255,0.8)');
+            com1.setAttribute('stroke-width', 1.5); com1.setAttribute('stroke-dasharray', '3,3');
+            svg.appendChild(com1);
+            const com2 = document.createElementNS(ns, 'circle');
+            com2.setAttribute('id', 'com2'); com2.setAttribute('r', 5);
+            com2.setAttribute('fill', 'none'); com2.setAttribute('stroke', 'rgba(255,150,50,0.8)');
+            com2.setAttribute('stroke-width', 1.5); com2.setAttribute('stroke-dasharray', '3,3');
+            svg.appendChild(com2);
+
+            // Controls
+            const fo = document.createElementNS(ns, 'foreignObject');
+            fo.setAttribute('x', 10); fo.setAttribute('y', H - 80);
+            fo.setAttribute('width', 340); fo.setAttribute('height', 70);
+            fo.setAttribute('class', 'interactive');
+            fo.innerHTML = `
+                <div xmlns="http://www.w3.org/1999/xhtml" style="background:rgba(0,0,0,0.75);padding:10px 14px;border-radius:10px;font-family:Nunito,sans-serif;display:flex;gap:8px;align-items:center;">
+                    <button id="play-btn" style="padding:4px 12px;border:1px solid #DDA15E;background:rgba(0,0,0,0.5);color:#DDA15E;border-radius:4px;cursor:pointer;font-size:12px;">Pause</button>
+                    <button id="reset-sim-btn" style="padding:4px 12px;border:1px solid #8A9A5B;background:rgba(0,0,0,0.5);color:#8A9A5B;border-radius:4px;cursor:pointer;font-size:12px;">Reset</button>
+                    <span style="color:#aaa;font-size:12px;">Speed:</span>
+                    <button class="spd-btn" data-spd="1" style="padding:3px 8px;border:1px solid #666;background:rgba(0,0,0,0.5);color:#DDA15E;border-radius:3px;cursor:pointer;font-size:11px;">x1</button>
+                    <button class="spd-btn" data-spd="4" style="padding:3px 8px;border:1px solid #666;background:rgba(0,0,0,0.5);color:#aaa;border-radius:3px;cursor:pointer;font-size:11px;">x4</button>
+                    <button class="spd-btn" data-spd="16" style="padding:3px 8px;border:1px solid #666;background:rgba(0,0,0,0.5);color:#aaa;border-radius:3px;cursor:pointer;font-size:11px;">x16</button>
+                </div>
+            `;
+            svg.appendChild(fo);
+        }
+
+        function bindUI() {
+            const playBtn = document.getElementById('play-btn');
+            if (playBtn) playBtn.addEventListener('click', function() {
+                running = !running;
+                this.textContent = running ? 'Pause' : 'Play';
+            });
+            const resetBtn = document.getElementById('reset-sim-btn');
+            if (resetBtn) resetBtn.addEventListener('click', resetSim);
+            document.querySelectorAll('.spd-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    speed = parseInt(this.dataset.spd);
+                    document.querySelectorAll('.spd-btn').forEach(b => b.style.color = '#aaa');
+                    this.style.color = '#DDA15E';
+                });
+            });
+        }
+
+        function updateSVG() {
+            const n1 = N_PER_GALAXY + 1;
+            const com1Data = getCOM(0, n1);
+            const com2Data = getCOM(n1, particles.length);
+            const com1El = document.getElementById('com1');
+            const com2El = document.getElementById('com2');
+            if (com1El) { com1El.setAttribute('cx', com1Data.x); com1El.setAttribute('cy', com1Data.y); }
+            if (com2El) { com2El.setAttribute('cx', com2Data.x); com2El.setAttribute('cy', com2Data.y); }
+            const timeEl = document.getElementById('time-display');
+            if (timeEl) {
+                const myr = (simTime * 0.5).toFixed(0);
+                timeEl.textContent = `T = ${myr} Myr`;
+            }
+        }
+
+        function resize() {
+            const rect = canvas.getBoundingClientRect();
+            W = rect.width; H = rect.height;
+            canvas.width = W * dpr; canvas.height = H * dpr;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+            svg.setAttribute('width', W); svg.setAttribute('height', H);
+
+            trailCanvas = document.createElement('canvas');
+            trailCanvas.width = W; trailCanvas.height = H;
+            trailCtx = trailCanvas.getContext('2d');
+
+            createUI();
+            bindUI();
+            resetSim();
+        }
+
+        let resizeTimeout;
+        window.addEventListener('resize', () => { clearTimeout(resizeTimeout); resizeTimeout = setTimeout(resize, 150); });
+        resize();
+
+        function animate() {
+            fpsCounter.update();
+            if (running) {
+                for (let i = 0; i < speed; i++) simulate(0.3);
+            }
+            draw();
+            updateSVG();
+            requestAnimationFrame(animate);
+        }
+        hideLoading();
+        animate();
+    } catch (err) { showError('Init Error: ' + err.message); }
+    </script>
+</body>
+</html>

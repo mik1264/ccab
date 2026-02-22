@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Spring Network - WebGPU</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600;700&family=Nunito:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #FEFAE0 0%, #F4F1DE 50%, #EDE8D5 100%);
+            color: #3d4423;
+            font-family: 'Nunito', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        .controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(255,255,255,0.75);
+            backdrop-filter: blur(12px);
+            padding: 20px;
+            border-radius: 16px;
+            border: 1px solid rgba(138,154,91,0.3);
+            z-index: 100;
+            min-width: 260px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+        }
+        h1 {
+            font-family: 'Lora', serif;
+            font-size: 1.3em;
+            color: #606C38;
+            margin-bottom: 15px;
+        }
+        .slider-group { margin-bottom: 10px; }
+        .slider-group label {
+            display: flex; justify-content: space-between;
+            margin-bottom: 3px; font-size: 0.85em; color: #606C38;
+        }
+        .slider-group input[type="range"] {
+            width: 100%; height: 6px; -webkit-appearance: none;
+            background: #d4d4aa; border-radius: 3px; outline: none;
+        }
+        .slider-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 16px; height: 16px;
+            background: #8A9A5B; border-radius: 50%; cursor: pointer;
+        }
+        .modes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+        .mode-btn {
+            padding: 5px 10px;
+            background: rgba(138,154,91,0.15);
+            border: 1px solid rgba(138,154,91,0.3);
+            border-radius: 8px; color: #606C38;
+            font-size: 0.78em; cursor: pointer;
+            font-family: 'Nunito', sans-serif; transition: all 0.2s;
+        }
+        .mode-btn:hover, .mode-btn.active {
+            background: #8A9A5B; color: #fff; border-color: #8A9A5B;
+        }
+        .info { font-size: 0.8em; color: #8A9A5B; margin-bottom: 10px; }
+        .stats {
+            margin-top: 10px; padding-top: 10px;
+            border-top: 1px solid rgba(138,154,91,0.2);
+            font-size: 0.82em; color: #606C38;
+        }
+        .stats div { margin-bottom: 2px; }
+        .back-link {
+            position: fixed; top: 20px; right: 20px;
+            color: #606C38; text-decoration: none;
+            font-family: 'Nunito', sans-serif; font-size: 0.9em; z-index: 100;
+            background: rgba(255,255,255,0.7); backdrop-filter: blur(8px);
+            padding: 8px 16px; border-radius: 10px;
+            border: 1px solid rgba(138,154,91,0.3); transition: all 0.2s;
+        }
+        .back-link:hover { background: rgba(138,154,91,0.2); }
+        .error-msg {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            background: rgba(188,108,37,0.95); color: #fff; padding: 30px;
+            border-radius: 16px; text-align: center; max-width: 420px;
+            font-family: 'Nunito', sans-serif;
+        }
+        .error-msg h2 { font-family: 'Lora', serif; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <h1>Spring Network</h1>
+        <div class="info">Click to add impulse disturbance</div>
+        <div class="modes">
+            <button class="mode-btn active" data-topo="grid">Grid</button>
+            <button class="mode-btn" data-topo="ring">Ring</button>
+            <button class="mode-btn" data-topo="random">Random</button>
+            <button class="mode-btn" data-topo="smallworld">Small World</button>
+        </div>
+        <div class="slider-group">
+            <label>Stiffness <span id="stiffVal">0.5</span></label>
+            <input type="range" id="stiffness" min="0.05" max="2.0" step="0.05" value="0.5">
+        </div>
+        <div class="slider-group">
+            <label>Damping <span id="dampVal">0.98</span></label>
+            <input type="range" id="damping" min="0.90" max="1.0" step="0.005" value="0.98">
+        </div>
+        <div class="stats">
+            <div>Nodes: <span id="nodeCount">2500</span></div>
+            <div>Springs: <span id="springCount">0</span></div>
+            <div>FPS: <span id="fps">0</span></div>
+        </div>
+    </div>
+    <a href="index.html" class="back-link">&#8592; Back to Gallery</a>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+
+        if (!navigator.gpu) {
+            document.body.innerHTML = '<div class="error-msg"><h2>WebGPU Not Supported</h2><p>Your browser does not support WebGPU. Try Chrome 113+ or Edge 113+.</p></div>';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) throw new Error('No adapter');
+        const device = await adapter.requestDevice();
+        const ctxGPU = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+
+        function resize() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            ctxGPU.configure({ device, format, alphaMode: 'opaque' });
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Network params
+        const GRID_SIZE = 50;
+        const NUM_NODES = GRID_SIZE * GRID_SIZE; // 2500
+        const MAX_SPRINGS_PER_NODE = 8;
+        const MAX_SPRINGS = NUM_NODES * MAX_SPRINGS_PER_NODE;
+
+        let stiffness = 0.5;
+        let damping = 0.98;
+        let topology = 'grid';
+
+        // Node data: x, y, prevX, prevY (Verlet)
+        const nodeData = new Float32Array(NUM_NODES * 4);
+        // Spring data: nodeA, nodeB, restLength, pad
+        let springData = new Float32Array(MAX_SPRINGS * 4);
+        let numSprings = 0;
+
+        function buildGrid() {
+            numSprings = 0;
+            for (let j = 0; j < GRID_SIZE; j++) {
+                for (let i = 0; i < GRID_SIZE; i++) {
+                    const idx = j * GRID_SIZE + i;
+                    const px = (i / (GRID_SIZE - 1)) * 2.0 - 1.0;
+                    const py = (j / (GRID_SIZE - 1)) * 2.0 - 1.0;
+                    nodeData[idx * 4] = px * 0.8;
+                    nodeData[idx * 4 + 1] = py * 0.8;
+                    nodeData[idx * 4 + 2] = px * 0.8;
+                    nodeData[idx * 4 + 3] = py * 0.8;
+                }
+            }
+        }
+
+        function addSpring(a, b) {
+            if (numSprings >= MAX_SPRINGS / 4) return;
+            const dx = nodeData[a * 4] - nodeData[b * 4];
+            const dy = nodeData[a * 4 + 1] - nodeData[b * 4 + 1];
+            const rest = Math.sqrt(dx * dx + dy * dy);
+            springData[numSprings * 4] = a;
+            springData[numSprings * 4 + 1] = b;
+            springData[numSprings * 4 + 2] = rest;
+            springData[numSprings * 4 + 3] = 0;
+            numSprings++;
+        }
+
+        function buildTopology(topo) {
+            topology = topo;
+            numSprings = 0;
+            buildGrid();
+
+            if (topo === 'grid') {
+                for (let j = 0; j < GRID_SIZE; j++) {
+                    for (let i = 0; i < GRID_SIZE; i++) {
+                        const idx = j * GRID_SIZE + i;
+                        if (i < GRID_SIZE - 1) addSpring(idx, idx + 1);
+                        if (j < GRID_SIZE - 1) addSpring(idx, idx + GRID_SIZE);
+                    }
+                }
+            } else if (topo === 'ring') {
+                for (let i = 0; i < NUM_NODES; i++) {
+                    // Arrange in circle
+                    const angle = (i / NUM_NODES) * Math.PI * 2;
+                    nodeData[i * 4] = Math.cos(angle) * 0.7;
+                    nodeData[i * 4 + 1] = Math.sin(angle) * 0.7;
+                    nodeData[i * 4 + 2] = nodeData[i * 4];
+                    nodeData[i * 4 + 3] = nodeData[i * 4 + 1];
+                    addSpring(i, (i + 1) % NUM_NODES);
+                }
+                // Cross links
+                for (let i = 0; i < 200; i++) {
+                    const a = Math.floor(Math.random() * NUM_NODES);
+                    const b = Math.floor(Math.random() * NUM_NODES);
+                    if (a !== b) addSpring(a, b);
+                }
+            } else if (topo === 'random') {
+                for (let i = 0; i < NUM_NODES; i++) {
+                    nodeData[i * 4] = (Math.random() * 2 - 1) * 0.8;
+                    nodeData[i * 4 + 1] = (Math.random() * 2 - 1) * 0.8;
+                    nodeData[i * 4 + 2] = nodeData[i * 4];
+                    nodeData[i * 4 + 3] = nodeData[i * 4 + 1];
+                }
+                for (let i = 0; i < NUM_NODES; i++) {
+                    const count = 2 + Math.floor(Math.random() * 3);
+                    for (let c = 0; c < count; c++) {
+                        const b = Math.floor(Math.random() * NUM_NODES);
+                        if (b !== i) addSpring(i, b);
+                    }
+                }
+            } else { // smallworld (Watts-Strogatz)
+                // Ring lattice with k=4 neighbors
+                for (let i = 0; i < NUM_NODES; i++) {
+                    const angle = (i / NUM_NODES) * Math.PI * 2;
+                    nodeData[i * 4] = Math.cos(angle) * 0.7;
+                    nodeData[i * 4 + 1] = Math.sin(angle) * 0.7;
+                    nodeData[i * 4 + 2] = nodeData[i * 4];
+                    nodeData[i * 4 + 3] = nodeData[i * 4 + 1];
+                    for (let k = 1; k <= 2; k++) {
+                        addSpring(i, (i + k) % NUM_NODES);
+                    }
+                }
+                // Rewire with probability 0.1
+                for (let i = 0; i < numSprings; i++) {
+                    if (Math.random() < 0.1) {
+                        springData[i * 4 + 1] = Math.floor(Math.random() * NUM_NODES);
+                        const a = springData[i * 4], b = springData[i * 4 + 1];
+                        const dx = nodeData[a * 4] - nodeData[b * 4];
+                        const dy = nodeData[a * 4 + 1] - nodeData[b * 4 + 1];
+                        springData[i * 4 + 2] = Math.sqrt(dx * dx + dy * dy);
+                    }
+                }
+            }
+            document.getElementById('nodeCount').textContent = NUM_NODES;
+            document.getElementById('springCount').textContent = numSprings;
+        }
+        buildTopology('grid');
+
+        // GPU Buffers
+        const nodeBuf = device.createBuffer({
+            size: nodeData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.VERTEX,
+        });
+        const springBuf = device.createBuffer({
+            size: springData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        // Per-spring tension output for coloring
+        const tensionBuf = device.createBuffer({
+            size: MAX_SPRINGS * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX,
+        });
+        const uniformData = new Float32Array([stiffness, damping, NUM_NODES, numSprings, 0, 0, 0, 0]);
+        const uniformBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        function uploadBuffers() {
+            device.queue.writeBuffer(nodeBuf, 0, nodeData);
+            device.queue.writeBuffer(springBuf, 0, springData);
+            uniformData[2] = NUM_NODES;
+            uniformData[3] = numSprings;
+        }
+        uploadBuffers();
+
+        // Impulse buffer: x, y, radius, strength
+        const impulseBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const impulseData = new Float32Array([0, 0, 0, 0]);
+
+        // Compute: Verlet integration with spring forces
+        const computeShader = device.createShaderModule({ code: `
+            struct Spring { a: f32, b: f32, restLen: f32, pad: f32 }
+            struct Uniforms { stiffness: f32, damping: f32, numNodes: f32, numSprings: f32, p1: f32, p2: f32, p3: f32, p4: f32 }
+            struct Impulse { x: f32, y: f32, radius: f32, strength: f32 }
+
+            @group(0) @binding(0) var<storage, read_write> nodes: array<vec4f>;
+            @group(0) @binding(1) var<storage, read> springs: array<Spring>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+            @group(0) @binding(3) var<storage, read_write> tensions: array<f32>;
+            @group(0) @binding(4) var<uniform> impulse: Impulse;
+
+            @compute @workgroup_size(256)
+            fn springForces(@builtin(global_invocation_id) gid: vec3u) {
+                let sid = gid.x;
+                if (sid >= u32(u.numSprings)) { return; }
+                let spring = springs[sid];
+                let ai = u32(spring.a);
+                let bi = u32(spring.b);
+                let posA = nodes[ai].xy;
+                let posB = nodes[bi].xy;
+                let delta = posB - posA;
+                let dist = max(length(delta), 0.0001);
+                let stretch = (dist - spring.restLen) / dist;
+                let force = delta * stretch * u.stiffness * 0.5;
+
+                // Store tension for coloring
+                tensions[sid] = abs(dist - spring.restLen) / max(spring.restLen, 0.001);
+
+                // Apply forces via position adjustment (Verlet)
+                nodes[ai] = vec4f(nodes[ai].xy + force * 0.01, nodes[ai].zw);
+                nodes[bi] = vec4f(nodes[bi].xy - force * 0.01, nodes[bi].zw);
+            }
+
+            @compute @workgroup_size(256)
+            fn integrate(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u32(u.numNodes)) { return; }
+                var n = nodes[idx];
+                let pos = n.xy;
+                let prev = n.zw;
+                var vel = (pos - prev) * u.damping;
+
+                // Impulse
+                if (impulse.radius > 0.0) {
+                    let d = pos - vec2f(impulse.x, impulse.y);
+                    let dist = length(d);
+                    if (dist < impulse.radius && dist > 0.001) {
+                        vel += normalize(d) * impulse.strength * (1.0 - dist / impulse.radius);
+                    }
+                }
+
+                let newPos = pos + vel;
+                // Boundary
+                let clamped = clamp(newPos, vec2f(-1.0), vec2f(1.0));
+                nodes[idx] = vec4f(clamped, pos);
+            }
+        `});
+
+        const springPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: computeShader, entryPoint: 'springForces' } });
+        const integratePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: computeShader, entryPoint: 'integrate' } });
+
+        const springBG = device.createBindGroup({
+            layout: springPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: nodeBuf } },
+                { binding: 1, resource: { buffer: springBuf } },
+                { binding: 2, resource: { buffer: uniformBuf } },
+                { binding: 3, resource: { buffer: tensionBuf } },
+                { binding: 4, resource: { buffer: impulseBuf } },
+            ],
+        });
+        const integrateBG = device.createBindGroup({
+            layout: integratePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: nodeBuf } },
+                { binding: 1, resource: { buffer: springBuf } },
+                { binding: 2, resource: { buffer: uniformBuf } },
+                { binding: 3, resource: { buffer: tensionBuf } },
+                { binding: 4, resource: { buffer: impulseBuf } },
+            ],
+        });
+
+        // Render: draw nodes as points
+        const renderShader = device.createShaderModule({ code: `
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) color: vec4f }
+
+            @vertex
+            fn vs(@location(0) position: vec2f, @location(1) prev: vec2f) -> VSOut {
+                var out: VSOut;
+                out.pos = vec4f(position, 0.0, 1.0);
+                let speed = length(position - prev);
+                let t = clamp(speed * 50.0, 0.0, 1.0);
+                // Green to warm orange based on speed
+                out.color = vec4f(
+                    mix(0.376, 0.867, t),
+                    mix(0.424, 0.424, t),
+                    mix(0.220, 0.145, t),
+                    1.0
+                );
+                return out;
+            }
+
+            @fragment
+            fn fs(@location(0) color: vec4f) -> @location(0) vec4f {
+                return color;
+            }
+        `});
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: renderShader,
+                entryPoint: 'vs',
+                buffers: [{
+                    arrayStride: 16,
+                    attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32x2' },
+                        { shaderLocation: 1, offset: 8, format: 'float32x2' },
+                    ],
+                }],
+            },
+            fragment: {
+                module: renderShader,
+                entryPoint: 'fs',
+                targets: [{
+                    format,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one' },
+                    },
+                }],
+            },
+            primitive: { topology: 'point-list' },
+        });
+
+        // Click impulse
+        canvas.addEventListener('click', e => {
+            const x = (e.clientX / window.innerWidth) * 2 - 1;
+            const y = -((e.clientY / window.innerHeight) * 2 - 1);
+            impulseData[0] = x;
+            impulseData[1] = y;
+            impulseData[2] = 0.3;
+            impulseData[3] = 0.05;
+            device.queue.writeBuffer(impulseBuf, 0, impulseData);
+            setTimeout(() => {
+                impulseData[2] = 0;
+                device.queue.writeBuffer(impulseBuf, 0, impulseData);
+            }, 50);
+        });
+
+        // UI
+        document.getElementById('stiffness').addEventListener('input', e => {
+            stiffness = parseFloat(e.target.value);
+            document.getElementById('stiffVal').textContent = stiffness.toFixed(2);
+        });
+        document.getElementById('damping').addEventListener('input', e => {
+            damping = parseFloat(e.target.value);
+            document.getElementById('dampVal').textContent = damping.toFixed(3);
+        });
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                buildTopology(btn.dataset.topo);
+                uploadBuffers();
+            });
+        });
+
+        // FPS
+        let lastTime = performance.now(), frameCount = 0, fpsAccum = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            frameCount++; fpsAccum += dt;
+            if (fpsAccum >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(frameCount / fpsAccum);
+                frameCount = 0; fpsAccum = 0;
+            }
+
+            uniformData[0] = stiffness;
+            uniformData[1] = damping;
+            uniformData[3] = numSprings;
+            device.queue.writeBuffer(uniformBuf, 0, uniformData);
+
+            const enc = device.createCommandEncoder();
+
+            // Compute spring forces
+            const sp = enc.beginComputePass();
+            sp.setPipeline(springPipeline);
+            sp.setBindGroup(0, springBG);
+            sp.dispatchWorkgroups(Math.ceil(numSprings / 256));
+            sp.end();
+
+            // Integrate
+            const ip = enc.beginComputePass();
+            ip.setPipeline(integratePipeline);
+            ip.setBindGroup(0, integrateBG);
+            ip.dispatchWorkgroups(Math.ceil(NUM_NODES / 256));
+            ip.end();
+
+            // Render
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: ctxGPU.getCurrentTexture().createView(),
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                    clearValue: { r: 0.996, g: 0.98, b: 0.878, a: 1 },
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setVertexBuffer(0, nodeBuf);
+            rp.draw(NUM_NODES);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+</body>
+</html>

@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D Wave Equation - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; cursor: crosshair; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 190px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .controls input[type=range] { width: 160px; }
+        .controls button { margin: 3px 2px; padding: 5px 10px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .controls .row { display: flex; gap: 4px; margin-top: 6px; }
+        .controls .row button { flex: 1; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        .info { font-size: 10px; color: #888; margin-top: 8px; line-height: 1.4; }
+        .source-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #22d3ee; margin-right: 4px; animation: pulse 1s ease-in-out infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title">2D Wave Equation Solver</div>
+
+    <div class="controls">
+        <label>Wave Speed: <span id="speedVal">1.0</span></label>
+        <input type="range" id="waveSpeed" min="0.1" max="2.0" step="0.1" value="1.0">
+        <label>Damping: <span id="dampVal">0.999</span></label>
+        <input type="range" id="damping" min="0.99" max="1.0" step="0.001" value="0.999">
+        <label>Boundary:</label>
+        <select id="boundary">
+            <option value="0">Absorbing (Damped)</option>
+            <option value="1">Reflecting (Dirichlet)</option>
+        </select>
+        <label>Source Frequency: <span id="freqVal">5.0</span> Hz</label>
+        <input type="range" id="freq" min="1" max="20" step="0.5" value="5.0">
+        <div class="row">
+            <button onclick="window.resetSim()">Reset</button>
+            <button onclick="window.clearSources()">Clear Sources</button>
+            <button onclick="window.togglePause()">Pause</button>
+        </div>
+        <div class="info">
+            Click/drag to create disturbance<br>
+            Right-click to place oscillating source<br>
+            Sources: <span id="sourceCount">0</span>/8
+        </div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Grid: 512x512
+    </div>
+
+    <div id="error">
+        WebGPU is not supported in your browser.<br>
+        Please use Chrome 113+, Edge 113+, or Safari 18+.
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        const N = 512;
+        canvas.width = N;
+        canvas.height = N;
+        canvas.style.width = '100vmin';
+        canvas.style.height = '100vmin';
+        canvas.style.position = 'absolute';
+        canvas.style.left = '50%';
+        canvas.style.top = '50%';
+        canvas.style.transform = 'translate(-50%, -50%)';
+
+        let waveSpeed = 1.0;
+        let dampingVal = 0.999;
+        let boundaryType = 0;
+        let sourceFreq = 5.0;
+        let paused = false;
+        let mouseDown = false;
+        let mouseX = -1, mouseY = -1;
+
+        // Oscillating sources (up to 8)
+        const sources = []; // {x, y, freq, phase}
+        const MAX_SOURCES = 8;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const fmt = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: fmt, alphaMode: 'opaque' });
+
+        // Three buffers for wave equation: u_prev, u_current, u_next
+        const cellCount = N * N;
+        const waveBuffers = [
+            device.createBuffer({ size: cellCount * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+            device.createBuffer({ size: cellCount * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+            device.createBuffer({ size: cellCount * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+        ];
+
+        const uniformBuffer = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        // Source buffer: 8 sources x 4 floats (x, y, freq, amplitude)
+        const sourceBuffer = device.createBuffer({ size: 8 * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+        const waveShader = `
+            struct Uniforms {
+                size: u32,
+                boundary: u32,
+                mouseX: f32,
+                mouseY: f32,
+                mouseActive: f32,
+                waveSpeed: f32,
+                damping: f32,
+                time: f32,
+                numSources: u32,
+                pad1: u32,
+                pad2: u32,
+                pad3: u32,
+            }
+
+            struct Source {
+                x: f32,
+                y: f32,
+                freq: f32,
+                amp: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read> uPrev: array<f32>;
+            @group(0) @binding(1) var<storage, read> uCurr: array<f32>;
+            @group(0) @binding(2) var<storage, read_write> uNext: array<f32>;
+            @group(0) @binding(3) var<uniform> u: Uniforms;
+            @group(0) @binding(4) var<storage, read> sources: array<Source>;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let s = u.size;
+                if (id.x >= s || id.y >= s) { return; }
+                let x = id.x;
+                let y = id.y;
+                let idx = y * s + x;
+
+                // Boundary conditions
+                if (x == 0u || x == s - 1u || y == 0u || y == s - 1u) {
+                    if (u.boundary == 0u) {
+                        // Absorbing: damped boundary
+                        let neighborIdx = clamp(y, 1u, s - 2u) * s + clamp(x, 1u, s - 2u);
+                        uNext[idx] = uCurr[neighborIdx] * 0.95;
+                    } else {
+                        // Reflecting (Dirichlet): fixed at zero
+                        uNext[idx] = 0.0;
+                    }
+                    return;
+                }
+
+                let c = u.waveSpeed;
+                let c2 = c * c;
+                let dt2 = 1.0; // normalized
+                let dx2 = 1.0;
+
+                let left = uCurr[y * s + (x - 1u)];
+                let right = uCurr[y * s + (x + 1u)];
+                let up = uCurr[(y - 1u) * s + x];
+                let down = uCurr[(y + 1u) * s + x];
+                let center = uCurr[idx];
+                let prev = uPrev[idx];
+
+                // FDTD: u_next = 2*u - u_prev + c^2 * dt^2/dx^2 * laplacian
+                let laplacian = left + right + up + down - 4.0 * center;
+                var next = 2.0 * center - prev + c2 * dt2 / dx2 * laplacian;
+
+                // Apply damping
+                next *= u.damping;
+
+                // Mouse disturbance (Gaussian)
+                if (u.mouseActive > 0.5) {
+                    let mx = u.mouseX;
+                    let my = u.mouseY;
+                    let dist = length(vec2f(f32(x), f32(y)) - vec2f(mx, my));
+                    if (dist < 15.0) {
+                        let w = exp(-dist * dist / 50.0);
+                        next += w * 2.0;
+                    }
+                }
+
+                // Oscillating sources
+                for (var i = 0u; i < u.numSources; i++) {
+                    let src = sources[i];
+                    let dist = length(vec2f(f32(x), f32(y)) - vec2f(src.x, src.y));
+                    if (dist < 5.0) {
+                        let w = exp(-dist * dist / 8.0);
+                        next = sin(u.time * src.freq * 6.28318) * src.amp * w;
+                    }
+                }
+
+                // Absorbing boundary region (PML-like)
+                if (u.boundary == 0u) {
+                    let border = 20.0;
+                    let fx = f32(x);
+                    let fy = f32(y);
+                    let fs = f32(s);
+                    var damp = 1.0;
+                    if (fx < border) { damp *= fx / border; }
+                    if (fx > fs - border) { damp *= (fs - fx) / border; }
+                    if (fy < border) { damp *= fy / border; }
+                    if (fy > fs - border) { damp *= (fs - fy) / border; }
+                    next *= damp;
+                }
+
+                uNext[idx] = clamp(next, -5.0, 5.0);
+            }
+        `;
+
+        const renderShader = `
+            struct Uniforms {
+                size: u32,
+                pad1: u32,
+                pad2: u32,
+                pad3: u32,
+            }
+            @group(0) @binding(0) var<storage, read> wave: array<f32>;
+            @group(0) @binding(1) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.size || id.y >= u.size) { return; }
+                let idx = id.y * u.size + id.x;
+                let v = wave[idx];
+
+                // Blue = trough, white = zero, red = crest
+                var color: vec3f;
+                if (v > 0.0) {
+                    let t = min(v / 2.0, 1.0);
+                    color = mix(vec3f(0.95, 0.95, 1.0), vec3f(1.0, 0.15, 0.1), t);
+                } else {
+                    let t = min(-v / 2.0, 1.0);
+                    color = mix(vec3f(0.95, 0.95, 1.0), vec3f(0.05, 0.2, 0.9), t);
+                }
+
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const wavePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: waveShader }), entryPoint: 'main' }
+        });
+
+        const renderPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'main' }
+        });
+
+        const outTexture = device.createTexture({
+            size: [N, N], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const renderUniformBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(renderUniformBuffer, 0, new Uint32Array([N, 0, 0, 0]));
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format: fmt }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const dispBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        function clearWave() {
+            const zero = new Float32Array(cellCount);
+            device.queue.writeBuffer(waveBuffers[0], 0, zero);
+            device.queue.writeBuffer(waveBuffers[1], 0, zero);
+            device.queue.writeBuffer(waveBuffers[2], 0, zero);
+        }
+
+        clearWave();
+
+        let step = 0;
+        let simTime = 0;
+        let lastTime = performance.now();
+        let fpsC = 0, fpsT = performance.now();
+        const wg = Math.ceil(N / 16);
+
+        function updateSourceBuffer() {
+            const data = new Float32Array(8 * 4);
+            for (let i = 0; i < Math.min(sources.length, MAX_SOURCES); i++) {
+                data[i * 4] = sources[i].x;
+                data[i * 4 + 1] = sources[i].y;
+                data[i * 4 + 2] = sources[i].freq;
+                data[i * 4 + 3] = sources[i].amp;
+            }
+            device.queue.writeBuffer(sourceBuffer, 0, data);
+            document.getElementById('sourceCount').textContent = sources.length;
+        }
+        updateSourceBuffer();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            if (paused) return;
+
+            const now = performance.now();
+            lastTime = now;
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            simTime += 0.016;
+
+            // Cycle through 3 buffers: prev, curr, next
+            const prevIdx = step % 3;
+            const currIdx = (step + 1) % 3;
+            const nextIdx = (step + 2) % 3;
+
+            // Update uniforms
+            const buf = new ArrayBuffer(96);
+            const u32 = new Uint32Array(buf);
+            const f32 = new Float32Array(buf);
+            u32[0] = N;
+            u32[1] = boundaryType;
+            f32[2] = mouseX;
+            f32[3] = mouseY;
+            f32[4] = mouseDown ? 1.0 : 0.0;
+            f32[5] = waveSpeed;
+            f32[6] = dampingVal;
+            f32[7] = simTime;
+            u32[8] = Math.min(sources.length, MAX_SOURCES);
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+
+            // Multiple sub-steps per frame for stability
+            for (let sub = 0; sub < 4; sub++) {
+                const p = (step + sub) % 3;
+                const c = (step + sub + 1) % 3;
+                const n = (step + sub + 2) % 3;
+
+                const waveBG = device.createBindGroup({
+                    layout: wavePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: waveBuffers[p] } },
+                        { binding: 1, resource: { buffer: waveBuffers[c] } },
+                        { binding: 2, resource: { buffer: waveBuffers[n] } },
+                        { binding: 3, resource: { buffer: uniformBuffer } },
+                        { binding: 4, resource: { buffer: sourceBuffer } }
+                    ]
+                });
+
+                const pass = enc.beginComputePass();
+                pass.setPipeline(wavePipeline);
+                pass.setBindGroup(0, waveBG);
+                pass.dispatchWorkgroups(wg, wg);
+                pass.end();
+            }
+            step += 4;
+
+            // Render the latest buffer
+            const latestBuf = (step + 1) % 3;
+            const renderBG = device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: waveBuffers[latestBuf] } },
+                    { binding: 1, resource: outTexture.createView() },
+                    { binding: 2, resource: { buffer: renderUniformBuffer } }
+                ]
+            });
+            const rp2 = enc.beginComputePass();
+            rp2.setPipeline(renderPipeline);
+            rp2.setBindGroup(0, renderBG);
+            rp2.dispatchWorkgroups(wg, wg);
+            rp2.end();
+
+            const dPass = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            dPass.setPipeline(displayPipeline);
+            dPass.setBindGroup(0, dispBG);
+            dPass.draw(4);
+            dPass.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        // Mouse interaction
+        function getGridPos(e) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: ((e.clientX - rect.left) / rect.width) * N,
+                y: ((e.clientY - rect.top) / rect.height) * N
+            };
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0) {
+                mouseDown = true;
+                const pos = getGridPos(e);
+                mouseX = pos.x;
+                mouseY = pos.y;
+            }
+        });
+        canvas.addEventListener('mousemove', (e) => {
+            const pos = getGridPos(e);
+            mouseX = pos.x;
+            mouseY = pos.y;
+        });
+        canvas.addEventListener('mouseup', () => mouseDown = false);
+        canvas.addEventListener('mouseleave', () => mouseDown = false);
+
+        // Right-click to place source
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            if (sources.length >= MAX_SOURCES) return;
+            const pos = getGridPos(e);
+            sources.push({ x: pos.x, y: pos.y, freq: sourceFreq, amp: 1.5 });
+            updateSourceBuffer();
+        });
+
+        // Touch support
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            mouseDown = true;
+            const rect = canvas.getBoundingClientRect();
+            const t = e.touches[0];
+            mouseX = ((t.clientX - rect.left) / rect.width) * N;
+            mouseY = ((t.clientY - rect.top) / rect.height) * N;
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const t = e.touches[0];
+            mouseX = ((t.clientX - rect.left) / rect.width) * N;
+            mouseY = ((t.clientY - rect.top) / rect.height) * N;
+        });
+        canvas.addEventListener('touchend', () => mouseDown = false);
+
+        // Controls
+        document.getElementById('waveSpeed').addEventListener('input', (e) => {
+            waveSpeed = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = waveSpeed.toFixed(1);
+        });
+        document.getElementById('damping').addEventListener('input', (e) => {
+            dampingVal = parseFloat(e.target.value);
+            document.getElementById('dampVal').textContent = dampingVal.toFixed(3);
+        });
+        document.getElementById('boundary').addEventListener('change', (e) => {
+            boundaryType = parseInt(e.target.value);
+        });
+        document.getElementById('freq').addEventListener('input', (e) => {
+            sourceFreq = parseFloat(e.target.value);
+            document.getElementById('freqVal').textContent = sourceFreq.toFixed(1);
+        });
+
+        window.resetSim = () => { clearWave(); step = 0; simTime = 0; };
+        window.clearSources = () => { sources.length = 0; updateSourceBuffer(); };
+        window.togglePause = () => { paused = !paused; };
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

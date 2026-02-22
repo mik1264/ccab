@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lattice Boltzmann Fluid - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 14px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; cursor: crosshair; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input { width: 100%; }
+        .controls button { margin-top: 8px; padding: 6px 12px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title-overlay { position: fixed; top: 70px; left: 20px; z-index: 90; }
+        .title-overlay h1 { font-size: 1.4rem; color: #22d3ee; margin: 0 0 4px 0; }
+        .title-overlay p { font-size: 0.85rem; color: #888; margin: 0; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(220, 50, 50, 0.95); padding: 30px 40px; border-radius: 12px; display: none; text-align: center; max-width: 400px; line-height: 1.6; }
+        .info { font-size: 10px; color: #666; margin-top: 10px; }
+        .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+        .btn-row button { flex: 1; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="title-overlay">
+        <h1>Lattice Boltzmann Fluid</h1>
+        <p>D2Q9 CFD simulation on the GPU</p>
+    </div>
+
+    <div class="controls">
+        <label>Viscosity: <span id="viscVal">0.02</span></label>
+        <input type="range" id="viscosity" min="0.005" max="0.1" step="0.005" value="0.02">
+        <label>Inlet Speed: <span id="speedVal">0.10</span></label>
+        <input type="range" id="inletSpeed" min="0.02" max="0.2" step="0.01" value="0.10">
+        <div class="btn-row">
+            <button onclick="clearObstacles()">Clear</button>
+            <button onclick="resetSim()">Reset</button>
+        </div>
+        <div class="info">Click and drag to place obstacles</div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Re: <span id="reynolds">0</span> | Grid: <span id="gridSize">0</span>
+    </div>
+
+    <div id="error">
+        <h2>WebGPU Not Supported</h2>
+        <p>Please use Chrome 113+, Edge 113+, or Safari 18+.</p>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        const NX = 512, NY = 256;
+        canvas.width = NX;
+        canvas.height = NY;
+        canvas.style.width = Math.min(window.innerWidth * 0.9, NX * 2) + 'px';
+        canvas.style.height = Math.min(window.innerHeight * 0.9, NY * 2) + 'px';
+
+        let viscosity = 0.02;
+        let inletSpeed = 0.10;
+        let mouseDown = false;
+        let mouseX = -1, mouseY = -1;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        document.getElementById('gridSize').textContent = NX + 'x' + NY;
+
+        // D2Q9 lattice directions: E, N, W, S, NE, NW, SW, SE, rest
+        // Weights: 1/9, 1/9, 1/9, 1/9, 1/36, 1/36, 1/36, 1/36, 4/9
+
+        // Storage: 9 distribution functions per cell stored as f32
+        // Each cell also stores: obstacle flag
+        const cellCount = NX * NY;
+        const fSize = cellCount * 9 * 4; // 9 floats per cell
+        const obstacleSize = cellCount * 4; // 1 u32 per cell
+
+        const collideStreamShader = `
+            struct Uniforms {
+                nx: u32,
+                ny: u32,
+                omega: f32,
+                inletSpeed: f32,
+            }
+
+            @group(0) @binding(0) var<storage, read> fIn: array<f32>;
+            @group(0) @binding(1) var<storage, read_write> fOut: array<f32>;
+            @group(0) @binding(2) var<storage, read> obstacles: array<u32>;
+            @group(0) @binding(3) var<uniform> u: Uniforms;
+
+            // D2Q9 directions: E(1,0), N(0,1), W(-1,0), S(0,-1), NE(1,1), NW(-1,1), SW(-1,-1), SE(1,-1), rest(0,0)
+            const ex = array<i32, 9>(1, 0, -1, 0, 1, -1, -1, 1, 0);
+            const ey = array<i32, 9>(0, 1, 0, -1, 1, 1, -1, -1, 0);
+            const w = array<f32, 9>(1.0/9.0, 1.0/9.0, 1.0/9.0, 1.0/9.0,
+                                    1.0/36.0, 1.0/36.0, 1.0/36.0, 1.0/36.0, 4.0/9.0);
+            // Opposite direction index for bounce-back
+            const opp = array<u32, 9>(2u, 3u, 0u, 1u, 6u, 7u, 4u, 5u, 8u);
+
+            fn idx(x: u32, y: u32, q: u32) -> u32 {
+                return (y * u.nx + x) * 9u + q;
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let x = gid.x;
+                let y = gid.y;
+                if (x >= u.nx || y >= u.ny) { return; }
+
+                let cellIdx = y * u.nx + x;
+                let isObstacle = obstacles[cellIdx] > 0u;
+
+                // --- Stream step: gather from neighbors ---
+                var f: array<f32, 9>;
+                for (var q = 0u; q < 9u; q++) {
+                    let srcX = i32(x) - ex[q];
+                    let srcY = i32(y) - ey[q];
+
+                    // Boundary: periodic left-right, bounce-back top/bottom
+                    var sx = ((srcX % i32(u.nx)) + i32(u.nx)) % i32(u.nx);
+                    var sy = srcY;
+
+                    if (sy < 0 || sy >= i32(u.ny)) {
+                        // Bounce-back from wall
+                        f[q] = fIn[idx(x, y, opp[q])];
+                    } else {
+                        f[q] = fIn[idx(u32(sx), u32(sy), q)];
+                    }
+                }
+
+                // Obstacle bounce-back
+                if (isObstacle) {
+                    for (var q = 0u; q < 9u; q++) {
+                        fOut[idx(x, y, q)] = f[opp[q]];
+                    }
+                    return;
+                }
+
+                // Compute macroscopic quantities
+                var rho: f32 = 0.0;
+                var ux: f32 = 0.0;
+                var uy: f32 = 0.0;
+                for (var q = 0u; q < 9u; q++) {
+                    rho += f[q];
+                    ux += f32(ex[q]) * f[q];
+                    uy += f32(ey[q]) * f[q];
+                }
+                if (rho > 0.0) {
+                    ux /= rho;
+                    uy /= rho;
+                }
+
+                // Inlet boundary (left side): Zou-He velocity BC
+                if (x == 0u) {
+                    ux = u.inletSpeed;
+                    uy = 0.0;
+                    rho = 1.0;
+                }
+
+                // --- Collision step: BGK relaxation ---
+                let usq = ux * ux + uy * uy;
+                for (var q = 0u; q < 9u; q++) {
+                    let eu = f32(ex[q]) * ux + f32(ey[q]) * uy;
+                    let feq = w[q] * rho * (1.0 + 3.0 * eu + 4.5 * eu * eu - 1.5 * usq);
+                    fOut[idx(x, y, q)] = f[q] + u.omega * (feq - f[q]);
+                }
+            }
+        `;
+
+        const renderShader = `
+            struct Uniforms {
+                nx: u32,
+                ny: u32,
+            }
+
+            @group(0) @binding(0) var<storage, read> f: array<f32>;
+            @group(0) @binding(1) var<storage, read> obstacles: array<u32>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+            @group(0) @binding(3) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+            const ex = array<i32, 9>(1, 0, -1, 0, 1, -1, -1, 1, 0);
+            const ey = array<i32, 9>(0, 1, 0, -1, 1, 1, -1, -1, 0);
+
+            fn viridis(t: f32) -> vec3f {
+                let c0 = vec3f(0.267, 0.004, 0.329);
+                let c1 = vec3f(0.283, 0.141, 0.458);
+                let c2 = vec3f(0.254, 0.265, 0.530);
+                let c3 = vec3f(0.207, 0.372, 0.553);
+                let c4 = vec3f(0.164, 0.471, 0.558);
+                let c5 = vec3f(0.128, 0.567, 0.551);
+                let c6 = vec3f(0.135, 0.659, 0.518);
+                let c7 = vec3f(0.267, 0.749, 0.441);
+                let c8 = vec3f(0.478, 0.821, 0.318);
+                let c9 = vec3f(0.741, 0.873, 0.150);
+                let c10 = vec3f(0.993, 0.906, 0.144);
+
+                let s = clamp(t, 0.0, 1.0) * 10.0;
+                let i = u32(floor(s));
+                let fr = fract(s);
+
+                var colors = array<vec3f, 11>(c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10);
+                let lo = colors[min(i, 10u)];
+                let hi = colors[min(i + 1u, 10u)];
+                return mix(lo, hi, fr);
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                let x = gid.x;
+                let y = gid.y;
+                if (x >= u.nx || y >= u.ny) { return; }
+
+                let cellIdx = y * u.nx + x;
+
+                if (obstacles[cellIdx] > 0u) {
+                    textureStore(outTex, vec2i(i32(x), i32(u.ny - 1u - y)), vec4f(0.3, 0.3, 0.35, 1.0));
+                    return;
+                }
+
+                // Compute velocity magnitude
+                var rho: f32 = 0.0;
+                var ux: f32 = 0.0;
+                var uy: f32 = 0.0;
+                let base = cellIdx * 9u;
+                for (var q = 0u; q < 9u; q++) {
+                    let fq = f[base + q];
+                    rho += fq;
+                    ux += f32(ex[q]) * fq;
+                    uy += f32(ey[q]) * fq;
+                }
+                if (rho > 0.001) { ux /= rho; uy /= rho; }
+
+                let speed = sqrt(ux * ux + uy * uy);
+                let color = viridis(speed * 5.0);
+
+                textureStore(outTex, vec2i(i32(x), i32(u.ny - 1u - y)), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+
+            struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+                var p = array<vec2f, 4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f, 4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VO; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        // Pipelines
+        const collideStreamPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: collideStreamShader }), entryPoint: 'main' }
+        });
+
+        const renderCompPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'main' }
+        });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        // Buffers
+        const fBuffers = [
+            device.createBuffer({ size: fSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+            device.createBuffer({ size: fSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+        ];
+
+        const obstacleBuffer = device.createBuffer({ size: obstacleSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+        const simUniformBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const renderUniformBuffer = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(renderUniformBuffer, 0, new Uint32Array([NX, NY]));
+
+        const outTexture = device.createTexture({
+            size: [NX, NY],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+        const sampler = device.createSampler({ magFilter: 'nearest', minFilter: 'nearest' });
+
+        let obstacleData = new Uint32Array(cellCount);
+
+        function initLBM() {
+            const fData = new Float32Array(cellCount * 9);
+
+            for (let y = 0; y < NY; y++) {
+                for (let x = 0; x < NX; x++) {
+                    const ci = y * NX + x;
+                    const base = ci * 9;
+                    const rho = 1.0;
+                    const ux = inletSpeed * 0.5;
+                    const uy = 0.0;
+                    const usq = ux * ux + uy * uy;
+
+                    const exArr = [1, 0, -1, 0, 1, -1, -1, 1, 0];
+                    const eyArr = [0, 1, 0, -1, 1, 1, -1, -1, 0];
+                    const wArr = [1/9, 1/9, 1/9, 1/9, 1/36, 1/36, 1/36, 1/36, 4/9];
+
+                    for (let q = 0; q < 9; q++) {
+                        const eu = exArr[q] * ux + eyArr[q] * uy;
+                        fData[base + q] = wArr[q] * rho * (1 + 3 * eu + 4.5 * eu * eu - 1.5 * usq);
+                    }
+                }
+            }
+
+            device.queue.writeBuffer(fBuffers[0], 0, fData);
+            device.queue.writeBuffer(fBuffers[1], 0, fData);
+
+            // Default obstacle: circle in center
+            obstacleData.fill(0);
+            const cx = Math.floor(NX * 0.25), cy = Math.floor(NY / 2), r = Math.floor(NY * 0.1);
+            for (let y = 0; y < NY; y++) {
+                for (let x = 0; x < NX; x++) {
+                    const dx = x - cx, dy = y - cy;
+                    if (dx * dx + dy * dy < r * r) {
+                        obstacleData[y * NX + x] = 1;
+                    }
+                }
+            }
+            device.queue.writeBuffer(obstacleBuffer, 0, obstacleData);
+        }
+
+        initLBM();
+
+        // Bind groups
+        const csBindGroups = [
+            device.createBindGroup({
+                layout: collideStreamPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: fBuffers[0] } },
+                    { binding: 1, resource: { buffer: fBuffers[1] } },
+                    { binding: 2, resource: { buffer: obstacleBuffer } },
+                    { binding: 3, resource: { buffer: simUniformBuffer } }
+                ]
+            }),
+            device.createBindGroup({
+                layout: collideStreamPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: fBuffers[1] } },
+                    { binding: 1, resource: { buffer: fBuffers[0] } },
+                    { binding: 2, resource: { buffer: obstacleBuffer } },
+                    { binding: 3, resource: { buffer: simUniformBuffer } }
+                ]
+            })
+        ];
+
+        const renderBindGroups = [
+            device.createBindGroup({
+                layout: renderCompPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: fBuffers[1] } },
+                    { binding: 1, resource: { buffer: obstacleBuffer } },
+                    { binding: 2, resource: { buffer: renderUniformBuffer } },
+                    { binding: 3, resource: outTexture.createView() }
+                ]
+            }),
+            device.createBindGroup({
+                layout: renderCompPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: fBuffers[0] } },
+                    { binding: 1, resource: { buffer: obstacleBuffer } },
+                    { binding: 2, resource: { buffer: renderUniformBuffer } },
+                    { binding: 3, resource: outTexture.createView() }
+                ]
+            })
+        ];
+
+        const displayBindGroup = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let frame = 0;
+        let lastTime = performance.now();
+        let fpsFrames = 0, fpsTime = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++;
+            fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            const omega = 1.0 / (3.0 * viscosity + 0.5);
+            const reynolds = Math.round(inletSpeed * NY * 0.1 * 2 / viscosity);
+            document.getElementById('reynolds').textContent = reynolds;
+
+            const uBuf = new ArrayBuffer(16);
+            new Uint32Array(uBuf, 0, 2).set([NX, NY]);
+            new Float32Array(uBuf, 8, 2).set([omega, inletSpeed]);
+            device.queue.writeBuffer(simUniformBuffer, 0, uBuf);
+
+            const encoder = device.createCommandEncoder();
+
+            // Run multiple sim steps
+            const steps = 4;
+            for (let i = 0; i < steps; i++) {
+                const cp = encoder.beginComputePass();
+                cp.setPipeline(collideStreamPipeline);
+                cp.setBindGroup(0, csBindGroups[(frame + i) % 2]);
+                cp.dispatchWorkgroups(Math.ceil(NX / 16), Math.ceil(NY / 16));
+                cp.end();
+            }
+            frame += steps;
+
+            // Render to texture
+            const rcp = encoder.beginComputePass();
+            rcp.setPipeline(renderCompPipeline);
+            rcp.setBindGroup(0, renderBindGroups[frame % 2]);
+            rcp.dispatchWorkgroups(Math.ceil(NX / 16), Math.ceil(NY / 16));
+            rcp.end();
+
+            // Display
+            const dp = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store'
+                }]
+            });
+            dp.setPipeline(displayPipeline);
+            dp.setBindGroup(0, displayBindGroup);
+            dp.draw(4);
+            dp.end();
+
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(render);
+        }
+
+        function clearObstacles() {
+            obstacleData.fill(0);
+            device.queue.writeBuffer(obstacleBuffer, 0, obstacleData);
+        }
+
+        function resetSim() {
+            initLBM();
+            frame = 0;
+        }
+
+        window.clearObstacles = clearObstacles;
+        window.resetSim = resetSim;
+
+        // Controls
+        document.getElementById('viscosity').addEventListener('input', (e) => {
+            viscosity = parseFloat(e.target.value);
+            document.getElementById('viscVal').textContent = viscosity.toFixed(3);
+        });
+        document.getElementById('inletSpeed').addEventListener('input', (e) => {
+            inletSpeed = parseFloat(e.target.value);
+            document.getElementById('speedVal').textContent = inletSpeed.toFixed(2);
+        });
+
+        // Mouse: paint obstacles
+        canvas.addEventListener('mousedown', (e) => { mouseDown = true; paintObstacle(e); });
+        canvas.addEventListener('mouseup', () => { mouseDown = false; });
+        canvas.addEventListener('mouseleave', () => { mouseDown = false; });
+        canvas.addEventListener('mousemove', (e) => { if (mouseDown) paintObstacle(e); });
+
+        function paintObstacle(e) {
+            const rect = canvas.getBoundingClientRect();
+            const sx = (e.clientX - rect.left) / rect.width;
+            const sy = (e.clientY - rect.top) / rect.height;
+            const cx = Math.floor(sx * NX);
+            const cy = Math.floor(sy * NY);
+            const r = 5;
+            for (let dy = -r; dy <= r; dy++) {
+                for (let dx = -r; dx <= r; dx++) {
+                    if (dx * dx + dy * dy > r * r) continue;
+                    const px = cx + dx, py = cy + dy;
+                    if (px >= 0 && px < NX && py >= 0 && py < NY) {
+                        obstacleData[py * NX + px] = 1;
+                    }
+                }
+            }
+            device.queue.writeBuffer(obstacleBuffer, 0, obstacleData);
+        }
+
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

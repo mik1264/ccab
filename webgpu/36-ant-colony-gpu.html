@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPU Ant Colony with Pheromone Grid - WebGPU</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600;700&family=Nunito:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a08;
+            color: #FEFAE0;
+            font-family: 'Nunito', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+        .controls {
+            position: fixed; top: 20px; left: 20px;
+            background: rgba(20,20,16,0.85);
+            backdrop-filter: blur(12px);
+            padding: 18px; border-radius: 16px;
+            border: 1px solid rgba(138,154,91,0.3);
+            z-index: 100; min-width: 260px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        h1 { font-family: 'Lora', serif; font-size: 1.2em; color: #8A9A5B; margin-bottom: 10px; }
+        .info { font-size: 0.78em; color: #8A9A5B; margin-bottom: 10px; }
+        .slider-group { margin-bottom: 10px; }
+        .slider-group label {
+            display: flex; justify-content: space-between;
+            margin-bottom: 3px; font-size: 0.82em; color: #8A9A5B;
+        }
+        .slider-group input[type="range"] {
+            width: 100%; height: 6px; -webkit-appearance: none;
+            background: #333; border-radius: 3px; outline: none;
+        }
+        .slider-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 16px; height: 16px;
+            background: #8A9A5B; border-radius: 50%; cursor: pointer;
+        }
+        .btn-row { display: flex; gap: 6px; margin-bottom: 10px; }
+        .btn {
+            flex: 1; padding: 7px; border: none; border-radius: 8px;
+            background: #8A9A5B; color: #0a0a08; cursor: pointer;
+            font-family: 'Nunito', sans-serif; font-weight: 600;
+            font-size: 0.82em; transition: all 0.2s;
+        }
+        .btn:hover { background: #606C38; color: #FEFAE0; }
+        .stats {
+            margin-top: 10px; padding-top: 10px;
+            border-top: 1px solid rgba(138,154,91,0.2);
+            font-size: 0.82em; color: #8A9A5B;
+        }
+        .stats div { margin-bottom: 2px; }
+        .highlight { color: #DDA15E; font-weight: 600; }
+        .back-link {
+            position: fixed; top: 20px; right: 20px;
+            color: #8A9A5B; text-decoration: none;
+            font-family: 'Nunito', sans-serif; font-size: 0.9em; z-index: 100;
+            background: rgba(20,20,16,0.7); backdrop-filter: blur(8px);
+            padding: 8px 16px; border-radius: 10px;
+            border: 1px solid rgba(138,154,91,0.3); transition: all 0.2s;
+        }
+        .back-link:hover { background: rgba(138,154,91,0.2); }
+        .error-msg {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            background: rgba(188,108,37,0.95); color: #fff; padding: 30px;
+            border-radius: 16px; text-align: center; max-width: 420px;
+            font-family: 'Nunito', sans-serif;
+        }
+        .error-msg h2 { font-family: 'Lora', serif; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <h1>Ant Colony GPU</h1>
+        <div class="info">Click to place food sources</div>
+        <div class="slider-group">
+            <label>Ants <span id="antVal">5000</span></label>
+            <input type="range" id="antCount" min="1000" max="10000" step="500" value="5000">
+        </div>
+        <div class="slider-group">
+            <label>Evaporation <span id="evapVal">0.995</span></label>
+            <input type="range" id="evaporation" min="0.98" max="1.0" step="0.001" value="0.995">
+        </div>
+        <div class="slider-group">
+            <label>Sensor Distance <span id="senseVal">12</span></label>
+            <input type="range" id="sensorDist" min="4" max="30" step="1" value="12">
+        </div>
+        <div class="slider-group">
+            <label>Sensor Angle <span id="angleVal">30</span> deg</label>
+            <input type="range" id="sensorAngle" min="10" max="60" step="5" value="30">
+        </div>
+        <div class="btn-row">
+            <button class="btn" id="resetBtn">Reset</button>
+            <button class="btn" id="clearFoodBtn">Clear Food</button>
+        </div>
+        <div class="stats">
+            <div>Grid: 512 x 512</div>
+            <div>Ants: <span id="antDisplay">5,000</span></div>
+            <div>Food returned: <span id="foodReturned" class="highlight">0</span></div>
+            <div>FPS: <span id="fps">0</span></div>
+        </div>
+    </div>
+    <a href="index.html" class="back-link">&#8592; Back to Gallery</a>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+
+        if (!navigator.gpu) {
+            document.body.innerHTML = '<div class="error-msg"><h2>WebGPU Not Supported</h2><p>Your browser does not support WebGPU. Try Chrome 113+ or Edge 113+.</p></div>';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) throw new Error('No adapter');
+        const device = await adapter.requestDevice();
+        const ctxGPU = canvas.getContext('webgpu');
+        const presentFormat = navigator.gpu.getPreferredCanvasFormat();
+
+        function resize() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            ctxGPU.configure({ device, format: presentFormat, alphaMode: 'opaque' });
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const GRID = 512;
+        const MAX_ANTS = 10000;
+        let numAnts = 5000;
+        let evaporation = 0.995;
+        let sensorDist = 12;
+        let sensorAngle = 30;
+        let foodReturned = 0;
+
+        // Nest position (center)
+        const NEST_X = GRID / 2, NEST_Y = GRID / 2;
+
+        // Ant data: x, y, angle, state(0=searching, 1=returning)
+        const antData = new Float32Array(MAX_ANTS * 4);
+        function initAnts() {
+            for (let i = 0; i < MAX_ANTS; i++) {
+                antData[i * 4] = NEST_X + (Math.random() - 0.5) * 10;
+                antData[i * 4 + 1] = NEST_Y + (Math.random() - 0.5) * 10;
+                antData[i * 4 + 2] = Math.random() * Math.PI * 2;
+                antData[i * 4 + 3] = 0; // searching
+            }
+        }
+        initAnts();
+
+        const antBuf = device.createBuffer({
+            size: MAX_ANTS * 16,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(antBuf, 0, antData);
+
+        // Pheromone grid: 2 channels (food pheromone, home pheromone) = 2 floats per cell
+        const pheroBufA = device.createBuffer({
+            size: GRID * GRID * 2 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        const pheroBufB = device.createBuffer({
+            size: GRID * GRID * 2 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+
+        // Food grid: 1 float per cell (food amount)
+        const foodData = new Float32Array(GRID * GRID);
+        // Place initial food sources
+        function placeFood(cx, cy, radius, amount) {
+            for (let y = -radius; y <= radius; y++) {
+                for (let x = -radius; x <= radius; x++) {
+                    if (x * x + y * y <= radius * radius) {
+                        const gx = Math.floor(cx + x);
+                        const gy = Math.floor(cy + y);
+                        if (gx >= 0 && gx < GRID && gy >= 0 && gy < GRID) {
+                            foodData[gy * GRID + gx] = amount;
+                        }
+                    }
+                }
+            }
+        }
+        placeFood(GRID * 0.2, GRID * 0.2, 20, 5);
+        placeFood(GRID * 0.8, GRID * 0.3, 15, 5);
+        placeFood(GRID * 0.7, GRID * 0.8, 25, 5);
+
+        const foodBuf = device.createBuffer({
+            size: GRID * GRID * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(foodBuf, 0, foodData);
+
+        // Params: gridSize, numAnts, evapRate, sensorDist, sensorAngle, nestX, nestY, time
+        const paramData = new Float32Array([GRID, numAnts, evaporation, sensorDist, sensorAngle * Math.PI / 180, NEST_X, NEST_Y, 0]);
+        const paramBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(paramBuf, 0, paramData);
+
+        // Compute: ant movement
+        const antShader = device.createShaderModule({ code: `
+            struct Params { gridSize: f32, numAnts: f32, evapRate: f32, sensorDist: f32, sensorAngle: f32, nestX: f32, nestY: f32, time: f32 }
+
+            @group(0) @binding(0) var<storage, read_write> ants: array<vec4f>;
+            @group(0) @binding(1) var<storage, read> phero: array<vec2f>; // food_phero, home_phero
+            @group(0) @binding(2) var<storage, read_write> food: array<f32>;
+            @group(0) @binding(3) var<uniform> params: Params;
+
+            fn hash(n: f32) -> f32 {
+                return fract(sin(n) * 43758.5453);
+            }
+
+            fn samplePhero(x: f32, y: f32, channel: u32) -> f32 {
+                let gs = i32(params.gridSize);
+                let ix = clamp(i32(x), 0, gs - 1);
+                let iy = clamp(i32(y), 0, gs - 1);
+                let p = phero[u32(iy * gs + ix)];
+                if (channel == 0u) { return p.x; }
+                return p.y;
+            }
+
+            @compute @workgroup_size(256)
+            fn moveAnts(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u32(params.numAnts)) { return; }
+
+                var ant = ants[idx];
+                let x = ant.x;
+                let y = ant.y;
+                var angle = ant.z;
+                var state = ant.w; // 0=searching, 1=returning
+
+                let gs = params.gridSize;
+                let sd = params.sensorDist;
+                let sa = params.sensorAngle;
+
+                // Sense pheromones in 3 directions
+                // Searching ants follow food pheromone (channel 0)
+                // Returning ants follow home pheromone (channel 1)
+                let channel = select(1u, 0u, state < 0.5);
+
+                let fwdX = x + cos(angle) * sd;
+                let fwdY = y + sin(angle) * sd;
+                let leftX = x + cos(angle - sa) * sd;
+                let leftY = y + sin(angle - sa) * sd;
+                let rightX = x + cos(angle + sa) * sd;
+                let rightY = y + sin(angle + sa) * sd;
+
+                let fwd = samplePhero(fwdX, fwdY, channel);
+                let left = samplePhero(leftX, leftY, channel);
+                let right = samplePhero(rightX, rightY, channel);
+
+                // Turn toward strongest pheromone
+                let rng = hash(f32(idx) * 0.001 + params.time * 7.13);
+                let randomTurn = (rng - 0.5) * 0.3;
+
+                if (left > fwd && left > right) {
+                    angle -= sa * 0.5;
+                } else if (right > fwd && right > left) {
+                    angle += sa * 0.5;
+                } else {
+                    angle += randomTurn;
+                }
+
+                // Move forward
+                let speed = 1.0;
+                var nx = x + cos(angle) * speed;
+                var ny = y + sin(angle) * speed;
+
+                // Bounce off walls
+                if (nx < 1.0 || nx >= gs - 1.0) { angle = 3.14159 - angle; nx = clamp(nx, 1.0, gs - 2.0); }
+                if (ny < 1.0 || ny >= gs - 1.0) { angle = -angle; ny = clamp(ny, 1.0, gs - 2.0); }
+
+                let cellIdx = u32(i32(ny) * i32(gs) + i32(nx));
+
+                // Check for food/nest
+                if (state < 0.5) {
+                    // Searching: check for food
+                    if (food[cellIdx] > 0.01) {
+                        food[cellIdx] -= 0.01;
+                        state = 1.0; // now returning
+                        angle += 3.14159; // turn around
+                    }
+                } else {
+                    // Returning: check for nest
+                    let dx = nx - params.nestX;
+                    let dy = ny - params.nestY;
+                    if (dx * dx + dy * dy < 100.0) {
+                        state = 0.0; // searching again
+                        angle += 3.14159;
+                    }
+                }
+
+                ants[idx] = vec4f(nx, ny, angle, state);
+            }
+        `});
+
+        // Pheromone deposit + evaporate
+        const pheroShader = device.createShaderModule({ code: `
+            struct Params { gridSize: f32, numAnts: f32, evapRate: f32, sensorDist: f32, sensorAngle: f32, nestX: f32, nestY: f32, time: f32 }
+
+            @group(0) @binding(0) var<storage, read> ants: array<vec4f>;
+            @group(0) @binding(1) var<storage, read> pheroIn: array<vec2f>;
+            @group(0) @binding(2) var<storage, read_write> pheroOut: array<vec2f>;
+            @group(0) @binding(3) var<uniform> params: Params;
+
+            @compute @workgroup_size(256)
+            fn deposit(@builtin(global_invocation_id) gid: vec3u) {
+                let idx = gid.x;
+                if (idx >= u32(params.numAnts)) { return; }
+
+                let ant = ants[idx];
+                let gs = i32(params.gridSize);
+                let ix = clamp(i32(ant.x), 0, gs - 1);
+                let iy = clamp(i32(ant.y), 0, gs - 1);
+                let cellIdx = u32(iy * gs + ix);
+
+                // Searching ants deposit home pheromone, returning deposit food pheromone
+                if (ant.w < 0.5) {
+                    // Deposit home pheromone (channel 1)
+                    pheroOut[cellIdx] = vec2f(pheroOut[cellIdx].x, pheroOut[cellIdx].y + 1.0);
+                } else {
+                    // Deposit food pheromone (channel 0)
+                    pheroOut[cellIdx] = vec2f(pheroOut[cellIdx].x + 1.0, pheroOut[cellIdx].y);
+                }
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn evaporate(@builtin(global_invocation_id) gid: vec3u) {
+                let x = i32(gid.x);
+                let y = i32(gid.y);
+                let gs = i32(params.gridSize);
+                if (x >= gs || y >= gs) { return; }
+
+                let idx = u32(y * gs + x);
+
+                // Diffuse + evaporate
+                var sum = vec2f(0.0);
+                var count = 0.0;
+                for (var dy = -1; dy <= 1; dy++) {
+                    for (var dx = -1; dx <= 1; dx++) {
+                        let nx = clamp(x + dx, 0, gs - 1);
+                        let ny = clamp(y + dy, 0, gs - 1);
+                        sum += pheroIn[u32(ny * gs + nx)];
+                        count += 1.0;
+                    }
+                }
+                let diffused = sum / count;
+                let mixed = mix(pheroIn[idx], diffused, 0.1);
+
+                pheroOut[idx] = mixed * params.evapRate;
+            }
+        `});
+
+        const antPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: antShader, entryPoint: 'moveAnts' } });
+        const depositPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: pheroShader, entryPoint: 'deposit' } });
+        const evaporatePipeline = device.createComputePipeline({ layout: 'auto', compute: { module: pheroShader, entryPoint: 'evaporate' } });
+
+        // Render
+        const renderShader = device.createShaderModule({ code: `
+            struct Params { gridSize: f32, numAnts: f32, evapRate: f32, sensorDist: f32, sensorAngle: f32, nestX: f32, nestY: f32, time: f32 }
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+            @group(0) @binding(0) var<storage, read> phero: array<vec2f>;
+            @group(0) @binding(1) var<storage, read> ants: array<vec4f>;
+            @group(0) @binding(2) var<storage, read> food: array<f32>;
+            @group(0) @binding(3) var<uniform> params: Params;
+
+            @vertex
+            fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+                var pos = array<vec2f, 6>(
+                    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+                    vec2f(-1,1), vec2f(1,-1), vec2f(1,1)
+                );
+                var out: VSOut;
+                out.pos = vec4f(pos[vi], 0, 1);
+                out.uv = pos[vi] * 0.5 + 0.5;
+                return out;
+            }
+
+            @fragment
+            fn fs(in: VSOut) -> @location(0) vec4f {
+                let gs = u32(params.gridSize);
+                let gx = u32(in.uv.x * f32(gs));
+                let gy = u32((1.0 - in.uv.y) * f32(gs));
+                let idx = gy * gs + gx;
+
+                let p = phero[idx];
+                let foodP = clamp(p.x * 0.15, 0.0, 1.0); // food pheromone
+                let homeP = clamp(p.y * 0.08, 0.0, 1.0); // home pheromone
+                let foodAmount = food[idx];
+
+                // Background: dark
+                var color = vec3f(0.02, 0.02, 0.015);
+
+                // Food pheromone: green
+                color += vec3f(0.1, 0.8, 0.2) * foodP;
+                // Home pheromone: blue
+                color += vec3f(0.2, 0.3, 0.8) * homeP;
+
+                // Food sources: bright yellow
+                if (foodAmount > 0.01) {
+                    color = vec3f(0.867, 0.632, 0.369);
+                }
+
+                // Nest
+                let nestDx = f32(gx) - params.nestX;
+                let nestDy = f32(gy) - params.nestY;
+                if (nestDx * nestDx + nestDy * nestDy < 64.0) {
+                    color = vec3f(0.7, 0.5, 0.3);
+                }
+
+                return vec4f(color, 1.0);
+            }
+        `});
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: renderShader, entryPoint: 'vs' },
+            fragment: { module: renderShader, entryPoint: 'fs', targets: [{ format: presentFormat }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        // Ant point renderer
+        const antRenderShader = device.createShaderModule({ code: `
+            struct Params { gridSize: f32, numAnts: f32, evapRate: f32, sensorDist: f32, sensorAngle: f32, nestX: f32, nestY: f32, time: f32 }
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) color: vec4f }
+
+            @group(0) @binding(0) var<uniform> params: Params;
+
+            @vertex
+            fn vs(@location(0) posAngle: vec3f, @location(1) state: f32) -> VSOut {
+                var out: VSOut;
+                let ndc = (vec2f(posAngle.x, posAngle.y) / params.gridSize) * 2.0 - 1.0;
+                out.pos = vec4f(ndc.x, -ndc.y, 0, 1);
+
+                if (state < 0.5) {
+                    out.color = vec4f(1.0, 1.0, 1.0, 0.8); // searching: white
+                } else {
+                    out.color = vec4f(1.0, 0.6, 0.2, 0.9); // returning: orange
+                }
+                return out;
+            }
+
+            @fragment
+            fn fs(@location(0) color: vec4f) -> @location(0) vec4f { return color; }
+        `});
+
+        const antRenderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: antRenderShader, entryPoint: 'vs',
+                buffers: [{
+                    arrayStride: 16,
+                    attributes: [
+                        { shaderLocation: 0, offset: 0, format: 'float32x3' },
+                        { shaderLocation: 1, offset: 12, format: 'float32' },
+                    ],
+                }],
+            },
+            fragment: {
+                module: antRenderShader, entryPoint: 'fs',
+                targets: [{
+                    format: presentFormat,
+                    blend: {
+                        color: { srcFactor: 'src-alpha', dstFactor: 'one' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one' },
+                    },
+                }],
+            },
+            primitive: { topology: 'point-list' },
+        });
+
+        const antRenderBG = device.createBindGroup({
+            layout: antRenderPipeline.getBindGroupLayout(0),
+            entries: [{ binding: 0, resource: { buffer: paramBuf } }],
+        });
+
+        // Click to place food
+        canvas.addEventListener('click', e => {
+            const x = (e.clientX / window.innerWidth) * GRID;
+            const y = (e.clientY / window.innerHeight) * GRID;
+            placeFood(x, y, 15, 5);
+            device.queue.writeBuffer(foodBuf, 0, foodData);
+        });
+
+        // UI
+        document.getElementById('antCount').addEventListener('input', e => {
+            numAnts = parseInt(e.target.value);
+            document.getElementById('antVal').textContent = numAnts;
+            document.getElementById('antDisplay').textContent = numAnts.toLocaleString();
+        });
+        document.getElementById('evaporation').addEventListener('input', e => {
+            evaporation = parseFloat(e.target.value);
+            document.getElementById('evapVal').textContent = evaporation.toFixed(3);
+        });
+        document.getElementById('sensorDist').addEventListener('input', e => {
+            sensorDist = parseInt(e.target.value);
+            document.getElementById('senseVal').textContent = sensorDist;
+        });
+        document.getElementById('sensorAngle').addEventListener('input', e => {
+            sensorAngle = parseInt(e.target.value);
+            document.getElementById('angleVal').textContent = sensorAngle;
+        });
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            initAnts();
+            device.queue.writeBuffer(antBuf, 0, antData);
+            const zeroPh = new Float32Array(GRID * GRID * 2);
+            device.queue.writeBuffer(pheroBufA, 0, zeroPh);
+            device.queue.writeBuffer(pheroBufB, 0, zeroPh);
+            foodReturned = 0;
+        });
+        document.getElementById('clearFoodBtn').addEventListener('click', () => {
+            foodData.fill(0);
+            device.queue.writeBuffer(foodBuf, 0, foodData);
+        });
+
+        let step = 0, time = 0;
+        let lastTime = performance.now(), frameCount = 0, fpsAccum = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            time += dt;
+            frameCount++; fpsAccum += dt;
+            if (fpsAccum >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(frameCount / fpsAccum);
+                frameCount = 0; fpsAccum = 0;
+            }
+
+            paramData[1] = numAnts;
+            paramData[2] = evaporation;
+            paramData[3] = sensorDist;
+            paramData[4] = sensorAngle * Math.PI / 180;
+            paramData[7] = time;
+            device.queue.writeBuffer(paramBuf, 0, paramData);
+
+            const phIn = step % 2 === 0 ? pheroBufA : pheroBufB;
+            const phOut = step % 2 === 0 ? pheroBufB : pheroBufA;
+
+            const enc = device.createCommandEncoder();
+
+            // Move ants
+            const antBG = device.createBindGroup({
+                layout: antPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: antBuf } },
+                    { binding: 1, resource: { buffer: phIn } },
+                    { binding: 2, resource: { buffer: foodBuf } },
+                    { binding: 3, resource: { buffer: paramBuf } },
+                ],
+            });
+            const ap = enc.beginComputePass();
+            ap.setPipeline(antPipeline);
+            ap.setBindGroup(0, antBG);
+            ap.dispatchWorkgroups(Math.ceil(numAnts / 256));
+            ap.end();
+
+            // Deposit pheromones (first copy phIn to phOut, then deposit)
+            enc.copyBufferToBuffer(phIn, 0, phOut, 0, GRID * GRID * 2 * 4);
+            const depBG = device.createBindGroup({
+                layout: depositPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: antBuf } },
+                    { binding: 1, resource: { buffer: phIn } },
+                    { binding: 2, resource: { buffer: phOut } },
+                    { binding: 3, resource: { buffer: paramBuf } },
+                ],
+            });
+            const dp = enc.beginComputePass();
+            dp.setPipeline(depositPipeline);
+            dp.setBindGroup(0, depBG);
+            dp.dispatchWorkgroups(Math.ceil(numAnts / 256));
+            dp.end();
+
+            // Evaporate
+            const evBG = device.createBindGroup({
+                layout: evaporatePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: antBuf } },
+                    { binding: 1, resource: { buffer: phOut } },
+                    { binding: 2, resource: { buffer: phIn } },
+                    { binding: 3, resource: { buffer: paramBuf } },
+                ],
+            });
+            const ep = enc.beginComputePass();
+            ep.setPipeline(evaporatePipeline);
+            ep.setBindGroup(0, evBG);
+            ep.dispatchWorkgroups(Math.ceil(GRID / 16), Math.ceil(GRID / 16));
+            ep.end();
+
+            step++;
+
+            // Render pheromone field
+            const readPhero = step % 2 === 0 ? pheroBufA : pheroBufB;
+            const rBG = device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: readPhero } },
+                    { binding: 1, resource: { buffer: antBuf } },
+                    { binding: 2, resource: { buffer: foodBuf } },
+                    { binding: 3, resource: { buffer: paramBuf } },
+                ],
+            });
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: ctxGPU.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.02, g: 0.02, b: 0.015, a: 1 },
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, rBG);
+            rp.draw(6);
+
+            // Draw ants as points
+            rp.setPipeline(antRenderPipeline);
+            rp.setBindGroup(0, antRenderBG);
+            rp.setVertexBuffer(0, antBuf);
+            rp.draw(numAnts);
+
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+</body>
+</html>

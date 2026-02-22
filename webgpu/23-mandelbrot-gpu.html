@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mandelbrot/Julia Deep Zoom - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; cursor: crosshair; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 200px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls select { width: 170px; background: #1a1a2e; color: #e8e6e1; border: 1px solid #22d3ee; border-radius: 4px; padding: 3px; }
+        .controls input[type=range] { width: 160px; }
+        .controls button { margin: 3px 2px; padding: 5px 10px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .controls .row { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+        .controls .row button { flex: 1; min-width: 70px; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        .info { font-size: 10px; color: #888; margin-top: 8px; line-height: 1.4; }
+        .mode-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .mode-mandelbrot { background: rgba(6, 182, 212, 0.3); color: #22d3ee; }
+        .mode-julia { background: rgba(139, 92, 246, 0.3); color: #a78bfa; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title">Mandelbrot / Julia Deep Zoom</div>
+
+    <div class="controls">
+        <label>Mode: <span id="modeBadge" class="mode-badge mode-mandelbrot">Mandelbrot</span></label>
+        <label>Max Iterations: <span id="iterVal">500</span></label>
+        <input type="range" id="maxIter" min="100" max="2000" step="100" value="500">
+        <label>Color Palette:</label>
+        <select id="palette">
+            <option value="0">Electric Blue</option>
+            <option value="1">Fire</option>
+            <option value="2">Grayscale</option>
+            <option value="3">Psychedelic</option>
+        </select>
+        <div class="row">
+            <button onclick="window.resetView()">Reset View</button>
+            <button onclick="window.toggleMode()">Toggle Julia</button>
+        </div>
+        <div class="info">
+            Scroll to zoom (centered on cursor)<br>
+            Drag to pan<br>
+            Click in Mandelbrot mode to set Julia c
+        </div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span><br>
+        Zoom: <span id="zoom">1.00</span><br>
+        Center: <span id="center">0, 0</span><br>
+        Julia c: <span id="juliaC">-0.7, 0.27</span>
+    </div>
+
+    <div id="error">
+        WebGPU is not supported in your browser.<br>
+        Please use Chrome 113+, Edge 113+, or Safari 18+.
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let maxIter = 500;
+        let paletteId = 0;
+        let isJulia = false;
+        let juliaR = -0.7, juliaI = 0.27;
+
+        // Double-precision emulation using two f32s (Dekker splitting)
+        // View in double-emulated coords
+        let centerXHi = -0.5, centerXLo = 0;
+        let centerYHi = 0, centerYLo = 0;
+        let zoomLevel = 1.0; // scale = 2.0 / zoom
+
+        let dragging = false, dragSX = 0, dragSY = 0, dragCXHi = 0, dragCYHi = 0;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const fmt = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: fmt, alphaMode: 'opaque' });
+
+        const W = canvas.width, H = canvas.height;
+        const uniformBuffer = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        const shader = `
+            struct Uniforms {
+                resolution: vec2f,
+                centerHi: vec2f,
+                centerLo: vec2f,
+                scale: f32,
+                maxIter: u32,
+                juliaR: f32,
+                juliaI: f32,
+                isJulia: u32,
+                palette: u32,
+                aspect: f32,
+                pad1: f32,
+                pad2: f32,
+                pad3: f32,
+            }
+
+            @group(0) @binding(0) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+
+            // Double-float addition: (a_hi, a_lo) + (b_hi, b_lo)
+            fn dsAdd(ahi: f32, alo: f32, bhi: f32, blo: f32) -> vec2f {
+                let s = ahi + bhi;
+                let v = s - ahi;
+                let t = (bhi - v) + (ahi - (s - v)) + alo + blo;
+                let s2 = s + t;
+                return vec2f(s2, t - (s2 - s));
+            }
+
+            // Double-float multiply: (a_hi, a_lo) * (b_hi, b_lo)
+            fn dsMul(ahi: f32, alo: f32, bhi: f32, blo: f32) -> vec2f {
+                let p = ahi * bhi;
+                let e = fma(ahi, bhi, -p) + ahi * blo + alo * bhi;
+                let s = p + e;
+                return vec2f(s, e - (s - p));
+            }
+
+            fn palette0(t: f32) -> vec3f {
+                // Electric blue
+                return vec3f(
+                    0.5 + 0.5 * cos(6.28318 * (t + 0.0)),
+                    0.5 + 0.5 * cos(6.28318 * (t + 0.4)),
+                    0.5 + 0.5 * cos(6.28318 * (t + 0.7))
+                );
+            }
+
+            fn palette1(t: f32) -> vec3f {
+                // Fire
+                return vec3f(
+                    min(t * 3.0, 1.0),
+                    max(0.0, min(t * 3.0 - 1.0, 1.0)),
+                    max(0.0, t * 3.0 - 2.0)
+                );
+            }
+
+            fn palette2(t: f32) -> vec3f {
+                // Grayscale
+                return vec3f(t);
+            }
+
+            fn palette3(t: f32) -> vec3f {
+                // Psychedelic
+                return vec3f(
+                    0.5 + 0.5 * sin(t * 25.0),
+                    0.5 + 0.5 * sin(t * 25.0 + 2.094),
+                    0.5 + 0.5 * sin(t * 25.0 + 4.189)
+                );
+            }
+
+            @compute @workgroup_size(8, 8)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                let w = u32(u.resolution.x);
+                let h = u32(u.resolution.y);
+                if (id.x >= w || id.y >= h) { return; }
+
+                // Map pixel to complex plane with double-precision center
+                let px = (f32(id.x) / u.resolution.x - 0.5) * u.scale * u.aspect;
+                let py = (f32(id.y) / u.resolution.y - 0.5) * u.scale;
+
+                // c = center + pixel offset (using DS arithmetic for center)
+                var cHi = dsAdd(u.centerHi.x, u.centerLo.x, px, 0.0);
+                var cIHi = dsAdd(u.centerHi.y, u.centerLo.y, py, 0.0);
+
+                var zrHi: f32; var zrLo: f32;
+                var ziHi: f32; var ziLo: f32;
+                var crHi: f32; var crLo: f32;
+                var ciHi: f32; var ciLo: f32;
+
+                if (u.isJulia == 1u) {
+                    zrHi = cHi.x; zrLo = cHi.y;
+                    ziHi = cIHi.x; ziLo = cIHi.y;
+                    crHi = u.juliaR; crLo = 0.0;
+                    ciHi = u.juliaI; ciLo = 0.0;
+                } else {
+                    zrHi = 0.0; zrLo = 0.0;
+                    ziHi = 0.0; ziLo = 0.0;
+                    crHi = cHi.x; crLo = cHi.y;
+                    ciHi = cIHi.x; ciLo = cIHi.y;
+                }
+
+                var iter = 0u;
+                var zr2Hi: f32; var zr2Lo: f32;
+                var zi2Hi: f32; var zi2Lo: f32;
+
+                for (var i = 0u; i < u.maxIter; i++) {
+                    let zr2 = dsMul(zrHi, zrLo, zrHi, zrLo);
+                    let zi2 = dsMul(ziHi, ziLo, ziHi, ziLo);
+                    zr2Hi = zr2.x; zr2Lo = zr2.y;
+                    zi2Hi = zi2.x; zi2Lo = zi2.y;
+
+                    let mag = zr2Hi + zi2Hi;
+                    if (mag > 4.0) { break; }
+
+                    // z = z*z + c
+                    let zri = dsMul(zrHi, zrLo, ziHi, ziLo);
+                    let newZi = dsAdd(zri.x + zri.x, zri.y + zri.y, ciHi, ciLo);
+                    let newZr = dsAdd(zr2Hi - zi2Hi, zr2Lo - zi2Lo, crHi, crLo);
+
+                    zrHi = newZr.x; zrLo = newZr.y;
+                    ziHi = newZi.x; ziLo = newZi.y;
+                    iter = i + 1u;
+                }
+
+                var color: vec3f;
+                if (iter >= u.maxIter) {
+                    color = vec3f(0.0);
+                } else {
+                    // Smooth coloring: log(log(|z|)) / log(2)
+                    let mag2 = zrHi * zrHi + ziHi * ziHi;
+                    let logMag = log2(mag2) * 0.5;
+                    let smooth_iter = f32(iter) + 1.0 - log2(max(logMag, 0.001));
+                    let t = fract(smooth_iter / 64.0);
+
+                    if (u.palette == 0u) { color = palette0(t); }
+                    else if (u.palette == 1u) { color = palette1(t); }
+                    else if (u.palette == 2u) { color = palette2(t); }
+                    else { color = palette3(t); }
+                }
+
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const outTexture = device.createTexture({
+            size: [W, H], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: shader }), entryPoint: 'main' }
+        });
+
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format: fmt }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const computeBG = device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: { buffer: uniformBuffer } }
+            ]
+        });
+
+        const displayBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        function updateStats() {
+            const scale = 4.0 / zoomLevel;
+            document.getElementById('zoom').textContent = zoomLevel < 1e6 ? zoomLevel.toFixed(2) : zoomLevel.toExponential(3);
+            document.getElementById('center').textContent = centerXHi.toFixed(10) + ', ' + centerYHi.toFixed(10);
+            document.getElementById('juliaC').textContent = juliaR.toFixed(4) + ', ' + juliaI.toFixed(4);
+            const badge = document.getElementById('modeBadge');
+            badge.textContent = isJulia ? 'Julia' : 'Mandelbrot';
+            badge.className = 'mode-badge ' + (isJulia ? 'mode-julia' : 'mode-mandelbrot');
+        }
+
+        let lastTime = performance.now();
+        let fpsC = 0, fpsT = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            const now = performance.now();
+            lastTime = now;
+            fpsC++;
+            if (now - fpsT > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsC / ((now - fpsT) / 1000));
+                fpsC = 0; fpsT = now;
+            }
+
+            const scale = 4.0 / zoomLevel;
+            const aspect = W / H;
+
+            const buf = new ArrayBuffer(80);
+            const f32 = new Float32Array(buf);
+            const u32 = new Uint32Array(buf);
+            f32[0] = W; f32[1] = H;
+            f32[2] = centerXHi; f32[3] = centerYHi;
+            f32[4] = centerXLo; f32[5] = centerYLo;
+            f32[6] = scale;
+            u32[7] = maxIter;
+            f32[8] = juliaR; f32[9] = juliaI;
+            u32[10] = isJulia ? 1 : 0;
+            u32[11] = paletteId;
+            f32[12] = aspect;
+
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+
+            const enc = device.createCommandEncoder();
+            const cp = enc.beginComputePass();
+            cp.setPipeline(computePipeline);
+            cp.setBindGroup(0, computeBG);
+            cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+            cp.end();
+
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{ view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store' }]
+            });
+            rp.setPipeline(displayPipeline);
+            rp.setBindGroup(0, displayBG);
+            rp.draw(4);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+        }
+
+        // Zoom with scroll, centered on cursor
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const mx = (e.clientX - rect.left) / rect.width;
+            const my = (e.clientY - rect.top) / rect.height;
+
+            const scale = 4.0 / zoomLevel;
+            const aspect = W / H;
+
+            // Complex coordinate under mouse
+            const cx = centerXHi + (mx - 0.5) * scale * aspect;
+            const cy = centerYHi + (my - 0.5) * scale;
+
+            const factor = e.deltaY > 0 ? 0.85 : 1.18;
+            zoomLevel *= factor;
+
+            // Adjust center so point under mouse stays fixed
+            const newScale = 4.0 / zoomLevel;
+            centerXHi = cx - (mx - 0.5) * newScale * aspect;
+            centerYHi = cy - (my - 0.5) * newScale;
+
+            updateStats();
+        }, { passive: false });
+
+        // Pan with drag
+        canvas.addEventListener('mousedown', (e) => {
+            if (e.button === 0) {
+                dragging = true;
+                dragSX = e.clientX;
+                dragSY = e.clientY;
+                dragCXHi = centerXHi;
+                dragCYHi = centerYHi;
+            }
+        });
+        window.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+            const scale = 4.0 / zoomLevel;
+            const aspect = W / H;
+            const dx = (e.clientX - dragSX) / W * scale * aspect;
+            const dy = (e.clientY - dragSY) / H * scale;
+            centerXHi = dragCXHi - dx;
+            centerYHi = dragCYHi - dy;
+            updateStats();
+        });
+        window.addEventListener('mouseup', (e) => {
+            if (dragging && Math.abs(e.clientX - dragSX) < 3 && Math.abs(e.clientY - dragSY) < 3 && !isJulia) {
+                // Click: set Julia c parameter
+                const rect = canvas.getBoundingClientRect();
+                const mx = (e.clientX - rect.left) / rect.width;
+                const my = (e.clientY - rect.top) / rect.height;
+                const scale = 4.0 / zoomLevel;
+                const aspect = W / H;
+                juliaR = centerXHi + (mx - 0.5) * scale * aspect;
+                juliaI = centerYHi + (my - 0.5) * scale;
+                updateStats();
+            }
+            dragging = false;
+        });
+
+        // Controls
+        document.getElementById('maxIter').addEventListener('input', (e) => {
+            maxIter = parseInt(e.target.value);
+            document.getElementById('iterVal').textContent = maxIter;
+        });
+        document.getElementById('palette').addEventListener('change', (e) => {
+            paletteId = parseInt(e.target.value);
+        });
+
+        window.resetView = () => {
+            centerXHi = isJulia ? 0 : -0.5;
+            centerXLo = 0;
+            centerYHi = 0; centerYLo = 0;
+            zoomLevel = 1.0;
+            updateStats();
+        };
+
+        window.toggleMode = () => {
+            isJulia = !isJulia;
+            window.resetView();
+        };
+
+        updateStats();
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gray-Scott Reaction-Diffusion - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 14px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; cursor: crosshair; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 210px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input { width: 100%; }
+        .controls button { margin: 4px 2px; padding: 6px 10px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .controls button:hover { background: #67e8f9; }
+        .presets { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+        .presets button { flex: 1; min-width: 45%; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        .title-overlay { position: fixed; top: 70px; left: 20px; z-index: 90; }
+        .title-overlay h1 { font-size: 1.4rem; color: #22d3ee; margin: 0 0 4px 0; }
+        .title-overlay p { font-size: 0.85rem; color: #888; margin: 0; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(220, 50, 50, 0.95); padding: 30px 40px; border-radius: 12px; display: none; text-align: center; max-width: 400px; line-height: 1.6; }
+        .info { font-size: 10px; color: #666; margin-top: 10px; }
+        .btn-full { width: 100% !important; margin-top: 8px !important; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+
+    <div class="title-overlay">
+        <h1>Gray-Scott Reaction-Diffusion</h1>
+        <p>GPU-accelerated pattern formation</p>
+    </div>
+
+    <div class="controls">
+        <label>Feed Rate (F): <span id="feedVal">0.055</span></label>
+        <input type="range" id="feed" min="0.01" max="0.1" step="0.001" value="0.055">
+        <label>Kill Rate (k): <span id="killVal">0.062</span></label>
+        <input type="range" id="kill" min="0.04" max="0.08" step="0.001" value="0.062">
+        <label>Diffusion U: <span id="duVal">1.00</span></label>
+        <input type="range" id="du" min="0.5" max="1.5" step="0.05" value="1.00">
+        <label>Diffusion V: <span id="dvVal">0.50</span></label>
+        <input type="range" id="dv" min="0.1" max="0.8" step="0.05" value="0.50">
+
+        <div class="presets">
+            <button onclick="setPreset(0.055, 0.062)">Coral</button>
+            <button onclick="setPreset(0.028, 0.062)">Mitosis</button>
+            <button onclick="setPreset(0.078, 0.061)">Worms</button>
+            <button onclick="setPreset(0.018, 0.055)">Spirals</button>
+            <button onclick="setPreset(0.042, 0.065)">Stripes</button>
+            <button onclick="setPreset(0.025, 0.060)">Pulsing</button>
+        </div>
+
+        <button class="btn-full" onclick="resetSim()">Reset</button>
+        <button class="btn-full" onclick="addRandomSeeds()">Add Seeds</button>
+        <div class="info">Click and drag to paint activator (V)</div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Resolution: <span id="resolution">0</span>
+    </div>
+
+    <div id="error">
+        <h2>WebGPU Not Supported</h2>
+        <p>Please use Chrome 113+, Edge 113+, or Safari 18+.</p>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        const SIZE = 512;
+        canvas.width = SIZE;
+        canvas.height = SIZE;
+        canvas.style.width = Math.min(window.innerWidth * 0.85, SIZE * 2) + 'px';
+        canvas.style.height = Math.min(window.innerHeight * 0.85, SIZE * 2) + 'px';
+
+        let feedRate = 0.055;
+        let killRate = 0.062;
+        let diffU = 1.0;
+        let diffV = 0.5;
+        let mouseDown = false;
+        let mouseX = -1, mouseY = -1;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) { document.getElementById('error').style.display = 'block'; throw new Error('No adapter'); }
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' });
+
+        document.getElementById('resolution').textContent = SIZE + 'x' + SIZE;
+
+        const computeShader = `
+            struct Uniforms {
+                feed: f32,
+                kill: f32,
+                dU: f32,
+                dV: f32,
+                mouseX: f32,
+                mouseY: f32,
+                mouseActive: f32,
+                size: u32,
+            }
+
+            @group(0) @binding(0) var<storage, read> gridIn: array<vec2f>;
+            @group(0) @binding(1) var<storage, read_write> gridOut: array<vec2f>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            fn getIdx(x: i32, y: i32) -> u32 {
+                let s = i32(u.size);
+                return u32(((y % s) + s) % s * s + ((x % s) + s) % s);
+            }
+
+            fn laplacian(x: i32, y: i32) -> vec2f {
+                let c = gridIn[getIdx(x, y)];
+                let up = gridIn[getIdx(x, y - 1)];
+                let dn = gridIn[getIdx(x, y + 1)];
+                let lt = gridIn[getIdx(x - 1, y)];
+                let rt = gridIn[getIdx(x + 1, y)];
+                let ul = gridIn[getIdx(x - 1, y - 1)];
+                let ur = gridIn[getIdx(x + 1, y - 1)];
+                let dl = gridIn[getIdx(x - 1, y + 1)];
+                let dr = gridIn[getIdx(x + 1, y + 1)];
+                return (up + dn + lt + rt) * 0.2 + (ul + ur + dl + dr) * 0.05 - c;
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                if (gid.x >= u.size || gid.y >= u.size) { return; }
+
+                let idx = gid.y * u.size + gid.x;
+                let state = gridIn[idx];
+                let lap = laplacian(i32(gid.x), i32(gid.y));
+
+                let uv2 = state.x * state.y * state.y;
+                let newU = state.x + u.dU * lap.x - uv2 + u.feed * (1.0 - state.x);
+                let newV = state.y + u.dV * lap.y + uv2 - (u.feed + u.kill) * state.y;
+
+                var result = clamp(vec2f(newU, newV), vec2f(0.0), vec2f(1.0));
+
+                // Mouse painting
+                if (u.mouseActive > 0.5) {
+                    let mx = u.mouseX * f32(u.size);
+                    let my = u.mouseY * f32(u.size);
+                    let dist = length(vec2f(f32(gid.x), f32(gid.y)) - vec2f(mx, my));
+                    if (dist < 8.0) {
+                        result.y = 1.0;
+                    }
+                }
+
+                gridOut[idx] = result;
+            }
+        `;
+
+        const renderShader = `
+            struct Uniforms { size: u32 }
+
+            @group(0) @binding(0) var<storage, read> grid: array<vec2f>;
+            @group(0) @binding(1) var<uniform> u: Uniforms;
+            @group(0) @binding(2) var outTex: texture_storage_2d<rgba8unorm, write>;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) gid: vec3u) {
+                if (gid.x >= u.size || gid.y >= u.size) { return; }
+
+                let idx = gid.y * u.size + gid.x;
+                let state = grid[idx];
+                let v = state.y;
+                let a = state.x;
+
+                // Color palette: dark background, vivid patterns
+                var color: vec3f;
+                let t = v;
+                if (t < 0.1) {
+                    color = mix(vec3f(0.02, 0.02, 0.06), vec3f(0.05, 0.1, 0.3), t * 10.0);
+                } else if (t < 0.3) {
+                    color = mix(vec3f(0.05, 0.1, 0.3), vec3f(0.1, 0.4, 0.7), (t - 0.1) * 5.0);
+                } else if (t < 0.5) {
+                    color = mix(vec3f(0.1, 0.4, 0.7), vec3f(0.6, 0.2, 0.5), (t - 0.3) * 5.0);
+                } else if (t < 0.7) {
+                    color = mix(vec3f(0.6, 0.2, 0.5), vec3f(0.9, 0.5, 0.2), (t - 0.5) * 5.0);
+                } else {
+                    color = mix(vec3f(0.9, 0.5, 0.2), vec3f(1.0, 0.95, 0.85), (t - 0.7) * 3.33);
+                }
+
+                textureStore(outTex, vec2i(gid.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VO { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+                var p = array<vec2f, 4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f, 4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VO; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        const computePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: computeShader }), entryPoint: 'main' }
+        });
+
+        const renderCompPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: device.createShaderModule({ code: renderShader }), entryPoint: 'main' }
+        });
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const gridBuffers = [
+            device.createBuffer({ size: SIZE * SIZE * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
+            device.createBuffer({ size: SIZE * SIZE * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
+        ];
+
+        const computeUniformBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const renderUniformBuffer = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(renderUniformBuffer, 0, new Uint32Array([SIZE]));
+
+        const outTexture = device.createTexture({
+            size: [SIZE, SIZE],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        function addSeedToData(data, cx, cy, radius) {
+            for (let y = -radius; y <= radius; y++) {
+                for (let x = -radius; x <= radius; x++) {
+                    if (x * x + y * y < radius * radius) {
+                        const px = Math.floor(cx + x);
+                        const py = Math.floor(cy + y);
+                        if (px >= 0 && px < SIZE && py >= 0 && py < SIZE) {
+                            data[(py * SIZE + px) * 2 + 1] = 1.0;
+                        }
+                    }
+                }
+            }
+        }
+
+        function initGrid() {
+            const data = new Float32Array(SIZE * SIZE * 2);
+            for (let i = 0; i < SIZE * SIZE; i++) {
+                data[i * 2] = 1.0;     // U = 1
+                data[i * 2 + 1] = 0.0; // V = 0
+            }
+            // Add seeds
+            addSeedToData(data, SIZE / 2, SIZE / 2, 20);
+            addSeedToData(data, SIZE / 3, SIZE / 3, 15);
+            addSeedToData(data, SIZE * 2 / 3, SIZE * 2 / 3, 15);
+            addSeedToData(data, SIZE / 4, SIZE * 3 / 4, 12);
+            addSeedToData(data, SIZE * 3 / 4, SIZE / 4, 12);
+
+            device.queue.writeBuffer(gridBuffers[0], 0, data);
+            device.queue.writeBuffer(gridBuffers[1], 0, data);
+        }
+
+        initGrid();
+
+        // Bind groups
+        const computeBindGroups = [
+            device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: gridBuffers[0] } },
+                    { binding: 1, resource: { buffer: gridBuffers[1] } },
+                    { binding: 2, resource: { buffer: computeUniformBuffer } }
+                ]
+            }),
+            device.createBindGroup({
+                layout: computePipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: gridBuffers[1] } },
+                    { binding: 1, resource: { buffer: gridBuffers[0] } },
+                    { binding: 2, resource: { buffer: computeUniformBuffer } }
+                ]
+            })
+        ];
+
+        const renderBindGroups = [
+            device.createBindGroup({
+                layout: renderCompPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: gridBuffers[1] } },
+                    { binding: 1, resource: { buffer: renderUniformBuffer } },
+                    { binding: 2, resource: outTexture.createView() }
+                ]
+            }),
+            device.createBindGroup({
+                layout: renderCompPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: gridBuffers[0] } },
+                    { binding: 1, resource: { buffer: renderUniformBuffer } },
+                    { binding: 2, resource: outTexture.createView() }
+                ]
+            })
+        ];
+
+        const displayBindGroup = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        let frame = 0;
+        let lastTime = performance.now();
+        let fpsFrames = 0, fpsTime = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            fpsFrames++;
+            fpsTime += dt;
+            if (fpsTime >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(fpsFrames / fpsTime);
+                fpsFrames = 0; fpsTime = 0;
+            }
+
+            // Update uniforms
+            const buf = new ArrayBuffer(32);
+            const f = new Float32Array(buf);
+            const u = new Uint32Array(buf);
+            f[0] = feedRate;
+            f[1] = killRate;
+            f[2] = diffU;
+            f[3] = diffV;
+            f[4] = mouseX;
+            f[5] = mouseY;
+            f[6] = mouseDown ? 1.0 : 0.0;
+            u[7] = SIZE;
+            device.queue.writeBuffer(computeUniformBuffer, 0, buf);
+
+            const encoder = device.createCommandEncoder();
+
+            // Multiple sim steps per frame
+            const stepsPerFrame = 10;
+            for (let i = 0; i < stepsPerFrame; i++) {
+                const cp = encoder.beginComputePass();
+                cp.setPipeline(computePipeline);
+                cp.setBindGroup(0, computeBindGroups[(frame + i) % 2]);
+                cp.dispatchWorkgroups(Math.ceil(SIZE / 16), Math.ceil(SIZE / 16));
+                cp.end();
+            }
+            frame += stepsPerFrame;
+
+            // Render to texture
+            const rcp = encoder.beginComputePass();
+            rcp.setPipeline(renderCompPipeline);
+            rcp.setBindGroup(0, renderBindGroups[frame % 2]);
+            rcp.dispatchWorkgroups(Math.ceil(SIZE / 16), Math.ceil(SIZE / 16));
+            rcp.end();
+
+            // Display
+            const dp = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: context.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store'
+                }]
+            });
+            dp.setPipeline(displayPipeline);
+            dp.setBindGroup(0, displayBindGroup);
+            dp.draw(4);
+            dp.end();
+
+            device.queue.submit([encoder.finish()]);
+            requestAnimationFrame(render);
+        }
+
+        function resetSim() { initGrid(); frame = 0; }
+        function addRandomSeeds() {
+            // Re-initialize with more random seeds
+            const data = new Float32Array(SIZE * SIZE * 2);
+            for (let i = 0; i < SIZE * SIZE; i++) { data[i * 2] = 1.0; }
+            for (let s = 0; s < 10; s++) {
+                addSeedToData(data, Math.random() * SIZE, Math.random() * SIZE, 8 + Math.random() * 15);
+            }
+            device.queue.writeBuffer(gridBuffers[0], 0, data);
+            device.queue.writeBuffer(gridBuffers[1], 0, data);
+            frame = 0;
+        }
+
+        function setPreset(f, k) {
+            feedRate = f; killRate = k;
+            document.getElementById('feed').value = f;
+            document.getElementById('kill').value = k;
+            document.getElementById('feedVal').textContent = f.toFixed(3);
+            document.getElementById('killVal').textContent = k.toFixed(3);
+            resetSim();
+        }
+
+        window.resetSim = resetSim;
+        window.addRandomSeeds = addRandomSeeds;
+        window.setPreset = setPreset;
+
+        // Controls
+        document.getElementById('feed').addEventListener('input', (e) => {
+            feedRate = parseFloat(e.target.value);
+            document.getElementById('feedVal').textContent = feedRate.toFixed(3);
+        });
+        document.getElementById('kill').addEventListener('input', (e) => {
+            killRate = parseFloat(e.target.value);
+            document.getElementById('killVal').textContent = killRate.toFixed(3);
+        });
+        document.getElementById('du').addEventListener('input', (e) => {
+            diffU = parseFloat(e.target.value);
+            document.getElementById('duVal').textContent = diffU.toFixed(2);
+        });
+        document.getElementById('dv').addEventListener('input', (e) => {
+            diffV = parseFloat(e.target.value);
+            document.getElementById('dvVal').textContent = diffV.toFixed(2);
+        });
+
+        // Mouse
+        canvas.addEventListener('mousedown', () => mouseDown = true);
+        canvas.addEventListener('mouseup', () => mouseDown = false);
+        canvas.addEventListener('mouseleave', () => mouseDown = false);
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            mouseX = (e.clientX - rect.left) / rect.width;
+            mouseY = (e.clientY - rect.top) / rect.height;
+        });
+
+        render();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terrain Generator + Contour Lines - CCAB</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root{--sage:#8A9A5B;--moss:#606C38;--earth:#DDA15E;--cream:#FEFAE0;--terracotta:#BC6C25;--dark-moss:#3d4423}
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{overflow:hidden;font-family:'Nunito',sans-serif;background:#0a0e1a;color:#e8e6e1}
+        .back-link{position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:var(--earth);text-decoration:none;border-radius:6px;font-size:14px;font-family:'Nunito',sans-serif;z-index:999;transition:all 0.3s ease}
+        .back-link:hover{background:rgba(221,161,94,0.2);transform:translateX(-4px)}
+        #fps-counter{position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.7);color:var(--earth);padding:8px 12px;border-radius:6px;font-family:'Courier New',monospace;font-size:14px;z-index:999}
+        .fps-good{color:#10b981}.fps-medium{color:#fbbf24}.fps-poor{color:#e11d48}
+        #hybrid-container{position:relative;width:100vw;height:100vh}
+        #canvas{position:absolute;top:0;left:0;width:100%;height:100%;z-index:0}
+        #svg-overlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none}
+        .interactive{pointer-events:all;cursor:pointer}
+        #loading{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:1000}
+        .spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,0.1);border-top-color:var(--earth);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1rem}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        #error{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(225,29,72,0.9);color:white;padding:2rem;border-radius:12px;text-align:center;max-width:400px;z-index:1001}
+        #error h2{font-family:'Lora',serif;margin:0 0 1rem 0}
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Generating terrain...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+
+    <script>
+        window.addEventListener('error',function(e){showError('Runtime Error: '+e.message);});
+        function showError(m){document.getElementById('loading').style.display='none';document.getElementById('error').style.display='block';document.getElementById('error-message').textContent=m;}
+        function hideLoading(){document.getElementById('loading').style.display='none';}
+        class FPSCounter{constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}update(){this.frames++;var n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}}
+
+        try {
+            var canvas = document.getElementById('canvas');
+            var ctx = canvas.getContext('2d');
+            var svg = document.getElementById('svg-overlay');
+            var svgNS = 'http://www.w3.org/2000/svg';
+            var fpsCounter = new FPSCounter();
+            var W, H;
+
+            // Perlin noise implementation
+            var permutation = [];
+            var p = new Array(512);
+            function initPerlin(seed) {
+                var perm = [];
+                for (var i = 0; i < 256; i++) perm.push(i);
+                // Shuffle with seed
+                var s = seed || 42;
+                for (var i = 255; i > 0; i--) {
+                    s = (s * 16807 + 0) % 2147483647;
+                    var j = s % (i + 1);
+                    var tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
+                }
+                for (var i = 0; i < 512; i++) p[i] = perm[i & 255];
+            }
+            initPerlin(42);
+
+            function fade(t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+            function lerp2(t, a, b) { return a + t * (b - a); }
+            function grad(hash, x, y) {
+                var h = hash & 3;
+                var u = h < 2 ? x : y;
+                var v = h < 2 ? y : x;
+                return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+            }
+
+            function perlin(x, y) {
+                var X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+                x -= Math.floor(x); y -= Math.floor(y);
+                var u = fade(x), v = fade(y);
+                var A = p[X] + Y, B = p[X + 1] + Y;
+                return lerp2(v,
+                    lerp2(u, grad(p[A], x, y), grad(p[B], x - 1, y)),
+                    lerp2(u, grad(p[A + 1], x, y - 1), grad(p[B + 1], x - 1, y - 1))
+                );
+            }
+
+            function fbm(x, y, octaves, lacunarity, gain) {
+                var sum = 0, amp = 1, freq = 1, max = 0;
+                for (var i = 0; i < octaves; i++) {
+                    sum += perlin(x * freq, y * freq) * amp;
+                    max += amp;
+                    amp *= gain;
+                    freq *= lacunarity;
+                }
+                return sum / max;
+            }
+
+            // Terrain parameters
+            var noiseScale = 4, octaves = 6, lacunarity = 2.0, gain = 0.5;
+            var showContours = true;
+            var gridW, gridH;
+            var heightMap;
+            var needsRedraw = true;
+            var offsetX = 0, offsetY = 0;
+
+            function generateTerrain() {
+                gridW = Math.ceil(W / 3);
+                gridH = Math.ceil(H / 3);
+                heightMap = new Float32Array(gridW * gridH);
+                for (var y = 0; y < gridH; y++) {
+                    for (var x = 0; x < gridW; x++) {
+                        var nx = (x + offsetX) / gridW * noiseScale;
+                        var ny = (y + offsetY) / gridH * noiseScale;
+                        heightMap[y * gridW + x] = (fbm(nx, ny, octaves, lacunarity, gain) + 1) / 2;
+                    }
+                }
+            }
+
+            function terrainColor(h) {
+                if (h < 0.3) return [30, 50, Math.floor(100 + h / 0.3 * 80)]; // deep water
+                if (h < 0.4) return [50, 100, Math.floor(150 + (h - 0.3) / 0.1 * 50)]; // water
+                if (h < 0.45) return [210, 190, 140]; // beach
+                if (h < 0.6) return [80, Math.floor(130 + (h - 0.45) / 0.15 * 40), 50]; // grass
+                if (h < 0.75) return [110, 100, 80]; // rock
+                return [220, 220, Math.floor(220 + (h - 0.75) / 0.25 * 35)]; // snow
+            }
+
+            function renderTerrain() {
+                var imgData = ctx.createImageData(W, H);
+                var data = imgData.data;
+                var cellW = W / gridW, cellH = H / gridH;
+
+                for (var py = 0; py < H; py++) {
+                    var gy = Math.floor(py / cellH);
+                    if (gy >= gridH) gy = gridH - 1;
+                    for (var px = 0; px < W; px++) {
+                        var gx = Math.floor(px / cellW);
+                        if (gx >= gridW) gx = gridW - 1;
+                        var h = heightMap[gy * gridW + gx];
+                        var c = terrainColor(h);
+                        var idx = (py * W + px) * 4;
+                        data[idx] = c[0]; data[idx+1] = c[1]; data[idx+2] = c[2]; data[idx+3] = 255;
+                    }
+                }
+                ctx.putImageData(imgData, 0, 0);
+            }
+
+            // Marching squares for contours
+            function createEl(tag, attrs) {
+                var el = document.createElementNS(svgNS, tag);
+                for (var k in attrs) el.setAttribute(k, attrs[k]);
+                return el;
+            }
+
+            var contourGroup = createEl('g', { id: 'contours' });
+            svg.appendChild(contourGroup);
+
+            function generateContours() {
+                // Clear old contours
+                while (contourGroup.firstChild) contourGroup.removeChild(contourGroup.firstChild);
+                if (!showContours) return;
+
+                var levels = [0.3, 0.4, 0.45, 0.5, 0.6, 0.7, 0.75, 0.85];
+                var cellW = W / gridW, cellH = H / gridH;
+                var step = 3; // sample every 3rd cell for performance
+
+                levels.forEach(function(level, li) {
+                    var segments = [];
+                    var isMajor = li === 0 || li === 2 || li === 5 || li === 7;
+
+                    for (var y = 0; y < gridH - step; y += step) {
+                        for (var x = 0; x < gridW - step; x += step) {
+                            var tl = heightMap[y * gridW + x];
+                            var tr = heightMap[y * gridW + (x + step)];
+                            var bl = heightMap[(y + step) * gridW + x];
+                            var br = heightMap[(y + step) * gridW + (x + step)];
+
+                            var idx = 0;
+                            if (tl >= level) idx |= 8;
+                            if (tr >= level) idx |= 4;
+                            if (br >= level) idx |= 2;
+                            if (bl >= level) idx |= 1;
+
+                            if (idx === 0 || idx === 15) continue;
+
+                            var px0 = x * cellW, py0 = y * cellH;
+                            var px1 = (x + step) * cellW, py1 = (y + step) * cellH;
+
+                            // Interpolation
+                            function interpX(v1, v2, y2) {
+                                var t = (level - v1) / (v2 - v1);
+                                return [px0 + t * (px1 - px0), y2];
+                            }
+                            function interpY(v1, v2, x2) {
+                                var t = (level - v1) / (v2 - v1);
+                                return [x2, py0 + t * (py1 - py0)];
+                            }
+
+                            var top = interpX(tl, tr, py0);
+                            var bottom = interpX(bl, br, py1);
+                            var left = interpY(tl, bl, px0);
+                            var right = interpY(tr, br, px1);
+
+                            var lines = [];
+                            if (idx === 1 || idx === 14) lines.push([left, bottom]);
+                            else if (idx === 2 || idx === 13) lines.push([bottom, right]);
+                            else if (idx === 3 || idx === 12) lines.push([left, right]);
+                            else if (idx === 4 || idx === 11) lines.push([top, right]);
+                            else if (idx === 5) { lines.push([top, left]); lines.push([bottom, right]); }
+                            else if (idx === 6 || idx === 9) lines.push([top, bottom]);
+                            else if (idx === 7 || idx === 8) lines.push([top, left]);
+                            else if (idx === 10) { lines.push([top, right]); lines.push([bottom, left]); }
+
+                            for (var li2 = 0; li2 < lines.length; li2++) {
+                                segments.push(lines[li2]);
+                            }
+                        }
+                    }
+
+                    // Draw segments as a single path
+                    if (segments.length > 0) {
+                        var d = '';
+                        for (var i = 0; i < segments.length; i++) {
+                            d += 'M' + segments[i][0][0].toFixed(1) + ',' + segments[i][0][1].toFixed(1) +
+                                 'L' + segments[i][1][0].toFixed(1) + ',' + segments[i][1][1].toFixed(1);
+                        }
+                        var path = createEl('path', {
+                            d: d,
+                            fill: 'none',
+                            stroke: isMajor ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.2)',
+                            'stroke-width': isMajor ? '1.5' : '0.8'
+                        });
+                        contourGroup.appendChild(path);
+
+                        // Label major contours
+                        if (isMajor && segments.length > 5) {
+                            var mid = segments[Math.floor(segments.length / 2)];
+                            var lx = (mid[0][0] + mid[1][0]) / 2;
+                            var ly = (mid[0][1] + mid[1][1]) / 2;
+                            var elevLabel = Math.floor(level * 4000) + 'm';
+                            var t = createEl('text', {
+                                x: lx, y: ly - 3,
+                                fill: 'rgba(255,255,255,0.7)',
+                                'font-family': 'Nunito, sans-serif',
+                                'font-size': '10',
+                                'text-anchor': 'middle'
+                            });
+                            t.textContent = elevLabel;
+                            contourGroup.appendChild(t);
+                        }
+                    }
+                });
+            }
+
+            // SVG panel
+            var panelW2 = 200;
+            var panelGroup = createEl('g', {});
+            svg.appendChild(panelGroup);
+
+            var panelBg = createEl('rect', { rx: '12', fill: 'rgba(0,0,0,0.75)', stroke: 'rgba(221,161,94,0.3)', 'stroke-width': '1' });
+            panelGroup.appendChild(panelBg);
+
+            var panelTitle = createEl('text', { fill: '#DDA15E', 'font-family': 'Lora, serif', 'font-size': '14', 'text-anchor': 'middle' });
+            panelTitle.textContent = 'Terrain Controls';
+            panelGroup.appendChild(panelTitle);
+
+            // Toggle contours button
+            var toggleG = createEl('g', { class: 'interactive', style: 'cursor:pointer' });
+            toggleG.classList.add('interactive');
+            var toggleR = createEl('rect', { width: '170', height: '28', rx: '6', fill: 'rgba(221,161,94,0.4)', stroke: 'rgba(221,161,94,0.4)', 'stroke-width': '1' });
+            var toggleT = createEl('text', { x: '85', y: '18', 'text-anchor': 'middle', fill: '#DDA15E', 'font-family': 'Nunito, sans-serif', 'font-size': '12' });
+            toggleT.textContent = 'Contours: ON';
+            toggleG.appendChild(toggleR); toggleG.appendChild(toggleT);
+            panelGroup.appendChild(toggleG);
+            toggleG.addEventListener('click', function() {
+                showContours = !showContours;
+                toggleT.textContent = showContours ? 'Contours: ON' : 'Contours: OFF';
+                toggleR.setAttribute('fill', showContours ? 'rgba(221,161,94,0.4)' : 'rgba(255,255,255,0.1)');
+                generateContours();
+            });
+
+            // Sliders
+            var sliderFO = createEl('foreignObject', { class: 'interactive' });
+            panelGroup.appendChild(sliderFO);
+            var sliderDiv = document.createElement('div');
+            sliderDiv.style.cssText = 'font-family:Nunito,sans-serif;font-size:12px;color:#e8e6e1;padding:5px;';
+            sliderFO.appendChild(sliderDiv);
+
+            var sliderDefs = [
+                { label: 'Scale', min: 1, max: 10, step: 0.5, val: 4, fn: function(v) { noiseScale = v; } },
+                { label: 'Octaves', min: 1, max: 8, step: 1, val: 6, fn: function(v) { octaves = v; } },
+                { label: 'Lacunarity', min: 1, max: 4, step: 0.1, val: 2, fn: function(v) { lacunarity = v; } },
+                { label: 'Gain', min: 0.1, max: 0.9, step: 0.05, val: 0.5, fn: function(v) { gain = v; } }
+            ];
+
+            sliderDefs.forEach(function(sd) {
+                var row = document.createElement('div');
+                row.style.cssText = 'margin-bottom:5px;display:flex;align-items:center;gap:5px;';
+                var lbl = document.createElement('span');
+                lbl.style.cssText = 'width:70px;color:#DDA15E;font-size:11px;';
+                lbl.textContent = sd.label;
+                var inp = document.createElement('input');
+                inp.type = 'range'; inp.min = sd.min; inp.max = sd.max; inp.step = sd.step; inp.value = sd.val;
+                inp.style.cssText = 'flex:1;accent-color:#DDA15E;height:3px;';
+                var val = document.createElement('span');
+                val.style.cssText = 'width:30px;text-align:right;font-size:10px;';
+                val.textContent = sd.val;
+                inp.addEventListener('input', function() {
+                    val.textContent = parseFloat(inp.value).toFixed(1);
+                    sd.fn(parseFloat(inp.value));
+                    needsRedraw = true;
+                });
+                row.appendChild(lbl); row.appendChild(inp); row.appendChild(val);
+                sliderDiv.appendChild(row);
+            });
+
+            function resize() {
+                W = window.innerWidth; H = window.innerHeight;
+                canvas.width = W; canvas.height = H;
+                svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+                svg.setAttribute('width', W); svg.setAttribute('height', H);
+
+                var px = W - panelW2 - 20, py = 50;
+                panelBg.setAttribute('x', px); panelBg.setAttribute('y', py);
+                panelBg.setAttribute('width', panelW2); panelBg.setAttribute('height', 280);
+                panelTitle.setAttribute('x', px + panelW2/2); panelTitle.setAttribute('y', py + 25);
+                toggleG.setAttribute('transform', 'translate(' + (px + 15) + ',' + (py + 40) + ')');
+                sliderFO.setAttribute('x', px + 5); sliderFO.setAttribute('y', py + 80);
+                sliderFO.setAttribute('width', panelW2 - 10); sliderFO.setAttribute('height', 180);
+
+                needsRedraw = true;
+            }
+            var rt; window.addEventListener('resize', function() { clearTimeout(rt); rt = setTimeout(resize, 100); });
+            resize();
+
+            // Pan support
+            var isDragging = false, dragSX, dragSY;
+            canvas.style.pointerEvents = 'all';
+            canvas.style.cursor = 'grab';
+            canvas.addEventListener('mousedown', function(e) { isDragging = true; dragSX = e.clientX; dragSY = e.clientY; canvas.style.cursor = 'grabbing'; });
+            canvas.addEventListener('mousemove', function(e) {
+                if (!isDragging) return;
+                offsetX -= (e.clientX - dragSX) * 0.5;
+                offsetY -= (e.clientY - dragSY) * 0.5;
+                dragSX = e.clientX; dragSY = e.clientY;
+                needsRedraw = true;
+            });
+            canvas.addEventListener('mouseup', function() { isDragging = false; canvas.style.cursor = 'grab'; });
+
+            function animate() {
+                fpsCounter.update();
+                if (needsRedraw) {
+                    generateTerrain();
+                    renderTerrain();
+                    generateContours();
+                    needsRedraw = false;
+                }
+                requestAnimationFrame(animate);
+            }
+
+            hideLoading();
+            animate();
+        } catch(e) { showError('Init Error: ' + e.message); }
+    </script>
+</body>
+</html>

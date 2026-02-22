@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sand Simulation + Brush Selector - CCAB</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root{--sage:#8A9A5B;--moss:#606C38;--earth:#DDA15E;--cream:#FEFAE0;--terracotta:#BC6C25;--dark-moss:#3d4423}
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{overflow:hidden;font-family:'Nunito',sans-serif;background:#0a0e1a;color:#e8e6e1}
+        .back-link{position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:var(--earth);text-decoration:none;border-radius:6px;font-size:14px;font-family:'Nunito',sans-serif;z-index:999;transition:all 0.3s ease}
+        .back-link:hover{background:rgba(221,161,94,0.2);transform:translateX(-4px)}
+        #fps-counter{position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.7);color:var(--earth);padding:8px 12px;border-radius:6px;font-family:'Courier New',monospace;font-size:14px;z-index:999}
+        .fps-good{color:#10b981}.fps-medium{color:#fbbf24}.fps-poor{color:#e11d48}
+        #hybrid-container{position:relative;width:100vw;height:100vh}
+        #canvas{position:absolute;top:0;left:0;width:100%;height:100%;z-index:0}
+        #svg-overlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none}
+        .interactive{pointer-events:all;cursor:pointer}
+        #loading{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:1000}
+        .spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,0.1);border-top-color:var(--earth);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1rem}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        #error{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(225,29,72,0.9);color:white;padding:2rem;border-radius:12px;text-align:center;max-width:400px;z-index:1001}
+        #error h2{font-family:'Lora',serif;margin:0 0 1rem 0}
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Loading demo...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+
+    <script>
+        window.addEventListener('error',function(e){showError('Runtime Error: '+e.message);});
+        function showError(m){document.getElementById('loading').style.display='none';document.getElementById('error').style.display='block';document.getElementById('error-message').textContent=m;}
+        function hideLoading(){document.getElementById('loading').style.display='none';}
+        class FPSCounter{constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}update(){this.frames++;var n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}}
+
+        try {
+            var canvas = document.getElementById('canvas');
+            var ctx = canvas.getContext('2d');
+            var svg = document.getElementById('svg-overlay');
+            var svgNS = 'http://www.w3.org/2000/svg';
+            var fpsCounter = new FPSCounter();
+            var W, H;
+
+            // Element types: 0=empty, 1=sand, 2=water, 3=fire, 4=stone, 5=wood
+            var EMPTY = 0, SAND = 1, WATER = 2, FIRE = 3, STONE = 4, WOOD = 5;
+            var elementNames = ['Empty', 'Sand', 'Water', 'Fire', 'Stone', 'Wood'];
+            var elementColors = [
+                [10, 14, 26],       // empty
+                [220, 180, 80],     // sand
+                [40, 100, 200],     // water
+                [255, 120, 20],     // fire
+                [128, 128, 128],    // stone
+                [100, 70, 30]       // wood
+            ];
+
+            var gw, gh;
+            var grid;
+            var currentElement = SAND;
+            var brushSize = 4;
+            var gravityDir = 1; // 1 = down, -1 = up
+
+            function initGrid() {
+                gw = Math.floor(W / 3);
+                gh = Math.floor(H / 3);
+                grid = new Int8Array(gw * gh);
+            }
+
+            function getCell(x, y) {
+                if (x < 0 || x >= gw || y < 0 || y >= gh) return STONE;
+                return grid[y * gw + x];
+            }
+            function setCell(x, y, v) {
+                if (x < 0 || x >= gw || y < 0 || y >= gh) return;
+                grid[y * gw + x] = v;
+            }
+            function swap(x1, y1, x2, y2) {
+                if (x2 < 0 || x2 >= gw || y2 < 0 || y2 >= gh) return false;
+                var t = grid[y1 * gw + x1];
+                grid[y1 * gw + x1] = grid[y2 * gw + x2];
+                grid[y2 * gw + x2] = t;
+                return true;
+            }
+
+            function simulate() {
+                var startY = gravityDir === 1 ? gh - 2 : 1;
+                var endY = gravityDir === 1 ? -1 : gh;
+                var stepY = gravityDir === 1 ? -1 : 1;
+                var down = gravityDir;
+
+                for (var y = startY; y !== endY; y += stepY) {
+                    // Alternate left/right scan per row to avoid bias
+                    var startX = (y & 1) ? 0 : gw - 1;
+                    var endX = (y & 1) ? gw : -1;
+                    var stepX = (y & 1) ? 1 : -1;
+
+                    for (var x = startX; x !== endX; x += stepX) {
+                        var cell = grid[y * gw + x];
+                        if (cell === EMPTY || cell === STONE) continue;
+
+                        if (cell === SAND) {
+                            var below = getCell(x, y + down);
+                            if (below === EMPTY || below === WATER) {
+                                swap(x, y, x, y + down);
+                            } else {
+                                var dir = Math.random() < 0.5 ? -1 : 1;
+                                var dl = getCell(x + dir, y + down);
+                                if (dl === EMPTY || dl === WATER) {
+                                    swap(x, y, x + dir, y + down);
+                                } else {
+                                    var dr = getCell(x - dir, y + down);
+                                    if (dr === EMPTY || dr === WATER) {
+                                        swap(x, y, x - dir, y + down);
+                                    }
+                                }
+                            }
+                        } else if (cell === WATER) {
+                            var below = getCell(x, y + down);
+                            if (below === EMPTY) {
+                                swap(x, y, x, y + down);
+                            } else {
+                                var dir = Math.random() < 0.5 ? -1 : 1;
+                                if (getCell(x + dir, y + down) === EMPTY) {
+                                    swap(x, y, x + dir, y + down);
+                                } else if (getCell(x - dir, y + down) === EMPTY) {
+                                    swap(x, y, x - dir, y + down);
+                                } else if (getCell(x + dir, y) === EMPTY) {
+                                    swap(x, y, x + dir, y);
+                                } else if (getCell(x - dir, y) === EMPTY) {
+                                    swap(x, y, x - dir, y);
+                                }
+                            }
+                        } else if (cell === FIRE) {
+                            // Fire rises, spreads to wood, evaporates water
+                            if (Math.random() < 0.05) {
+                                setCell(x, y, EMPTY); // burn out
+                                continue;
+                            }
+                            // Spread
+                            for (var dy = -1; dy <= 1; dy++) {
+                                for (var dx = -1; dx <= 1; dx++) {
+                                    if (dx === 0 && dy === 0) continue;
+                                    var nx = x + dx, ny = y + dy;
+                                    var n = getCell(nx, ny);
+                                    if (n === WOOD && Math.random() < 0.02) {
+                                        setCell(nx, ny, FIRE);
+                                    } else if (n === WATER) {
+                                        setCell(nx, ny, EMPTY);
+                                        setCell(x, y, EMPTY);
+                                    }
+                                }
+                            }
+                            // Rise
+                            if (getCell(x, y - down) === EMPTY && Math.random() < 0.3) {
+                                swap(x, y, x, y - down);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Mouse drawing
+            var isDown = false;
+            canvas.style.pointerEvents = 'all';
+            canvas.addEventListener('mousedown', function(e) { isDown = true; paintAt(e); });
+            canvas.addEventListener('mouseup', function() { isDown = false; });
+            canvas.addEventListener('mousemove', function(e) { if (isDown) paintAt(e); });
+
+            function paintAt(e) {
+                var gx = Math.floor(e.clientX * gw / W);
+                var gy = Math.floor(e.clientY * gh / H);
+                for (var dy = -brushSize; dy <= brushSize; dy++) {
+                    for (var dx = -brushSize; dx <= brushSize; dx++) {
+                        if (dx*dx + dy*dy > brushSize*brushSize) continue;
+                        var nx = gx + dx, ny = gy + dy;
+                        if (nx >= 0 && nx < gw && ny >= 0 && ny < gh) {
+                            if (currentElement === EMPTY || grid[ny * gw + nx] === EMPTY || currentElement === FIRE) {
+                                grid[ny * gw + nx] = currentElement;
+                            }
+                        }
+                    }
+                }
+            }
+
+            function createEl(tag, attrs) {
+                var el = document.createElementNS(svgNS, tag);
+                for (var k in attrs) el.setAttribute(k, attrs[k]);
+                return el;
+            }
+
+            // SVG toolbar panel
+            var panelW2 = 180;
+            var panel = createEl('g', {});
+            svg.appendChild(panel);
+            var panelBg = createEl('rect', { rx: '12', fill: 'rgba(0,0,0,0.8)', stroke: 'rgba(221,161,94,0.3)', 'stroke-width': '1' });
+            panel.appendChild(panelBg);
+            var panelTitle = createEl('text', { fill: '#DDA15E', 'font-family': 'Lora, serif', 'font-size': '14', 'text-anchor': 'middle' });
+            panelTitle.textContent = 'Sandbox';
+            panel.appendChild(panelTitle);
+
+            // Element picker
+            var pickerLabel = createEl('text', { fill: 'rgba(255,255,255,0.6)', 'font-family': 'Nunito, sans-serif', 'font-size': '11' });
+            pickerLabel.textContent = 'Elements:';
+            panel.appendChild(pickerLabel);
+
+            var elemBtns = [];
+            var elemEntries = [
+                { type: SAND, color: 'rgb(220,180,80)', name: 'Sand' },
+                { type: WATER, color: 'rgb(40,100,200)', name: 'Water' },
+                { type: FIRE, color: 'rgb(255,120,20)', name: 'Fire' },
+                { type: STONE, color: 'rgb(128,128,128)', name: 'Stone' },
+                { type: WOOD, color: 'rgb(100,70,30)', name: 'Wood' },
+                { type: EMPTY, color: 'rgb(10,14,26)', name: 'Erase' }
+            ];
+
+            elemEntries.forEach(function(ee, i) {
+                var g = createEl('g', { style: 'cursor:pointer' });
+                g.classList.add('interactive');
+                var c = createEl('circle', { r: '10', fill: ee.color, stroke: i === 0 ? '#DDA15E' : 'rgba(255,255,255,0.3)', 'stroke-width': i === 0 ? '3' : '1' });
+                var t = createEl('text', { 'text-anchor': 'middle', fill: 'rgba(255,255,255,0.7)', 'font-family': 'Nunito, sans-serif', 'font-size': '9' });
+                t.textContent = ee.name;
+                g.appendChild(c); g.appendChild(t);
+                panel.appendChild(g);
+                elemBtns.push({ g: g, circle: c });
+
+                g.addEventListener('click', function() {
+                    currentElement = ee.type;
+                    for (var j = 0; j < elemBtns.length; j++) {
+                        elemBtns[j].circle.setAttribute('stroke', j === i ? '#DDA15E' : 'rgba(255,255,255,0.3)');
+                        elemBtns[j].circle.setAttribute('stroke-width', j === i ? '3' : '1');
+                    }
+                });
+            });
+
+            // Brush size slider
+            var sliderFO = createEl('foreignObject', { class: 'interactive' });
+            panel.appendChild(sliderFO);
+            var sliderDiv = document.createElement('div');
+            sliderDiv.style.cssText = 'font-family:Nunito,sans-serif;font-size:12px;color:#e8e6e1;padding:5px;';
+            sliderFO.appendChild(sliderDiv);
+
+            var brushRow = document.createElement('div');
+            brushRow.style.cssText = 'display:flex;align-items:center;gap:5px;';
+            var brushLbl = document.createElement('span');
+            brushLbl.style.cssText = 'width:50px;color:#DDA15E;font-size:11px;';
+            brushLbl.textContent = 'Brush';
+            var brushInp = document.createElement('input');
+            brushInp.type = 'range'; brushInp.min = 1; brushInp.max = 15; brushInp.step = 1; brushInp.value = 4;
+            brushInp.style.cssText = 'flex:1;accent-color:#DDA15E;height:3px;';
+            var brushVal = document.createElement('span');
+            brushVal.style.cssText = 'width:20px;text-align:right;font-size:10px;';
+            brushVal.textContent = '4';
+            brushInp.addEventListener('input', function() {
+                brushSize = parseInt(brushInp.value);
+                brushVal.textContent = brushSize;
+            });
+            brushRow.appendChild(brushLbl); brushRow.appendChild(brushInp); brushRow.appendChild(brushVal);
+            sliderDiv.appendChild(brushRow);
+
+            // Gravity toggle
+            var gravG = createEl('g', { style: 'cursor:pointer' });
+            gravG.classList.add('interactive');
+            var gravR = createEl('rect', { width: '120', height: '24', rx: '5', fill: 'rgba(255,255,255,0.1)', stroke: 'rgba(221,161,94,0.4)', 'stroke-width': '1' });
+            var gravT = createEl('text', { x: '60', y: '16', 'text-anchor': 'middle', fill: '#DDA15E', 'font-family': 'Nunito, sans-serif', 'font-size': '11' });
+            gravT.textContent = 'Gravity: Down';
+            gravG.appendChild(gravR); gravG.appendChild(gravT);
+            panel.appendChild(gravG);
+            gravG.addEventListener('click', function() {
+                gravityDir *= -1;
+                gravT.textContent = gravityDir === 1 ? 'Gravity: Down' : 'Gravity: Up';
+            });
+
+            // Clear button
+            var clearG = createEl('g', { style: 'cursor:pointer' });
+            clearG.classList.add('interactive');
+            var clearR = createEl('rect', { width: '80', height: '24', rx: '5', fill: 'rgba(225,29,72,0.3)', stroke: 'rgba(225,29,72,0.5)', 'stroke-width': '1' });
+            var clearT = createEl('text', { x: '40', y: '16', 'text-anchor': 'middle', fill: '#e11d48', 'font-family': 'Nunito, sans-serif', 'font-size': '11' });
+            clearT.textContent = 'Clear';
+            clearG.appendChild(clearR); clearG.appendChild(clearT);
+            panel.appendChild(clearG);
+            clearG.addEventListener('click', function() {
+                grid.fill(0);
+            });
+
+            // Element count display
+            var countTexts = [];
+            elemEntries.forEach(function(ee) {
+                if (ee.type === EMPTY) return;
+                var t = createEl('text', { fill: ee.color, 'font-family': 'Courier New, monospace', 'font-size': '10' });
+                panel.appendChild(t);
+                countTexts.push({ text: t, type: ee.type, name: ee.name });
+            });
+
+            function resize() {
+                W = window.innerWidth; H = window.innerHeight;
+                canvas.width = W; canvas.height = H;
+                svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+                svg.setAttribute('width', W); svg.setAttribute('height', H);
+
+                var px = W - panelW2 - 15, py = 50, ph = 430;
+                panelBg.setAttribute('x', px); panelBg.setAttribute('y', py);
+                panelBg.setAttribute('width', panelW2); panelBg.setAttribute('height', ph);
+                panelTitle.setAttribute('x', px + panelW2/2); panelTitle.setAttribute('y', py + 22);
+
+                pickerLabel.setAttribute('x', px + 15); pickerLabel.setAttribute('y', py + 45);
+
+                // Element buttons layout
+                for (var i = 0; i < elemBtns.length; i++) {
+                    var row = Math.floor(i / 3), col = i % 3;
+                    var bx = px + 30 + col * 50;
+                    var by = py + 65 + row * 50;
+                    elemBtns[i].circle.setAttribute('cx', 0);
+                    elemBtns[i].circle.setAttribute('cy', 0);
+                    var t = elemBtns[i].g.querySelector('text');
+                    t.setAttribute('x', 0); t.setAttribute('y', 20);
+                    elemBtns[i].g.setAttribute('transform', 'translate(' + bx + ',' + by + ')');
+                }
+
+                sliderFO.setAttribute('x', px + 5); sliderFO.setAttribute('y', py + 175);
+                sliderFO.setAttribute('width', panelW2 - 10); sliderFO.setAttribute('height', 30);
+
+                gravG.setAttribute('transform', 'translate(' + (px + 15) + ',' + (py + 215) + ')');
+                clearG.setAttribute('transform', 'translate(' + (px + panelW2/2 - 40) + ',' + (py + 250) + ')');
+
+                for (var i = 0; i < countTexts.length; i++) {
+                    countTexts[i].text.setAttribute('x', px + 15);
+                    countTexts[i].text.setAttribute('y', py + 295 + i * 16);
+                }
+
+                initGrid();
+            }
+            var rt; window.addEventListener('resize', function() { clearTimeout(rt); rt = setTimeout(resize, 100); });
+            resize();
+
+            var stepCount = 0;
+
+            function animate() {
+                fpsCounter.update();
+                stepCount++;
+
+                simulate();
+
+                // Render
+                var imgData = ctx.createImageData(W, H);
+                var data = imgData.data;
+                var cellW = W / gw, cellH = H / gh;
+
+                for (var y = 0; y < gh; y++) {
+                    var py0 = Math.floor(y * cellH);
+                    var py1 = Math.ceil((y + 1) * cellH);
+                    for (var x = 0; x < gw; x++) {
+                        var cell = grid[y * gw + x];
+                        var c = elementColors[cell];
+                        // Add variation for natural look
+                        var vr = 0, vg = 0, vb = 0;
+                        if (cell === SAND) { vr = ((x * 7 + y * 13) % 20) - 10; }
+                        if (cell === FIRE) { vr = Math.floor(Math.random() * 50) - 25; vg = Math.floor(Math.random() * 60); }
+                        if (cell === WATER) { vb = ((x * 3 + y * 7) % 30) - 15; }
+
+                        var r = Math.max(0, Math.min(255, c[0] + vr));
+                        var g = Math.max(0, Math.min(255, c[1] + vg));
+                        var b = Math.max(0, Math.min(255, c[2] + vb));
+
+                        var px0 = Math.floor(x * cellW);
+                        var px1 = Math.ceil((x + 1) * cellW);
+                        for (var py2 = py0; py2 < py1 && py2 < H; py2++) {
+                            for (var px2 = px0; px2 < px1 && px2 < W; px2++) {
+                                var idx = (py2 * W + px2) * 4;
+                                data[idx] = r; data[idx+1] = g; data[idx+2] = b; data[idx+3] = 255;
+                            }
+                        }
+                    }
+                }
+                ctx.putImageData(imgData, 0, 0);
+
+                // Update element counts every 60 frames
+                if (stepCount % 60 === 0) {
+                    var counts = [0, 0, 0, 0, 0, 0];
+                    for (var i = 0; i < grid.length; i++) counts[grid[i]]++;
+                    for (var i = 0; i < countTexts.length; i++) {
+                        countTexts[i].text.textContent = countTexts[i].name + ': ' + counts[countTexts[i].type];
+                    }
+                }
+
+                requestAnimationFrame(animate);
+            }
+
+            hideLoading();
+            animate();
+        } catch(e) { showError('Init Error: ' + e.message); }
+    </script>
+</body>
+</html>

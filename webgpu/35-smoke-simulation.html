@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smoke Simulation with Vorticity - WebGPU</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600;700&family=Nunito:wght@300;400;600&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0f;
+            color: #FEFAE0;
+            font-family: 'Nunito', sans-serif;
+            overflow: hidden;
+        }
+        canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+        .controls {
+            position: fixed; top: 20px; left: 20px;
+            background: rgba(20,20,16,0.85);
+            backdrop-filter: blur(12px);
+            padding: 18px; border-radius: 16px;
+            border: 1px solid rgba(138,154,91,0.3);
+            z-index: 100; min-width: 240px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+        }
+        h1 { font-family: 'Lora', serif; font-size: 1.2em; color: #8A9A5B; margin-bottom: 12px; }
+        .info { font-size: 0.78em; color: #8A9A5B; margin-bottom: 10px; line-height: 1.4; }
+        .slider-group { margin-bottom: 10px; }
+        .slider-group label {
+            display: flex; justify-content: space-between;
+            margin-bottom: 3px; font-size: 0.82em; color: #8A9A5B;
+        }
+        .slider-group input[type="range"] {
+            width: 100%; height: 6px; -webkit-appearance: none;
+            background: #333; border-radius: 3px; outline: none;
+        }
+        .slider-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 16px; height: 16px;
+            background: #8A9A5B; border-radius: 50%; cursor: pointer;
+        }
+        .btn-row { display: flex; gap: 6px; margin-bottom: 10px; }
+        .btn {
+            flex: 1; padding: 7px; border: none; border-radius: 8px;
+            background: #8A9A5B; color: #0a0a0f; cursor: pointer;
+            font-family: 'Nunito', sans-serif; font-weight: 600;
+            font-size: 0.82em; transition: all 0.2s;
+        }
+        .btn:hover { background: #606C38; color: #FEFAE0; }
+        .stats {
+            margin-top: 10px; padding-top: 10px;
+            border-top: 1px solid rgba(138,154,91,0.2);
+            font-size: 0.82em; color: #8A9A5B;
+        }
+        .stats div { margin-bottom: 2px; }
+        .back-link {
+            position: fixed; top: 20px; right: 20px;
+            color: #8A9A5B; text-decoration: none;
+            font-family: 'Nunito', sans-serif; font-size: 0.9em; z-index: 100;
+            background: rgba(20,20,16,0.7); backdrop-filter: blur(8px);
+            padding: 8px 16px; border-radius: 10px;
+            border: 1px solid rgba(138,154,91,0.3); transition: all 0.2s;
+        }
+        .back-link:hover { background: rgba(138,154,91,0.2); }
+        .error-msg {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            background: rgba(188,108,37,0.95); color: #fff; padding: 30px;
+            border-radius: 16px; text-align: center; max-width: 420px;
+            font-family: 'Nunito', sans-serif;
+        }
+        .error-msg h2 { font-family: 'Lora', serif; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="controls">
+        <h1>Smoke Simulation</h1>
+        <div class="info">
+            Left drag: inject smoke<br>
+            Right drag: create wind
+        </div>
+        <div class="slider-group">
+            <label>Buoyancy <span id="buoyVal">1.0</span></label>
+            <input type="range" id="buoyancy" min="0" max="3" step="0.1" value="1.0">
+        </div>
+        <div class="slider-group">
+            <label>Vorticity <span id="vortVal">0.5</span></label>
+            <input type="range" id="vorticity" min="0" max="2" step="0.1" value="0.5">
+        </div>
+        <div class="slider-group">
+            <label>Dissipation <span id="dissVal">0.995</span></label>
+            <input type="range" id="dissipation" min="0.98" max="1.0" step="0.001" value="0.995">
+        </div>
+        <div class="btn-row">
+            <button class="btn" id="clearBtn">Clear</button>
+        </div>
+        <div class="stats">
+            <div>Grid: <span id="gridSize">256x256</span></div>
+            <div>FPS: <span id="fps">0</span></div>
+        </div>
+    </div>
+    <a href="index.html" class="back-link">&#8592; Back to Gallery</a>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+
+        if (!navigator.gpu) {
+            document.body.innerHTML = '<div class="error-msg"><h2>WebGPU Not Supported</h2><p>Your browser does not support WebGPU. Try Chrome 113+ or Edge 113+.</p></div>';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) throw new Error('No adapter');
+        const device = await adapter.requestDevice();
+        const ctxGPU = canvas.getContext('webgpu');
+        const presentFormat = navigator.gpu.getPreferredCanvasFormat();
+
+        function resize() {
+            canvas.width = window.innerWidth * devicePixelRatio;
+            canvas.height = window.innerHeight * devicePixelRatio;
+            ctxGPU.configure({ device, format: presentFormat, alphaMode: 'opaque' });
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        const GW = 256, GH = 256;
+        document.getElementById('gridSize').textContent = GW + 'x' + GH;
+
+        let buoyancy = 1.0, vorticityStr = 0.5, dissipation = 0.995;
+
+        // Grid buffers: velocity (vx, vy), density, temperature, pressure, divergence
+        // Pack as: buf0 = [vx, vy, density, temperature] per cell = 4 floats
+        // buf1 = same (ping-pong)
+        // pressure bufs for Jacobi iteration
+        const CELLS = GW * GH;
+        const fieldSize = CELLS * 4 * 4; // 4 floats per cell
+
+        const fieldBufA = device.createBuffer({ size: fieldSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const fieldBufB = device.createBuffer({ size: fieldSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const pressureBufA = device.createBuffer({ size: CELLS * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        const pressureBufB = device.createBuffer({ size: CELLS * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+
+        // Initialize to zero
+        const zeroData = new Float32Array(CELLS * 4);
+        device.queue.writeBuffer(fieldBufA, 0, zeroData);
+        device.queue.writeBuffer(fieldBufB, 0, zeroData);
+
+        // Mouse interaction buffer: mouseX, mouseY, forceX, forceY, inject, temp_inject, pad, pad
+        const mouseBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const mouseData = new Float32Array(8);
+
+        // Params: gridW, gridH, dt, buoyancy, vorticity, dissipation, pad, pad
+        const paramData = new Float32Array([GW, GH, 0.016, buoyancy, vorticityStr, dissipation, 0, 0]);
+        const paramBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        device.queue.writeBuffer(paramBuf, 0, paramData);
+
+        // Compute shaders for fluid simulation
+        const fluidShader = device.createShaderModule({ code: `
+            struct Params { gw: f32, gh: f32, dt: f32, buoyancy: f32, vorticity: f32, dissipation: f32, p1: f32, p2: f32 }
+            struct Mouse { x: f32, y: f32, fx: f32, fy: f32, inject: f32, temp: f32, p1: f32, p2: f32 }
+
+            // Field: vx, vy, density, temperature per cell
+            @group(0) @binding(0) var<storage, read> fieldIn: array<vec4f>;
+            @group(0) @binding(1) var<storage, read_write> fieldOut: array<vec4f>;
+            @group(0) @binding(2) var<uniform> params: Params;
+            @group(0) @binding(3) var<uniform> mouse: Mouse;
+
+            fn idx(x: i32, y: i32) -> u32 {
+                let gw = i32(params.gw);
+                let gh = i32(params.gh);
+                let cx = clamp(x, 0, gw - 1);
+                let cy = clamp(y, 0, gh - 1);
+                return u32(cy * gw + cx);
+            }
+
+            fn sampleBilinear(px: f32, py: f32) -> vec4f {
+                let x0 = i32(floor(px));
+                let y0 = i32(floor(py));
+                let fx = px - floor(px);
+                let fy = py - floor(py);
+                let a = fieldIn[idx(x0, y0)];
+                let b = fieldIn[idx(x0+1, y0)];
+                let c = fieldIn[idx(x0, y0+1)];
+                let d = fieldIn[idx(x0+1, y0+1)];
+                return mix(mix(a, b, fx), mix(c, d, fx), fy);
+            }
+
+            // Advection + forces
+            @compute @workgroup_size(16, 16)
+            fn advect(@builtin(global_invocation_id) gid: vec3u) {
+                let x = i32(gid.x);
+                let y = i32(gid.y);
+                let gw = i32(params.gw);
+                let gh = i32(params.gh);
+                if (x >= gw || y >= gh) { return; }
+
+                let i = u32(y * gw + x);
+                let cell = fieldIn[i];
+                let vx = cell.x;
+                let vy = cell.y;
+
+                // Semi-Lagrangian advection
+                let px = f32(x) - vx * params.dt * f32(gw);
+                let py = f32(y) - vy * params.dt * f32(gh);
+                var advected = sampleBilinear(px, py);
+
+                // Buoyancy: hot smoke rises
+                advected.y -= advected.w * params.buoyancy * params.dt;
+
+                // Dissipation
+                advected.z *= params.dissipation;
+                advected.w *= 0.999;
+
+                // Mouse interaction
+                let mx = mouse.x * f32(gw);
+                let my = mouse.y * f32(gh);
+                let dx = f32(x) - mx;
+                let dy = f32(y) - my;
+                let dist = sqrt(dx * dx + dy * dy);
+                let radius = 15.0;
+
+                if (dist < radius) {
+                    let falloff = 1.0 - dist / radius;
+                    // Inject smoke
+                    if (mouse.inject > 0.5) {
+                        advected.z += falloff * 2.0;
+                        advected.w += falloff * 1.5;
+                    }
+                    // Apply force
+                    advected.x += mouse.fx * falloff * 0.3;
+                    advected.y += mouse.fy * falloff * 0.3;
+                }
+
+                fieldOut[i] = advected;
+            }
+
+            // Compute divergence and apply simple pressure projection
+            @compute @workgroup_size(16, 16)
+            fn project(@builtin(global_invocation_id) gid: vec3u) {
+                let x = i32(gid.x);
+                let y = i32(gid.y);
+                let gw = i32(params.gw);
+                let gh = i32(params.gh);
+                if (x >= gw || y >= gh) { return; }
+
+                let i = u32(y * gw + x);
+                var cell = fieldIn[i];
+
+                // Compute divergence of neighbors
+                let L = fieldIn[idx(x-1, y)].x;
+                let R = fieldIn[idx(x+1, y)].x;
+                let D = fieldIn[idx(x, y-1)].y;
+                let U = fieldIn[idx(x, y+1)].y;
+                let div = (R - L + U - D) * 0.5;
+
+                // Subtract pressure gradient (simplified Jacobi)
+                let pL = fieldIn[idx(x-1, y)].z;
+                let pR = fieldIn[idx(x+1, y)].z;
+                let pD = fieldIn[idx(x, y-1)].z;
+                let pU = fieldIn[idx(x, y+1)].z;
+
+                cell.x -= (R - L) * 0.25;
+                cell.y -= (U - D) * 0.25;
+
+                // Vorticity confinement
+                let vL = fieldIn[idx(x-1, y)];
+                let vR = fieldIn[idx(x+1, y)];
+                let vD = fieldIn[idx(x, y-1)];
+                let vU = fieldIn[idx(x, y+1)];
+
+                // Curl (2D vorticity = dvy/dx - dvx/dy)
+                let curlCenter = (vR.y - vL.y) - (vU.x - vD.x);
+                let curlL = abs((fieldIn[idx(x-1, y+1)].y - fieldIn[idx(x-1, y-1)].y) - (fieldIn[idx(x, y)].x - fieldIn[idx(x-2, y)].x));
+                let curlR = abs((fieldIn[idx(x+1, y+1)].y - fieldIn[idx(x+1, y-1)].y) - (fieldIn[idx(x+2, y)].x - fieldIn[idx(x, y)].x));
+                let curlD = abs((fieldIn[idx(x+1, y-1)].y - fieldIn[idx(x-1, y-1)].y) - (fieldIn[idx(x, y)].x - fieldIn[idx(x, y-2)].x));
+                let curlU = abs((fieldIn[idx(x+1, y+1)].y - fieldIn[idx(x-1, y+1)].y) - (fieldIn[idx(x, y+2)].x - fieldIn[idx(x, y)].x));
+
+                var gradX = curlR - curlL;
+                var gradY = curlU - curlD;
+                let len = max(sqrt(gradX * gradX + gradY * gradY), 0.0001);
+                gradX /= len;
+                gradY /= len;
+
+                cell.x += params.vorticity * gradY * curlCenter * params.dt;
+                cell.y -= params.vorticity * gradX * curlCenter * params.dt;
+
+                // Boundary
+                if (x == 0 || x == gw - 1) { cell.x = 0.0; }
+                if (y == 0 || y == gh - 1) { cell.y = 0.0; }
+
+                fieldOut[i] = cell;
+            }
+        `});
+
+        const advectPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: fluidShader, entryPoint: 'advect' } });
+        const projectPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: fluidShader, entryPoint: 'project' } });
+
+        function makeBG(pipeline, inBuf, outBuf) {
+            return device.createBindGroup({
+                layout: pipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: inBuf } },
+                    { binding: 1, resource: { buffer: outBuf } },
+                    { binding: 2, resource: { buffer: paramBuf } },
+                    { binding: 3, resource: { buffer: mouseBuf } },
+                ],
+            });
+        }
+
+        // Render shader
+        const renderShader = device.createShaderModule({ code: `
+            struct Params { gw: f32, gh: f32, dt: f32, buoyancy: f32, vorticity: f32, dissipation: f32, p1: f32, p2: f32 }
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+            @group(0) @binding(0) var<storage, read> field: array<vec4f>;
+            @group(0) @binding(1) var<uniform> params: Params;
+
+            @vertex
+            fn vs(@builtin(vertex_index) vi: u32) -> VSOut {
+                var pos = array<vec2f, 6>(
+                    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+                    vec2f(-1,1), vec2f(1,-1), vec2f(1,1)
+                );
+                var out: VSOut;
+                out.pos = vec4f(pos[vi], 0, 1);
+                out.uv = pos[vi] * 0.5 + 0.5;
+                return out;
+            }
+
+            @fragment
+            fn fs(in: VSOut) -> @location(0) vec4f {
+                let gw = u32(params.gw);
+                let gh = u32(params.gh);
+                let gx = u32(in.uv.x * f32(gw));
+                let gy = u32((1.0 - in.uv.y) * f32(gh));
+                let i = gy * gw + gx;
+                let cell = field[i];
+
+                let density = clamp(cell.z, 0.0, 3.0);
+                let temp = clamp(cell.w, 0.0, 2.0);
+
+                // Color by temperature: cool=blue-gray, hot=orange-white
+                let coolColor = vec3f(0.4, 0.45, 0.5);
+                let hotColor = vec3f(1.0, 0.7, 0.3);
+                let whiteHot = vec3f(1.0, 0.95, 0.85);
+
+                var smokeColor = mix(coolColor, hotColor, clamp(temp * 0.8, 0.0, 1.0));
+                smokeColor = mix(smokeColor, whiteHot, clamp(temp - 1.0, 0.0, 1.0));
+
+                let alpha = clamp(density * 0.6, 0.0, 1.0);
+                let bgColor = vec3f(0.02, 0.02, 0.03);
+                let color = mix(bgColor, smokeColor, alpha);
+
+                return vec4f(color, 1.0);
+            }
+        `});
+
+        const renderPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: renderShader, entryPoint: 'vs' },
+            fragment: { module: renderShader, entryPoint: 'fs', targets: [{ format: presentFormat }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        function makeRenderBG(buf) {
+            return device.createBindGroup({
+                layout: renderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: buf } },
+                    { binding: 1, resource: { buffer: paramBuf } },
+                ],
+            });
+        }
+
+        // Mouse
+        let mouseX = 0, mouseY = 0, prevMX = 0, prevMY = 0;
+        let leftDown = false, rightDown = false;
+
+        canvas.addEventListener('contextmenu', e => e.preventDefault());
+        canvas.addEventListener('mousedown', e => {
+            if (e.button === 0) leftDown = true;
+            if (e.button === 2) rightDown = true;
+        });
+        canvas.addEventListener('mouseup', e => {
+            if (e.button === 0) leftDown = false;
+            if (e.button === 2) rightDown = false;
+        });
+        canvas.addEventListener('mousemove', e => {
+            prevMX = mouseX; prevMY = mouseY;
+            mouseX = e.clientX / window.innerWidth;
+            mouseY = e.clientY / window.innerHeight;
+        });
+        canvas.addEventListener('mouseleave', () => { leftDown = false; rightDown = false; });
+
+        // UI
+        document.getElementById('buoyancy').addEventListener('input', e => {
+            buoyancy = parseFloat(e.target.value);
+            document.getElementById('buoyVal').textContent = buoyancy.toFixed(1);
+        });
+        document.getElementById('vorticity').addEventListener('input', e => {
+            vorticityStr = parseFloat(e.target.value);
+            document.getElementById('vortVal').textContent = vorticityStr.toFixed(1);
+        });
+        document.getElementById('dissipation').addEventListener('input', e => {
+            dissipation = parseFloat(e.target.value);
+            document.getElementById('dissVal').textContent = dissipation.toFixed(3);
+        });
+        document.getElementById('clearBtn').addEventListener('click', () => {
+            device.queue.writeBuffer(fieldBufA, 0, zeroData);
+            device.queue.writeBuffer(fieldBufB, 0, zeroData);
+        });
+
+        let step = 0;
+        let lastTime = performance.now(), frameCount = 0, fpsAccum = 0;
+
+        function render() {
+            const now = performance.now();
+            const dt = (now - lastTime) / 1000;
+            lastTime = now;
+            frameCount++; fpsAccum += dt;
+            if (fpsAccum >= 1.0) {
+                document.getElementById('fps').textContent = Math.round(frameCount / fpsAccum);
+                frameCount = 0; fpsAccum = 0;
+            }
+
+            // Update params
+            paramData[3] = buoyancy;
+            paramData[4] = vorticityStr;
+            paramData[5] = dissipation;
+            device.queue.writeBuffer(paramBuf, 0, paramData);
+
+            // Update mouse
+            mouseData[0] = mouseX;
+            mouseData[1] = mouseY;
+            mouseData[2] = rightDown ? (mouseX - prevMX) * 20 : 0;
+            mouseData[3] = rightDown ? (mouseY - prevMY) * 20 : 0;
+            mouseData[4] = leftDown ? 1 : 0;
+            mouseData[5] = leftDown ? 1 : 0;
+            device.queue.writeBuffer(mouseBuf, 0, mouseData);
+
+            const inBuf = step % 2 === 0 ? fieldBufA : fieldBufB;
+            const outBuf = step % 2 === 0 ? fieldBufB : fieldBufA;
+
+            const enc = device.createCommandEncoder();
+
+            // Advect
+            const advBG = makeBG(advectPipeline, inBuf, outBuf);
+            const ap = enc.beginComputePass();
+            ap.setPipeline(advectPipeline);
+            ap.setBindGroup(0, advBG);
+            ap.dispatchWorkgroups(Math.ceil(GW / 16), Math.ceil(GH / 16));
+            ap.end();
+
+            // Project (using outBuf as input, inBuf as output for next step)
+            const projBG = makeBG(projectPipeline, outBuf, inBuf);
+            const pp = enc.beginComputePass();
+            pp.setPipeline(projectPipeline);
+            pp.setBindGroup(0, projBG);
+            pp.dispatchWorkgroups(Math.ceil(GW / 16), Math.ceil(GH / 16));
+            pp.end();
+
+            step++;
+
+            // Render
+            const renderBuf = step % 2 === 0 ? fieldBufA : fieldBufB;
+            const rBG = makeRenderBG(renderBuf);
+            const rp = enc.beginRenderPass({
+                colorAttachments: [{
+                    view: ctxGPU.getCurrentTexture().createView(),
+                    loadOp: 'clear', storeOp: 'store',
+                    clearValue: { r: 0.02, g: 0.02, b: 0.03, a: 1 },
+                }],
+            });
+            rp.setPipeline(renderPipeline);
+            rp.setBindGroup(0, rBG);
+            rp.draw(6);
+            rp.end();
+
+            device.queue.submit([enc.finish()]);
+            requestAnimationFrame(render);
+        }
+        render();
+    </script>
+</body>
+</html>

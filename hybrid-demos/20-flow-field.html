@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flow Field - Hybrid Canvas+SVG</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root { --sage:#8A9A5B; --moss:#606C38; --earth:#DDA15E; --cream:#FEFAE0; --terracotta:#BC6C25; --dark-moss:#3d4423; }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { overflow:hidden; font-family:'Nunito',sans-serif; background:#0a0e1a; color:#e8e6e1; }
+        .back-link { position:fixed; top:10px; left:10px; padding:8px 16px; background:rgba(0,0,0,0.7); color:var(--earth); text-decoration:none; border-radius:6px; font-size:14px; font-family:'Nunito',sans-serif; z-index:999; transition:all 0.3s ease; }
+        .back-link:hover { background:rgba(221,161,94,0.2); transform:translateX(-4px); }
+        #fps-counter { position:fixed; top:10px; right:10px; background:rgba(0,0,0,0.7); color:var(--earth); padding:8px 12px; border-radius:6px; font-family:'Courier New',monospace; font-size:14px; z-index:999; }
+        .fps-good{color:#10b981} .fps-medium{color:#fbbf24} .fps-poor{color:#e11d48}
+        #hybrid-container { position:relative; width:100vw; height:100vh; }
+        #canvas { position:absolute; top:0; left:0; width:100%; height:100%; z-index:0; }
+        #svg-overlay { position:absolute; top:0; left:0; width:100%; height:100%; z-index:1; pointer-events:none; }
+        .interactive { pointer-events:all; cursor:pointer; }
+        .svg-label { font-family:'Nunito',sans-serif; font-size:12px; fill:rgba(255,255,255,0.8); pointer-events:none; }
+        .svg-title { font-family:'Lora',serif; font-size:16px; fill:var(--earth); pointer-events:none; }
+        #loading { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; z-index:1000; }
+        .spinner { width:50px; height:50px; border:4px solid rgba(255,255,255,0.1); border-top-color:var(--earth); border-radius:50%; animation:spin 1s linear infinite; margin:0 auto 1rem; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        #error { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(225,29,72,0.9); color:white; padding:2rem; border-radius:12px; text-align:center; max-width:400px; z-index:1001; }
+        #error h2 { font-family:'Lora',serif; margin:0 0 1rem 0; }
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Loading demo...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"><defs></defs></svg>
+    </div>
+    <script>
+    window.addEventListener('error', (e) => { showError('Runtime Error: ' + e.message); });
+    function showError(m) { document.getElementById('loading').style.display='none'; document.getElementById('error').style.display='block'; document.getElementById('error-message').textContent=m; }
+    function hideLoading() { document.getElementById('loading').style.display='none'; }
+
+    class FPSCounter {
+        constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}
+        update(){this.frames++;const n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}
+    }
+
+    // Perlin Noise implementation
+    (function() {
+        var perm = new Uint8Array(512);
+        var grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+
+        window.noiseSeed = function(seed) {
+            var p = new Uint8Array(256);
+            for (var i = 0; i < 256; i++) p[i] = i;
+            // Fisher-Yates with seeded random
+            var s = seed;
+            function rng() { s = (s * 16807 + 0) % 2147483647; return (s - 1) / 2147483646; }
+            for (var i = 255; i > 0; i--) {
+                var j = Math.floor(rng() * (i + 1));
+                var tmp = p[i]; p[i] = p[j]; p[j] = tmp;
+            }
+            for (var i = 0; i < 512; i++) perm[i] = p[i & 255];
+        };
+
+        function dot(g, x, y) { return g[0]*x + g[1]*y; }
+        function fade(t) { return t*t*t*(t*(t*6-15)+10); }
+        function mix(a,b,t) { return (1-t)*a + t*b; }
+
+        window.perlin2 = function(x, y) {
+            var X = Math.floor(x) & 255, Y = Math.floor(y) & 255;
+            x -= Math.floor(x); y -= Math.floor(y);
+            var u = fade(x), v = fade(y);
+            var A = perm[X] + Y, B = perm[X+1] + Y;
+            var g00 = grad3[perm[A] % 12], g10 = grad3[perm[B] % 12];
+            var g01 = grad3[perm[A+1] % 12], g11 = grad3[perm[B+1] % 12];
+            var n00 = dot(g00, x, y), n10 = dot(g10, x-1, y);
+            var n01 = dot(g01, x, y-1), n11 = dot(g11, x-1, y-1);
+            return mix(mix(n00, n10, u), mix(n01, n11, u), v);
+        };
+
+        window.fbm = function(x, y, octaves) {
+            var val = 0, amp = 1, freq = 1, max = 0;
+            for (var i = 0; i < octaves; i++) {
+                val += perlin2(x * freq, y * freq) * amp;
+                max += amp;
+                amp *= 0.5; freq *= 2;
+            }
+            return val / max;
+        };
+
+        noiseSeed(42);
+    })();
+
+    try {
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const svg = document.getElementById('svg-overlay');
+        const ns = 'http://www.w3.org/2000/svg';
+        const fpsCounter = new FPSCounter();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        let W, H;
+
+        let particleCount = 3000;
+        let noiseScale = 0.003;
+        let octaves = 4;
+        let seed = 42;
+        let colorScheme = 'rainbow';
+        let particles = [];
+
+        const schemes = {
+            rainbow: (angle) => `hsla(${(angle / Math.PI * 180 + 180) % 360}, 70%, 55%, 0.3)`,
+            monochrome: (angle) => `hsla(0, 0%, ${50 + Math.sin(angle) * 30}%, 0.3)`,
+            fire: (angle) => `hsla(${10 + Math.sin(angle) * 20}, 90%, ${40 + Math.sin(angle) * 20}%, 0.35)`,
+            ocean: (angle) => `hsla(${200 + Math.sin(angle) * 30}, 70%, ${40 + Math.cos(angle) * 20}%, 0.3)`
+        };
+
+        function initParticles() {
+            particles = [];
+            for (let i = 0; i < particleCount; i++) {
+                particles.push({
+                    x: Math.random() * W,
+                    y: Math.random() * H,
+                    px: 0, py: 0
+                });
+                particles[i].px = particles[i].x;
+                particles[i].py = particles[i].y;
+            }
+        }
+
+        function updateParticles() {
+            for (const p of particles) {
+                p.px = p.x;
+                p.py = p.y;
+                const angle = fbm(p.x * noiseScale, p.y * noiseScale, octaves) * Math.PI * 4;
+                p.x += Math.cos(angle) * 1.5;
+                p.y += Math.sin(angle) * 1.5;
+
+                if (p.x < 0 || p.x > W || p.y < 0 || p.y > H) {
+                    p.x = Math.random() * W;
+                    p.y = Math.random() * H;
+                    p.px = p.x;
+                    p.py = p.y;
+                }
+            }
+        }
+
+        function drawParticles() {
+            // Semi-transparent overlay for trail effect
+            ctx.fillStyle = 'rgba(10, 14, 26, 0.02)';
+            ctx.fillRect(0, 0, W, H);
+
+            ctx.lineWidth = 0.8;
+            for (const p of particles) {
+                const angle = fbm(p.x * noiseScale, p.y * noiseScale, octaves) * Math.PI * 4;
+                ctx.beginPath();
+                ctx.moveTo(p.px, p.py);
+                ctx.lineTo(p.x, p.y);
+                ctx.strokeStyle = schemes[colorScheme](angle);
+                ctx.stroke();
+            }
+        }
+
+        function clearTrails() {
+            ctx.fillStyle = '#0a0e1a';
+            ctx.fillRect(0, 0, W, H);
+        }
+
+        function createUI() {
+            svg.innerHTML = '';
+            const d = document.createElementNS(ns, 'defs'); svg.appendChild(d);
+
+            const title = document.createElementNS(ns, 'text');
+            title.setAttribute('class', 'svg-title');
+            title.setAttribute('x', W / 2); title.setAttribute('y', 28);
+            title.setAttribute('text-anchor', 'middle');
+            title.textContent = 'Perlin Noise Flow Field';
+            svg.appendChild(title);
+
+            const fo = document.createElementNS(ns, 'foreignObject');
+            fo.setAttribute('x', 10); fo.setAttribute('y', H - 250);
+            fo.setAttribute('width', 230); fo.setAttribute('height', 242);
+            fo.setAttribute('class', 'interactive');
+            fo.innerHTML = `
+                <div xmlns="http://www.w3.org/1999/xhtml" style="background:rgba(0,0,0,0.8);padding:12px;border-radius:10px;font-family:Nunito,sans-serif;font-size:12px;color:#e8e6e1;">
+                    <div style="margin-bottom:6px;"><label style="color:#DDA15E;">Seed: </label>
+                    <input type="number" id="seed-input" value="${seed}" style="width:60px;background:#1a1e2e;border:1px solid #444;color:#e8e6e1;border-radius:3px;padding:2px 4px;font-size:11px;"></div>
+                    <div style="margin-bottom:6px;"><label style="color:#DDA15E;">Octaves: <span id="oct-val">${octaves}</span></label>
+                    <input type="range" id="oct-slider" min="1" max="6" value="${octaves}" style="width:100%;"></div>
+                    <div style="margin-bottom:6px;"><label style="color:#DDA15E;">Scale: <span id="scale-val">${(noiseScale*1000).toFixed(1)}</span></label>
+                    <input type="range" id="scale-slider" min="0.5" max="10" step="0.1" value="${noiseScale*1000}" style="width:100%;"></div>
+                    <div style="margin-bottom:6px;"><label style="color:#DDA15E;">Particles: <span id="pcount-val">${particleCount}</span></label>
+                    <input type="range" id="pcount-slider" min="500" max="6000" step="500" value="${particleCount}" style="width:100%;"></div>
+                    <div style="margin-bottom:6px;"><label style="color:#DDA15E;">Color Scheme:</label><br>
+                    <select id="color-select" style="background:#1a1e2e;border:1px solid #444;color:#DDA15E;border-radius:3px;padding:2px 6px;font-size:11px;">
+                        <option value="rainbow">Rainbow</option>
+                        <option value="monochrome">Monochrome</option>
+                        <option value="fire">Fire</option>
+                        <option value="ocean">Ocean</option>
+                    </select></div>
+                    <div style="display:flex;gap:6px;">
+                        <button id="clear-btn" style="padding:4px 10px;border:1px solid #DDA15E;background:rgba(0,0,0,0.5);color:#DDA15E;border-radius:4px;cursor:pointer;font-size:11px;">Clear Trails</button>
+                        <button id="download-btn" style="padding:4px 10px;border:1px solid #8A9A5B;background:rgba(0,0,0,0.5);color:#8A9A5B;border-radius:4px;cursor:pointer;font-size:11px;">Save PNG</button>
+                    </div>
+                </div>
+            `;
+            svg.appendChild(fo);
+        }
+
+        function bindUI() {
+            document.getElementById('seed-input').addEventListener('change', function() {
+                seed = parseInt(this.value) || 42;
+                noiseSeed(seed); clearTrails(); initParticles();
+            });
+            document.getElementById('oct-slider').addEventListener('input', function() {
+                octaves = parseInt(this.value);
+                document.getElementById('oct-val').textContent = octaves;
+                clearTrails();
+            });
+            document.getElementById('scale-slider').addEventListener('input', function() {
+                noiseScale = parseFloat(this.value) / 1000;
+                document.getElementById('scale-val').textContent = this.value;
+                clearTrails();
+            });
+            document.getElementById('pcount-slider').addEventListener('input', function() {
+                particleCount = parseInt(this.value);
+                document.getElementById('pcount-val').textContent = particleCount;
+                initParticles(); clearTrails();
+            });
+            document.getElementById('color-select').addEventListener('change', function() {
+                colorScheme = this.value; clearTrails();
+            });
+            document.getElementById('clear-btn').addEventListener('click', clearTrails);
+            document.getElementById('download-btn').addEventListener('click', function() {
+                const link = document.createElement('a');
+                link.download = 'flow-field.png';
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+            });
+        }
+
+        function resize() {
+            const rect = canvas.getBoundingClientRect();
+            W = rect.width; H = rect.height;
+            canvas.width = W * dpr; canvas.height = H * dpr;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+            svg.setAttribute('width', W); svg.setAttribute('height', H);
+            createUI(); bindUI();
+            clearTrails(); initParticles();
+        }
+
+        let resizeTimeout;
+        window.addEventListener('resize', () => { clearTimeout(resizeTimeout); resizeTimeout = setTimeout(resize, 150); });
+        resize();
+
+        function animate() {
+            fpsCounter.update();
+            updateParticles();
+            drawParticles();
+            requestAnimationFrame(animate);
+        }
+        hideLoading();
+        animate();
+    } catch (err) { showError('Init Error: ' + err.message); }
+    </script>
+</body>
+</html>

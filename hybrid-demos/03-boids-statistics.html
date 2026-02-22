@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boids + Live Statistics - CCAB</title>
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500;600;700&family=Nunito:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root{--sage:#8A9A5B;--moss:#606C38;--earth:#DDA15E;--cream:#FEFAE0;--terracotta:#BC6C25;--dark-moss:#3d4423}
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{overflow:hidden;font-family:'Nunito',sans-serif;background:#0a0e1a;color:#e8e6e1}
+        .back-link{position:fixed;top:10px;left:10px;padding:8px 16px;background:rgba(0,0,0,0.7);color:var(--earth);text-decoration:none;border-radius:6px;font-size:14px;font-family:'Nunito',sans-serif;z-index:999;transition:all 0.3s ease}
+        .back-link:hover{background:rgba(221,161,94,0.2);transform:translateX(-4px)}
+        #fps-counter{position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.7);color:var(--earth);padding:8px 12px;border-radius:6px;font-family:'Courier New',monospace;font-size:14px;z-index:999}
+        .fps-good{color:#10b981}.fps-medium{color:#fbbf24}.fps-poor{color:#e11d48}
+        #hybrid-container{position:relative;width:100vw;height:100vh}
+        #canvas{position:absolute;top:0;left:0;width:100%;height:100%;z-index:0}
+        #svg-overlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none}
+        .interactive{pointer-events:all;cursor:pointer}
+        #loading{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:1000}
+        .spinner{width:50px;height:50px;border:4px solid rgba(255,255,255,0.1);border-top-color:var(--earth);border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 1rem}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        #error{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(225,29,72,0.9);color:white;padding:2rem;border-radius:12px;text-align:center;max-width:400px;z-index:1001}
+        #error h2{font-family:'Lora',serif;margin:0 0 1rem 0}
+    </style>
+</head>
+<body>
+    <a href="../index.html" class="back-link">&larr; Back to Gallery</a>
+    <div id="fps-counter">FPS: <span id="fps-value">0</span></div>
+    <div id="loading"><div class="spinner"></div><p>Loading demo...</p></div>
+    <div id="error"><h2>Error</h2><p id="error-message"></p></div>
+    <div id="hybrid-container">
+        <canvas id="canvas"></canvas>
+        <svg id="svg-overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+
+    <script>
+        window.addEventListener('error',function(e){showError('Runtime Error: '+e.message);});
+        function showError(m){document.getElementById('loading').style.display='none';document.getElementById('error').style.display='block';document.getElementById('error-message').textContent=m;}
+        function hideLoading(){document.getElementById('loading').style.display='none';}
+        class FPSCounter{constructor(){this.fps=0;this.frames=0;this.lastTime=performance.now();this.el=document.getElementById('fps-value');}update(){this.frames++;var n=performance.now(),d=n-this.lastTime;if(d>=1000){this.fps=Math.round(this.frames*1000/d);this.frames=0;this.lastTime=n;this.el.textContent=this.fps;this.el.className=this.fps>=55?'fps-good':this.fps>=30?'fps-medium':'fps-poor';}}}
+
+        try {
+            var canvas = document.getElementById('canvas');
+            var ctx = canvas.getContext('2d');
+            var svg = document.getElementById('svg-overlay');
+            var svgNS = 'http://www.w3.org/2000/svg';
+            var fpsCounter = new FPSCounter();
+            var W, H;
+
+            // Boids
+            var NUM_BOIDS = 3000;
+            var boids = [];
+            var separation = 1.5, alignment = 1.0, cohesion = 1.0;
+            var maxSpeed = 4, perceptionRadius = 50;
+
+            function initBoids() {
+                boids = [];
+                for (var i = 0; i < NUM_BOIDS; i++) {
+                    boids.push({
+                        x: Math.random() * (W || 800),
+                        y: Math.random() * (H || 600),
+                        vx: (Math.random() - 0.5) * maxSpeed * 2,
+                        vy: (Math.random() - 0.5) * maxSpeed * 2
+                    });
+                }
+            }
+
+            // Stats history
+            var statsHistory = { speed: [], neighbors: [], cohesionF: [] };
+            var maxHistory = 100;
+            var frameCount = 0;
+
+            // SVG panel
+            var panelW = 250;
+            function createEl(tag, attrs) {
+                var el = document.createElementNS(svgNS, tag);
+                for (var k in attrs) el.setAttribute(k, attrs[k]);
+                return el;
+            }
+
+            var panel = createEl('g', {});
+            svg.appendChild(panel);
+
+            var panelBg = createEl('rect', { rx: '12', fill: 'rgba(0,0,0,0.75)', stroke: 'rgba(221,161,94,0.3)', 'stroke-width': '1' });
+            panel.appendChild(panelBg);
+
+            // 3 mini charts
+            var chartNames = ['Avg Speed', 'Avg Neighbors', 'Cohesion Force'];
+            var chartColors = ['#10b981', '#fbbf24', '#e879f9'];
+            var chartGroups = [];
+            var chartLines = [];
+            var chartLabels = [];
+
+            for (var c = 0; c < 3; c++) {
+                var g = createEl('g', {});
+                panel.appendChild(g);
+                var bg = createEl('rect', { fill: 'rgba(10,14,26,0.9)', stroke: 'rgba(255,255,255,0.1)', 'stroke-width': '1', rx: '4' });
+                g.appendChild(bg);
+                var lbl = createEl('text', { fill: '#DDA15E', 'font-family': 'Nunito, sans-serif', 'font-size': '11' });
+                lbl.textContent = chartNames[c];
+                g.appendChild(lbl);
+                var line = createEl('polyline', { fill: 'none', stroke: chartColors[c], 'stroke-width': '1.5' });
+                g.appendChild(line);
+                var valText = createEl('text', { fill: chartColors[c], 'font-family': 'Courier New, monospace', 'font-size': '11', 'text-anchor': 'end' });
+                g.appendChild(valText);
+                chartGroups.push({ g: g, bg: bg, label: lbl, line: line, val: valText });
+            }
+
+            // Sliders
+            var sliderFO = createEl('foreignObject', { class: 'interactive' });
+            panel.appendChild(sliderFO);
+            var sliderDiv = document.createElement('div');
+            sliderDiv.style.cssText = 'font-family:Nunito,sans-serif;font-size:12px;color:#e8e6e1;padding:5px;';
+            sliderFO.appendChild(sliderDiv);
+
+            var sliderDefs = [
+                { label: 'Separation', key: 'sep', min: 0, max: 5, step: 0.1, val: 1.5 },
+                { label: 'Alignment', key: 'ali', min: 0, max: 5, step: 0.1, val: 1.0 },
+                { label: 'Cohesion', key: 'coh', min: 0, max: 5, step: 0.1, val: 1.0 }
+            ];
+
+            sliderDefs.forEach(function(sd) {
+                var row = document.createElement('div');
+                row.style.cssText = 'margin-bottom:5px;display:flex;align-items:center;gap:5px;';
+                var lbl = document.createElement('span');
+                lbl.style.cssText = 'width:75px;color:#DDA15E;font-size:11px;';
+                lbl.textContent = sd.label;
+                var inp = document.createElement('input');
+                inp.type = 'range'; inp.min = sd.min; inp.max = sd.max; inp.step = sd.step; inp.value = sd.val;
+                inp.style.cssText = 'flex:1;accent-color:#DDA15E;height:3px;';
+                var val = document.createElement('span');
+                val.style.cssText = 'width:30px;text-align:right;font-size:10px;';
+                val.textContent = sd.val;
+                inp.addEventListener('input', function() {
+                    val.textContent = parseFloat(inp.value).toFixed(1);
+                    if (sd.key === 'sep') separation = parseFloat(inp.value);
+                    if (sd.key === 'ali') alignment = parseFloat(inp.value);
+                    if (sd.key === 'coh') cohesion = parseFloat(inp.value);
+                });
+                row.appendChild(lbl); row.appendChild(inp); row.appendChild(val);
+                sliderDiv.appendChild(row);
+            });
+
+            // Count display
+            var countText = createEl('text', { fill: 'rgba(255,255,255,0.5)', 'font-family': 'Nunito, sans-serif', 'font-size': '12' });
+            countText.textContent = 'Boids: ' + NUM_BOIDS;
+            panel.appendChild(countText);
+
+            function resize() {
+                W = window.innerWidth; H = window.innerHeight;
+                canvas.width = W; canvas.height = H;
+                svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+                svg.setAttribute('width', W); svg.setAttribute('height', H);
+
+                var px = W - panelW - 15, py = 50, ph = 370;
+                panelBg.setAttribute('x', px); panelBg.setAttribute('y', py);
+                panelBg.setAttribute('width', panelW); panelBg.setAttribute('height', ph);
+
+                var cw = panelW - 30, ch2 = 55;
+                for (var c = 0; c < 3; c++) {
+                    var cy = py + 20 + c * (ch2 + 25);
+                    chartGroups[c].bg.setAttribute('x', px + 15); chartGroups[c].bg.setAttribute('y', cy);
+                    chartGroups[c].bg.setAttribute('width', cw); chartGroups[c].bg.setAttribute('height', ch2);
+                    chartGroups[c].label.setAttribute('x', px + 18); chartGroups[c].label.setAttribute('y', cy - 3);
+                    chartGroups[c].val.setAttribute('x', px + panelW - 18); chartGroups[c].val.setAttribute('y', cy - 3);
+                    chartGroups[c]._cx = px + 15; chartGroups[c]._cy = cy; chartGroups[c]._cw = cw; chartGroups[c]._ch = ch2;
+                }
+
+                sliderFO.setAttribute('x', px + 5); sliderFO.setAttribute('y', py + 275);
+                sliderFO.setAttribute('width', panelW - 10); sliderFO.setAttribute('height', 80);
+                countText.setAttribute('x', px + 15); countText.setAttribute('y', py + ph - 10);
+
+                if (boids.length === 0) initBoids();
+            }
+            var rt; window.addEventListener('resize', function() { clearTimeout(rt); rt = setTimeout(resize, 100); });
+            resize();
+
+            // Spatial grid for boids
+            function updateBoids() {
+                var simW = W - panelW - 30;
+                var cellSize = perceptionRadius;
+                var gridCols = Math.ceil(simW / cellSize);
+                var gridRows = Math.ceil(H / cellSize);
+                var grid = new Array(gridCols * gridRows);
+                for (var i = 0; i < grid.length; i++) grid[i] = [];
+
+                // Place boids in grid
+                for (var i = 0; i < NUM_BOIDS; i++) {
+                    var gc = Math.floor(boids[i].x / cellSize);
+                    var gr = Math.floor(boids[i].y / cellSize);
+                    if (gc >= 0 && gc < gridCols && gr >= 0 && gr < gridRows) {
+                        grid[gr * gridCols + gc].push(i);
+                    }
+                }
+
+                var totalSpeed = 0, totalNeighbors = 0, totalCohesion = 0;
+
+                for (var i = 0; i < NUM_BOIDS; i++) {
+                    var b = boids[i];
+                    var sepX = 0, sepY = 0, aliX = 0, aliY = 0, cohX = 0, cohY = 0;
+                    var neighbors = 0;
+
+                    var gc = Math.floor(b.x / cellSize);
+                    var gr = Math.floor(b.y / cellSize);
+
+                    for (var dj = -1; dj <= 1; dj++) {
+                        for (var di = -1; di <= 1; di++) {
+                            var nc = gc + di, nr = gr + dj;
+                            if (nc < 0 || nc >= gridCols || nr < 0 || nr >= gridRows) continue;
+                            var cell = grid[nr * gridCols + nc];
+                            for (var ci = 0; ci < cell.length; ci++) {
+                                var j = cell[ci];
+                                if (j === i) continue;
+                                var dx = boids[j].x - b.x;
+                                var dy = boids[j].y - b.y;
+                                var dist = Math.sqrt(dx * dx + dy * dy);
+                                if (dist < perceptionRadius && dist > 0) {
+                                    neighbors++;
+                                    sepX -= dx / dist;
+                                    sepY -= dy / dist;
+                                    aliX += boids[j].vx;
+                                    aliY += boids[j].vy;
+                                    cohX += boids[j].x;
+                                    cohY += boids[j].y;
+                                }
+                            }
+                        }
+                    }
+
+                    if (neighbors > 0) {
+                        sepX /= neighbors; sepY /= neighbors;
+                        aliX /= neighbors; aliY /= neighbors;
+                        aliX -= b.vx; aliY -= b.vy;
+                        cohX = cohX / neighbors - b.x;
+                        cohY = cohY / neighbors - b.y;
+                    }
+
+                    b.vx += sepX * separation * 0.5 + aliX * alignment * 0.05 + cohX * cohesion * 0.005;
+                    b.vy += sepY * separation * 0.5 + aliY * alignment * 0.05 + cohY * cohesion * 0.005;
+
+                    var speed = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+                    if (speed > maxSpeed) {
+                        b.vx = (b.vx / speed) * maxSpeed;
+                        b.vy = (b.vy / speed) * maxSpeed;
+                        speed = maxSpeed;
+                    }
+
+                    b.x += b.vx; b.y += b.vy;
+
+                    // Wrap
+                    if (b.x < 0) b.x += simW; if (b.x > simW) b.x -= simW;
+                    if (b.y < 0) b.y += H; if (b.y > H) b.y -= H;
+
+                    totalSpeed += speed;
+                    totalNeighbors += neighbors;
+                    totalCohesion += Math.sqrt(cohX * cohX + cohY * cohY);
+                }
+
+                return {
+                    avgSpeed: totalSpeed / NUM_BOIDS,
+                    avgNeighbors: totalNeighbors / NUM_BOIDS,
+                    avgCohesion: totalCohesion / NUM_BOIDS
+                };
+            }
+
+            function drawChart(group, history, maxVal) {
+                if (history.length < 2) return;
+                var cx = group._cx, cy = group._cy, cw = group._cw, ch = group._ch;
+                var pts = '';
+                for (var i = 0; i < history.length; i++) {
+                    var x = cx + (i / (maxHistory - 1)) * cw;
+                    var y = cy + ch - (Math.min(history[i] / maxVal, 1)) * ch;
+                    pts += x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+                }
+                group.line.setAttribute('points', pts);
+            }
+
+            function animate() {
+                fpsCounter.update();
+                frameCount++;
+
+                var stats = updateBoids();
+
+                // Draw boids
+                ctx.fillStyle = 'rgba(10,14,26,0.3)';
+                ctx.fillRect(0, 0, W, H);
+
+                for (var i = 0; i < NUM_BOIDS; i++) {
+                    var b = boids[i];
+                    var angle = Math.atan2(b.vy, b.vx);
+                    var hue = ((angle + Math.PI) / (2 * Math.PI)) * 360;
+                    ctx.save();
+                    ctx.translate(b.x, b.y);
+                    ctx.rotate(angle);
+                    ctx.fillStyle = 'hsla(' + hue + ',70%,60%,0.8)';
+                    ctx.beginPath();
+                    ctx.moveTo(5, 0);
+                    ctx.lineTo(-3, -2);
+                    ctx.lineTo(-3, 2);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.restore();
+                }
+
+                // Update stats every 30 frames
+                if (frameCount % 30 === 0) {
+                    statsHistory.speed.push(stats.avgSpeed);
+                    statsHistory.neighbors.push(stats.avgNeighbors);
+                    statsHistory.cohesionF.push(stats.avgCohesion);
+                    if (statsHistory.speed.length > maxHistory) {
+                        statsHistory.speed.shift();
+                        statsHistory.neighbors.shift();
+                        statsHistory.cohesionF.shift();
+                    }
+
+                    drawChart(chartGroups[0], statsHistory.speed, maxSpeed);
+                    drawChart(chartGroups[1], statsHistory.neighbors, 20);
+                    drawChart(chartGroups[2], statsHistory.cohesionF, 100);
+
+                    chartGroups[0].val.textContent = stats.avgSpeed.toFixed(2);
+                    chartGroups[1].val.textContent = stats.avgNeighbors.toFixed(1);
+                    chartGroups[2].val.textContent = stats.avgCohesion.toFixed(1);
+                }
+
+                requestAnimationFrame(animate);
+            }
+
+            hideLoading();
+            animate();
+        } catch(e) { showError('Init Error: ' + e.message); }
+    </script>
+</body>
+</html>

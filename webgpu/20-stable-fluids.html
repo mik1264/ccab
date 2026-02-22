@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stable Fluids - WebGPU - CCAB</title>
+    <style>
+        body { margin: 0; background: #0a0a0f; color: #e8e6e1; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+        .back-link { position: fixed; top: 20px; left: 20px; padding: 8px 16px; background: rgba(6, 182, 212, 0.2); color: #22d3ee; text-decoration: none; border-radius: 6px; z-index: 100; font-size: 13px; }
+        .back-link:hover { background: rgba(6, 182, 212, 0.4); }
+        canvas { display: block; cursor: crosshair; }
+        .controls { position: fixed; top: 20px; right: 20px; background: rgba(0,0,0,0.75); backdrop-filter: blur(10px); padding: 15px; border-radius: 8px; z-index: 100; font-size: 12px; min-width: 180px; }
+        .controls label { display: block; margin: 8px 0 3px; color: #22d3ee; }
+        .controls input[type=range] { width: 150px; }
+        .controls button { margin: 4px 2px; padding: 5px 10px; background: #22d3ee; color: #000; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }
+        .controls .row { display: flex; gap: 4px; margin-top: 8px; }
+        .controls .row button { flex: 1; }
+        .stats { position: fixed; bottom: 20px; left: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 15px; border-radius: 8px; font-size: 12px; }
+        #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(239, 68, 68, 0.9); padding: 20px 40px; border-radius: 8px; display: none; text-align: center; max-width: 400px; }
+        .title { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); color: #22d3ee; font-size: 14px; font-weight: 600; z-index: 100; text-shadow: 0 0 10px rgba(6, 182, 212, 0.5); pointer-events: none; }
+        .info { font-size: 10px; color: #888; margin-top: 10px; line-height: 1.4; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to WebGPU Gallery</a>
+    <div class="title">Stable Fluids (Jos Stam)</div>
+
+    <div class="controls">
+        <label>Viscosity: <span id="viscVal">0.0001</span></label>
+        <input type="range" id="viscosity" min="0" max="0.001" step="0.00005" value="0.0001">
+        <label>Dissipation: <span id="dissVal">0.98</span></label>
+        <input type="range" id="dissipation" min="0.9" max="1.0" step="0.005" value="0.98">
+        <label>Force Radius: <span id="radiusVal">30</span></label>
+        <input type="range" id="radius" min="5" max="80" step="1" value="30">
+        <label>Dye Intensity: <span id="dyeVal">5.0</span></label>
+        <input type="range" id="dyeIntensity" min="1" max="15" step="0.5" value="5.0">
+        <label>
+            <input type="checkbox" id="showVorticity"> Show Vorticity
+        </label>
+        <div class="row">
+            <button onclick="window.resetSim()">Reset</button>
+            <button onclick="window.togglePause()">Pause</button>
+        </div>
+        <div class="info">Click + drag to inject dye and velocity</div>
+    </div>
+
+    <div class="stats">
+        FPS: <span id="fps">0</span> | Grid: <span id="gridSize">256x256</span>
+    </div>
+
+    <div id="error">
+        WebGPU is not supported in your browser.<br>
+        Please use Chrome 113+, Edge 113+, or Safari 18+.
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        const canvas = document.getElementById('canvas');
+        const N = 256;
+        canvas.width = N;
+        canvas.height = N;
+        canvas.style.width = '100vmin';
+        canvas.style.height = '100vmin';
+        canvas.style.position = 'absolute';
+        canvas.style.left = '50%';
+        canvas.style.top = '50%';
+        canvas.style.transform = 'translate(-50%, -50%)';
+
+        document.getElementById('gridSize').textContent = N + 'x' + N;
+
+        let viscosity = 0.0001;
+        let dissipation = 0.98;
+        let forceRadius = 30;
+        let dyeIntensity = 5.0;
+        let showVorticity = false;
+        let paused = false;
+        let mouseDown = false;
+        let mouseX = 0, mouseY = 0, prevMouseX = 0, prevMouseY = 0;
+        let hue = 0;
+
+        if (!navigator.gpu) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('WebGPU not supported');
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+            document.getElementById('error').style.display = 'block';
+            throw new Error('No WebGPU adapter');
+        }
+        const device = await adapter.requestDevice();
+        const context = canvas.getContext('webgpu');
+        const presentFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format: presentFormat, alphaMode: 'opaque' });
+
+        // Buffers: velocity (vec2f), dye (vec4f) - ping pong pairs, pressure (f32) ping pong, divergence (f32)
+        const cellCount = N * N;
+        function makeStorageBuffer(bytes) {
+            return device.createBuffer({ size: bytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        }
+
+        const velBuffers = [makeStorageBuffer(cellCount * 8), makeStorageBuffer(cellCount * 8)];
+        const dyeBuffers = [makeStorageBuffer(cellCount * 16), makeStorageBuffer(cellCount * 16)];
+        const pressureBuffers = [makeStorageBuffer(cellCount * 4), makeStorageBuffer(cellCount * 4)];
+        const divergenceBuffer = makeStorageBuffer(cellCount * 4);
+
+        const uniformBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        // ---- WGSL Shaders ----
+
+        const addForceShader = `
+            struct Uniforms {
+                mousePos: vec2f,
+                mouseDelta: vec2f,
+                dyeColor: vec4f,
+                params: vec4f, // radius, dyeIntensity, dt, mouseActive
+                gridSize: u32,
+            }
+            @group(0) @binding(0) var<storage, read_write> velocity: array<vec2f>;
+            @group(0) @binding(1) var<storage, read_write> dye: array<vec4f>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.gridSize || id.y >= u.gridSize) { return; }
+                let idx = id.y * u.gridSize + id.x;
+                let pos = vec2f(f32(id.x), f32(id.y));
+                let mp = u.mousePos;
+                let dist = length(pos - mp);
+                let radius = u.params.x;
+                if (dist < radius && u.params.w > 0.5) {
+                    let w = exp(-dist * dist / (radius * radius * 0.25));
+                    velocity[idx] += u.mouseDelta * w * 200.0;
+                    dye[idx] += u.dyeColor * w * u.params.y;
+                }
+            }
+        `;
+
+        const advectShader = `
+            struct Uniforms {
+                mousePos: vec2f,
+                mouseDelta: vec2f,
+                dyeColor: vec4f,
+                params: vec4f,
+                gridSize: u32,
+            }
+            @group(0) @binding(0) var<storage, read> velIn: array<vec2f>;
+            @group(0) @binding(1) var<storage, read> fieldIn: array<vec2f>;
+            @group(0) @binding(2) var<storage, read_write> fieldOut: array<vec2f>;
+            @group(0) @binding(3) var<uniform> u: Uniforms;
+
+            fn sampleBilinear(field: ptr<storage, array<vec2f>, read>, pos: vec2f, size: u32) -> vec2f {
+                let s = f32(size);
+                let p = clamp(pos, vec2f(0.5), vec2f(s - 1.5));
+                let x0 = u32(floor(p.x));
+                let y0 = u32(floor(p.y));
+                let x1 = min(x0 + 1u, size - 1u);
+                let y1 = min(y0 + 1u, size - 1u);
+                let fx = fract(p.x);
+                let fy = fract(p.y);
+                let v00 = (*field)[y0 * size + x0];
+                let v10 = (*field)[y0 * size + x1];
+                let v01 = (*field)[y1 * size + x0];
+                let v11 = (*field)[y1 * size + x1];
+                return mix(mix(v00, v10, fx), mix(v01, v11, fx), fy);
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.gridSize || id.y >= u.gridSize) { return; }
+                let idx = id.y * u.gridSize + id.x;
+                let pos = vec2f(f32(id.x), f32(id.y));
+                let vel = velIn[idx];
+                let dt = u.params.z;
+                let backPos = pos - vel * dt;
+                fieldOut[idx] = sampleBilinear(&fieldIn, backPos, u.gridSize);
+            }
+        `;
+
+        const advectDyeShader = `
+            struct Uniforms {
+                mousePos: vec2f,
+                mouseDelta: vec2f,
+                dyeColor: vec4f,
+                params: vec4f,
+                gridSize: u32,
+            }
+            @group(0) @binding(0) var<storage, read> velIn: array<vec2f>;
+            @group(0) @binding(1) var<storage, read> dyeIn: array<vec4f>;
+            @group(0) @binding(2) var<storage, read_write> dyeOut: array<vec4f>;
+            @group(0) @binding(3) var<uniform> u: Uniforms;
+
+            fn sampleBilinearDye(field: ptr<storage, array<vec4f>, read>, pos: vec2f, size: u32) -> vec4f {
+                let s = f32(size);
+                let p = clamp(pos, vec2f(0.5), vec2f(s - 1.5));
+                let x0 = u32(floor(p.x));
+                let y0 = u32(floor(p.y));
+                let x1 = min(x0 + 1u, size - 1u);
+                let y1 = min(y0 + 1u, size - 1u);
+                let fx = fract(p.x);
+                let fy = fract(p.y);
+                let v00 = (*field)[y0 * size + x0];
+                let v10 = (*field)[y0 * size + x1];
+                let v01 = (*field)[y1 * size + x0];
+                let v11 = (*field)[y1 * size + x1];
+                return mix(mix(v00, v10, fx), mix(v01, v11, fx), fy);
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.gridSize || id.y >= u.gridSize) { return; }
+                let idx = id.y * u.gridSize + id.x;
+                let pos = vec2f(f32(id.x), f32(id.y));
+                let vel = velIn[idx];
+                let dt = u.params.z;
+                let backPos = pos - vel * dt;
+                dyeOut[idx] = sampleBilinearDye(&dyeIn, backPos, u.gridSize) * ${dissipation.toFixed(4)};
+            }
+        `;
+
+        const divergenceShader = `
+            struct Uniforms {
+                mousePos: vec2f,
+                mouseDelta: vec2f,
+                dyeColor: vec4f,
+                params: vec4f,
+                gridSize: u32,
+            }
+            @group(0) @binding(0) var<storage, read> vel: array<vec2f>;
+            @group(0) @binding(1) var<storage, read_write> div: array<f32>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.gridSize || id.y >= u.gridSize) { return; }
+                let s = u.gridSize;
+                let x = id.x; let y = id.y;
+                let l = vel[y * s + max(x, 1u) - 1u].x;
+                let r = vel[y * s + min(x + 1u, s - 1u)].x;
+                let b = vel[max(y, 1u) * s + x].y;
+                let t = vel[min(y + 1u, s - 1u) * s + x].y;
+                div[y * s + x] = -0.5 * (r - l + t - b);
+            }
+        `;
+
+        const jacobiShader = `
+            struct Uniforms {
+                mousePos: vec2f,
+                mouseDelta: vec2f,
+                dyeColor: vec4f,
+                params: vec4f,
+                gridSize: u32,
+            }
+            @group(0) @binding(0) var<storage, read> pIn: array<f32>;
+            @group(0) @binding(1) var<storage, read_write> pOut: array<f32>;
+            @group(0) @binding(2) var<storage, read> div: array<f32>;
+            @group(0) @binding(3) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.gridSize || id.y >= u.gridSize) { return; }
+                let s = u.gridSize;
+                let x = id.x; let y = id.y;
+                let l = pIn[y * s + max(x, 1u) - 1u];
+                let r = pIn[y * s + min(x + 1u, s - 1u)];
+                let b = pIn[max(y, 1u) * s + x];
+                let t = pIn[min(y + 1u, s - 1u) * s + x];
+                let d = div[y * s + x];
+                pOut[y * s + x] = (l + r + b + t + d) * 0.25;
+            }
+        `;
+
+        const projectShader = `
+            struct Uniforms {
+                mousePos: vec2f,
+                mouseDelta: vec2f,
+                dyeColor: vec4f,
+                params: vec4f,
+                gridSize: u32,
+            }
+            @group(0) @binding(0) var<storage, read_write> vel: array<vec2f>;
+            @group(0) @binding(1) var<storage, read> pressure: array<f32>;
+            @group(0) @binding(2) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.gridSize || id.y >= u.gridSize) { return; }
+                let s = u.gridSize;
+                let x = id.x; let y = id.y;
+                let l = pressure[y * s + max(x, 1u) - 1u];
+                let r = pressure[y * s + min(x + 1u, s - 1u)];
+                let b = pressure[max(y, 1u) * s + x];
+                let t = pressure[min(y + 1u, s - 1u) * s + x];
+                let idx = y * s + x;
+                vel[idx] -= vec2f(r - l, t - b) * 0.5;
+            }
+        `;
+
+        const renderShader = `
+            struct Uniforms {
+                mousePos: vec2f,
+                mouseDelta: vec2f,
+                dyeColor: vec4f,
+                params: vec4f,
+                gridSize: u32,
+            }
+            @group(0) @binding(0) var<storage, read> dye: array<vec4f>;
+            @group(0) @binding(1) var<storage, read> vel: array<vec2f>;
+            @group(0) @binding(2) var outTex: texture_storage_2d<rgba8unorm, write>;
+            @group(0) @binding(3) var<uniform> u: Uniforms;
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) id: vec3u) {
+                if (id.x >= u.gridSize || id.y >= u.gridSize) { return; }
+                let idx = id.y * u.gridSize + id.x;
+                let d = dye[idx];
+                var color = vec3f(d.x, d.y, d.z);
+
+                // Vorticity visualization (stored in params.w bit pattern, reusing showVort)
+                // We detect vorticity mode from dyeColor.w
+                if (u.dyeColor.w > 1.5) {
+                    let s = u.gridSize;
+                    let x = id.x; let y = id.y;
+                    let vl = vel[y * s + max(x, 1u) - 1u];
+                    let vr = vel[y * s + min(x + 1u, s - 1u)];
+                    let vb = vel[max(y, 1u) * s + x];
+                    let vt = vel[min(y + 1u, s - 1u) * s + x];
+                    let curl = (vr.y - vl.y) - (vt.x - vb.x);
+                    let c = clamp(curl * 5.0, -1.0, 1.0);
+                    let vortColor = vec3f(
+                        max(c, 0.0),
+                        0.1 + abs(c) * 0.3,
+                        max(-c, 0.0)
+                    );
+                    color = mix(color, vortColor, 0.6);
+                }
+
+                color = clamp(color, vec3f(0.0), vec3f(1.0));
+                textureStore(outTex, vec2i(id.xy), vec4f(color, 1.0));
+            }
+        `;
+
+        const displayShader = `
+            @group(0) @binding(0) var tex: texture_2d<f32>;
+            @group(0) @binding(1) var samp: sampler;
+            struct VSOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+            @vertex fn vs(@builtin(vertex_index) i: u32) -> VSOut {
+                var p = array<vec2f,4>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(1,1));
+                var u = array<vec2f,4>(vec2f(0,1), vec2f(1,1), vec2f(0,0), vec2f(1,0));
+                var o: VSOut; o.pos = vec4f(p[i], 0, 1); o.uv = u[i]; return o;
+            }
+            @fragment fn fs(@location(0) uv: vec2f) -> @location(0) vec4f {
+                return textureSample(tex, samp, uv);
+            }
+        `;
+
+        // Create pipelines
+        function makePipeline(code) {
+            return device.createComputePipeline({
+                layout: 'auto',
+                compute: { module: device.createShaderModule({ code }), entryPoint: 'main' }
+            });
+        }
+
+        const addForcePipeline = makePipeline(addForceShader);
+        const advectPipeline = makePipeline(advectShader);
+        const divergencePipeline = makePipeline(divergenceShader);
+        const jacobiPipeline = makePipeline(jacobiShader);
+        const projectPipeline = makePipeline(projectShader);
+        const renderPipeline = makePipeline(renderShader);
+
+        // Advect dye pipeline needs to be recreated when dissipation changes
+        let advectDyePipeline = makePipeline(advectDyeShader);
+
+        const displayPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'vs' },
+            fragment: { module: device.createShaderModule({ code: displayShader }), entryPoint: 'fs', targets: [{ format: presentFormat }] },
+            primitive: { topology: 'triangle-strip' }
+        });
+
+        const outTexture = device.createTexture({
+            size: [N, N], format: 'rgba8unorm',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+        });
+        const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+
+        const dispBG = device.createBindGroup({
+            layout: displayPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: outTexture.createView() },
+                { binding: 1, resource: sampler }
+            ]
+        });
+
+        const wg = Math.ceil(N / 16);
+
+        function clearBuffers() {
+            const zeroVel = new Float32Array(cellCount * 2);
+            const zeroDye = new Float32Array(cellCount * 4);
+            const zeroP = new Float32Array(cellCount);
+            device.queue.writeBuffer(velBuffers[0], 0, zeroVel);
+            device.queue.writeBuffer(velBuffers[1], 0, zeroVel);
+            device.queue.writeBuffer(dyeBuffers[0], 0, zeroDye);
+            device.queue.writeBuffer(dyeBuffers[1], 0, zeroDye);
+            device.queue.writeBuffer(pressureBuffers[0], 0, zeroP);
+            device.queue.writeBuffer(pressureBuffers[1], 0, zeroP);
+            device.queue.writeBuffer(divergenceBuffer, 0, zeroP);
+        }
+
+        clearBuffers();
+
+        function writeUniforms(mx, my, dx, dy, r, g, b, dt, active, showVort) {
+            const buf = new ArrayBuffer(64);
+            const f = new Float32Array(buf);
+            const u = new Uint32Array(buf);
+            f[0] = mx; f[1] = my;       // mousePos
+            f[2] = dx; f[3] = dy;       // mouseDelta
+            f[4] = r; f[5] = g; f[6] = b; f[7] = showVort ? 2.0 : 1.0; // dyeColor (w = vort flag)
+            f[8] = forceRadius; f[9] = dyeIntensity; f[10] = dt; f[11] = active ? 1.0 : 0.0; // params
+            u[12] = N;                   // gridSize
+            device.queue.writeBuffer(uniformBuffer, 0, buf);
+        }
+
+        let step = 0;
+        let lastTime = performance.now();
+        let fpsCounter = 0;
+        let fpsTime = performance.now();
+
+        function frame() {
+            requestAnimationFrame(frame);
+            if (paused) return;
+
+            const now = performance.now();
+            const dt = Math.min((now - lastTime) / 1000, 0.033);
+            lastTime = now;
+
+            fpsCounter++;
+            if (now - fpsTime > 500) {
+                document.getElementById('fps').textContent = Math.round(fpsCounter / ((now - fpsTime) / 1000));
+                fpsCounter = 0;
+                fpsTime = now;
+            }
+
+            const dx = mouseX - prevMouseX;
+            const dy = mouseY - prevMouseY;
+            prevMouseX = mouseX;
+            prevMouseY = mouseY;
+
+            // Cycle hue for rainbow dye
+            hue += dt * 40;
+            const h = (hue % 360) / 60;
+            const hi = Math.floor(h);
+            const f = h - hi;
+            let r = 0, g = 0, b = 0;
+            switch (hi % 6) {
+                case 0: r = 1; g = f; b = 0; break;
+                case 1: r = 1 - f; g = 1; b = 0; break;
+                case 2: r = 0; g = 1; b = f; break;
+                case 3: r = 0; g = 1 - f; b = 1; break;
+                case 4: r = f; g = 0; b = 1; break;
+                case 5: r = 1; g = 0; b = 1 - f; break;
+            }
+
+            writeUniforms(mouseX, mouseY, dx, dy, r, g, b, dt, mouseDown, showVorticity);
+
+            const s = step % 2;
+            const enc = device.createCommandEncoder();
+
+            // 1. Add forces
+            {
+                const bg = device.createBindGroup({
+                    layout: addForcePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: velBuffers[s] } },
+                        { binding: 1, resource: { buffer: dyeBuffers[s] } },
+                        { binding: 2, resource: { buffer: uniformBuffer } }
+                    ]
+                });
+                const pass = enc.beginComputePass();
+                pass.setPipeline(addForcePipeline);
+                pass.setBindGroup(0, bg);
+                pass.dispatchWorkgroups(wg, wg);
+                pass.end();
+            }
+
+            // 2. Advect velocity
+            {
+                const bg = device.createBindGroup({
+                    layout: advectPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: velBuffers[s] } },
+                        { binding: 1, resource: { buffer: velBuffers[s] } },
+                        { binding: 2, resource: { buffer: velBuffers[1 - s] } },
+                        { binding: 3, resource: { buffer: uniformBuffer } }
+                    ]
+                });
+                const pass = enc.beginComputePass();
+                pass.setPipeline(advectPipeline);
+                pass.setBindGroup(0, bg);
+                pass.dispatchWorkgroups(wg, wg);
+                pass.end();
+            }
+
+            // 3. Advect dye
+            {
+                // Recreate pipeline with current dissipation
+                const dyeCode = `
+                    struct Uniforms {
+                        mousePos: vec2f,
+                        mouseDelta: vec2f,
+                        dyeColor: vec4f,
+                        params: vec4f,
+                        gridSize: u32,
+                    }
+                    @group(0) @binding(0) var<storage, read> velIn: array<vec2f>;
+                    @group(0) @binding(1) var<storage, read> dyeIn: array<vec4f>;
+                    @group(0) @binding(2) var<storage, read_write> dyeOut: array<vec4f>;
+                    @group(0) @binding(3) var<uniform> u: Uniforms;
+
+                    fn sampleBilinearDye(field: ptr<storage, array<vec4f>, read>, pos: vec2f, size: u32) -> vec4f {
+                        let s = f32(size);
+                        let p = clamp(pos, vec2f(0.5), vec2f(s - 1.5));
+                        let x0 = u32(floor(p.x));
+                        let y0 = u32(floor(p.y));
+                        let x1 = min(x0 + 1u, size - 1u);
+                        let y1 = min(y0 + 1u, size - 1u);
+                        let fx = fract(p.x);
+                        let fy = fract(p.y);
+                        let v00 = (*field)[y0 * size + x0];
+                        let v10 = (*field)[y0 * size + x1];
+                        let v01 = (*field)[y1 * size + x0];
+                        let v11 = (*field)[y1 * size + x1];
+                        return mix(mix(v00, v10, fx), mix(v01, v11, fx), fy);
+                    }
+
+                    @compute @workgroup_size(16, 16)
+                    fn main(@builtin(global_invocation_id) id: vec3u) {
+                        if (id.x >= u.gridSize || id.y >= u.gridSize) { return; }
+                        let idx = id.y * u.gridSize + id.x;
+                        let pos = vec2f(f32(id.x), f32(id.y));
+                        let vel = velIn[idx];
+                        let dt = u.params.z;
+                        let backPos = pos - vel * dt;
+                        dyeOut[idx] = sampleBilinearDye(&dyeIn, backPos, u.gridSize) * ${dissipation.toFixed(4)};
+                    }
+                `;
+                const pl = device.createComputePipeline({
+                    layout: 'auto',
+                    compute: { module: device.createShaderModule({ code: dyeCode }), entryPoint: 'main' }
+                });
+                const bg = device.createBindGroup({
+                    layout: pl.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: velBuffers[1 - s] } },
+                        { binding: 1, resource: { buffer: dyeBuffers[s] } },
+                        { binding: 2, resource: { buffer: dyeBuffers[1 - s] } },
+                        { binding: 3, resource: { buffer: uniformBuffer } }
+                    ]
+                });
+                const pass = enc.beginComputePass();
+                pass.setPipeline(pl);
+                pass.setBindGroup(0, bg);
+                pass.dispatchWorkgroups(wg, wg);
+                pass.end();
+            }
+
+            // 4. Divergence
+            {
+                const bg = device.createBindGroup({
+                    layout: divergencePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: velBuffers[1 - s] } },
+                        { binding: 1, resource: { buffer: divergenceBuffer } },
+                        { binding: 2, resource: { buffer: uniformBuffer } }
+                    ]
+                });
+                const pass = enc.beginComputePass();
+                pass.setPipeline(divergencePipeline);
+                pass.setBindGroup(0, bg);
+                pass.dispatchWorkgroups(wg, wg);
+                pass.end();
+            }
+
+            // 5. Pressure solve (Jacobi iterations)
+            // Clear pressure
+            {
+                const zeroP = new Float32Array(cellCount);
+                device.queue.writeBuffer(pressureBuffers[0], 0, zeroP);
+                device.queue.writeBuffer(pressureBuffers[1], 0, zeroP);
+            }
+
+            for (let i = 0; i < 30; i++) {
+                const pIn = i % 2;
+                const bg = device.createBindGroup({
+                    layout: jacobiPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: pressureBuffers[pIn] } },
+                        { binding: 1, resource: { buffer: pressureBuffers[1 - pIn] } },
+                        { binding: 2, resource: { buffer: divergenceBuffer } },
+                        { binding: 3, resource: { buffer: uniformBuffer } }
+                    ]
+                });
+                const pass = enc.beginComputePass();
+                pass.setPipeline(jacobiPipeline);
+                pass.setBindGroup(0, bg);
+                pass.dispatchWorkgroups(wg, wg);
+                pass.end();
+            }
+
+            // 6. Subtract pressure gradient
+            {
+                const finalP = 30 % 2;
+                const bg = device.createBindGroup({
+                    layout: projectPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: velBuffers[1 - s] } },
+                        { binding: 1, resource: { buffer: pressureBuffers[finalP] } },
+                        { binding: 2, resource: { buffer: uniformBuffer } }
+                    ]
+                });
+                const pass = enc.beginComputePass();
+                pass.setPipeline(projectPipeline);
+                pass.setBindGroup(0, bg);
+                pass.dispatchWorkgroups(wg, wg);
+                pass.end();
+            }
+
+            // 7. Render
+            {
+                const bg = device.createBindGroup({
+                    layout: renderPipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: dyeBuffers[1 - s] } },
+                        { binding: 1, resource: { buffer: velBuffers[1 - s] } },
+                        { binding: 2, resource: outTexture.createView() },
+                        { binding: 3, resource: { buffer: uniformBuffer } }
+                    ]
+                });
+                const pass = enc.beginComputePass();
+                pass.setPipeline(renderPipeline);
+                pass.setBindGroup(0, bg);
+                pass.dispatchWorkgroups(wg, wg);
+                pass.end();
+            }
+
+            // 8. Display
+            {
+                const pass = enc.beginRenderPass({
+                    colorAttachments: [{
+                        view: context.getCurrentTexture().createView(),
+                        loadOp: 'clear', storeOp: 'store'
+                    }]
+                });
+                pass.setPipeline(displayPipeline);
+                pass.setBindGroup(0, dispBG);
+                pass.draw(4);
+                pass.end();
+            }
+
+            device.queue.submit([enc.finish()]);
+            step++;
+        }
+
+        // Mouse handling
+        canvas.addEventListener('mousedown', (e) => {
+            mouseDown = true;
+            const rect = canvas.getBoundingClientRect();
+            mouseX = ((e.clientX - rect.left) / rect.width) * N;
+            mouseY = ((e.clientY - rect.top) / rect.height) * N;
+            prevMouseX = mouseX;
+            prevMouseY = mouseY;
+        });
+        canvas.addEventListener('mouseup', () => mouseDown = false);
+        canvas.addEventListener('mouseleave', () => mouseDown = false);
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            mouseX = ((e.clientX - rect.left) / rect.width) * N;
+            mouseY = ((e.clientY - rect.top) / rect.height) * N;
+        });
+
+        // Touch support
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            mouseDown = true;
+            const rect = canvas.getBoundingClientRect();
+            const t = e.touches[0];
+            mouseX = ((t.clientX - rect.left) / rect.width) * N;
+            mouseY = ((t.clientY - rect.top) / rect.height) * N;
+            prevMouseX = mouseX;
+            prevMouseY = mouseY;
+        });
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const t = e.touches[0];
+            mouseX = ((t.clientX - rect.left) / rect.width) * N;
+            mouseY = ((t.clientY - rect.top) / rect.height) * N;
+        });
+        canvas.addEventListener('touchend', () => mouseDown = false);
+
+        // Controls
+        document.getElementById('viscosity').addEventListener('input', (e) => {
+            viscosity = parseFloat(e.target.value);
+            document.getElementById('viscVal').textContent = viscosity.toFixed(4);
+        });
+        document.getElementById('dissipation').addEventListener('input', (e) => {
+            dissipation = parseFloat(e.target.value);
+            document.getElementById('dissVal').textContent = dissipation.toFixed(2);
+        });
+        document.getElementById('radius').addEventListener('input', (e) => {
+            forceRadius = parseInt(e.target.value);
+            document.getElementById('radiusVal').textContent = forceRadius;
+        });
+        document.getElementById('dyeIntensity').addEventListener('input', (e) => {
+            dyeIntensity = parseFloat(e.target.value);
+            document.getElementById('dyeVal').textContent = dyeIntensity.toFixed(1);
+        });
+        document.getElementById('showVorticity').addEventListener('change', (e) => {
+            showVorticity = e.target.checked;
+        });
+
+        window.resetSim = () => { clearBuffers(); step = 0; };
+        window.togglePause = () => { paused = !paused; lastTime = performance.now(); };
+
+        requestAnimationFrame(frame);
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>
