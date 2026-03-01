@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CCAB (Claude Code and Algorithmic Beauty)** - A comprehensive showcase of 4,000+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
+**CCAB (Claude Code and Algorithmic Beauty)** - A comprehensive showcase of 4,200+ interactive web visualizations spanning vanilla JavaScript, modern graphics frameworks, and cutting-edge web technologies.
 
 This is a **static HTML/CSS/JavaScript** project with no build system, no dependencies, and no package manager. All demos are self-contained HTML files that can be opened directly in a browser.
 
@@ -14,7 +14,7 @@ This is a **static HTML/CSS/JavaScript** project with no build system, no depend
 
 The project follows a two-tier navigation structure:
 
-1. **Main Index** (`index.html`): Landing page with 179 galleries organized into 8 sections
+1. **Main Index** (`index.html`): Landing page with 183 galleries organized into 18 sections
 2. **Gallery Indexes**: Each category has its own `index.html` linking to individual demos
 3. **Individual Demos**: Self-contained HTML files with inline CSS/JavaScript
 
@@ -26,7 +26,7 @@ The project follows a two-tier navigation structure:
 
 ```
 ccab/
-├── index.html                      # Main landing page (179 galleries, 4,000+ demos)
+├── index.html                      # Main landing page (183 galleries, 4,200+ demos)
 ├── threejs/                        # Multi-demo gallery example
 │   ├── index.html                  # Gallery index listing demos
 │   ├── 01-rotating-cube.html       # Individual demo
@@ -84,6 +84,10 @@ ccab/
 * `webassembly/` - High-performance WASM (13 demos)
 
 * `complex-showcases/` - Ray tracers, terrain, galaxies (15 demos)
+
+**Added later (1):**
+
+* `theocratic-revolutions/` - Illustrated interactive timelines of 6 major theocratic revolutions (Taiping Rebellion, Mahdist State, Sokoto Caliphate, Taliban, Savonarola's Florence, Iran) — vanilla JS, no external libraries
 
 ## Key Implementation Patterns
 
@@ -514,7 +518,7 @@ When demos are added/removed, update the stats in `index.html` (organic-nature f
     </div>
     <div class="stat">
         <div class="stat-number">183</div>
-        <div class="stat-label">Galleries</div>
+        <div class="stat-label">Collections</div>
     </div>
     <!-- Add more stat blocks as needed -->
 </div>
@@ -653,6 +657,7 @@ This project evolved through:
    * Each collection has proper gallery index + numbered demos
 
    * Reduced gallery count from 302 to 179
-10. **Current state**: 4,000+ demos across 179 galleries with consistent organic-nature design
+10. **Theocratic Revolutions** (Mar 2026): Added History & Civilization gallery with 6 illustrated interactive timelines covering major theocratic revolutions, using vanilla JS and no external libraries
+11. **Current state**: 4,200+ demos across 183 galleries with consistent organic-nature design
 
 Success pattern: Graphics frameworks outperformed physics simulations (68% success rate overall).

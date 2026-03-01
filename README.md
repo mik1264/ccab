@@ -1,6 +1,6 @@
 # CCAB - Claude Code and Algorithmic Beauty
 
-> **3,713 Interactive Web Visualizations** across 228 galleries showcasing the creative possibilities of modern web technologies
+> **4,200+ Interactive Web Visualizations** across 183 galleries showcasing the creative possibilities of modern web technologies
 
 A comprehensive collection of creative coding demonstrations spanning vanilla JavaScript, advanced graphics frameworks, scientific simulations, and cutting-edge web APIs. All demos are self-contained HTML files requiring no build process—just open and explore.
 
@@ -14,11 +14,11 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 
 ## 📖 Complete Documentation
 
-**[→ View the Master Catalog](documentation/MASTER_CATALOG.md)** - Comprehensive listing of all 3,713 demos across 228 galleries
+**[→ View the Master Catalog](documentation/MASTER_CATALOG.md)** - Comprehensive listing of all 4,200+ demos across 183 galleries
 
 ## 🎨 What's Inside
 
-### 228 Galleries • 3,713 Visualizations
+### 183 Galleries • 4,200+ Visualizations
 
 **Core Graphics & 3D (11 galleries, 200+ demos)**
 - 🎭 **Three.js** - 3D models, particles, advanced shader effects (36 demos)
@@ -63,6 +63,9 @@ A comprehensive collection of creative coding demonstrations spanning vanilla Ja
 - 👁️ **Optical Illusions** - Motion illusions, moire patterns (13 demos)
 - 〰️ **Lissajous** - Interactive parametric curve generator (1 demo)
 - 🍂 **Autumn Leaf Visualizations** - Seasonal physics (20 demos)
+
+**History & Civilization (1 gallery, 6 demos)**
+- 🏛️ **Theocratic Revolutions** - Illustrated interactive timelines: Taiping Rebellion, Mahdist State, Sokoto Caliphate, Taliban, Savonarola's Florence, Iran (6 demos)
 
 ## 🎯 Features
 
@@ -158,9 +161,9 @@ Explore cutting-edge techniques:
 
 ## 📊 Statistics
 
-- **Total Visualizations**: 3,713
-- **Galleries**: 228
-- **Technologies**: 10+ frameworks/APIs
+- **Total Visualizations**: 4,200+
+- **Galleries**: 183
+- **Technologies**: 15+ frameworks/APIs
 - **Largest Gallery**: Surprising Paradoxes (514 demos)
 - **Lines of Code**: 200,000+
 - **Browser Compatibility**: Modern evergreen browsers
@@ -302,4 +305,4 @@ Built with:
 
 **Explore. Learn. Create.** 🚀
 
-*3,713 interactive visualizations across 228 galleries demonstrating the creative possibilities of web technologies*
+*4,200+ interactive visualizations across 183 galleries demonstrating the creative possibilities of web technologies*
