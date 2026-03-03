@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matching Symphony</title>
+<link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600&family=Nunito:wght@300;400;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0d1117; color:#e6edf3; font-family:'Nunito',sans-serif; overflow:hidden; }
+canvas { display:block; }
+.back-link { position:fixed; top:16px; left:16px; background:rgba(22,27,34,0.9); border:1px solid #30363d; color:#58a6ff; text-decoration:none; padding:8px 14px; border-radius:20px; font-size:13px; font-weight:600; backdrop-filter:blur(8px); z-index:100; transition:background 0.2s; }
+.back-link:hover { background:#30363d; }
+.info { position:fixed; top:60px; left:16px; background:rgba(13,17,23,0.88); border:1px solid #30363d; border-radius:10px; padding:12px 16px; z-index:50; max-width:280px; backdrop-filter:blur(8px); }
+.info h2 { font-family:'Lora',serif; font-size:15px; color:#58a6ff; margin-bottom:4px; }
+.info p { font-size:12px; color:#8b949e; line-height:1.4; }
+#start-overlay { position:fixed; inset:0; background:rgba(13,17,23,0.95); display:flex; align-items:center; justify-content:center; z-index:200; cursor:pointer; }
+#start-overlay .prompt { text-align:center; }
+#start-overlay h1 { font-family:'Lora',serif; color:#58a6ff; font-size:28px; margin-bottom:12px; }
+#start-overlay p { color:#8b949e; font-size:16px; }
+#start-overlay .pulse { display:inline-block; width:80px; height:80px; border-radius:50%; background:rgba(88,166,255,0.15); border:2px solid #58a6ff; margin-bottom:20px; animation: pulse-ring 2s ease-in-out infinite; }
+@keyframes pulse-ring { 0%,100% { transform:scale(1); opacity:0.6; } 50% { transform:scale(1.2); opacity:1; } }
+</style>
+</head>
+<body>
+<a href="../gale-shapley-visual/index.html" class="back-link">← Visual Gallery</a>
+<div class="info">
+<h2>Matching Symphony</h2>
+<p>Each matched pair plays a harmonic interval. Unstable matchings produce dissonance; the stable matching resolves to a perfect chord — the sound of algorithmic beauty.</p>
+</div>
+<div id="start-overlay">
+<div class="prompt">
+<div class="pulse"></div>
+<h1>Matching Symphony</h1>
+<p>Click anywhere to begin</p>
+</div>
+</div>
+
+<script>
+let audioCtx = null;
+let oscillators = [];
+let gains = [];
+let analyser = null;
+let waveData = null;
+let started = false;
+let matchPhase = 0; // 0=building, 1=dissonant, 2=resolving, 3=consonant
+let phaseTimer = 0;
+let phaseDuration = [180, 180, 60, 240]; // frames per phase
+
+const N = 5;
+let menPrefs = [], womenPrefs = [];
+let stableMatching = [];
+let currentMatching = [];
+let barHeights = { men: [], women: [] };
+let matchLines = [];
+let lineAlpha = 0;
+
+// Musical intervals (frequency ratios for consonance)
+const consonantRatios = [1, 5/4, 4/3, 3/2, 5/3]; // unison, major 3rd, 4th, 5th, major 6th
+const dissonantRatios = [16/15, 7/5, 7/4, 11/8, 13/8]; // minor 2nd, tritone, etc
+
+function generatePreferences() {
+    menPrefs = []; womenPrefs = [];
+    for (let i = 0; i < N; i++) {
+        let a = [0,1,2,3,4];
+        for (let j = a.length - 1; j > 0; j--) { let k = Math.floor(Math.random()*(j+1)); [a[j],a[k]]=[a[k],a[j]]; }
+        menPrefs.push([...a]);
+        let b = [0,1,2,3,4];
+        for (let j = b.length - 1; j > 0; j--) { let k = Math.floor(Math.random()*(j+1)); [b[j],b[k]]=[b[k],b[j]]; }
+        womenPrefs.push([...b]);
+    }
+}
+
+function runGaleShapley() {
+    let menPartner = Array(N).fill(-1);
+    let womenPartner = Array(N).fill(-1);
+    let menNext = Array(N).fill(0);
+    let free = [...Array(N).keys()];
+    while (free.length > 0) {
+        let m = free[0];
+        let w = menPrefs[m][menNext[m]];
+        menNext[m]++;
+        if (womenPartner[w] === -1) {
+            menPartner[m] = w; womenPartner[w] = m; free.shift();
+        } else {
+            let curr = womenPartner[w];
+            if (womenPrefs[w].indexOf(m) < womenPrefs[w].indexOf(curr)) {
+                menPartner[m] = w; womenPartner[w] = m; menPartner[curr] = -1; free.shift(); free.push(curr);
+            }
+        }
+    }
+    return menPartner;
+}
+
+function randomMatching() {
+    let ws = [0,1,2,3,4];
+    for (let j = ws.length - 1; j > 0; j--) { let k = Math.floor(Math.random()*(j+1)); [ws[j],ws[k]]=[ws[k],ws[j]]; }
+    return ws;
+}
+
+function initAudio() {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    waveData = new Uint8Array(analyser.frequencyBinCount);
+    analyser.connect(audioCtx.destination);
+
+    for (let i = 0; i < N; i++) {
+        let osc = audioCtx.createOscillator();
+        let gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = 0;
+        gain.gain.value = 0;
+        osc.connect(gain);
+        gain.connect(analyser);
+        osc.start();
+        oscillators.push(osc);
+        gains.push(gain);
+    }
+}
+
+function setFrequencies(matching, dissonant) {
+    const baseFreq = 220;
+    for (let i = 0; i < N; i++) {
+        let w = matching[i];
+        let ratios = dissonant ? dissonantRatios : consonantRatios;
+        let freq = baseFreq * ratios[i] * (1 + w * 0.05);
+        oscillators[i].frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.3);
+        gains[i].gain.setTargetAtTime(0.06, audioCtx.currentTime, 0.2);
+    }
+}
+
+function silenceAll() {
+    for (let i = 0; i < N; i++) {
+        gains[i].gain.setTargetAtTime(0, audioCtx.currentTime, 0.3);
+    }
+}
+
+document.getElementById('start-overlay').addEventListener('click', function() {
+    this.style.display = 'none';
+    started = true;
+    generatePreferences();
+    stableMatching = runGaleShapley();
+    currentMatching = randomMatching();
+    for (let i = 0; i < N; i++) {
+        barHeights.men[i] = 0;
+        barHeights.women[i] = 0;
+    }
+    initAudio();
+    setFrequencies(currentMatching, true);
+});
+
+function setup() {
+    createCanvas(windowWidth, windowHeight);
+    noStroke();
+    textFont('Nunito');
+}
+
+function windowResized() {
+    resizeCanvas(windowWidth, windowHeight);
+}
+
+function draw() {
+    background(13, 17, 23);
+    if (!started) return;
+
+    phaseTimer++;
+    let pd = phaseDuration[matchPhase];
+
+    if (phaseTimer >= pd) {
+        phaseTimer = 0;
+        matchPhase = (matchPhase + 1) % 4;
+        if (matchPhase === 0) {
+            generatePreferences();
+            stableMatching = runGaleShapley();
+            currentMatching = randomMatching();
+        }
+        if (matchPhase === 1) setFrequencies(currentMatching, true);
+        if (matchPhase === 2) {
+            currentMatching = [...stableMatching];
+            setFrequencies(stableMatching, false);
+        }
+        if (matchPhase === 3) {} // continue consonant
+    }
+
+    let cx = width / 2;
+    let cy = height / 2;
+
+    // Draw waveform in center
+    if (analyser) {
+        analyser.getByteTimeDomainData(waveData);
+        let waveW = width * 0.4;
+        let waveH = 120;
+        let waveX = cx - waveW / 2;
+        let waveY = cy - waveH / 2;
+
+        noFill();
+        beginShape();
+        for (let i = 0; i < waveData.length; i += 4) {
+            let x = waveX + (i / waveData.length) * waveW;
+            let v = (waveData[i] / 128.0) - 1.0;
+            let y = waveY + waveH / 2 + v * waveH / 2;
+            let col;
+            if (matchPhase <= 1) {
+                col = lerpColor(color(255, 80, 80, 100), color(255, 160, 60, 100), i / waveData.length);
+            } else {
+                col = lerpColor(color(88, 166, 255, 120), color(180, 120, 255, 120), i / waveData.length);
+            }
+            stroke(col);
+            strokeWeight(2);
+            vertex(x, y);
+        }
+        endShape();
+    }
+
+    noStroke();
+
+    // Men bars (left)
+    let barW = 30;
+    let barSpacing = 20;
+    let leftX = cx - width * 0.3;
+    let bottomY = cy + 100;
+
+    for (let i = 0; i < N; i++) {
+        let targetH = 40 + (N - i) * 30 + sin(frameCount * 0.05 + i) * 15;
+        barHeights.men[i] = lerp(barHeights.men[i], targetH, 0.08);
+        let h = barHeights.men[i];
+        let x = leftX + i * (barW + barSpacing);
+
+        // Glow
+        for (let g = 3; g >= 0; g--) {
+            fill(56, 120, 255, 10 + g * 5);
+            rect(x - g*2, bottomY - h - g*2, barW + g*4, h + g*4, 4);
+        }
+        // Bar
+        let c = lerpColor(color(40, 80, 200), color(100, 160, 255), sin(frameCount * 0.03 + i) * 0.5 + 0.5);
+        fill(c);
+        rect(x, bottomY - h, barW, h, 4);
+    }
+
+    // Women bars (right)
+    let rightX = cx + width * 0.15;
+    for (let i = 0; i < N; i++) {
+        let targetH = 40 + (N - i) * 30 + sin(frameCount * 0.05 + i + PI) * 15;
+        barHeights.women[i] = lerp(barHeights.women[i], targetH, 0.08);
+        let h = barHeights.women[i];
+        let x = rightX + i * (barW + barSpacing);
+
+        for (let g = 3; g >= 0; g--) {
+            fill(160, 80, 255, 10 + g * 5);
+            rect(x - g*2, bottomY - h - g*2, barW + g*4, h + g*4, 4);
+        }
+        let c = lerpColor(color(140, 60, 200), color(200, 130, 255), sin(frameCount * 0.03 + i + 1) * 0.5 + 0.5);
+        fill(c);
+        rect(x, bottomY - h, barW, h, 4);
+    }
+
+    // Draw matching lines
+    let matching = (matchPhase >= 2) ? stableMatching : currentMatching;
+    let targetAlpha = (matchPhase === 0) ? 0 : (matchPhase === 2 ? min(phaseTimer / 30, 1) : 1);
+    lineAlpha = lerp(lineAlpha, targetAlpha, 0.05);
+
+    for (let m = 0; m < N; m++) {
+        let w = matching[m];
+        let x1 = leftX + m * (barW + barSpacing) + barW / 2;
+        let y1 = bottomY - barHeights.men[m];
+        let x2 = rightX + w * (barW + barSpacing) + barW / 2;
+        let y2 = bottomY - barHeights.women[w];
+
+        let midX = (x1 + x2) / 2;
+        let midY = min(y1, y2) - 40 - m * 10;
+
+        if (matchPhase >= 2) {
+            stroke(88, 255, 160, lineAlpha * 180);
+        } else {
+            stroke(255, 120, 80, lineAlpha * 100);
+        }
+        strokeWeight(2);
+        noFill();
+        beginShape();
+        curveVertex(x1, y1);
+        curveVertex(x1, y1);
+        curveVertex(midX, midY);
+        curveVertex(x2, y2);
+        curveVertex(x2, y2);
+        endShape();
+    }
+    noStroke();
+
+    // Phase label
+    let labels = ['Building...', 'Dissonant Matching', 'Resolving...', 'Stable Harmony'];
+    let labelColors = [color(139,148,158), color(255,100,80), color(255,200,80), color(88,255,160)];
+    fill(labelColors[matchPhase]);
+    textAlign(CENTER, CENTER);
+    textSize(18);
+    textFont('Lora');
+    text(labels[matchPhase], cx, cy + 170);
+
+    // Progress bar
+    let prog = phaseTimer / pd;
+    fill(30, 36, 45);
+    rect(cx - 100, cy + 195, 200, 4, 2);
+    fill(labelColors[matchPhase]);
+    rect(cx - 100, cy + 195, 200 * prog, 4, 2);
+
+    // Labels
+    textFont('Nunito');
+    textSize(12);
+    fill(139, 148, 158);
+    text('Men', leftX + (N * (barW + barSpacing)) / 2, bottomY + 25);
+    text('Women', rightX + (N * (barW + barSpacing)) / 2, bottomY + 25);
+}
+</script>
+</body>
+</html>

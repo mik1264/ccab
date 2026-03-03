@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Globe Matching Network</title>
+<link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;600&family=Nunito:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0d1117; color:#e6edf3; font-family:'Nunito',sans-serif; overflow:hidden; }
+canvas { display:block; }
+.back-link { position:fixed; top:16px; left:16px; background:rgba(22,27,34,0.9); border:1px solid #30363d; color:#58a6ff; text-decoration:none; padding:8px 14px; border-radius:20px; font-size:13px; font-weight:600; backdrop-filter:blur(8px); z-index:100; transition:background 0.2s; }
+.back-link:hover { background:#30363d; }
+.info { position:fixed; top:60px; left:16px; background:rgba(13,17,23,0.88); border:1px solid #30363d; border-radius:10px; padding:12px 16px; z-index:50; max-width:280px; backdrop-filter:blur(8px); }
+.info h2 { font-family:'Lora',serif; font-size:15px; color:#58a6ff; margin-bottom:4px; }
+.info p { font-size:12px; color:#8b949e; line-height:1.4; }
+</style>
+</head>
+<body>
+<a href="../gale-shapley-visual/index.html" class="back-link">← Visual Gallery</a>
+<div class="info">
+<h2>Globe Matching Network</h2>
+<p>A 3D globe where NRMP-style medical matching is shown as arcs between cities. Each arc glows with the preference intensity of that hospital-doctor pairing.</p>
+</div>
+<script src="https://unpkg.com/three@0.158.0/build/three.min.js"></script>
+<script>
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 100);
+camera.position.z = 3.2;
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setClearColor(0x0d1117);
+document.body.appendChild(renderer.domElement);
+
+// Globe
+const globeGeo = new THREE.SphereGeometry(1, 64, 64);
+const globeMat = new THREE.MeshPhongMaterial({
+    color: 0x0a1628,
+    transparent: true,
+    opacity: 0.85,
+    shininess: 30
+});
+const globe = new THREE.Mesh(globeGeo, globeMat);
+scene.add(globe);
+
+// Grid lines (lat/lon)
+const gridMat = new THREE.LineBasicMaterial({ color: 0x1a3050, transparent: true, opacity: 0.4 });
+for (let lat = -60; lat <= 60; lat += 30) {
+    const pts = [];
+    const r = Math.cos(lat * Math.PI/180);
+    const y = Math.sin(lat * Math.PI/180);
+    for (let lon = 0; lon <= 360; lon += 5) {
+        const rad = lon * Math.PI/180;
+        pts.push(new THREE.Vector3(r * Math.cos(rad) * 1.002, y * 1.002, r * Math.sin(rad) * 1.002));
+    }
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    scene.add(new THREE.Line(geo, gridMat));
+}
+for (let lon = 0; lon < 360; lon += 30) {
+    const pts = [];
+    const rad = lon * Math.PI/180;
+    for (let lat = -90; lat <= 90; lat += 5) {
+        const lr = lat * Math.PI/180;
+        pts.push(new THREE.Vector3(Math.cos(lr)*Math.cos(rad)*1.002, Math.sin(lr)*1.002, Math.cos(lr)*Math.sin(rad)*1.002));
+    }
+    const geo = new THREE.BufferGeometry().setFromPoints(pts);
+    scene.add(new THREE.Line(geo, gridMat));
+}
+
+// Cities (hospitals & doctors) on globe surface
+const cityCoords = [
+    [40.7, -74.0], [51.5, -0.1], [35.7, 139.7], [-33.9, 151.2], [48.9, 2.3],
+    [55.8, 37.6], [39.9, 116.4], [-23.5, -46.6], [28.6, 77.2], [37.6, 127.0]
+];
+const cityColors = [0x58a6ff, 0x58a6ff, 0x58a6ff, 0x58a6ff, 0x58a6ff,
+                     0xd2a8ff, 0xd2a8ff, 0xd2a8ff, 0xd2a8ff, 0xd2a8ff];
+const cityNames = ['New York','London','Tokyo','Sydney','Paris','Moscow','Beijing','Sao Paulo','Delhi','Seoul'];
+
+function latLonToVec3(lat, lon, r) {
+    const phi = (90 - lat) * Math.PI/180;
+    const theta = (lon + 180) * Math.PI/180;
+    return new THREE.Vector3(
+        -r * Math.sin(phi) * Math.cos(theta),
+        r * Math.cos(phi),
+        r * Math.sin(phi) * Math.sin(theta)
+    );
+}
+
+const cityMeshes = [];
+cityCoords.forEach((c, i) => {
+    const pos = latLonToVec3(c[0], c[1], 1.02);
+    const geo = new THREE.SphereGeometry(0.025, 16, 16);
+    const mat = new THREE.MeshBasicMaterial({ color: cityColors[i] });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(pos);
+    scene.add(mesh);
+    cityMeshes.push(mesh);
+
+    // Glow
+    const glowGeo = new THREE.SphereGeometry(0.045, 16, 16);
+    const glowMat = new THREE.MeshBasicMaterial({ color: cityColors[i], transparent: true, opacity: 0.2 });
+    const glow = new THREE.Mesh(glowGeo, glowMat);
+    glow.position.copy(pos);
+    scene.add(glow);
+});
+
+// Stable matching: simple pairing of hospitals (0-4) with doctors (5-9)
+const matching = [[0,7],[1,5],[2,9],[3,6],[4,8]];
+const prefRanks = [1,2,1,3,2]; // preference intensity
+
+// Arcs
+const arcGroups = [];
+matching.forEach((pair, idx) => {
+    const p1 = latLonToVec3(cityCoords[pair[0]][0], cityCoords[pair[0]][1], 1.02);
+    const p2 = latLonToVec3(cityCoords[pair[1]][0], cityCoords[pair[1]][1], 1.02);
+    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+    const height = 1.0 + 0.3 * (1/prefRanks[idx]);
+    mid.normalize().multiplyScalar(height);
+
+    const curve = new THREE.QuadraticBezierCurve3(p1, mid, p2);
+    const points = curve.getPoints(60);
+    const geo = new THREE.BufferGeometry().setFromPoints(points);
+
+    const hue = idx / matching.length;
+    const col = new THREE.Color().setHSL(0.55 + hue * 0.15, 0.8, 0.6);
+    const mat = new THREE.LineBasicMaterial({
+        color: col,
+        transparent: true,
+        opacity: 0.8,
+        linewidth: 2
+    });
+    const line = new THREE.Line(geo, mat);
+    scene.add(line);
+
+    // Particle on arc
+    const dotGeo = new THREE.SphereGeometry(0.015, 8, 8);
+    const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const dot = new THREE.Mesh(dotGeo, dotMat);
+    scene.add(dot);
+
+    arcGroups.push({ curve, line, dot, speed: 0.3 + idx * 0.05, offset: idx * 0.2 });
+});
+
+// Atmosphere glow
+const atmosGeo = new THREE.SphereGeometry(1.08, 64, 64);
+const atmosMat = new THREE.MeshBasicMaterial({
+    color: 0x1a5090,
+    transparent: true,
+    opacity: 0.08,
+    side: THREE.BackSide
+});
+scene.add(new THREE.Mesh(atmosGeo, atmosMat));
+
+// Lighting
+scene.add(new THREE.AmbientLight(0x334455, 0.8));
+const dirLight = new THREE.DirectionalLight(0x88aaff, 0.6);
+dirLight.position.set(2, 2, 3);
+scene.add(dirLight);
+
+const globeGroup = new THREE.Group();
+scene.children.forEach(c => { if (c !== camera) globeGroup.add(c); });
+// Re-add to scene via group
+scene.add(globeGroup);
+
+let t = 0;
+function animate() {
+    requestAnimationFrame(animate);
+    t += 0.005;
+
+    globeGroup.rotation.y = t * 0.3;
+
+    arcGroups.forEach(a => {
+        const pos = (t * a.speed + a.offset) % 1;
+        const pt = a.curve.getPoint(pos);
+        a.dot.position.copy(pt);
+        a.dot.position.applyMatrix4(globeGroup.matrixWorld);
+    });
+
+    renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
