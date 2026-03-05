@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Student Agent Generator - Matching Market Mechanics</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #0a0e1a;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+}
+.back-link {
+    position: fixed; top: 10px; left: 10px; padding: 8px 16px;
+    background: rgba(0,0,0,0.7); color: #fbbf24; text-decoration: none;
+    border-radius: 6px; font-size: 14px; z-index: 999;
+}
+.back-link:hover { background: rgba(0,0,0,0.9); }
+#fps {
+    position: fixed; top: 10px; right: 10px; padding: 6px 12px;
+    background: rgba(0,0,0,0.7); color: #4ade80; font-size: 13px;
+    border-radius: 6px; z-index: 999; font-family: monospace;
+}
+#controls {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: rgba(10,14,26,0.95); border-top: 1px solid #1e293b;
+    padding: 10px 16px; z-index: 998; display: flex; align-items: center;
+    gap: 12px; flex-wrap: wrap;
+}
+#controls button {
+    padding: 6px 14px; background: #1e293b; color: #fbbf24;
+    border: 1px solid #334155; border-radius: 6px; cursor: pointer;
+    font-size: 13px; white-space: nowrap;
+}
+#controls button:hover { background: #334155; }
+.archetype-toggle {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 10px; border-radius: 6px; cursor: pointer;
+    font-size: 12px; border: 1px solid #334155; user-select: none;
+    transition: opacity 0.2s;
+}
+.archetype-toggle.off { opacity: 0.3; }
+.archetype-dot {
+    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+}
+.slider-group {
+    display: flex; align-items: center; gap: 6px; font-size: 13px;
+    white-space: nowrap;
+}
+.slider-group input[type=range] {
+    width: 100px; accent-color: #fbbf24;
+}
+#stats-panel {
+    position: fixed; top: 50px; right: 10px; width: 240px;
+    background: rgba(10,14,26,0.92); border: 1px solid #1e293b;
+    border-radius: 8px; padding: 10px; z-index: 998; font-size: 12px;
+    max-height: calc(100vh - 120px); overflow-y: auto;
+}
+#stats-panel h3 { color: #fbbf24; margin-bottom: 8px; font-size: 14px; }
+.stat-row { margin-bottom: 6px; padding: 4px 0; border-bottom: 1px solid #1e293b; }
+.stat-row .label { font-weight: 600; }
+.stat-row .vals { color: #94a3b8; font-family: monospace; font-size: 11px; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&#8592; Back to Gallery</a>
+<div id="fps">-- FPS</div>
+<canvas id="canvas"></canvas>
+
+<div id="stats-panel"><h3>Archetype Statistics</h3><div id="stats-content"></div></div>
+
+<div id="controls">
+    <button id="btn-regen">Regenerate</button>
+    <div class="slider-group">
+        <label>&#961; = <span id="rho-val">0.65</span></label>
+        <input type="range" id="rho-slider" min="0" max="100" value="65">
+    </div>
+    <div id="archetype-toggles"></div>
+</div>
+
+<script>
+(function() {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const fpsEl = document.getElementById('fps');
+
+    // Archetype definitions
+    const ARCHETYPES = [
+        { name: 'STEM Spike',      color: '#f43f5e', gpa: [3.85, 0.12], sat: [1520, 40],  pct: 0.15 },
+        { name: 'Humanities Spike', color: '#a78bfa', gpa: [3.9,  0.10], sat: [1480, 50],  pct: 0.12 },
+        { name: 'Recruited Athlete',color: '#22d3ee', gpa: [3.5,  0.25], sat: [1350, 80],  pct: 0.08 },
+        { name: 'Legacy/Dev',       color: '#fbbf24', gpa: [3.7,  0.20], sat: [1420, 60],  pct: 0.10 },
+        { name: 'First-Gen',        color: '#4ade80', gpa: [3.75, 0.18], sat: [1380, 70],  pct: 0.12 },
+        { name: 'URM',              color: '#fb923c', gpa: [3.7,  0.20], sat: [1360, 75],  pct: 0.10 },
+        { name: 'Well-Rounded',     color: '#60a5fa', gpa: [3.8,  0.15], sat: [1450, 55],  pct: 0.18 },
+        { name: 'Average Strong',   color: '#94a3b8', gpa: [3.6,  0.20], sat: [1400, 65],  pct: 0.15 },
+    ];
+
+    const TOTAL = 4000;
+    let rho = 0.65;
+    let students = [];
+    let visible = ARCHETYPES.map(() => true);
+
+    // Box-Muller transform
+    function randn() {
+        let u, v, s;
+        do { u = Math.random() * 2 - 1; v = Math.random() * 2 - 1; s = u*u + v*v; } while (s >= 1 || s === 0);
+        const m = Math.sqrt(-2 * Math.log(s) / s);
+        return u * m;
+    }
+
+    function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+    function generate() {
+        students = [];
+        const sqrtFactor = Math.sqrt(1 - rho * rho);
+        for (const arch of ARCHETYPES) {
+            const count = Math.round(TOTAL * arch.pct);
+            for (let i = 0; i < count; i++) {
+                const z1 = randn(), z2 = randn();
+                const gpa = clamp(arch.gpa[0] + arch.gpa[1] * z1, 0, 4.0);
+                const sat = clamp(Math.round(arch.sat[0] + arch.sat[1] * (rho * z1 + sqrtFactor * z2)), 400, 1600);
+                students.push({ gpa, sat, arch: ARCHETYPES.indexOf(arch) });
+            }
+        }
+        updateStats();
+    }
+
+    function updateStats() {
+        const container = document.getElementById('stats-content');
+        let html = '';
+        for (let i = 0; i < ARCHETYPES.length; i++) {
+            const a = ARCHETYPES[i];
+            const group = students.filter(s => s.arch === i);
+            const n = group.length;
+            if (n === 0) continue;
+            const gpaM = group.reduce((s, st) => s + st.gpa, 0) / n;
+            const satM = group.reduce((s, st) => s + st.sat, 0) / n;
+            const gpaS = Math.sqrt(group.reduce((s, st) => s + (st.gpa - gpaM) ** 2, 0) / n);
+            const satS = Math.sqrt(group.reduce((s, st) => s + (st.sat - satM) ** 2, 0) / n);
+            html += `<div class="stat-row">
+                <div class="label" style="color:${a.color}">${a.name} (n=${n})</div>
+                <div class="vals">GPA: &#956;=${gpaM.toFixed(2)} &#963;=${gpaS.toFixed(2)}<br>SAT: &#956;=${satM.toFixed(0)} &#963;=${satS.toFixed(0)}</div>
+            </div>`;
+        }
+        html += `<div class="stat-row"><div class="label" style="color:#fff">Total: ${students.length}</div></div>`;
+        container.innerHTML = html;
+    }
+
+    // Layout constants
+    const MARGIN = { top: 50, right: 270, bottom: 80, left: 70 };
+    const HIST_H = 50; // histogram height
+    const GPA_RANGE = [0, 4.0];
+    const SAT_RANGE = [400, 1600];
+
+    function resize() {
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = window.innerWidth * dpr;
+        canvas.height = window.innerHeight * dpr;
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function mapX(gpa) {
+        const w = window.innerWidth - MARGIN.left - MARGIN.right;
+        return MARGIN.left + HIST_H + 6 + (gpa - GPA_RANGE[0]) / (GPA_RANGE[1] - GPA_RANGE[0]) * (w - HIST_H - 6);
+    }
+    function mapY(sat) {
+        const h = window.innerHeight - MARGIN.top - MARGIN.bottom;
+        return MARGIN.top + (1 - (sat - SAT_RANGE[0]) / (SAT_RANGE[1] - SAT_RANGE[0])) * (h - HIST_H - 6);
+    }
+
+    function draw() {
+        const W = window.innerWidth, H = window.innerHeight;
+        const plotL = MARGIN.left + HIST_H + 6;
+        const plotR = W - MARGIN.right;
+        const plotT = MARGIN.top;
+        const plotB = H - MARGIN.bottom - HIST_H - 6;
+        const plotW = plotR - plotL;
+        const plotH = plotB - plotT;
+
+        ctx.clearRect(0, 0, W, H);
+
+        // Title
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = 'bold 18px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText('Student Agent Generator: Demand-Side Scatter', (plotL + plotR) / 2, 30);
+
+        // Grid lines
+        ctx.strokeStyle = '#1e293b';
+        ctx.lineWidth = 1;
+        for (let g = 0; g <= 4; g += 0.5) {
+            const x = plotL + (g / 4) * plotW;
+            ctx.beginPath(); ctx.moveTo(x, plotT); ctx.lineTo(x, plotB); ctx.stroke();
+        }
+        for (let s = 400; s <= 1600; s += 200) {
+            const y = plotT + (1 - (s - 400) / 1200) * plotH;
+            ctx.beginPath(); ctx.moveTo(plotL, y); ctx.lineTo(plotR, y); ctx.stroke();
+        }
+
+        // Axis labels
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '12px system-ui';
+        ctx.textAlign = 'center';
+        for (let g = 0; g <= 4; g += 0.5) {
+            const x = plotL + (g / 4) * plotW;
+            ctx.fillText(g.toFixed(1), x, plotB + HIST_H + 20);
+        }
+        ctx.fillText('GPA', (plotL + plotR) / 2, plotB + HIST_H + 38);
+
+        ctx.textAlign = 'right';
+        for (let s = 400; s <= 1600; s += 200) {
+            const y = plotT + (1 - (s - 400) / 1200) * plotH;
+            ctx.fillText(s.toString(), MARGIN.left + HIST_H - 4, y + 4);
+        }
+        ctx.save();
+        ctx.translate(16, (plotT + plotB) / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.fillText('SAT Score', 0, 0);
+        ctx.restore();
+
+        // Plot border
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(plotL, plotT, plotW, plotH);
+
+        // Build histograms
+        const gpaBins = 40, satBins = 40;
+        const gpaHist = new Float32Array(gpaBins);
+        const satHist = new Float32Array(satBins);
+        const gpaHistByArch = ARCHETYPES.map(() => new Float32Array(gpaBins));
+        const satHistByArch = ARCHETYPES.map(() => new Float32Array(satBins));
+
+        // Draw students
+        const visStudents = students.filter(s => visible[s.arch]);
+        for (const s of visStudents) {
+            const bi = Math.min(Math.floor((s.gpa / 4) * gpaBins), gpaBins - 1);
+            const si = Math.min(Math.floor(((s.sat - 400) / 1200) * satBins), satBins - 1);
+            gpaHist[bi]++;
+            satHist[si]++;
+            gpaHistByArch[s.arch][bi]++;
+            satHistByArch[s.arch][si]++;
+        }
+
+        for (const s of visStudents) {
+            const x = plotL + (s.gpa / 4) * plotW;
+            const y = plotT + (1 - (s.sat - 400) / 1200) * plotH;
+            ctx.fillStyle = ARCHETYPES[s.arch].color;
+            ctx.globalAlpha = 0.55;
+            ctx.beginPath();
+            ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+
+        // GPA histogram (bottom)
+        const gpaMax = Math.max(...gpaHist, 1);
+        const binW = plotW / gpaBins;
+        for (let b = 0; b < gpaBins; b++) {
+            let yOff = 0;
+            for (let a = 0; a < ARCHETYPES.length; a++) {
+                if (!visible[a]) continue;
+                const h = (gpaHistByArch[a][b] / gpaMax) * HIST_H;
+                if (h < 0.5) continue;
+                ctx.fillStyle = ARCHETYPES[a].color;
+                ctx.globalAlpha = 0.7;
+                ctx.fillRect(plotL + b * binW, plotB + 4 + yOff, binW - 1, h);
+                yOff += h;
+            }
+        }
+        ctx.globalAlpha = 1;
+
+        // SAT histogram (left)
+        const satMax = Math.max(...satHist, 1);
+        const binH = plotH / satBins;
+        for (let b = 0; b < satBins; b++) {
+            let xOff = 0;
+            for (let a = 0; a < ARCHETYPES.length; a++) {
+                if (!visible[a]) continue;
+                const w = (satHistByArch[a][b] / satMax) * HIST_H;
+                if (w < 0.5) continue;
+                ctx.fillStyle = ARCHETYPES[a].color;
+                ctx.globalAlpha = 0.7;
+                const y = plotT + plotH - (b + 1) * binH;
+                ctx.fillRect(MARGIN.left + HIST_H - xOff - w, y, w, binH - 1);
+                xOff += w;
+            }
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // FPS
+    let frames = 0, lastFpsTime = performance.now();
+    function loop() {
+        frames++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 1000) {
+            fpsEl.textContent = frames + ' FPS';
+            frames = 0;
+            lastFpsTime = now;
+        }
+        draw();
+        requestAnimationFrame(loop);
+    }
+
+    // Controls
+    function buildToggles() {
+        const container = document.getElementById('archetype-toggles');
+        container.innerHTML = '';
+        ARCHETYPES.forEach((a, i) => {
+            const el = document.createElement('span');
+            el.className = 'archetype-toggle' + (visible[i] ? '' : ' off');
+            el.innerHTML = `<span class="archetype-dot" style="background:${a.color}"></span>${a.name}`;
+            el.onclick = () => { visible[i] = !visible[i]; el.classList.toggle('off'); };
+            container.appendChild(el);
+        });
+    }
+
+    document.getElementById('btn-regen').onclick = () => { generate(); };
+    const rhoSlider = document.getElementById('rho-slider');
+    const rhoVal = document.getElementById('rho-val');
+    rhoSlider.oninput = () => {
+        rho = parseInt(rhoSlider.value) / 100;
+        rhoVal.textContent = rho.toFixed(2);
+        generate();
+    };
+
+    window.addEventListener('resize', resize);
+    resize();
+    buildToggles();
+    generate();
+    loop();
+})();
+</script>
+</body>
+</html>
