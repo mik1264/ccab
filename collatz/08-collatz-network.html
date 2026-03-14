@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Collatz Network - Force-Directed Graph</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0e1a; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+canvas { display: block; cursor: grab; }
+canvas.dragging { cursor: grabbing; }
+.back-link {
+    position: fixed; top: 15px; left: 15px; z-index: 100;
+    color: #fbbf24; text-decoration: none; font-size: 14px;
+    background: rgba(10, 14, 26, 0.85); padding: 8px 14px;
+    border-radius: 8px; border: 1px solid rgba(251, 191, 36, 0.3);
+    transition: background 0.2s;
+}
+.back-link:hover { background: rgba(251, 191, 36, 0.15); }
+#fps {
+    position: fixed; top: 15px; right: 15px; z-index: 100;
+    color: #8f8; font-size: 13px; font-family: monospace;
+    background: rgba(10, 14, 26, 0.85); padding: 6px 10px;
+    border-radius: 6px;
+}
+#info {
+    position: fixed; bottom: 15px; left: 50%; transform: translateX(-50%);
+    z-index: 100; color: #aab; font-size: 13px; text-align: center;
+    background: rgba(10, 14, 26, 0.85); padding: 8px 16px;
+    border-radius: 8px;
+}
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">&#8592; Back to Gallery</a>
+<div id="fps">FPS: --</div>
+<div id="info">Drag nodes to rearrange. Node size = path frequency.</div>
+<canvas id="canvas"></canvas>
+<script>
+try {
+(function() {
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const fpsEl = document.getElementById('fps');
+    const infoEl = document.getElementById('info');
+    const dpr = window.devicePixelRatio || 1;
+
+    let W, H;
+    function resize() {
+        W = window.innerWidth; H = window.innerHeight;
+        canvas.width = W * dpr; canvas.height = H * dpr;
+        canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    const MAX_N = 100;
+
+    // Build graph
+    const pathCount = new Map();
+    const edges = [];
+    const edgeSet = new Set();
+
+    for (let i = 1; i <= MAX_N; i++) {
+        pathCount.set(i, (pathCount.get(i) || 0));
+    }
+
+    for (let start = 2; start <= MAX_N; start++) {
+        let n = start;
+        while (n !== 1) {
+            pathCount.set(n, (pathCount.get(n) || 0) + 1);
+            const next = n % 2 === 0 ? n / 2 : 3 * n + 1;
+            if (next <= MAX_N) {
+                pathCount.set(next, (pathCount.get(next) || 0) + 1);
+                const key = n + '-' + next;
+                if (!edgeSet.has(key)) {
+                    edgeSet.add(key);
+                    edges.push([n, next]);
+                }
+            }
+            n = next;
+            if (n > MAX_N * 10) break; // Safety
+        }
+    }
+
+    // Node 1 gets extra weight
+    pathCount.set(1, (pathCount.get(1) || 0) + MAX_N);
+    pathCount.set(2, (pathCount.get(2) || 0) + MAX_N / 2);
+
+    const maxPathCount = Math.max(...pathCount.values());
+
+    // Create node objects
+    const nodes = [];
+    const nodeMap = new Map();
+    for (let i = 1; i <= MAX_N; i++) {
+        const count = pathCount.get(i) || 1;
+        const node = {
+            id: i,
+            x: W / 2 + (Math.random() - 0.5) * W * 0.6,
+            y: H / 2 + (Math.random() - 0.5) * H * 0.6,
+            vx: 0, vy: 0,
+            radius: 4 + Math.sqrt(count / maxPathCount) * 20,
+            count: count,
+            color: `hsl(${(i / MAX_N) * 300}, 70%, 55%)`
+        };
+        nodes.push(node);
+        nodeMap.set(i, node);
+    }
+
+    // Drag interaction
+    let dragNode = null;
+    let mouseX = 0, mouseY = 0;
+
+    canvas.addEventListener('mousedown', (e) => {
+        const x = e.clientX, y = e.clientY;
+        for (let i = nodes.length - 1; i >= 0; i--) {
+            const n = nodes[i];
+            const dx = x - n.x, dy = y - n.y;
+            if (dx * dx + dy * dy < (n.radius + 5) * (n.radius + 5)) {
+                dragNode = n;
+                canvas.classList.add('dragging');
+                break;
+            }
+        }
+    });
+    canvas.addEventListener('mousemove', (e) => {
+        mouseX = e.clientX; mouseY = e.clientY;
+        if (dragNode) {
+            dragNode.x = e.clientX;
+            dragNode.y = e.clientY;
+            dragNode.vx = 0; dragNode.vy = 0;
+        }
+    });
+    canvas.addEventListener('mouseup', () => {
+        dragNode = null;
+        canvas.classList.remove('dragging');
+    });
+
+    // Physics constants
+    const REPULSION = 5000;
+    const SPRING_K = 0.005;
+    const SPRING_LEN = 80;
+    const DAMPING = 0.92;
+    const CENTER_PULL = 0.0005;
+
+    function simulate() {
+        // Repulsion between all node pairs
+        for (let i = 0; i < nodes.length; i++) {
+            for (let j = i + 1; j < nodes.length; j++) {
+                const a = nodes[i], b = nodes[j];
+                let dx = b.x - a.x, dy = b.y - a.y;
+                let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                const force = REPULSION / (dist * dist);
+                const fx = (dx / dist) * force;
+                const fy = (dy / dist) * force;
+                if (a !== dragNode) { a.vx -= fx; a.vy -= fy; }
+                if (b !== dragNode) { b.vx += fx; b.vy += fy; }
+            }
+        }
+
+        // Spring forces along edges
+        for (const [aId, bId] of edges) {
+            const a = nodeMap.get(aId), b = nodeMap.get(bId);
+            if (!a || !b) continue;
+            let dx = b.x - a.x, dy = b.y - a.y;
+            let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            const displacement = dist - SPRING_LEN;
+            const force = SPRING_K * displacement;
+            const fx = (dx / dist) * force;
+            const fy = (dy / dist) * force;
+            if (a !== dragNode) { a.vx += fx; a.vy += fy; }
+            if (b !== dragNode) { b.vx -= fx; b.vy -= fy; }
+        }
+
+        // Center pull & update positions
+        for (const node of nodes) {
+            if (node === dragNode) continue;
+            node.vx += (W / 2 - node.x) * CENTER_PULL;
+            node.vy += (H / 2 - node.y) * CENTER_PULL;
+            node.vx *= DAMPING;
+            node.vy *= DAMPING;
+            node.x += node.vx;
+            node.y += node.vy;
+            // Keep in bounds
+            node.x = Math.max(node.radius, Math.min(W - node.radius, node.x));
+            node.y = Math.max(node.radius, Math.min(H - node.radius, node.y));
+        }
+    }
+
+    // FPS
+    let lastTime = performance.now(), frameCount = 0, fpsValue = 0;
+
+    function draw() {
+        requestAnimationFrame(draw);
+        const now = performance.now();
+        frameCount++;
+        if (now - lastTime >= 500) {
+            fpsValue = Math.round(frameCount * 1000 / (now - lastTime));
+            fpsEl.textContent = 'FPS: ' + fpsValue;
+            frameCount = 0; lastTime = now;
+        }
+
+        simulate();
+
+        ctx.fillStyle = '#0a0e1a';
+        ctx.fillRect(0, 0, W, H);
+
+        // Title
+        ctx.fillStyle = '#fbbf24';
+        ctx.font = 'bold 18px Segoe UI, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Collatz Network: Force-Directed Graph (n=1 to 100)', W / 2, 30);
+
+        // Draw edges
+        ctx.strokeStyle = 'rgba(100, 120, 160, 0.15)';
+        ctx.lineWidth = 0.8;
+        for (const [aId, bId] of edges) {
+            const a = nodeMap.get(aId), b = nodeMap.get(bId);
+            if (!a || !b) continue;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+        }
+
+        // Draw nodes
+        let hoveredNode = null;
+        for (const node of nodes) {
+            ctx.beginPath();
+            ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+            ctx.fillStyle = node.color;
+            ctx.globalAlpha = 0.8;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            // Border
+            ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // Label for larger nodes
+            if (node.radius > 10) {
+                ctx.fillStyle = '#fff';
+                ctx.font = Math.max(8, node.radius * 0.6) + 'px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(node.id, node.x, node.y + node.radius * 0.2);
+            }
+
+            // Check hover
+            const dx = mouseX - node.x, dy = mouseY - node.y;
+            if (dx * dx + dy * dy < (node.radius + 5) * (node.radius + 5)) {
+                hoveredNode = node;
+            }
+        }
+
+        if (hoveredNode) {
+            ctx.beginPath();
+            ctx.arc(hoveredNode.x, hoveredNode.y, hoveredNode.radius + 4, 0, Math.PI * 2);
+            ctx.strokeStyle = '#fbbf24';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            infoEl.textContent = `Node ${hoveredNode.id} | Paths through: ${hoveredNode.count} | Next: ${hoveredNode.id % 2 === 0 ? hoveredNode.id / 2 : 3 * hoveredNode.id + 1}`;
+        }
+    }
+
+    draw();
+})();
+} catch(e) {
+    document.body.innerHTML = '<div style="color:#f66;padding:40px;font-size:18px;">Error: ' + e.message + '</div>';
+    console.error(e);
+}
+</script>
+</body>
+</html>
