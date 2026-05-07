@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crowd Evacuation Simulation - Viral Simulations - CCAB</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0a0e1a;color:#e8e6e1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh;cursor:crosshair}
+  .back-link{position:fixed;top:12px;left:12px;padding:8px 14px;background:rgba(0,0,0,0.6);color:#fbbf24;text-decoration:none;border-radius:8px;font-size:14px;font-weight:600;z-index:1000;backdrop-filter:blur(8px);border:1px solid rgba(251,191,36,0.25);transition:all .25s}
+  .back-link:hover{background:rgba(251,191,36,0.18);transform:translateX(-3px)}
+  .info{position:fixed;top:12px;right:12px;background:rgba(0,0,0,0.6);color:#e8e6e1;padding:10px 14px;border-radius:8px;font-size:13px;z-index:1000;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.08);max-width:260px}
+  .info h2{font-size:14px;color:#fbbf24;margin-bottom:4px}
+  .info p{font-size:12px;opacity:.85;line-height:1.4}
+  .controls{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.65);padding:10px 16px;border-radius:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.08);z-index:1000;max-width:90vw}
+  .controls button{background:#fbbf24;color:#0a0e1a;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px}
+  .controls button:hover{background:#fcd34d}
+  .controls label{font-size:12px;color:#cbd5e1;display:flex;flex-direction:column;gap:2px}
+  .controls input[type=range]{width:120px;accent-color:#fbbf24}
+  .controls select{background:#1a1e2a;color:#e8e6e1;border:1px solid rgba(255,255,255,0.15);padding:4px 8px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back to Gallery</a>
+<div class="info"><h2>Crowd Evacuation</h2><p>Social-force model: agents repel each other and walls while attracted to a doorway. Watch bottlenecks form. Click-drag to draw walls.</p></div>
+<canvas id="c"></canvas>
+<div class="controls">
+  <label>Doors
+    <select id="doors"><option value="1">One door</option><option value="2" selected>Two doors</option></select>
+  </label>
+  <label>Agents <span id="aval">200</span>
+    <input type="range" id="agents" min="50" max="400" value="200">
+  </label>
+  <button id="reset">Reset Crowd</button>
+  <button id="clear">Clear Walls</button>
+</div>
+<script>
+(function(){
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W,H;
+  function resize(){ W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; buildRoom(); }
+  window.addEventListener('resize', resize);
+
+  let agents = [];
+  let walls = [];     // user drawn segments {x1,y1,x2,y2}
+  let roomWalls = []; // room outline + door gaps
+  let doors = [];     // {x,y,w,h} door zones (goal points)
+  let doorMode = 2;
+  let agentCount = 200;
+  let escaped = 0;
+
+  function buildRoom(){
+    roomWalls = [];
+    doors = [];
+    const m = 60;
+    const x1 = m, y1 = m, x2 = W-m, y2 = H-m;
+    // top, bottom, left walls
+    roomWalls.push({x1:x1,y1:y1,x2:x2,y2:y1});
+    roomWalls.push({x1:x1,y1:y2,x2:x2,y2:y2});
+    roomWalls.push({x1:x1,y1:y1,x2:x1,y2:y2});
+    // right wall with door gap(s)
+    const dw = 60;
+    if(doorMode === 1){
+      const cy = (y1+y2)/2;
+      roomWalls.push({x1:x2,y1:y1,x2:x2,y2:cy-dw/2});
+      roomWalls.push({x1:x2,y1:cy+dw/2,x2:x2,y2:y2});
+      doors.push({x:x2+30, y:cy});
+    } else {
+      const h = y2 - y1;
+      const c1 = y1 + h*0.3;
+      const c2 = y1 + h*0.7;
+      roomWalls.push({x1:x2,y1:y1,x2:x2,y2:c1-dw/2});
+      roomWalls.push({x1:x2,y1:c1+dw/2,x2:x2,y2:c2-dw/2});
+      roomWalls.push({x1:x2,y1:c2+dw/2,x2:x2,y2:y2});
+      doors.push({x:x2+30, y:c1});
+      doors.push({x:x2+30, y:c2});
+    }
+  }
+
+  function spawn(){
+    agents = [];
+    escaped = 0;
+    const m = 70;
+    for(let i=0;i<agentCount;i++){
+      agents.push({
+        x: m + Math.random()*(W*0.45 - m),
+        y: m + Math.random()*(H - 2*m),
+        vx: 0, vy: 0,
+        r: 4 + Math.random()*1.5,
+        hue: 200 + Math.random()*40,
+        done: false
+      });
+    }
+  }
+
+  // distance from point to segment
+  function distSeg(px,py,x1,y1,x2,y2){
+    const dx = x2-x1, dy = y2-y1;
+    const len2 = dx*dx + dy*dy;
+    let t = 0;
+    if(len2>0) t = ((px-x1)*dx + (py-y1)*dy)/len2;
+    t = Math.max(0, Math.min(1,t));
+    const cx = x1 + t*dx, cy = y1 + t*dy;
+    return {d: Math.hypot(px-cx, py-cy), nx: px-cx, ny: py-cy};
+  }
+
+  // grid for neighbour query
+  let cellSize = 30;
+  function buildGrid(){
+    const cols = Math.ceil(W/cellSize), rows = Math.ceil(H/cellSize);
+    const g = new Map();
+    for(let i=0;i<agents.length;i++){
+      const a = agents[i];
+      if(a.done) continue;
+      const cx = Math.floor(a.x/cellSize), cy = Math.floor(a.y/cellSize);
+      const k = cx+','+cy;
+      if(!g.has(k)) g.set(k,[]);
+      g.get(k).push(i);
+    }
+    return g;
+  }
+
+  function step(dt){
+    const grid = buildGrid();
+    const A = 80, B = 14; // social force constants
+    const desired = 90; // desired speed px/s
+    const tau = 0.5;
+
+    for(let i=0;i<agents.length;i++){
+      const a = agents[i];
+      if(a.done) continue;
+      // pick nearest door as goal
+      let best = doors[0], bd = 1e9;
+      for(const d of doors){
+        const dd = (d.x-a.x)*(d.x-a.x) + (d.y-a.y)*(d.y-a.y);
+        if(dd<bd){bd=dd;best=d;}
+      }
+      const dx = best.x - a.x, dy = best.y - a.y;
+      const dlen = Math.hypot(dx,dy) || 1;
+      const ex = dx/dlen, ey = dy/dlen;
+      // driving force
+      let fx = (desired*ex - a.vx)/tau;
+      let fy = (desired*ey - a.vy)/tau;
+
+      // agent-agent repulsion (3x3 cells)
+      const cx = Math.floor(a.x/cellSize), cy = Math.floor(a.y/cellSize);
+      for(let ox=-1;ox<=1;ox++){
+        for(let oy=-1;oy<=1;oy++){
+          const k = (cx+ox)+','+(cy+oy);
+          const arr = grid.get(k);
+          if(!arr) continue;
+          for(const j of arr){
+            if(j===i) continue;
+            const b = agents[j];
+            const ddx = a.x-b.x, ddy = a.y-b.y;
+            const d = Math.hypot(ddx,ddy) || 0.0001;
+            const overlap = (a.r+b.r) - d;
+            const f = A*Math.exp(overlap/B);
+            fx += f*ddx/d;
+            fy += f*ddy/d;
+            // physical contact
+            if(overlap>0){
+              fx += 200*overlap*ddx/d;
+              fy += 200*overlap*ddy/d;
+            }
+          }
+        }
+      }
+
+      // walls
+      const allWalls = roomWalls.concat(walls);
+      for(const w of allWalls){
+        const r = distSeg(a.x,a.y,w.x1,w.y1,w.x2,w.y2);
+        if(r.d < 60){
+          const nd = r.d || 0.0001;
+          const overlap = a.r - r.d;
+          const f = A*Math.exp((a.r-r.d)/B);
+          fx += f*r.nx/nd;
+          fy += f*r.ny/nd;
+          if(overlap>0){
+            fx += 300*overlap*r.nx/nd;
+            fy += 300*overlap*r.ny/nd;
+          }
+        }
+      }
+
+      a.vx += fx*dt;
+      a.vy += fy*dt;
+      // damp speed
+      const sp = Math.hypot(a.vx,a.vy);
+      const max = 130;
+      if(sp>max){ a.vx *= max/sp; a.vy *= max/sp; }
+    }
+    for(const a of agents){
+      if(a.done) continue;
+      a.x += a.vx*dt;
+      a.y += a.vy*dt;
+      if(a.x > W-30){ a.done = true; escaped++; }
+    }
+  }
+
+  function draw(){
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0,0,W,H);
+
+    // walls
+    ctx.strokeStyle = '#fbbf24';
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    for(const w of roomWalls){
+      ctx.beginPath();
+      ctx.moveTo(w.x1,w.y1);
+      ctx.lineTo(w.x2,w.y2);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = '#94a3b8';
+    for(const w of walls){
+      ctx.beginPath();
+      ctx.moveTo(w.x1,w.y1);
+      ctx.lineTo(w.x2,w.y2);
+      ctx.stroke();
+    }
+
+    // doors marker
+    for(const d of doors){
+      ctx.fillStyle = 'rgba(34,197,94,0.4)';
+      ctx.beginPath();
+      ctx.arc(d.x,d.y,12,0,Math.PI*2);
+      ctx.fill();
+    }
+
+    // agents
+    for(const a of agents){
+      if(a.done) continue;
+      const sp = Math.hypot(a.vx,a.vy);
+      const stress = Math.min(1, sp/30);
+      ctx.fillStyle = `hsl(${a.hue - stress*60}, 70%, ${55+stress*15}%)`;
+      ctx.beginPath();
+      ctx.arc(a.x,a.y,a.r,0,Math.PI*2);
+      ctx.fill();
+    }
+
+    // stats
+    const remaining = agents.filter(a=>!a.done).length;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(12, H-60, 180, 48);
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = '13px sans-serif';
+    ctx.fillText('Remaining: ' + remaining, 22, H-40);
+    ctx.fillStyle = '#22c55e';
+    ctx.fillText('Escaped: ' + escaped, 22, H-22);
+  }
+
+  let last = performance.now();
+  function loop(t){
+    const dt = Math.min(0.04, (t-last)/1000);
+    last = t;
+    step(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // wall drawing
+  let drawing = null;
+  canvas.addEventListener('mousedown', e=>{
+    drawing = {x1:e.clientX,y1:e.clientY,x2:e.clientX,y2:e.clientY};
+    walls.push(drawing);
+  });
+  canvas.addEventListener('mousemove', e=>{
+    if(drawing){ drawing.x2 = e.clientX; drawing.y2 = e.clientY; }
+  });
+  window.addEventListener('mouseup', ()=>{ drawing = null; });
+
+  document.getElementById('reset').onclick = spawn;
+  document.getElementById('clear').onclick = ()=>{ walls = []; };
+  document.getElementById('doors').onchange = (e)=>{ doorMode = parseInt(e.target.value,10); buildRoom(); };
+  const aIn = document.getElementById('agents');
+  aIn.oninput = ()=>{ agentCount = parseInt(aIn.value,10); document.getElementById('aval').textContent = agentCount; spawn(); };
+
+  resize();
+  spawn();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

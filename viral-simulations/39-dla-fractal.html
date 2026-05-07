@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diffusion-Limited Aggregation - Viral Simulations - CCAB</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0a0e1a;color:#e8e6e1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh}
+  .back-link{position:fixed;top:12px;left:12px;padding:8px 14px;background:rgba(0,0,0,0.6);color:#fbbf24;text-decoration:none;border-radius:8px;font-size:14px;font-weight:600;z-index:1000;backdrop-filter:blur(8px);border:1px solid rgba(251,191,36,0.25);transition:all .25s}
+  .back-link:hover{background:rgba(251,191,36,0.18);transform:translateX(-3px)}
+  .info{position:fixed;top:12px;right:12px;background:rgba(0,0,0,0.6);color:#e8e6e1;padding:10px 14px;border-radius:8px;font-size:13px;z-index:1000;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.08);max-width:260px}
+  .info h2{font-size:14px;color:#fbbf24;margin-bottom:4px}
+  .info p{font-size:12px;opacity:.85;line-height:1.4}
+  .controls{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.65);padding:10px 16px;border-radius:10px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.08);z-index:1000;max-width:90vw}
+  .controls button{background:#fbbf24;color:#0a0e1a;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px}
+  .controls button:hover{background:#fcd34d}
+  .controls label{font-size:12px;color:#cbd5e1;display:flex;flex-direction:column;gap:2px}
+  .controls input[type=range]{width:120px;accent-color:#fbbf24}
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back to Gallery</a>
+<div class="info"><h2>Diffusion-Limited Aggregation</h2><p>Random walkers spawn from the edges and stick when they touch the cluster. Color shows attachment age (rainbow). Targets ~50,000 stuck particles.</p></div>
+<canvas id="c"></canvas>
+<div class="controls">
+  <label>Walkers/frame <span id="sval">200</span>
+    <input type="range" id="speed" min="20" max="800" value="200">
+  </label>
+  <label>Stick prob <span id="pval">1.00</span>
+    <input type="range" id="prob" min="0.05" max="1" step="0.05" value="1">
+  </label>
+  <button id="reset">Reset</button>
+</div>
+<script>
+(function(){
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W,H, gridW, gridH, scale=2;
+  let grid; // Uint16Array, 0 = empty, else age+1
+  let walkers = [];
+  let stuck = 0;
+  let maxAge = 0;
+  let radius = 1; // current cluster radius from center
+  let cx, cy;
+  let perFrame = 200;
+  let stickProb = 1.0;
+
+  let img;
+
+  function resize(){
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    gridW = Math.floor(W/scale);
+    gridH = Math.floor(H/scale);
+    cx = (gridW/2)|0; cy = (gridH/2)|0;
+    grid = new Uint32Array(gridW*gridH);
+    walkers = [];
+    stuck = 0;
+    maxAge = 0;
+    radius = 2;
+    img = ctx.createImageData(gridW, gridH);
+    grid[cy*gridW+cx] = 1;
+    stuck = 1;
+    maxAge = 1;
+    paintCell(cx,cy,1);
+  }
+  window.addEventListener('resize', resize);
+
+  function ageColor(age, maxA){
+    const t = age/Math.max(1,maxA);
+    const hue = (200 + t*340) % 360;
+    // hsl to rgb quick
+    const s=0.8,l=0.55;
+    const c = (1-Math.abs(2*l-1))*s;
+    const hp = hue/60;
+    const x = c*(1-Math.abs(hp%2-1));
+    let r,g,b;
+    if(hp<1){r=c;g=x;b=0;}
+    else if(hp<2){r=x;g=c;b=0;}
+    else if(hp<3){r=0;g=c;b=x;}
+    else if(hp<4){r=0;g=x;b=c;}
+    else if(hp<5){r=x;g=0;b=c;}
+    else {r=c;g=0;b=x;}
+    const m = l-c/2;
+    return [(r+m)*255,(g+m)*255,(b+m)*255];
+  }
+
+  function paintCell(x,y,age){
+    const idx = (y*gridW + x)*4;
+    const [r,g,b] = ageColor(age, Math.max(maxAge,1));
+    img.data[idx] = r;
+    img.data[idx+1] = g;
+    img.data[idx+2] = b;
+    img.data[idx+3] = 255;
+  }
+
+  function spawnWalker(){
+    // spawn on circle around center, slightly larger than current cluster radius
+    const spawnR = Math.min(Math.max(radius+8, 20), Math.min(gridW,gridH)/2 - 2);
+    const a = Math.random()*Math.PI*2;
+    return {
+      x: Math.floor(cx + Math.cos(a)*spawnR),
+      y: Math.floor(cy + Math.sin(a)*spawnR),
+      killR: spawnR*1.5
+    };
+  }
+
+  function isStuck(x,y){
+    if(x<1||y<1||x>=gridW-1||y>=gridH-1) return false;
+    if(grid[(y-1)*gridW+x]) return true;
+    if(grid[(y+1)*gridW+x]) return true;
+    if(grid[y*gridW+x-1]) return true;
+    if(grid[y*gridW+x+1]) return true;
+    return false;
+  }
+
+  function step(){
+    // top up walker pool
+    const target = perFrame;
+    while(walkers.length < target) walkers.push(spawnWalker());
+
+    for(let i=walkers.length-1;i>=0;i--){
+      const w = walkers[i];
+      // walk a few steps
+      for(let s=0;s<6;s++){
+        const r = Math.random();
+        if(r<0.25) w.x++;
+        else if(r<0.5) w.x--;
+        else if(r<0.75) w.y++;
+        else w.y--;
+        // bound
+        if(w.x<1||w.y<1||w.x>=gridW-1||w.y>=gridH-1){
+          walkers[i] = spawnWalker();
+          break;
+        }
+        // kill if too far
+        const dx = w.x - cx, dy = w.y - cy;
+        if(dx*dx+dy*dy > w.killR*w.killR){
+          walkers[i] = spawnWalker();
+          break;
+        }
+        if(isStuck(w.x,w.y)){
+          if(Math.random() < stickProb){
+            maxAge++;
+            grid[w.y*gridW+w.x] = maxAge;
+            paintCell(w.x,w.y,maxAge);
+            stuck++;
+            const dr = Math.sqrt(dx*dx+dy*dy);
+            if(dr > radius) radius = dr;
+            walkers[i] = spawnWalker();
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  function draw(){
+    // recolor entire image periodically so colors stay calibrated
+    if(stuck % 500 === 0){
+      // rebuild image
+      for(let y=0;y<gridH;y++){
+        for(let x=0;x<gridW;x++){
+          const v = grid[y*gridW+x];
+          const idx = (y*gridW+x)*4;
+          if(v===0){
+            img.data[idx] = 10;
+            img.data[idx+1] = 14;
+            img.data[idx+2] = 26;
+            img.data[idx+3] = 255;
+          } else {
+            const [r,g,b] = ageColor(v, Math.max(maxAge,1));
+            img.data[idx] = r;
+            img.data[idx+1] = g;
+            img.data[idx+2] = b;
+            img.data[idx+3] = 255;
+          }
+        }
+      }
+    }
+    // blit grid
+    const off = document.createElement('canvas');
+    off.width = gridW; off.height = gridH;
+    off.getContext('2d').putImageData(img,0,0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = '#0a0e1a';
+    ctx.fillRect(0,0,W,H);
+    ctx.drawImage(off, 0,0, gridW,gridH, 0,0, gridW*scale, gridH*scale);
+
+    // status
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(12, H-50, 200, 40);
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = '13px sans-serif';
+    ctx.fillText('Stuck particles: ' + stuck, 22, H-30);
+    ctx.fillStyle = '#cbd5e1';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('Cluster radius: ' + (radius|0) + ' px', 22, H-15);
+  }
+
+  let last = performance.now();
+  function loop(t){
+    last = t;
+    if(stuck < 50000) step();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  document.getElementById('reset').onclick = resize;
+  const sIn = document.getElementById('speed');
+  sIn.oninput = ()=>{ perFrame = parseInt(sIn.value,10); document.getElementById('sval').textContent = perFrame; };
+  const pIn = document.getElementById('prob');
+  pIn.oninput = ()=>{ stickProb = parseFloat(pIn.value); document.getElementById('pval').textContent = stickProb.toFixed(2); };
+
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
