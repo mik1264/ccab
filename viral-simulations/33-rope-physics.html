@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Verlet Rope Physics — Viral Simulations · CCAB</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0a0e1a;color:#e8e6e1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh;cursor:grab}
+  canvas:active{cursor:grabbing}
+  .back-link{position:fixed;top:12px;left:12px;padding:8px 14px;background:rgba(0,0,0,0.6);color:#fbbf24;text-decoration:none;border-radius:8px;font-size:14px;font-weight:600;z-index:1000;backdrop-filter:blur(8px);border:1px solid rgba(251,191,36,0.25);transition:all .25s}
+  .back-link:hover{background:rgba(251,191,36,0.18);transform:translateX(-3px)}
+  .info{position:fixed;top:12px;right:12px;background:rgba(0,0,0,0.6);color:#e8e6e1;padding:10px 14px;border-radius:8px;font-size:13px;z-index:1000;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.08);max-width:260px}
+  .info h2{font-size:14px;color:#fbbf24;margin-bottom:4px}
+  .info p{font-size:12px;opacity:.85;line-height:1.4}
+  .controls{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.65);padding:10px 16px;border-radius:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.08);z-index:1000;max-width:90vw}
+  .controls button{background:#fbbf24;color:#0a0e1a;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px}
+  .controls button:hover{background:#fcd34d}
+  .controls label{font-size:12px;color:#cbd5e1;display:flex;flex-direction:column;gap:2px}
+  .controls input[type=range]{width:120px;accent-color:#fbbf24}
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back to Gallery</a>
+<div class="info"><h2>Verlet Rope</h2><p>80-particle rope with iterative distance constraints. Drag the weight at the bottom.</p></div>
+<canvas id="c"></canvas>
+<div class="controls">
+  <button id="reset">Reset</button>
+  <label>Iterations <input type="range" id="iters" min="5" max="60" value="30"></label>
+  <label>Gravity <input type="range" id="grav" min="0" max="200" value="90"></label>
+  <label>Wind <input type="range" id="wind" min="-50" max="50" value="0"></label>
+</div>
+<script>
+const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
+let W,H;function resize(){W=canvas.width=innerWidth;H=canvas.height=innerHeight}resize();addEventListener('resize',resize);
+
+let rope1,rope2,cart;
+const N=80;
+
+function makeRope(x0,y0,n,segLen,bigEnd){
+  const pts=[];
+  for(let i=0;i<n;i++){
+    pts.push({
+      x:x0,y:y0+i*segLen,
+      px:x0,py:y0+i*segLen,
+      pinned:i===0,
+      mass:bigEnd&&i===n-1?6:1
+    });
+  }
+  const cons=[];
+  for(let i=0;i<n-1;i++){
+    cons.push({a:i,b:i+1,len:segLen});
+  }
+  return {pts,cons};
+}
+
+function reset(){
+  rope1=makeRope(W*0.4,80,N,8,true);
+  // second rope tied to a cart that slides horizontally
+  cart={x:W*0.7,y:H*0.6,vx:0,radius:18};
+  rope2=makeRope(W*0.7,80,60,7,false);
+  // last point of rope2 is held by cart instead of pinned
+  rope2.cartTied=true;
+}
+
+let mouse={x:0,y:0,down:false,dragIdx:-1,dragRope:null};
+canvas.addEventListener('mousedown',e=>{
+  mouse.down=true;mouse.x=e.clientX;mouse.y=e.clientY;
+  // find closest point
+  let best=null,bd=400;
+  [rope1,rope2].forEach(r=>{
+    r.pts.forEach((p,i)=>{
+      const d=(p.x-mouse.x)**2+(p.y-mouse.y)**2;
+      if(d<bd){bd=d;best={rope:r,idx:i}}
+    });
+  });
+  if(best){mouse.dragRope=best.rope;mouse.dragIdx=best.idx}
+});
+canvas.addEventListener('mousemove',e=>{mouse.x=e.clientX;mouse.y=e.clientY});
+canvas.addEventListener('mouseup',()=>{mouse.down=false;mouse.dragIdx=-1;mouse.dragRope=null});
+canvas.addEventListener('touchstart',e=>{const t=e.touches[0];mouse.down=true;mouse.x=t.clientX;mouse.y=t.clientY;
+  let best=null,bd=900;
+  [rope1,rope2].forEach(r=>{
+    r.pts.forEach((p,i)=>{
+      const d=(p.x-mouse.x)**2+(p.y-mouse.y)**2;
+      if(d<bd){bd=d;best={rope:r,idx:i}}
+    });
+  });
+  if(best){mouse.dragRope=best.rope;mouse.dragIdx=best.idx}
+  e.preventDefault();
+},{passive:false});
+canvas.addEventListener('touchmove',e=>{const t=e.touches[0];mouse.x=t.clientX;mouse.y=t.clientY;e.preventDefault()},{passive:false});
+canvas.addEventListener('touchend',()=>{mouse.down=false;mouse.dragIdx=-1;mouse.dragRope=null});
+
+function updateRope(rope,dt,gx,gy){
+  // Verlet integration
+  for(let i=0;i<rope.pts.length;i++){
+    const p=rope.pts[i];
+    if(p.pinned) continue;
+    const vx=(p.x-p.px)*0.99,vy=(p.y-p.py)*0.99;
+    p.px=p.x;p.py=p.y;
+    p.x+=vx+gx*dt*dt;
+    p.y+=vy+gy*dt*dt;
+  }
+  // dragged point
+  if(mouse.down&&mouse.dragRope===rope&&mouse.dragIdx>=0){
+    const p=rope.pts[mouse.dragIdx];
+    if(!p.pinned){p.x=mouse.x;p.y=mouse.y;p.px=mouse.x;p.py=mouse.y}
+  }
+  // tie last to cart
+  if(rope.cartTied){
+    const last=rope.pts[rope.pts.length-1];
+    last.x=cart.x;last.y=cart.y;last.px=cart.x;last.py=cart.y;
+  }
+  // constraint solve
+  const iters=parseInt(document.getElementById('iters').value);
+  for(let k=0;k<iters;k++){
+    for(const c of rope.cons){
+      const a=rope.pts[c.a],b=rope.pts[c.b];
+      const dx=b.x-a.x,dy=b.y-a.y;
+      const d=Math.sqrt(dx*dx+dy*dy)||0.0001;
+      const diff=(d-c.len)/d;
+      const wa=a.pinned?0:1/a.mass, wb=b.pinned?0:1/b.mass;
+      const tot=wa+wb||1;
+      if(!a.pinned){a.x+=dx*0.5*diff*(wa/tot)*2;a.y+=dy*0.5*diff*(wa/tot)*2}
+      if(!b.pinned){b.x-=dx*0.5*diff*(wb/tot)*2;b.y-=dy*0.5*diff*(wb/tot)*2}
+    }
+    // pin again
+    rope.pts.forEach(p=>{if(p.pinned){/* keep */}});
+    if(rope.cartTied){
+      const last=rope.pts[rope.pts.length-1];
+      last.x=cart.x;last.y=cart.y;
+    }
+  }
+}
+
+function updateCart(dt){
+  // cart slides along a horizontal rail at y=H*0.6
+  const railY=H*0.6;
+  // gravity-like force from rope (last segment pulls cart)
+  // but mainly handle dragging
+  if(mouse.down&&mouse.dragRope===rope2){
+    // skip
+  }
+  // simple: cart can be dragged separately
+  cart.y=railY;
+  // small autonomous bob
+  // damp velocity
+  cart.vx*=0.94;
+  cart.x+=cart.vx;
+  // bounds
+  if(cart.x<60){cart.x=60;cart.vx=Math.abs(cart.vx)*0.5}
+  if(cart.x>W-60){cart.x=W-60;cart.vx=-Math.abs(cart.vx)*0.5}
+  // gentle oscillation
+  cart.vx+=Math.sin(performance.now()*0.0007)*0.6;
+}
+
+function drawRope(rope,col){
+  ctx.strokeStyle=col;ctx.lineWidth=2;ctx.lineCap='round';
+  ctx.beginPath();
+  rope.pts.forEach((p,i)=>{if(i===0)ctx.moveTo(p.x,p.y);else ctx.lineTo(p.x,p.y)});
+  ctx.stroke();
+  // weight
+  const last=rope.pts[rope.pts.length-1];
+  if(last.mass>1){
+    ctx.fillStyle='#fbbf24';ctx.strokeStyle='#92400e';ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(last.x,last.y,12,0,Math.PI*2);ctx.fill();ctx.stroke();
+  }
+  // pinned point
+  if(rope.pts[0].pinned){
+    ctx.fillStyle='#94a3b8';
+    ctx.fillRect(rope.pts[0].x-6,rope.pts[0].y-6,12,12);
+  }
+}
+
+function draw(){
+  ctx.fillStyle='rgba(10,14,26,0.85)';ctx.fillRect(0,0,W,H);
+  // rail
+  ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(40,H*0.6);ctx.lineTo(W-40,H*0.6);ctx.stroke();
+  drawRope(rope1,'#fbbf24');
+  drawRope(rope2,'#60a5fa');
+  // cart
+  ctx.fillStyle='#1e293b';ctx.strokeStyle='#60a5fa';ctx.lineWidth=2;
+  ctx.fillRect(cart.x-22,cart.y-12,44,24);
+  ctx.strokeRect(cart.x-22,cart.y-12,44,24);
+  ctx.fillStyle='#60a5fa';
+  ctx.beginPath();ctx.arc(cart.x-12,cart.y+15,5,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(cart.x+12,cart.y+15,5,0,Math.PI*2);ctx.fill();
+}
+
+let lastT=performance.now();
+function loop(t){
+  const dt=Math.min((t-lastT)/1000,1/30);lastT=t;
+  const grav=parseFloat(document.getElementById('grav').value);
+  const wind=parseFloat(document.getElementById('wind').value);
+  const subSteps=2;
+  for(let s=0;s<subSteps;s++){
+    updateCart(dt/subSteps);
+    updateRope(rope1,dt/subSteps,wind,grav);
+    updateRope(rope2,dt/subSteps,wind,grav);
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('reset').onclick=reset;
+addEventListener('resize',()=>{resize();reset()});
+
+reset();requestAnimationFrame(loop);
+</script>
+</body>
+</html>

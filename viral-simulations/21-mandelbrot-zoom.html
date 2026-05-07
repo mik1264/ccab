@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mandelbrot Zoom — Viral Simulations · CCAB</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0a0e1a;color:#e8e6e1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh;cursor:zoom-in}
+  .back-link{position:fixed;top:12px;left:12px;padding:8px 14px;background:rgba(0,0,0,0.6);color:#fbbf24;text-decoration:none;border-radius:8px;font-size:14px;font-weight:600;z-index:1000;backdrop-filter:blur(8px);border:1px solid rgba(251,191,36,0.25);transition:all .25s}
+  .back-link:hover{background:rgba(251,191,36,0.18);transform:translateX(-3px)}
+  .info{position:fixed;top:12px;right:12px;background:rgba(0,0,0,0.6);color:#e8e6e1;padding:10px 14px;border-radius:8px;font-size:13px;z-index:1000;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.08);max-width:280px}
+  .info h2{font-size:14px;color:#fbbf24;margin-bottom:4px}
+  .info p{font-size:12px;opacity:.85;line-height:1.4}
+  .info code{font-family:monospace;font-size:11px;color:#cbd5e1;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px;display:block;margin-top:4px;word-break:break-all}
+  .controls{position:fixed;bottom:12px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.65);padding:10px 16px;border-radius:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.08);z-index:1000;max-width:90vw}
+  .controls button{background:#fbbf24;color:#0a0e1a;border:none;padding:6px 14px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px}
+  .controls button:hover{background:#fcd34d}
+  .controls label{font-size:12px;color:#cbd5e1;display:flex;flex-direction:column;gap:2px}
+  .controls input[type=range]{width:120px;accent-color:#fbbf24}
+</style>
+</head>
+<body>
+<a href="index.html" class="back-link">← Back to Gallery</a>
+<div class="info">
+  <h2>Mandelbrot Zoom</h2>
+  <p>Click to zoom in 2x. Right-click to zoom out. Smooth continuous-escape coloring.</p>
+  <code id="coords"></code>
+</div>
+<canvas id="c"></canvas>
+<div class="controls">
+  <button id="reset">Reset</button>
+  <button id="recenter">Center</button>
+  <label>Max Iter <input type="range" id="iter" min="100" max="1500" step="50" value="400"></label>
+  <span id="stat" style="font-size:12px;color:#cbd5e1"></span>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+let centerX = -0.5, centerY = 0;
+let zoom = 1;
+let maxIter = 400;
+
+const TILE = 64;
+let tileQueue = [];
+let renderToken = 0;
+
+function resize(){
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  scheduleRender();
+}
+window.addEventListener('resize', resize);
+
+function pixelToComplex(px, py){
+  const span = 3 / zoom; // span across the smaller dimension of view
+  const minDim = Math.min(W, H);
+  const cx = centerX + (px - W/2) / minDim * span;
+  const cy = centerY + (py - H/2) / minDim * span;
+  return [cx, cy];
+}
+
+function colorFromIter(iter, smoothLog){
+  if(iter >= maxIter){
+    return [10, 14, 26];
+  }
+  const v = iter + 1 - smoothLog;
+  const t = Math.log(v + 1) / Math.log(maxIter);
+  // Smooth palette
+  const r = Math.floor(255 * (0.5 + 0.5 * Math.cos(3 + t * 6.28 + 0)));
+  const g = Math.floor(255 * (0.5 + 0.5 * Math.cos(3 + t * 6.28 + 0.6)));
+  const b = Math.floor(255 * (0.5 + 0.5 * Math.cos(3 + t * 6.28 + 1.2)));
+  return [r, g, b];
+}
+
+function renderTile(tx, ty, token){
+  if(token !== renderToken) return;
+  const tw = Math.min(TILE, W - tx);
+  const th = Math.min(TILE, H - ty);
+  if(tw <= 0 || th <= 0) return;
+  const img = ctx.createImageData(tw, th);
+  const data = img.data;
+  const span = 3 / zoom;
+  const minDim = Math.min(W, H);
+  for(let py=0; py<th; py++){
+    const cy0 = centerY + (ty + py - H/2) / minDim * span;
+    for(let px=0; px<tw; px++){
+      const cx0 = centerX + (tx + px - W/2) / minDim * span;
+      // Mandelbrot iteration
+      let zx = 0, zy = 0;
+      let iter = 0;
+      let zx2 = 0, zy2 = 0;
+      while(iter < maxIter && zx2 + zy2 < 256){
+        zy = 2 * zx * zy + cy0;
+        zx = zx2 - zy2 + cx0;
+        zx2 = zx*zx;
+        zy2 = zy*zy;
+        iter++;
+      }
+      let smoothLog = 0;
+      if(iter < maxIter){
+        const log_zn = Math.log(zx2 + zy2) / 2;
+        smoothLog = Math.log(log_zn / Math.log(2)) / Math.log(2);
+      }
+      const [r,g,b] = colorFromIter(iter, smoothLog);
+      const idx = (py * tw + px) * 4;
+      data[idx] = r;
+      data[idx+1] = g;
+      data[idx+2] = b;
+      data[idx+3] = 255;
+    }
+  }
+  if(token === renderToken) ctx.putImageData(img, tx, ty);
+}
+
+function scheduleRender(){
+  renderToken++;
+  const token = renderToken;
+  // Quick low-res preview first
+  const previewScale = 8;
+  const pw = Math.ceil(W / previewScale);
+  const ph = Math.ceil(H / previewScale);
+  const pImg = ctx.createImageData(pw, ph);
+  const span = 3 / zoom;
+  const minDim = Math.min(W, H);
+  for(let py=0; py<ph; py++){
+    for(let px=0; px<pw; px++){
+      const cx0 = centerX + (px*previewScale - W/2) / minDim * span;
+      const cy0 = centerY + (py*previewScale - H/2) / minDim * span;
+      let zx = 0, zy = 0, iter = 0;
+      let zx2 = 0, zy2 = 0;
+      const lowMax = Math.min(maxIter, 80);
+      while(iter < lowMax && zx2 + zy2 < 256){
+        zy = 2 * zx * zy + cy0;
+        zx = zx2 - zy2 + cx0;
+        zx2 = zx*zx; zy2 = zy*zy;
+        iter++;
+      }
+      let smoothLog = 0;
+      if(iter < lowMax){
+        const log_zn = Math.log(zx2 + zy2) / 2;
+        smoothLog = Math.log(log_zn / Math.log(2)) / Math.log(2);
+      }
+      const [r,g,b] = colorFromIter(iter, smoothLog);
+      const idx = (py * pw + px) * 4;
+      pImg.data[idx] = r;
+      pImg.data[idx+1] = g;
+      pImg.data[idx+2] = b;
+      pImg.data[idx+3] = 255;
+    }
+  }
+  // Stretch the preview to canvas using a temp canvas
+  const tmp = document.createElement('canvas');
+  tmp.width = pw; tmp.height = ph;
+  tmp.getContext('2d').putImageData(pImg, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(tmp, 0, 0, W, H);
+
+  // Build tile queue (center-out for nicer feel)
+  tileQueue = [];
+  const centerTileX = Math.floor((W/2) / TILE) * TILE;
+  const centerTileY = Math.floor((H/2) / TILE) * TILE;
+  const all = [];
+  for(let ty=0; ty<H; ty+=TILE){
+    for(let tx=0; tx<W; tx+=TILE){
+      const dx = tx - centerTileX;
+      const dy = ty - centerTileY;
+      all.push({tx, ty, d: dx*dx + dy*dy});
+    }
+  }
+  all.sort((a,b)=> a.d - b.d);
+  tileQueue = all;
+
+  pumpTiles(token);
+  updateCoords();
+}
+
+function pumpTiles(token){
+  if(token !== renderToken) return;
+  const t0 = performance.now();
+  while(tileQueue.length && performance.now() - t0 < 14){
+    const t = tileQueue.shift();
+    renderTile(t.tx, t.ty, token);
+  }
+  if(tileQueue.length){
+    requestAnimationFrame(()=> pumpTiles(token));
+  }
+}
+
+function updateCoords(){
+  document.getElementById('coords').textContent =
+    `c = ${centerX.toFixed(8)} + ${centerY.toFixed(8)}i  zoom = ${zoom.toExponential(2)}`;
+  document.getElementById('stat').textContent =
+    `iter ${maxIter}  zoom ${zoom.toExponential(1)}`;
+}
+
+canvas.addEventListener('click', (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  const [cx, cy] = pixelToComplex(px, py);
+  centerX = cx;
+  centerY = cy;
+  zoom *= 2;
+  // Auto-bump iterations on deep zoom
+  if(zoom > 100) maxIter = Math.max(maxIter, 600);
+  if(zoom > 10000) maxIter = Math.max(maxIter, 1000);
+  document.getElementById('iter').value = maxIter;
+  scheduleRender();
+});
+
+canvas.addEventListener('contextmenu', (e)=>{
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  const [cx, cy] = pixelToComplex(px, py);
+  centerX = cx;
+  centerY = cy;
+  zoom /= 2;
+  if(zoom < 1) zoom = 1;
+  scheduleRender();
+});
+
+document.getElementById('reset').addEventListener('click', ()=>{
+  centerX = -0.5; centerY = 0; zoom = 1; maxIter = 400;
+  document.getElementById('iter').value = 400;
+  scheduleRender();
+});
+
+document.getElementById('recenter').addEventListener('click', ()=>{
+  centerX = -0.5; centerY = 0;
+  scheduleRender();
+});
+
+document.getElementById('iter').addEventListener('input', (e)=>{
+  maxIter = parseInt(e.target.value);
+  scheduleRender();
+});
+
+resize();
+</script>
+</body>
+</html>
