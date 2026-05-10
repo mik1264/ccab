@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-View NeRF — AI 3D Generation</title>
+    <style>
+        :root { --sage: #8A9A5B; --moss: #606C38; --earth: #DDA15E; --terracotta: #BC6C25; }
+        body { margin:0; overflow:hidden; font-family:-apple-system,sans-serif; background:#070a12; color:#e8e6e1; }
+        #container { width: 100vw; height: 100vh; }
+        .back-link {
+            position: fixed; top: 14px; left: 14px;
+            padding: 8px 14px; background: rgba(254,250,224,0.9); color: var(--terracotta);
+            text-decoration: none; border-radius: 14px; font-size: 13px; font-weight: 600; z-index: 20;
+        }
+        #panel {
+            position: fixed; top: 14px; right: 14px;
+            background: rgba(10,15,28,0.85); backdrop-filter: blur(12px);
+            border: 1px solid rgba(138,154,91,0.3); border-radius: 14px;
+            padding: 14px; z-index: 15; width: 240px;
+        }
+        #panel h3 { margin: 0 0 10px; font-size: 14px; color: #cce0a3; font-weight: 700; }
+        .row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin: 8px 0; font-size: 12px; }
+        .row label { color: #9bb1d8; }
+        .row input[type="range"] { flex: 1; }
+        .row .val { font-family: monospace; color: #e0d499; min-width: 36px; text-align: right; }
+        .stage-label {
+            font-size: 11px; color: #9bb1d8; font-family: monospace;
+            margin: 8px 0 4px; text-transform: uppercase; letter-spacing: 0.05em;
+        }
+        button.action {
+            width: 100%; padding: 8px;
+            background: linear-gradient(135deg, var(--sage), var(--moss));
+            color: white; border: none; border-radius: 8px;
+            font-size: 12px; font-weight: 700; cursor: pointer;
+            margin-top: 8px;
+        }
+        button.action:hover { filter: brightness(1.15); }
+        #info {
+            position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+            background: rgba(10,15,28,0.78); backdrop-filter: blur(10px);
+            padding: 10px 18px; border-radius: 12px; font-size: 12px; font-family: monospace;
+            color: #cce0a3; z-index: 15; max-width: 90vw; text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to AI 3D Generation</a>
+    <div id="container"></div>
+
+    <div id="panel">
+        <h3>Multi-View NeRF</h3>
+        <div class="stage-label">Stage</div>
+        <div id="stage" style="font-size:13px; color:#fefae0; font-weight:600;">Capturing views…</div>
+
+        <div class="row">
+            <label>Cameras</label>
+            <span class="val" id="ncams">8</span>
+        </div>
+        <div class="row">
+            <label>Density threshold</label>
+            <input id="thresh" type="range" min="0.05" max="0.6" step="0.01" value="0.18">
+            <span class="val" id="thresh-val">0.18</span>
+        </div>
+        <div class="row">
+            <label>Show rays</label>
+            <input id="show-rays" type="checkbox" checked>
+        </div>
+        <div class="row">
+            <label>Show voxels</label>
+            <input id="show-vox" type="checkbox" checked>
+        </div>
+
+        <button class="action" id="restart">Restart capture</button>
+    </div>
+
+    <div id="info">8 virtual cameras photograph the subject. Their rays vote on a 3D density grid. Marching cubes turns that grid into a mesh.</div>
+
+    <script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                   "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x070a12);
+        scene.fog = new THREE.FogExp2(0x070a12, 0.04);
+
+        const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 200);
+        camera.position.set(7, 5, 9);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        document.getElementById('container').appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 0, 0);
+
+        scene.add(new THREE.AmbientLight(0x445566, 0.6));
+        const key = new THREE.DirectionalLight(0xffffff, 0.9); key.position.set(4, 6, 4); scene.add(key);
+        const rim = new THREE.PointLight(0xffaa66, 1, 30); rim.position.set(-5, 3, -3); scene.add(rim);
+
+        // Floor / grid
+        const grid = new THREE.GridHelper(20, 20, 0x506680, 0x223040);
+        grid.position.y = -2;
+        scene.add(grid);
+
+        // ---------------- The subject (ground truth, hidden until end) ----------------
+        // Use a torus knot for a non-trivial volume
+        const subjectGeo = new THREE.TorusKnotGeometry(0.8, 0.28, 100, 16, 2, 3);
+        const subjectMat = new THREE.MeshStandardMaterial({
+            color: 0xff7a3a, metalness: 0.4, roughness: 0.3,
+            transparent: true, opacity: 0.0
+        });
+        const subject = new THREE.Mesh(subjectGeo, subjectMat);
+        scene.add(subject);
+
+        // We need a way to test "is this point inside the subject volume?".
+        // Approximate by signed-distance: the torus knot has no closed-form SDF,
+        // so use a bounding-sphere/voxelized ground truth instead.
+        // Build a low-res voxel grid of the subject by sampling its surface points.
+        const RES = 32;
+        const VOXEL = new Float32Array(RES * RES * RES); // ground truth density
+        function buildGroundTruth() {
+            // Sample points on the surface and rasterize into the grid
+            const pos = subjectGeo.attributes.position;
+            for (let i = 0; i < pos.count; i++) {
+                const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+                stamp(x, y, z, 1.0);
+            }
+            // Dilate by stamping at each surface point's neighborhood
+        }
+        function stamp(x, y, z, w) {
+            // grid spans [-1.5, 1.5] in each axis
+            const fx = (x + 1.5) / 3 * (RES - 1);
+            const fy = (y + 1.5) / 3 * (RES - 1);
+            const fz = (z + 1.5) / 3 * (RES - 1);
+            const ix = Math.round(fx), iy = Math.round(fy), iz = Math.round(fz);
+            if (ix < 0 || ix >= RES || iy < 0 || iy >= RES || iz < 0 || iz >= RES) return;
+            // 3x3x3 stamp
+            for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+                const xx = ix+dx, yy = iy+dy, zz = iz+dz;
+                if (xx < 0 || xx >= RES || yy < 0 || yy >= RES || zz < 0 || zz >= RES) continue;
+                const k = xx + yy*RES + zz*RES*RES;
+                const fall = 1 - (Math.abs(dx)+Math.abs(dy)+Math.abs(dz))/4;
+                VOXEL[k] = Math.min(1, VOXEL[k] + w * fall * 0.4);
+            }
+        }
+        buildGroundTruth();
+
+        function gtDensity(x, y, z) {
+            const fx = (x + 1.5) / 3 * (RES - 1);
+            const fy = (y + 1.5) / 3 * (RES - 1);
+            const fz = (z + 1.5) / 3 * (RES - 1);
+            const ix = Math.round(fx), iy = Math.round(fy), iz = Math.round(fz);
+            if (ix < 0 || ix >= RES || iy < 0 || iy >= RES || iz < 0 || iz >= RES) return 0;
+            return VOXEL[ix + iy*RES + iz*RES*RES];
+        }
+
+        // ---------------- Cameras ----------------
+        const NUM_CAMS = 8;
+        const cameras = [];
+        const camGroups = [];
+        for (let i = 0; i < NUM_CAMS; i++) {
+            const angle = (i / NUM_CAMS) * Math.PI * 2;
+            const tilt = (i % 2 === 0) ? 0.5 : -0.3;
+            const r = 3.6;
+            const pos = new THREE.Vector3(Math.cos(angle) * r, tilt, Math.sin(angle) * r);
+            cameras.push(pos);
+
+            const group = new THREE.Group();
+            group.position.copy(pos);
+            group.lookAt(0, 0, 0);
+
+            // body
+            const body = new THREE.Mesh(
+                new THREE.BoxGeometry(0.3, 0.22, 0.4),
+                new THREE.MeshStandardMaterial({ color: 0x222844, metalness: 0.6, roughness: 0.3 })
+            );
+            group.add(body);
+            // lens
+            const lens = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.12, 0.14, 0.18, 16),
+                new THREE.MeshStandardMaterial({ color: 0x444a5a, metalness: 0.7, roughness: 0.4 })
+            );
+            lens.rotation.x = Math.PI / 2;
+            lens.position.z = 0.28;
+            group.add(lens);
+            // glass
+            const glass = new THREE.Mesh(
+                new THREE.CircleGeometry(0.1, 16),
+                new THREE.MeshStandardMaterial({ color: 0xffaa66, emissive: 0xff4422, emissiveIntensity: 0.6 })
+            );
+            glass.position.z = 0.38;
+            group.add(glass);
+            // status light
+            const led = new THREE.Mesh(
+                new THREE.SphereGeometry(0.025, 8, 8),
+                new THREE.MeshBasicMaterial({ color: 0x33ff66 })
+            );
+            led.position.set(0.1, 0.13, 0.15);
+            group.add(led);
+            group.userData.led = led;
+
+            scene.add(group);
+            camGroups.push(group);
+        }
+
+        // ---------------- Rays ----------------
+        // Each tick, every active camera shoots N rays toward the centre.
+        // Each ray increments density along its line where the ground truth is
+        // positive. (Mimics NeRF density estimation through volume rendering.)
+        const RAYS_PER_TICK = 6;
+        const ESTIMATED = new Float32Array(RES * RES * RES); // accumulated estimate
+
+        const rayLines = new THREE.LineSegments(
+            new THREE.BufferGeometry(),
+            new THREE.LineBasicMaterial({ color: 0xffaa66, transparent: true, opacity: 0.5 })
+        );
+        scene.add(rayLines);
+
+        const MAX_LIVE_RAYS = NUM_CAMS * RAYS_PER_TICK;
+        const liveRayPositions = new Float32Array(MAX_LIVE_RAYS * 6);
+        rayLines.geometry.setAttribute('position', new THREE.BufferAttribute(liveRayPositions, 3));
+        rayLines.geometry.setDrawRange(0, 0);
+
+        function castRays() {
+            let ptr = 0;
+            for (let c = 0; c < NUM_CAMS; c++) {
+                const origin = cameras[c];
+                for (let r = 0; r < RAYS_PER_TICK; r++) {
+                    // jitter direction toward centre
+                    const target = new THREE.Vector3(
+                        (Math.random() - 0.5) * 1.6,
+                        (Math.random() - 0.5) * 1.6,
+                        (Math.random() - 0.5) * 1.6
+                    );
+                    const dir = target.clone().sub(origin).normalize();
+                    // March along the ray
+                    const STEPS = 80;
+                    let hitPoint = null;
+                    for (let s = 1; s < STEPS; s++) {
+                        const t = (s / STEPS) * 6;
+                        const px = origin.x + dir.x * t;
+                        const py = origin.y + dir.y * t;
+                        const pz = origin.z + dir.z * t;
+                        const d = gtDensity(px, py, pz);
+                        if (d > 0.05) {
+                            // record a "vote" in the estimated grid
+                            const fx = (px + 1.5) / 3 * (RES - 1);
+                            const fy = (py + 1.5) / 3 * (RES - 1);
+                            const fz = (pz + 1.5) / 3 * (RES - 1);
+                            const ix = Math.round(fx), iy = Math.round(fy), iz = Math.round(fz);
+                            if (ix >= 0 && ix < RES && iy >= 0 && iy < RES && iz >= 0 && iz < RES) {
+                                const k = ix + iy*RES + iz*RES*RES;
+                                ESTIMATED[k] = Math.min(1, ESTIMATED[k] + 0.04);
+                            }
+                            hitPoint = new THREE.Vector3(px, py, pz);
+                            break;
+                        }
+                    }
+                    const end = hitPoint || origin.clone().add(dir.clone().multiplyScalar(6));
+                    liveRayPositions[ptr++] = origin.x;
+                    liveRayPositions[ptr++] = origin.y;
+                    liveRayPositions[ptr++] = origin.z;
+                    liveRayPositions[ptr++] = end.x;
+                    liveRayPositions[ptr++] = end.y;
+                    liveRayPositions[ptr++] = end.z;
+                }
+            }
+            rayLines.geometry.attributes.position.needsUpdate = true;
+            rayLines.geometry.setDrawRange(0, ptr / 3);
+        }
+
+        // ---------------- Voxel point cloud (estimated density) ----------------
+        const voxelGeo = new THREE.BufferGeometry();
+        const voxelPos = new Float32Array(RES*RES*RES * 3);
+        const voxelCol = new Float32Array(RES*RES*RES * 3);
+        let voxelIdx = 0;
+        for (let z = 0; z < RES; z++) for (let y = 0; y < RES; y++) for (let x = 0; x < RES; x++) {
+            voxelPos[voxelIdx*3]   = (x / (RES-1)) * 3 - 1.5;
+            voxelPos[voxelIdx*3+1] = (y / (RES-1)) * 3 - 1.5;
+            voxelPos[voxelIdx*3+2] = (z / (RES-1)) * 3 - 1.5;
+            voxelIdx++;
+        }
+        voxelGeo.setAttribute('position', new THREE.BufferAttribute(voxelPos, 3));
+        voxelGeo.setAttribute('color', new THREE.BufferAttribute(voxelCol, 3));
+        const voxelMat = new THREE.PointsMaterial({
+            size: 0.05,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.0,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        const voxelPoints = new THREE.Points(voxelGeo, voxelMat);
+        scene.add(voxelPoints);
+
+        function updateVoxelColors(thresh) {
+            const col = voxelGeo.attributes.color;
+            let visibleCount = 0;
+            for (let i = 0; i < RES*RES*RES; i++) {
+                const d = ESTIMATED[i];
+                if (d > thresh) {
+                    col.array[i*3]   = 0.55 + d * 0.4;
+                    col.array[i*3+1] = 0.4 + d * 0.5;
+                    col.array[i*3+2] = 0.18;
+                    visibleCount++;
+                } else {
+                    col.array[i*3] = col.array[i*3+1] = col.array[i*3+2] = 0;
+                }
+            }
+            col.needsUpdate = true;
+            return visibleCount;
+        }
+
+        // ---------------- Marching cubes for the final mesh ----------------
+        const mc = new MarchingCubes(40, new THREE.MeshStandardMaterial({
+            color: 0xff7a3a, metalness: 0.5, roughness: 0.3,
+            transparent: true, opacity: 0
+        }), true, true, 100000);
+        mc.scale.set(1.5, 1.5, 1.5);
+        mc.isolation = 0.3;
+        mc.enableUvs = false;
+        mc.enableColors = false;
+        scene.add(mc);
+
+        function updateMarching(thresh) {
+            mc.reset();
+            // Sample our estimated density into the marching cubes field
+            const subdiv = mc.size; // 40
+            for (let z = 0; z < subdiv; z++) {
+                for (let y = 0; y < subdiv; y++) {
+                    for (let x = 0; x < subdiv; x++) {
+                        const fx = (x / (subdiv-1)) * (RES-1);
+                        const fy = (y / (subdiv-1)) * (RES-1);
+                        const fz = (z / (subdiv-1)) * (RES-1);
+                        const ix = Math.floor(fx), iy = Math.floor(fy), iz = Math.floor(fz);
+                        const k = ix + iy*RES + iz*RES*RES;
+                        const v = ESTIMATED[k] || 0;
+                        const idx = z*subdiv*subdiv + y*subdiv + x;
+                        mc.field[idx] = Math.max(0, v - thresh) * 6;
+                    }
+                }
+            }
+            mc.update();
+        }
+
+        // ---------------- UI ----------------
+        const stageEl = document.getElementById('stage');
+        const threshEl = document.getElementById('thresh');
+        const threshValEl = document.getElementById('thresh-val');
+        const showRaysEl = document.getElementById('show-rays');
+        const showVoxEl = document.getElementById('show-vox');
+        document.getElementById('ncams').textContent = NUM_CAMS;
+
+        threshEl.addEventListener('input', () => {
+            threshValEl.textContent = parseFloat(threshEl.value).toFixed(2);
+            // re-render with new threshold (only effective in stage 3+)
+            if (stage >= 2) {
+                updateVoxelColors(parseFloat(threshEl.value));
+                updateMarching(parseFloat(threshEl.value));
+            }
+        });
+
+        showRaysEl.addEventListener('change', () => rayLines.visible = showRaysEl.checked);
+        showVoxEl.addEventListener('change', () => voxelPoints.visible = showVoxEl.checked);
+
+        document.getElementById('restart').addEventListener('click', () => restart());
+
+        // ---------------- Stage machine ----------------
+        let stage = 0; // 0: capturing, 1: building voxels, 2: marching, 3: final
+        let stageTime = 0;
+
+        function restart() {
+            ESTIMATED.fill(0);
+            voxelMat.opacity = 0;
+            mc.material.opacity = 0;
+            subjectMat.opacity = 0;
+            stage = 0;
+            stageTime = 0;
+            stageEl.textContent = 'Capturing views…';
+            rayLines.material.opacity = 0.5;
+        }
+
+        addEventListener('resize', () => {
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+        });
+
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+            stageTime += dt;
+
+            // Wobble cameras for visual interest
+            for (let i = 0; i < camGroups.length; i++) {
+                const g = camGroups[i];
+                g.userData.led.material.color.setHSL((stageTime * 0.1 + i * 0.13) % 1, 0.7, 0.55);
+            }
+
+            const thresh = parseFloat(threshEl.value);
+
+            if (stage === 0) {
+                castRays();
+                if (stageTime > 4.0) { // capture for 4s
+                    stage = 1; stageTime = 0;
+                    stageEl.textContent = 'Building density volume…';
+                }
+            } else if (stage === 1) {
+                // fade out rays, fade in voxels
+                const t = Math.min(1, stageTime / 1.2);
+                rayLines.material.opacity = 0.5 * (1 - t);
+                voxelMat.opacity = 0.7 * t;
+                updateVoxelColors(thresh);
+                if (t >= 1) {
+                    stage = 2; stageTime = 0;
+                    stageEl.textContent = 'Marching cubes → mesh';
+                }
+            } else if (stage === 2) {
+                const t = Math.min(1, stageTime / 1.5);
+                mc.material.opacity = t;
+                updateMarching(thresh);
+                if (t >= 1) {
+                    stage = 3; stageTime = 0;
+                    stageEl.textContent = 'Done · NeRF reconstruction complete';
+                }
+            } else {
+                // final stage — keep updating with current threshold
+                if (Math.floor(stageTime * 4) !== Math.floor((stageTime - dt) * 4)) {
+                    updateVoxelColors(thresh);
+                    updateMarching(thresh);
+                }
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        restart();
+        animate();
+    </script>
+</body>
+</html>

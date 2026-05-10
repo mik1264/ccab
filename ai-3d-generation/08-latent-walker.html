@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Latent Space Walker — AI 3D Generation</title>
+    <style>
+        :root { --sage:#8A9A5B; --moss:#606C38; --earth:#DDA15E; --terracotta:#BC6C25; }
+        body { margin:0; overflow:hidden; font-family:-apple-system,sans-serif; background:#070b18; color:#e8e6e1; }
+        #container { width:100vw; height:100vh; }
+        .back-link {
+            position:fixed; top:14px; left:14px;
+            padding:8px 14px; background:rgba(254,250,224,0.9); color:var(--terracotta);
+            text-decoration:none; border-radius:14px; font-size:13px; font-weight:600; z-index:20;
+        }
+        #panel {
+            position:fixed; bottom:18px; left:50%; transform:translateX(-50%);
+            width:min(720px, calc(100vw - 28px));
+            background:rgba(7,11,24,0.85); backdrop-filter:blur(14px);
+            border:1px solid rgba(138,154,91,0.3); border-radius:16px;
+            padding:16px; z-index:15;
+        }
+        .endpoints { display:flex; gap:8px; margin-bottom:10px; }
+        .endpoint {
+            flex:1; padding:10px;
+            background:rgba(255,255,255,0.05); border:1px solid rgba(138,154,91,0.25);
+            border-radius:10px; font-size:13px; color:#cce0a3;
+        }
+        .endpoint label { font-size:10px; color:#9bb1d8; text-transform:uppercase; letter-spacing:0.05em; display:block; margin-bottom:4px; }
+        .endpoint select {
+            width:100%; padding:6px; background:rgba(0,0,0,0.4); color:#fefae0;
+            border:1px solid rgba(138,154,91,0.3); border-radius:6px; font-family:inherit;
+            font-size:13px;
+        }
+        #blend {
+            width:100%; -webkit-appearance:none; appearance:none;
+            height:6px; background:rgba(255,255,255,0.1); border-radius:3px; outline:none; margin:8px 0;
+        }
+        #blend::-webkit-slider-thumb {
+            -webkit-appearance:none; appearance:none;
+            width:18px; height:18px; border-radius:50%;
+            background:linear-gradient(135deg, var(--earth), var(--terracotta));
+            cursor:pointer; border:2px solid #fefae0;
+        }
+        #blend::-moz-range-thumb {
+            width:18px; height:18px; border-radius:50%;
+            background:linear-gradient(135deg, var(--earth), var(--terracotta));
+            cursor:pointer; border:2px solid #fefae0;
+        }
+        .meta-row { display:flex; justify-content:space-between; font-size:11px; color:#cce0a3; font-family:monospace; }
+        .play-row { display:flex; gap:8px; margin-top:10px; }
+        .play-row button {
+            flex:1; padding:8px;
+            background:linear-gradient(135deg, var(--sage), var(--moss));
+            color:white; border:none; border-radius:8px;
+            font-size:12px; font-weight:700; cursor:pointer;
+        }
+        .play-row button:hover { filter:brightness(1.15); }
+        .play-row button.secondary {
+            background:rgba(255,255,255,0.05);
+            color:#cce0a3;
+            border:1px solid rgba(138,154,91,0.3);
+        }
+        #latent-viz {
+            position:fixed; top:14px; right:14px;
+            background:rgba(7,11,24,0.85); backdrop-filter:blur(12px);
+            border:1px solid rgba(138,154,91,0.3); border-radius:12px;
+            padding:10px; z-index:15; width:200px;
+        }
+        #latent-viz h3 { margin:0 0 6px; font-size:12px; color:#cce0a3; text-transform:uppercase; letter-spacing:0.05em; }
+        #latent-canvas { width:100%; aspect-ratio:1; background:#000; border-radius:8px; display:block; }
+        #latent-viz .caption { font-size:10px; color:#9bb1d8; margin-top:4px; font-family:monospace; }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to AI 3D Generation</a>
+    <div id="container"></div>
+
+    <div id="latent-viz">
+        <h3>Latent space</h3>
+        <canvas id="latent-canvas" width="180" height="180"></canvas>
+        <div class="caption" id="latent-caption">[ -, - ]</div>
+    </div>
+
+    <div id="panel">
+        <div class="endpoints">
+            <div class="endpoint">
+                <label>From</label>
+                <select id="from"></select>
+            </div>
+            <div class="endpoint">
+                <label>To</label>
+                <select id="to"></select>
+            </div>
+        </div>
+        <input id="blend" type="range" min="0" max="1000" step="1" value="0">
+        <div class="meta-row">
+            <span id="from-label">—</span>
+            <span id="blend-pct">0%</span>
+            <span id="to-label">—</span>
+        </div>
+        <div class="play-row">
+            <button id="play-btn">▶ Auto-cycle</button>
+            <button id="random-btn" class="secondary">Random pair</button>
+        </div>
+    </div>
+
+    <script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                   "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x070b18);
+        scene.fog = new THREE.FogExp2(0x070b18, 0.045);
+
+        const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+        camera.position.set(0, 1, 5);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        document.getElementById('container').appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = 0.5;
+
+        scene.add(new THREE.AmbientLight(0x445566, 0.6));
+        const key = new THREE.DirectionalLight(0xffffff, 1); key.position.set(3, 5, 4); scene.add(key);
+        const rim = new THREE.PointLight(0xffaa66, 1, 25); rim.position.set(-4, 2, -3); scene.add(rim);
+
+        // ---------------- Latent prompts ----------------
+        // Each is a parametric SDF/displacement function. Building a single
+        // displaced sphere with all functions blended.
+        // We also store a 2D "latent coordinate" for visualization.
+        const PROMPTS = [
+            { name: 'sphere',     latent:[0.0, 0.0],   color: 0x88aaff,
+              disp:(p)=>0 },
+            { name: 'spiked',     latent:[0.6, 0.1],   color: 0xff7a3a,
+              disp:(p)=>0.45 * Math.pow(Math.abs(Math.cos(p.x*4)*Math.sin(p.y*4)*Math.cos(p.z*4)), 0.4) },
+            { name: 'wavy',       latent:[0.3,-0.55],  color: 0x6ad9b5,
+              disp:(p)=>0.18 * (Math.sin(p.x*5) + Math.sin(p.y*5) + Math.sin(p.z*5)) / 3 },
+            { name: 'crystal',    latent:[-0.4,-0.4],  color: 0xb088ff,
+              disp:(p)=>0.18*(Math.abs(p.x)+Math.abs(p.y)+Math.abs(p.z)) - 0.2 },
+            { name: 'bumpy',      latent:[-0.7, 0.3],  color: 0xddc870,
+              disp:(p)=>0.12 * Math.sin(p.x*9)*Math.cos(p.y*8)*Math.sin(p.z*9) },
+            { name: 'sliced',     latent:[0.0, 0.7],   color: 0xff66aa,
+              disp:(p)=>{
+                  const slice = Math.max(0, 0.5 - Math.abs(Math.sin(p.y*6)));
+                  return slice * 0.35;
+              }},
+            { name: 'star',       latent:[0.7,-0.5],   color: 0xffe66a,
+              disp:(p)=>{
+                  // 6-pointed: maximize displacement on 6 axes
+                  const a = Math.atan2(p.z, p.x);
+                  return 0.4 * Math.pow(Math.max(0, Math.cos(a*3)), 4);
+              }},
+            { name: 'organic',    latent:[-0.55, 0.65],color: 0xa3d859,
+              disp:(p)=>{
+                  // soft worm-like bumps
+                  const phi = Math.atan2(p.y, p.x);
+                  return 0.25*Math.sin(phi*3 + p.z*4) + 0.15*Math.cos(p.x*3 + p.y*3);
+              }}
+        ];
+
+        // ---------------- The morphable mesh ----------------
+        // Use a high-res icosphere; each vertex's radius = 1 + interp(disp_a, disp_b)
+        const baseGeo = new THREE.IcosahedronGeometry(1, 6);
+        const basePos = baseGeo.attributes.position;
+        const baseDirs = new Float32Array(basePos.count * 3);
+        for (let i = 0; i < basePos.count; i++) {
+            const x = basePos.getX(i), y = basePos.getY(i), z = basePos.getZ(i);
+            const len = Math.hypot(x, y, z);
+            baseDirs[i*3]   = x / len;
+            baseDirs[i*3+1] = y / len;
+            baseDirs[i*3+2] = z / len;
+        }
+
+        const morphMat = new THREE.MeshStandardMaterial({
+            color: 0xff7a3a,
+            metalness: 0.4,
+            roughness: 0.4,
+            flatShading: false
+        });
+        const morphMesh = new THREE.Mesh(baseGeo.clone(), morphMat);
+        scene.add(morphMesh);
+
+        // ---------------- Build dropdowns ----------------
+        const fromSel = document.getElementById('from');
+        const toSel = document.getElementById('to');
+        PROMPTS.forEach((p, i) => {
+            fromSel.innerHTML += `<option value="${i}">${p.name}</option>`;
+            toSel.innerHTML += `<option value="${i}">${p.name}</option>`;
+        });
+        fromSel.value = 1; // spiked
+        toSel.value = 7;   // organic
+
+        const blend = document.getElementById('blend');
+        const fromLabel = document.getElementById('from-label');
+        const toLabel = document.getElementById('to-label');
+        const blendPct = document.getElementById('blend-pct');
+
+        function updateLabels() {
+            fromLabel.textContent = PROMPTS[parseInt(fromSel.value)].name;
+            toLabel.textContent = PROMPTS[parseInt(toSel.value)].name;
+        }
+
+        // ---------------- Update mesh ----------------
+        const tmp = new THREE.Vector3();
+        function updateMesh() {
+            const a = PROMPTS[parseInt(fromSel.value)];
+            const b = PROMPTS[parseInt(toSel.value)];
+            const t = parseFloat(blend.value) / 1000;
+            const pos = morphMesh.geometry.attributes.position;
+            for (let i = 0; i < pos.count; i++) {
+                tmp.set(baseDirs[i*3], baseDirs[i*3+1], baseDirs[i*3+2]);
+                const da = a.disp(tmp);
+                const db = b.disp(tmp);
+                const d = da * (1 - t) + db * t;
+                const r = 1 + d;
+                pos.setXYZ(i, tmp.x * r, tmp.y * r, tmp.z * r);
+            }
+            pos.needsUpdate = true;
+            morphMesh.geometry.computeVertexNormals();
+
+            // Color interpolation
+            const ca = new THREE.Color(a.color);
+            const cb = new THREE.Color(b.color);
+            morphMat.color.copy(ca).lerp(cb, t);
+
+            blendPct.textContent = `${Math.round(t * 100)}%`;
+            updateLatentViz(a, b, t);
+        }
+
+        // ---------------- Latent space mini-visualization ----------------
+        const latentCanvas = document.getElementById('latent-canvas');
+        const lctx = latentCanvas.getContext('2d');
+        const W = latentCanvas.width, H = latentCanvas.height;
+
+        function updateLatentViz(a, b, t) {
+            lctx.fillStyle = '#070b18';
+            lctx.fillRect(0, 0, W, H);
+
+            // Light grid
+            lctx.strokeStyle = 'rgba(138,154,91,0.18)';
+            lctx.lineWidth = 1;
+            for (let i = 0; i <= 4; i++) {
+                const p = (i/4) * W;
+                lctx.beginPath(); lctx.moveTo(p, 0); lctx.lineTo(p, H); lctx.stroke();
+                lctx.beginPath(); lctx.moveTo(0, p); lctx.lineTo(W, p); lctx.stroke();
+            }
+            // Axes
+            lctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            lctx.beginPath(); lctx.moveTo(W/2, 0); lctx.lineTo(W/2, H); lctx.stroke();
+            lctx.beginPath(); lctx.moveTo(0, H/2); lctx.lineTo(W, H/2); lctx.stroke();
+
+            // All prompts as small dots
+            const toScreen = (lx, ly) => [W/2 + lx * (W/2 - 12), H/2 - ly * (H/2 - 12)];
+
+            PROMPTS.forEach((p) => {
+                const [px, py] = toScreen(p.latent[0], p.latent[1]);
+                lctx.fillStyle = `#${p.color.toString(16).padStart(6,'0')}`;
+                lctx.beginPath(); lctx.arc(px, py, 3.5, 0, Math.PI*2); lctx.fill();
+                lctx.fillStyle = 'rgba(255,255,255,0.6)';
+                lctx.font = '9px monospace';
+                lctx.fillText(p.name, px + 6, py + 3);
+            });
+
+            // Line between A and B
+            const [ax, ay] = toScreen(a.latent[0], a.latent[1]);
+            const [bx, by] = toScreen(b.latent[0], b.latent[1]);
+            lctx.strokeStyle = 'rgba(221,161,94,0.6)';
+            lctx.lineWidth = 1.5;
+            lctx.beginPath(); lctx.moveTo(ax, ay); lctx.lineTo(bx, by); lctx.stroke();
+
+            // Highlight A and B
+            lctx.fillStyle = `#${a.color.toString(16).padStart(6,'0')}`;
+            lctx.beginPath(); lctx.arc(ax, ay, 6, 0, Math.PI*2); lctx.fill();
+            lctx.fillStyle = `#${b.color.toString(16).padStart(6,'0')}`;
+            lctx.beginPath(); lctx.arc(bx, by, 6, 0, Math.PI*2); lctx.fill();
+
+            // Walker dot
+            const wx = ax + (bx - ax) * t;
+            const wy = ay + (by - ay) * t;
+            const wlx = a.latent[0] + (b.latent[0] - a.latent[0]) * t;
+            const wly = a.latent[1] + (b.latent[1] - a.latent[1]) * t;
+            lctx.shadowColor = '#fefae0';
+            lctx.shadowBlur = 12;
+            lctx.fillStyle = '#fefae0';
+            lctx.beginPath(); lctx.arc(wx, wy, 5, 0, Math.PI*2); lctx.fill();
+            lctx.shadowBlur = 0;
+
+            document.getElementById('latent-caption').textContent =
+                `[ ${wlx.toFixed(2)}, ${wly.toFixed(2)} ]`;
+        }
+
+        // ---------------- UI events ----------------
+        blend.addEventListener('input', updateMesh);
+        fromSel.addEventListener('change', () => { updateLabels(); updateMesh(); });
+        toSel.addEventListener('change', () => { updateLabels(); updateMesh(); });
+
+        let autoPlay = false;
+        let autoDir = 1;
+        const playBtn = document.getElementById('play-btn');
+        playBtn.addEventListener('click', () => {
+            autoPlay = !autoPlay;
+            playBtn.textContent = autoPlay ? '⏸ Pause' : '▶ Auto-cycle';
+        });
+
+        document.getElementById('random-btn').addEventListener('click', () => {
+            const a = Math.floor(Math.random() * PROMPTS.length);
+            let b = Math.floor(Math.random() * PROMPTS.length);
+            while (b === a) b = Math.floor(Math.random() * PROMPTS.length);
+            fromSel.value = a; toSel.value = b;
+            blend.value = 0; autoDir = 1; autoPlay = true; playBtn.textContent = '⏸ Pause';
+            updateLabels(); updateMesh();
+        });
+
+        addEventListener('resize', () => {
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+        });
+
+        function tick() {
+            if (autoPlay) {
+                let v = parseFloat(blend.value);
+                v += autoDir * 4;
+                if (v >= 1000) { v = 1000; autoDir = -1; }
+                if (v <= 0)    { v = 0;    autoDir = 1; }
+                blend.value = v;
+                updateMesh();
+            }
+            controls.update();
+            renderer.render(scene, camera);
+            requestAnimationFrame(tick);
+        }
+
+        updateLabels();
+        updateMesh();
+        tick();
+    </script>
+</body>
+</html>

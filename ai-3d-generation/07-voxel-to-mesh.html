@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voxel-to-Mesh — AI 3D Generation</title>
+    <style>
+        :root { --sage:#8A9A5B; --moss:#606C38; --earth:#DDA15E; --terracotta:#BC6C25; }
+        body { margin:0; overflow:hidden; font-family:-apple-system,sans-serif; background:#070b18; color:#e8e6e1; }
+        #container { width:100vw; height:100vh; }
+        .back-link {
+            position:fixed; top:14px; left:14px;
+            padding:8px 14px; background:rgba(254,250,224,0.9); color:var(--terracotta);
+            text-decoration:none; border-radius:14px; font-size:13px; font-weight:600; z-index:20;
+        }
+        #panel {
+            position:fixed; top:14px; right:14px;
+            background:rgba(7,11,24,0.85); backdrop-filter:blur(12px);
+            border:1px solid rgba(138,154,91,0.3); border-radius:14px;
+            padding:14px; z-index:15; width:240px;
+        }
+        #panel h3 { margin:0 0 10px; font-size:14px; color:#cce0a3; font-weight:700; }
+        .row { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:8px 0; font-size:12px; color:#9bb1d8; }
+        .row input[type="range"] { flex:1; }
+        .val { font-family:monospace; color:#e0d499; min-width:40px; text-align:right; font-size:12px; }
+        .stats { margin-top:10px; padding:10px; background:rgba(0,0,0,0.3); border-radius:8px; font-family:monospace; font-size:11px; color:#cce0a3; }
+        .stats div { display:flex; justify-content:space-between; margin:2px 0; }
+        .shape-row { display:flex; gap:4px; flex-wrap:wrap; margin-top:8px; }
+        .shape-btn {
+            flex:1; padding:6px;
+            background:rgba(255,255,255,0.08); color:#cce0a3;
+            border:1px solid rgba(138,154,91,0.3); border-radius:6px;
+            font-size:11px; font-weight:600; cursor:pointer;
+        }
+        .shape-btn.active { background:linear-gradient(135deg,var(--sage),var(--moss)); color:white; border-color:transparent; }
+        #info {
+            position:fixed; bottom:14px; left:50%; transform:translateX(-50%);
+            background:rgba(7,11,24,0.78); backdrop-filter:blur(10px);
+            padding:10px 18px; border-radius:12px; font-size:12px; font-family:monospace;
+            color:#cce0a3; z-index:15; max-width:90vw; text-align:center;
+        }
+    </style>
+</head>
+<body>
+    <a href="index.html" class="back-link">← Back to AI 3D Generation</a>
+    <div id="container"></div>
+
+    <div id="panel">
+        <h3>Voxel → Mesh</h3>
+        <div class="shape-row">
+            <button class="shape-btn active" data-shape="blob">blob</button>
+            <button class="shape-btn" data-shape="figure">figure</button>
+            <button class="shape-btn" data-shape="lattice">lattice</button>
+            <button class="shape-btn" data-shape="bone">bone</button>
+        </div>
+
+        <div class="row">
+            <span>Resolution</span>
+            <input id="res" type="range" min="20" max="60" step="2" value="36">
+            <span class="val" id="res-val">36</span>
+        </div>
+        <div class="row">
+            <span>Iso level</span>
+            <input id="iso" type="range" min="0.05" max="1.5" step="0.01" value="0.45">
+            <span class="val" id="iso-val">0.45</span>
+        </div>
+        <div class="row">
+            <span>Show voxels</span>
+            <input id="show-vox" type="checkbox" checked>
+        </div>
+        <div class="row">
+            <span>Show mesh</span>
+            <input id="show-mesh" type="checkbox" checked>
+        </div>
+        <div class="row">
+            <span>Animate</span>
+            <input id="animate" type="checkbox" checked>
+        </div>
+
+        <div class="stats">
+            <div><span>Voxels active</span><span id="vox-count">0</span></div>
+            <div><span>Mesh tris</span><span id="tri-count">0</span></div>
+            <div><span>Build time</span><span id="build-time">0ms</span></div>
+        </div>
+    </div>
+
+    <div id="info">A neural net predicts an SDF on a voxel grid. Marching cubes turns it into a polygon mesh — adjust the iso-level to dilate or erode.</div>
+
+    <script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                   "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x070b18);
+        scene.fog = new THREE.FogExp2(0x070b18, 0.05);
+
+        const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 100);
+        camera.position.set(0, 1.5, 5);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        document.getElementById('container').appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = 0.5;
+
+        scene.add(new THREE.AmbientLight(0x445566, 0.6));
+        const key = new THREE.DirectionalLight(0xffffff, 1); key.position.set(3, 5, 4); scene.add(key);
+        const rim = new THREE.PointLight(0xffaa66, 1, 20); rim.position.set(-4, 2, -3); scene.add(rim);
+
+        // Bounding box visualization
+        const bbox = new THREE.LineSegments(
+            new THREE.EdgesGeometry(new THREE.BoxGeometry(3, 3, 3)),
+            new THREE.LineBasicMaterial({ color: 0x445e7a, transparent: true, opacity: 0.5 })
+        );
+        scene.add(bbox);
+
+        // -------------- SDF / scalar field functions --------------
+        const SHAPES = {
+            blob: (x, y, z, t) => {
+                // sum of moving spheres
+                let f = 0;
+                const centers = [
+                    [Math.sin(t) * 0.4, Math.cos(t * 1.3) * 0.3, 0],
+                    [Math.sin(t * 0.8 + 1) * 0.5, 0.3, Math.cos(t) * 0.4],
+                    [-0.4, Math.sin(t * 0.7) * 0.4, Math.cos(t * 1.1) * 0.3],
+                    [0.2, -0.5, Math.sin(t * 0.5) * 0.3]
+                ];
+                for (const [cx, cy, cz] of centers) {
+                    const d = Math.hypot(x - cx, y - cy, z - cz);
+                    f += 0.4 / (d * d + 0.05);
+                }
+                return f;
+            },
+            figure: (x, y, z, t) => {
+                // humanoid
+                const head = 0.3 / (Math.hypot(x, y - 0.7, z) + 0.05);
+                const torso = 0.4 / (Math.hypot(x*1.2, (y - 0.05) * 0.9, z * 1.4) + 0.1);
+                const armR = 0.15 / (Math.hypot(x - 0.5, y - 0.1, z) + 0.05);
+                const armL = 0.15 / (Math.hypot(x + 0.5, y - 0.1, z) + 0.05);
+                const legR = 0.18 / (Math.hypot(x - 0.18, y + 0.6, z) + 0.05);
+                const legL = 0.18 / (Math.hypot(x + 0.18, y + 0.6, z) + 0.05);
+                return head + torso + armR + armL + legR + legL;
+            },
+            lattice: (x, y, z, t) => {
+                // gyroid surface
+                const f = Math.sin(x*4 + t)*Math.cos(y*4) + Math.sin(y*4 + t)*Math.cos(z*4) + Math.sin(z*4 + t)*Math.cos(x*4);
+                // contained inside a sphere
+                const r = Math.hypot(x, y, z);
+                const sphere = Math.max(0, 1 - r * 1.0);
+                return (f * 0.3 + 0.5) * sphere;
+            },
+            bone: (x, y, z, t) => {
+                // cylinder with knobs at the ends
+                const r = Math.hypot(x, z);
+                const len = 0.7;
+                const yClamped = Math.max(-len, Math.min(len, y));
+                const shaft = 0.18 / (Math.hypot(r, y - yClamped) + 0.04);
+                const knob1 = 0.4 / (Math.hypot(x, y - len, z) + 0.07);
+                const knob2 = 0.4 / (Math.hypot(x, y + len, z) + 0.07);
+                return shaft + knob1 + knob2;
+            }
+        };
+
+        // -------------- Voxel cube cloud (visualization) --------------
+        let voxelMesh = null;
+        function buildVoxelGrid(res) {
+            if (voxelMesh) {
+                scene.remove(voxelMesh);
+                voxelMesh.geometry.dispose();
+                voxelMesh.material.dispose();
+            }
+            const cubeGeo = new THREE.BoxGeometry(3 / res * 0.6, 3 / res * 0.6, 3 / res * 0.6);
+            const mat = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.35,
+                metalness: 0.1,
+                roughness: 0.6
+            });
+            voxelMesh = new THREE.InstancedMesh(cubeGeo, mat, res * res * res);
+            voxelMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(res*res*res*3), 3);
+            voxelMesh.count = 0;
+            scene.add(voxelMesh);
+        }
+
+        // -------------- Marching cubes --------------
+        const mcMat = new THREE.MeshStandardMaterial({
+            color: 0xff7a3a,
+            metalness: 0.4,
+            roughness: 0.35,
+            flatShading: false
+        });
+        let mc = new MarchingCubes(36, mcMat, true, true, 200000);
+        mc.scale.set(1.5, 1.5, 1.5);
+        mc.isolation = 0.45;
+        mc.enableUvs = false;
+        mc.enableColors = false;
+        scene.add(mc);
+
+        function rebuildMC(res) {
+            scene.remove(mc);
+            mc = new MarchingCubes(res, mcMat, true, true, 200000);
+            mc.scale.set(1.5, 1.5, 1.5);
+            mc.isolation = parseFloat(document.getElementById('iso').value);
+            scene.add(mc);
+        }
+
+        // -------------- Update field each frame --------------
+        let activeShape = 'blob';
+        function update(t, res) {
+            const fn = SHAPES[activeShape];
+            const iso = parseFloat(document.getElementById('iso').value);
+            mc.isolation = iso;
+
+            const tStart = performance.now();
+            mc.reset();
+            // Sample SDF into MC field
+            const subdiv = mc.size;
+            // Also collect voxel positions for visualization
+            const visMatrix = new THREE.Matrix4();
+            const visColor = new THREE.Color();
+            let visCount = 0;
+            const voxRes = parseInt(document.getElementById('res').value, 10);
+
+            // We use the *voxel* res for both, but render voxels at a coarser stride for perf
+            const voxStride = Math.max(1, Math.floor(subdiv / voxRes));
+
+            for (let z = 0; z < subdiv; z++) {
+                const fz = (z / (subdiv - 1)) * 2 - 1;
+                for (let y = 0; y < subdiv; y++) {
+                    const fy = (y / (subdiv - 1)) * 2 - 1;
+                    for (let x = 0; x < subdiv; x++) {
+                        const fx = (x / (subdiv - 1)) * 2 - 1;
+                        const v = fn(fx, fy, fz, t);
+                        const idx = z * subdiv * subdiv + y * subdiv + x;
+                        mc.field[idx] = v;
+                        // Push a voxel cube if value is above iso (and on the stride)
+                        if (v > iso && voxelMesh && (x % voxStride === 0) && (y % voxStride === 0) && (z % voxStride === 0)) {
+                            visMatrix.makeTranslation(fx * 1.5, fy * 1.5, fz * 1.5);
+                            visMatrix.scale(new THREE.Vector3(voxStride, voxStride, voxStride));
+                            voxelMesh.setMatrixAt(visCount, visMatrix);
+                            // Color from value -> warm gradient
+                            const tCol = Math.min(1, (v - iso) / 0.8);
+                            visColor.setHSL(0.08 - tCol * 0.06, 0.7, 0.45 + tCol * 0.2);
+                            voxelMesh.setColorAt(visCount, visColor);
+                            visCount++;
+                        }
+                    }
+                }
+            }
+            mc.update();
+            if (voxelMesh) {
+                voxelMesh.count = visCount;
+                voxelMesh.instanceMatrix.needsUpdate = true;
+                if (voxelMesh.instanceColor) voxelMesh.instanceColor.needsUpdate = true;
+            }
+            const buildMs = performance.now() - tStart;
+
+            document.getElementById('vox-count').textContent = visCount.toLocaleString();
+            document.getElementById('tri-count').textContent = (mc.count / 3).toLocaleString();
+            document.getElementById('build-time').textContent = buildMs.toFixed(0) + 'ms';
+        }
+
+        // -------------- UI events --------------
+        const resEl = document.getElementById('res');
+        const isoEl = document.getElementById('iso');
+        const showVoxEl = document.getElementById('show-vox');
+        const showMeshEl = document.getElementById('show-mesh');
+        const animateEl = document.getElementById('animate');
+
+        resEl.addEventListener('input', () => {
+            const res = parseInt(resEl.value, 10);
+            document.getElementById('res-val').textContent = res;
+            rebuildMC(res);
+            buildVoxelGrid(res);
+        });
+        isoEl.addEventListener('input', () => {
+            document.getElementById('iso-val').textContent = parseFloat(isoEl.value).toFixed(2);
+        });
+        showVoxEl.addEventListener('change', () => { if (voxelMesh) voxelMesh.visible = showVoxEl.checked; });
+        showMeshEl.addEventListener('change', () => mc.visible = showMeshEl.checked);
+
+        document.querySelectorAll('.shape-btn').forEach(b => {
+            b.addEventListener('click', () => {
+                document.querySelectorAll('.shape-btn').forEach(x => x.classList.remove('active'));
+                b.classList.add('active');
+                activeShape = b.dataset.shape;
+            });
+        });
+
+        addEventListener('resize', () => {
+            camera.aspect = innerWidth / innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+        });
+
+        // Init
+        rebuildMC(36);
+        buildVoxelGrid(36);
+
+        const startTime = performance.now();
+        let lastUpdate = 0;
+        function tick() {
+            const now = performance.now();
+            const t = (now - startTime) / 1000;
+
+            // Update field at most ~20Hz to keep things snappy
+            if (animateEl.checked || (now - lastUpdate) > 200) {
+                update(animateEl.checked ? t : 0, parseInt(resEl.value, 10));
+                lastUpdate = now;
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+            requestAnimationFrame(tick);
+        }
+        tick();
+    </script>
+</body>
+</html>
