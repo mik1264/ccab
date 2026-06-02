@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Circuit Traces - Ribbonics</title>
+    <meta name="description" content="Truchet paths styled as PCB copper traces with via dots at tile junctions on a dark green board. Gold and green traces weave across the surface.">
+    <meta name="theme-color" content="#0a1a0f">
+    <link rel="icon" href="data:,">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            overflow: hidden;
+            font-family: 'Nunito', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0a1a0f;
+        }
+        canvas { display: block; }
+
+        .info-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(10, 26, 15, 0.90);
+            color: #c8e6c9;
+            padding: 18px 20px;
+            border-radius: 14px;
+            max-width: 300px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(100,200,100,0.12);
+        }
+        .info-panel h1 { font-size: 20px; margin-bottom: 8px; color: #ffd54f; font-family: 'Lora', serif; }
+        .info-panel p { font-size: 13px; line-height: 1.55; color: #81c784; }
+
+        .controls {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(10, 26, 15, 0.90);
+            color: #c8e6c9;
+            padding: 18px 20px;
+            border-radius: 14px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(100,200,100,0.12);
+            min-width: 230px;
+        }
+        .control-group { margin-bottom: 13px; }
+        .control-group:last-child { margin-bottom: 0; }
+        .control-group label { display: block; margin-bottom: 5px; font-size: 13px; color: #81c784; }
+        .control-group input[type="range"] { width: 100%; accent-color: #ffd54f; }
+        .control-group select {
+            width: 100%; padding: 6px; background: rgba(100,200,100,0.08); color: #c8e6c9;
+            border: 1px solid rgba(100,200,100,0.2); border-radius: 6px;
+        }
+        .control-group option { background: #0a1a0f; }
+        .value-display { float: right; color: #ffd54f; font-weight: 700; }
+        button {
+            width: 100%; padding: 10px; background: linear-gradient(135deg, #1b5e20, #ffd54f);
+            color: #000; border: none; border-radius: 8px; cursor: pointer; font-size: 14px;
+            font-weight: 700; transition: transform 0.2s ease, filter 0.2s ease;
+        }
+        button:hover { transform: translateY(-2px); filter: brightness(1.1); }
+    </style>
+</head>
+<body>
+    <a href="../index.html" style="position:fixed;top:20px;left:20px;z-index:10000;display:inline-flex;align-items:center;gap:0.5rem;color:#BC6C25;text-decoration:none;font-family:'Nunito',-apple-system,BlinkMacSystemFont,sans-serif;font-weight:600;padding:0.5rem 1rem;background:rgba(254,250,224,0.95);border-radius:20px;border:2px solid rgba(138,154,91,0.3);box-shadow:0 4px 15px rgba(96,108,56,0.15);"><span>←</span><span>Gallery</span></a>
+    <canvas id="canvas"></canvas>
+
+    <div class="info-panel">
+        <h1>Circuit Traces</h1>
+        <p>Truchet quarter-circle arcs become PCB copper traces on a dark FR-4 board. Via pads mark each tile junction and a silkscreen grid overlays the surface.</p>
+    </div>
+
+    <div class="controls">
+        <div class="control-group">
+            <label>Tile size <span class="value-display" id="sizeVal">64</span></label>
+            <input type="range" id="size" min="32" max="130" value="64">
+        </div>
+        <div class="control-group">
+            <label>Trace width <span class="value-display" id="wVal">22</span>%</label>
+            <input type="range" id="width" min="10" max="45" value="22">
+        </div>
+        <div class="control-group">
+            <label>Style
+                <select id="style">
+                    <option value="gold">Gold traces</option>
+                    <option value="green">Green traces</option>
+                    <option value="silver">Silver traces</option>
+                    <option value="mixed">Mixed layers</option>
+                </select>
+            </label>
+        </div>
+        <div class="control-group">
+            <button id="regen">Regenerate</button>
+        </div>
+    </div>
+
+    <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    const TRACE_PALETTES = {
+        gold:   ['#ffd54f','#ffca28','#ffb300','#ff8f00'],
+        green:  ['#69f0ae','#40c4ff','#b2ff59','#ea80fc'],
+        silver: ['#b0bec5','#90a4ae','#78909c','#cfd8dc'],
+        mixed:  ['#ffd54f','#69f0ae','#ff6d00','#40c4ff','#b2ff59'],
+    };
+
+    let tileSize = 64;
+    let widthPct = 0.22;
+    let traceStyle = 'gold';
+    let W, H, cols, rows;
+    let cells = [];
+    let arcs = [];
+    let junctions = [];
+    let rafId = null;
+
+    function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+    }
+
+    function build() {
+        cols = Math.ceil(W / tileSize) + 1;
+        rows = Math.ceil(H / tileSize) + 1;
+        cells = [];
+        for (let i = 0; i < cols * rows; i++) cells.push(Math.random() < 0.5 ? 0 : 1);
+
+        const parent = new Map();
+        function find(x) {
+            if (!parent.has(x)) parent.set(x, x);
+            let r = x;
+            while (parent.get(r) !== r) r = parent.get(r);
+            while (parent.get(x) !== r) { const nx = parent.get(x); parent.set(x, r); x = nx; }
+            return r;
+        }
+        function union(a, b) { parent.set(find(a), find(b)); }
+        const h = (c, r) => 'h_' + c + '_' + r;
+        const v = (c, r) => 'v_' + c + '_' + r;
+
+        arcs = [];
+        const s = tileSize, rad = s / 2;
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const x0 = c * s, y0 = r * s;
+                const top = h(c, r), bottom = h(c, r+1), left = v(c, r), right = v(c+1, r);
+                const config = cells[r * cols + c];
+                let pairs;
+                if (config === 0) {
+                    pairs = [
+                        { cx: x0,     cy: y0,     a0: 0,           a1: Math.PI/2,   n1: top,    n2: left  },
+                        { cx: x0 + s, cy: y0 + s, a0: Math.PI,     a1: Math.PI*1.5, n1: bottom, n2: right }
+                    ];
+                } else {
+                    pairs = [
+                        { cx: x0 + s, cy: y0,     a0: Math.PI/2,   a1: Math.PI,     n1: top,    n2: right },
+                        { cx: x0,     cy: y0 + s, a0: Math.PI*1.5, a1: Math.PI*2,   n1: bottom, n2: left  }
+                    ];
+                }
+                for (const p of pairs) {
+                    union(p.n1, p.n2);
+                    arcs.push({ cx: p.cx, cy: p.cy, r: rad, a0: p.a0, a1: p.a1, n1: p.n1 });
+                }
+            }
+        }
+
+        // Via positions: corners where arcs meet
+        junctions = [];
+        for (let r = 0; r <= rows; r++) {
+            for (let c = 0; c <= cols; c++) {
+                junctions.push({ x: c * s, y: r * s });
+            }
+        }
+
+        const pal = TRACE_PALETTES[traceStyle];
+        const rootColor = new Map();
+        let next = 0;
+        for (const a of arcs) {
+            const root = find(a.n1);
+            if (!rootColor.has(root)) rootColor.set(root, pal[next++ % pal.length]);
+            a.color = rootColor.get(root);
+        }
+    }
+
+    function draw() {
+        const s = tileSize;
+
+        // PCB Board background
+        ctx.fillStyle = '#0a1a0f';
+        ctx.fillRect(0, 0, W, H);
+
+        // Subtle board texture — fiberglass weave pattern
+        ctx.strokeStyle = 'rgba(20,50,20,0.5)';
+        ctx.lineWidth = 0.5;
+        ctx.beginPath();
+        const gs = 8;
+        for (let x = 0; x < W; x += gs) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+        for (let y = 0; y < H; y += gs) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+        ctx.stroke();
+
+        // Silkscreen grid (faint)
+        ctx.strokeStyle = 'rgba(50,120,50,0.12)';
+        ctx.lineWidth = 0.8;
+        ctx.setLineDash([2, s - 2]);
+        ctx.beginPath();
+        for (let c = 0; c <= cols; c++) { ctx.moveTo(c * s, 0); ctx.lineTo(c * s, H); }
+        for (let r = 0; r <= rows; r++) { ctx.moveTo(0, r * s); ctx.lineTo(W, r * s); }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const tracW = Math.max(3, s * widthPct);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // Trace shadow/solder mask layer
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.lineWidth = tracW + 5;
+        ctx.beginPath();
+        for (const a of arcs) {
+            ctx.moveTo(a.cx + Math.cos(a.a0)*a.r, a.cy + Math.sin(a.a0)*a.r);
+            ctx.arc(a.cx, a.cy, a.r, a.a0, a.a1);
+        }
+        ctx.stroke();
+
+        // Solder mask (dark green tinted over trace area)
+        ctx.strokeStyle = 'rgba(0,40,10,0.5)';
+        ctx.lineWidth = tracW + 3;
+        ctx.beginPath();
+        for (const a of arcs) {
+            ctx.moveTo(a.cx + Math.cos(a.a0)*a.r, a.cy + Math.sin(a.a0)*a.r);
+            ctx.arc(a.cx, a.cy, a.r, a.a0, a.a1);
+        }
+        ctx.stroke();
+
+        // Copper traces
+        ctx.lineWidth = tracW;
+        const byColor = {};
+        for (const a of arcs) (byColor[a.color] = byColor[a.color] || []).push(a);
+        for (const col in byColor) {
+            ctx.strokeStyle = col;
+            ctx.shadowColor = col;
+            ctx.shadowBlur = 3;
+            ctx.beginPath();
+            for (const a of byColor[col]) {
+                ctx.moveTo(a.cx + Math.cos(a.a0)*a.r, a.cy + Math.sin(a.a0)*a.r);
+                ctx.arc(a.cx, a.cy, a.r, a.a0, a.a1);
+            }
+            ctx.stroke();
+        }
+        ctx.shadowBlur = 0;
+
+        // Trace highlight (shininess)
+        ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+        ctx.lineWidth = tracW * 0.3;
+        ctx.beginPath();
+        for (const a of arcs) {
+            ctx.moveTo(a.cx + Math.cos(a.a0)*a.r, a.cy + Math.sin(a.a0)*a.r);
+            ctx.arc(a.cx, a.cy, a.r, a.a0, a.a1);
+        }
+        ctx.stroke();
+
+        // Via pads at tile junctions
+        const viaR = tracW * 0.8;
+        const viaInner = tracW * 0.35;
+        // Collect midpoint positions of arc endpoints
+        const viaDots = new Set();
+        for (const a of arcs) {
+            for (const angle of [a.a0, a.a1]) {
+                const ex = Math.round(a.cx + Math.cos(angle)*a.r);
+                const ey = Math.round(a.cy + Math.sin(angle)*a.r);
+                viaDots.add(ex + ',' + ey);
+            }
+        }
+
+        ctx.shadowBlur = 0;
+        for (const key of viaDots) {
+            const [vx, vy] = key.split(',').map(Number);
+
+            // Via annular ring
+            ctx.fillStyle = '#ffd54f';
+            ctx.beginPath();
+            ctx.arc(vx, vy, viaR, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Via drill hole
+            ctx.fillStyle = '#0a1a0f';
+            ctx.beginPath();
+            ctx.arc(vx, vy, viaInner, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Subtle highlight
+            ctx.fillStyle = 'rgba(255,255,255,0.25)';
+            ctx.beginPath();
+            ctx.arc(vx - viaR * 0.25, vy - viaR * 0.25, viaR * 0.3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Component pads at tile centers (occasional decorative ICs)
+        if (tileSize >= 60) {
+            const padPct = 0.3;
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    if (Math.random() < padPct) {
+                        const cx = c * s + s / 2;
+                        const cy = r * s + s / 2;
+                        const padW = s * 0.18;
+                        const padH = s * 0.10;
+                        // SMD pad rectangle
+                        ctx.fillStyle = '#ffd54f';
+                        ctx.beginPath();
+                        ctx.roundRect(cx - padW/2, cy - padH/2, padW, padH, 2);
+                        ctx.fill();
+                    }
+                }
+            }
+        }
+    }
+
+    function regenerate() {
+        if (rafId) cancelAnimationFrame(rafId);
+        resize();
+        build();
+        draw();
+    }
+
+    document.getElementById('size').addEventListener('input', e => {
+        tileSize = +e.target.value;
+        document.getElementById('sizeVal').textContent = tileSize;
+        regenerate();
+    });
+    document.getElementById('width').addEventListener('input', e => {
+        widthPct = +e.target.value / 100;
+        document.getElementById('wVal').textContent = e.target.value;
+        draw();
+    });
+    document.getElementById('style').addEventListener('change', e => {
+        traceStyle = e.target.value;
+        build();
+        draw();
+    });
+    document.getElementById('regen').addEventListener('click', regenerate);
+    window.addEventListener('resize', regenerate);
+    window.reset = regenerate;
+
+    regenerate();
+    </script>
+    <script src="../assets/js/enhance.js" defer></script>
+</body>
+</html>
