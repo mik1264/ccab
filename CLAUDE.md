@@ -458,6 +458,39 @@ python3 -m http.server 8000
 # Navigate to http://localhost:8000
 ```
 
+### Deployment
+
+The site is deployed to **two independent targets** from the `main` branch:
+
+| Target               | URL                                          | Trigger                                  | Config                                          |
+| -------------------- | -------------------------------------------- | ---------------------------------------- | ----------------------------------------------- |
+| **GitHub Pages**     | `mik1264.github.io/ccab`                     | **Automatic** on every push to `main`    | `.github/workflows/deploy.yml`                  |
+| **Cloudflare Pages** | `ccab.mkirsanov.com` (+ `ccab-2fy.pages.dev`)| **Manual only** — run `./deploy.sh`      | project name `ccab`, **NOT git-connected**      |
+
+> ⚠️ **Pushing to GitHub does NOT update `ccab.mkirsanov.com`.** The Cloudflare Pages project is not git-connected, so it only updates when someone runs `./deploy.sh`. If the Cloudflare site looks out of date (e.g. fewer galleries than GitHub Pages), it just needs a re-deploy — it silently went 3 months stale once for exactly this reason.
+
+**Deploying to Cloudflare:**
+
+```bash
+./deploy.sh        # wraps: wrangler pages deploy . --project-name ccab --branch main
+```
+
+`deploy.sh` exists because `wrangler pages deploy` uploads the whole directory and has two quirks:
+
+* It **rejects any file > 25 MiB** (e.g. the Playwright binary inside `.venv/`).
+* It does **NOT honor `.assetsignore`** (confirmed: `.gitignore` got published despite being listed).
+
+So the script moves `.venv` and `.claude` out of the tree during upload and always restores them afterward (even on failure/interrupt). `wrangler` does auto-skip `.git`, `node_modules`, and `.DS_Store` on its own.
+
+### Analytics
+
+Privacy-friendly **Plausible** analytics is injected site-wide on `ccab.mkirsanov.com` via a single Cloudflare Pages middleware — **not** by editing the 4,800+ HTML files:
+
+* `functions/_middleware.js` uses `HTMLRewriter` to inject the Plausible tag before `</head>` on every `text/html` response; other assets pass through untouched, with a fallback to the original response on any error.
+* Because Plausible is JavaScript-based, **bots/crawlers that don't execute JS (e.g. ClaudeBot) are not counted** — the Plausible dashboard shows real humans. This is the opposite of Cloudflare's dashboard "Unique Visitors", which is IP-based and counts ClaudeBot's large rotating IP fleet as thousands of "visitors".
+* The middleware ships on the **Cloudflare** deployment only; the GitHub Pages mirror has no analytics.
+* Plausible property: `ccab.mkirsanov.com` (separate from the `mikhailkirsanov.com` property used by the mk-info site).
+
 ### Git Workflow
 
 This project uses a unique git worktree pattern for parallel development:
